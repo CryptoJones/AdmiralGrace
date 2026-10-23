@@ -24,7 +24,7 @@ The bundled sample project, which opens when no corpus or export is given, so th
 
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
 - `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
-- `ag-engine` holds the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
+- `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
 - `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
 ## Build
@@ -111,8 +111,8 @@ The export fills the Listing and Pseudocode tabs on its own. With the kuna execu
 
 ## Development status
 
-The engine is under active development. The x86-64 decoder and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. Whether the engine should build on the kuna crates instead of its own decoder and loader is evaluated in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. The x86-64 decoder and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 
-The workspace declares the MIT license in `Cargo.toml`.
+The workspace declares the MIT license in `Cargo.toml`; the text is in `LICENSE`. The kuna crates it depends on are Apache-2.0, and `NOTICE` carries their attribution and Ghidra's.

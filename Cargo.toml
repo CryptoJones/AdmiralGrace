@@ -18,6 +18,9 @@ serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
+# The loader and analyzer tier of the kuna decompiler (Apache-2.0, see NOTICE),
+# pinned to a commit: the crates are not published.
+kuna-analysis = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b15010ac25431b8a6374e46b3" }
 
 [profile.release]
 opt-level = 2

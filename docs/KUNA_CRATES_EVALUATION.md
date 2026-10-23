@@ -42,7 +42,16 @@ throughout: `architecture::Architecture`, `dtype::Datatype`,
 - Lifecycle: `publish = false` → git dep pinned to a commit or vendor. Either way the shipped binary redistributes Apache-2.0 code, so kuna's `NOTICE` (which carries Ghidra's) must ship with releases; vendoring additionally puts the text in-tree.
 - SLEIGH first use requires compiling a `.sla` with kuna-slacomp (no precompiled artifacts are shipped).
 
-## Recommendation (pending owner approval — not adopted yet)
+## Decision (2026-10-23)
+
+**Adopted.** CJ chose option 1: `kuna-analysis` is a git dependency pinned to
+commit `28219c9` in the workspace `Cargo.toml`, and `ag-engine::image::Image` is
+its first consumer (the loader behind sections, entry point, symbols and
+section bytes). `iced-x86` stays in `ag-engine` for now; nothing is vendored;
+`NOTICE` at the repository root carries kuna's and Ghidra's attribution, and it
+ships with every release. Bumping the pin is a reviewed change like any other.
+
+## Recommendation (as evaluated, before the decision)
 
 Stage the adoption; keep the options reversible:
 
