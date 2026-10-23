@@ -47,6 +47,29 @@ cargo run --bin ag -- corpus --root ./corpus grep 'memcpy|malloc'
 
 Objective-C method names can be overlaid from a method map with `--methods PATH`. See `cargo run --bin ag -- corpus --help` and `cargo run --bin ag -- corpus --root ./corpus list --help` for all options.
 
+## Corpus format
+
+A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points.
+
+A kuna project export is the other layout `ag` reads: a `.c` of every function, a `.h` of prototypes, an `.asm` of every code section, and — under `--stream` — an `index.jsonl` giving each function's byte span in the `.c`.
+
+## Embedded manual and agent skill
+
+The `ag` binary carries its own documentation and an agent skill, so a session with no checkout and no network can still read the reference and learn to drive the tool.
+
+```sh
+# List the embedded manual's topics
+ag docs
+
+# Print one topic
+ag docs cli
+
+# Install the agent skill where coding agents load skills
+ag install-skill --agent claude
+```
+
+`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format and the workbench.
+
 ## Desktop workbench
 
 `ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work surface with listing, pseudocode, bytes and references, an inspector, and a bottom workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.

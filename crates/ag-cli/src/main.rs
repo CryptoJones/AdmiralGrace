@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
+mod docs;
+mod skill;
+
 #[derive(Parser)]
 #[command(name = "ag", version, about = "AdmiralGrace decompiler toolchain")]
 struct Cli {
@@ -27,6 +30,29 @@ enum Cmd {
         shift: String,
         #[command(subcommand)]
         cmd: CorpusCmd,
+    },
+    /// Install the agent skill, embedded in this binary.
+    InstallSkill {
+        /// The agent to install for.
+        #[arg(long)]
+        agent: Option<skill::Agent>,
+        /// Install into the current directory, to commit alongside a repo.
+        #[arg(long)]
+        project: bool,
+        /// Install into DIR/<skill-name>/, for any other agent.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Replace an installed copy that differs.
+        #[arg(long)]
+        force: bool,
+        /// Write the skill to stdout and install nothing.
+        #[arg(long)]
+        print: bool,
+    },
+    /// Print the embedded manual.
+    Docs {
+        /// The topic to print; without one, the topics are listed.
+        topic: Option<String>,
     },
 }
 
@@ -148,7 +174,8 @@ fn expand_tilde(p: &Path) -> PathBuf {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cmd_run(cli.cmd) {
-        Ok(_) => Ok(()),
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");
             std::process::exit(1)
@@ -156,13 +183,27 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_run(cmd: Cmd) -> Result<()> {
-    let Cmd::Corpus {
-        root,
-        methods,
-        shift,
-        cmd,
-    } = cmd;
+fn cmd_run(cmd: Cmd) -> Result<i32> {
+    match cmd {
+        Cmd::Corpus {
+            root,
+            methods,
+            shift,
+            cmd,
+        } => corpus(root, methods, shift, cmd),
+        Cmd::InstallSkill {
+            agent,
+            project,
+            dir,
+            force,
+            print,
+        } => Ok(skill::run(agent, project, dir, force, print)),
+        Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
+    }
+}
+
+/// Report on a corpus or a kuna project export.
+fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd) -> Result<i32> {
     let root = expand_tilde(&root);
     let shift_val = ag_corpus::parse_addr(&shift)?;
     let overlay = match methods {
@@ -305,7 +346,7 @@ fn cmd_run(cmd: Cmd) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// The best display name for a function.
