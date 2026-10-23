@@ -96,6 +96,9 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
+
+# The strings of the image, and the functions that use them
+cargo run --bin ag -- image ./sample.elf strings
 ```
 
 ## `ag image` subcommands
@@ -106,11 +109,15 @@ cargo run --bin ag -- image ./sample.elf disasm main
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
+| `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
+| `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
+| `strings --utf16` | The strings that are held as UTF-16LE. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
-symbols; `disasm` gives the blocks, their instructions, and the calls the function makes.
-Every address is reported twice, as a number and as a hex string.
+symbols; `disasm` gives the blocks, their instructions, and the calls the function makes;
+`strings` gives the strings and the functions that use them. Every address is reported
+twice, as a number and as a hex string.
 
 `disasm` takes the function as an address (`0x1198`) or as a name (`main`). A name is
 matched loosely: an exact name first, then a substring. A direct call prints the name of
@@ -118,6 +125,15 @@ the function it calls, when that function has one.
 
 `info` and `symbols` read any format the loader reads. `disasm` decodes x86-64, so it
 refuses an image of another architecture rather than printing nonsense.
+
+`strings` reads the sections that are not code, and reports every run of text that ends
+in a NUL. A tab, a newline and a carriage return are part of the text, and they are
+written out as `\t`, `\n` and `\r`, so a string never breaks the line it is printed on.
+A section that is not mapped into memory holds text as well — the debug sections do — but
+it has no address, so it is left out.
+
+Who uses a string is found from the instructions that point at it, which needs the whole
+program read. The wide strings are not in that index, so they are reported without users.
 
 ## The embedded manual and agent skill
 

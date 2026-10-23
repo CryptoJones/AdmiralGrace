@@ -91,6 +91,7 @@ fn reference_cards(app: &App) -> Element<'_, Message> {
         ReferenceKind::CalledBy,
         ReferenceKind::Data,
         ReferenceKind::String,
+        ReferenceKind::UsedBy,
     ] {
         let matching: Vec<_> = app
             .work

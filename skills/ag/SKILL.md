@@ -103,13 +103,15 @@ and `ag docs workbench` explains how.
 ag image ./sample.elf info
 ag image ./sample.elf symbols --filter 'main|add'
 ag image ./sample.elf disasm main
+ag image ./sample.elf strings
 ```
 
 `info` gives the language, the entry point and the sections. `symbols` gives the function
 and data symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per
 block, then the address, the bytes, the mnemonic and the operands of every instruction. A
-call shows the name of the function it calls. `--json` reports the same thing as JSON,
-with every address as both a number and a hex string.
+call shows the name of the function it calls. `strings` gives the text the image holds,
+with the functions that use it. `--json` reports the same thing as JSON, with every
+address as both a number and a hex string.
 
 `info` and `symbols` read any format the loader reads. `disasm` decodes x86-64 only, so
 it refuses another architecture rather than guessing.

@@ -12,8 +12,9 @@
 //!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
-//! plain data — the sections, the symbols, and the bytes of the file — and
-//! that is what the workbench and the CLI both read.
+//! plain data — the sections, the symbols, the bytes of the file, and the
+//! strings of the data sections — and that is what the workbench and the CLI
+//! both read.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -60,6 +61,45 @@ pub struct DataSymbol {
     pub name: String,
     /// The symbol's size in bytes.
     pub size: u64,
+}
+
+/// One string the image holds.
+///
+/// A string is a run of text that ends in a NUL: the way a string looks in a
+/// program image. The text is written out as it should be read, so a newline
+/// in it is a `\n` and not a line break.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageString {
+    /// Where the string lives.
+    pub address: u64,
+    /// The name of the section it lives in.
+    pub section: String,
+    /// The text of the string.
+    pub text: String,
+    /// How many bytes the string holds, the terminator included.
+    pub length: u64,
+}
+
+/// An address an instruction points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pointer {
+    /// The address of the instruction.
+    pub site: u64,
+    /// The address the instruction points at.
+    pub target: u64,
+}
+
+/// A string a function refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringReference {
+    /// The address of the string.
+    pub address: u64,
+    /// The text of the string.
+    pub text: String,
+    /// The name of the section the string lives in.
+    pub section: String,
+    /// The address of the instruction that points at the string.
+    pub site: u64,
 }
 
 /// One instruction of a listing.
@@ -114,6 +154,8 @@ pub struct Disassembly {
     pub blocks: Vec<Block>,
     /// The direct calls the function makes.
     pub calls: Vec<Call>,
+    /// The addresses the instructions of the function point at.
+    pub pointers: Vec<Pointer>,
 }
 
 /// The calls between the functions of an image.
@@ -167,8 +209,12 @@ pub struct Binary {
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
     file: Vec<FileSection>,
+    strings: Vec<ImageString>,
+    wide_strings: Vec<ImageString>,
+
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     graph: OnceLock<CallGraph>,
+    string_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
 }
 
 impl std::fmt::Debug for Binary {
@@ -254,6 +300,10 @@ impl Binary {
             })
             .collect();
 
+        // The strings are found in the bytes of the file: the data sections
+        // are not code, so they are never decoded.
+        let (strings, wide_strings) = scan_strings(&file);
+
         Binary {
             language,
             entry,
@@ -261,8 +311,12 @@ impl Binary {
             functions,
             data,
             file,
+            strings,
+            wide_strings,
+
             disassembly: Mutex::new(HashMap::new()),
             graph: OnceLock::new(),
+            string_users: OnceLock::new(),
         }
     }
 
@@ -323,6 +377,83 @@ impl Binary {
         }
 
         Some(file.bytes[offset..end].to_vec())
+    }
+
+    /// The strings the image holds.
+    ///
+    /// They are found when the image is read, out of the bytes of the
+    /// sections that are not code.
+    pub fn strings(&self) -> &[ImageString] {
+        &self.strings
+    }
+
+    /// The strings the image holds as UTF-16LE.
+    ///
+    /// A wide string is a run of characters that each take a byte and a NUL.
+    pub fn wide_strings(&self) -> &[ImageString] {
+        &self.wide_strings
+    }
+
+    /// The strings the function at `address` refers to.
+    ///
+    /// A function refers to a string when one of its instructions points at
+    /// the string's bytes.
+    pub fn string_references(&self, address: u64) -> Vec<StringReference> {
+        let Some(disassembly) = self.disassembly(address) else {
+            return Vec::new();
+        };
+
+        let mut references: Vec<StringReference> = Vec::new();
+
+        for pointer in &disassembly.pointers {
+            let Some(string) = self.string_at(pointer.target) else {
+                continue;
+            };
+
+            if references
+                .iter()
+                .any(|reference| reference.address == string.address)
+            {
+                continue;
+            }
+
+            references.push(StringReference {
+                address: string.address,
+                text: string.text.clone(),
+                section: string.section.clone(),
+                site: pointer.site,
+            });
+        }
+
+        references
+    }
+
+    /// The functions that refer to each string, by the address of the string.
+    ///
+    /// This needs the whole program read, so it is worked out once and kept.
+    pub fn string_users(&self) -> &BTreeMap<u64, Vec<u64>> {
+        self.string_users.get_or_init(|| {
+            let mut users: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+
+            for function in &self.functions {
+                for reference in self.string_references(function.address) {
+                    let functions = users.entry(reference.address).or_default();
+                    if !functions.contains(&function.address) {
+                        functions.push(function.address);
+                    }
+                }
+            }
+
+            users
+        })
+    }
+
+    /// The functions that refer to each string, when they have been worked out.
+    ///
+    /// This does not wait for the map: a reader that must not block asks this,
+    /// and gets nothing until the whole program has been read.
+    pub fn string_users_ready(&self) -> Option<&BTreeMap<u64, Vec<u64>>> {
+        self.string_users.get()
     }
 
     /// The name of the function at `address`, when it has one.
@@ -434,6 +565,13 @@ impl Binary {
             .cloned()
     }
 
+    /// The string that holds `address`, when one does.
+    fn string_at(&self, address: u64) -> Option<&ImageString> {
+        self.strings
+            .iter()
+            .find(|string| address >= string.address && address < string.address + string.length)
+    }
+
     /// Walk the function at `address` and gather its blocks.
     fn build_disassembly(&self, address: u64) -> Option<Disassembly> {
         let code = self.file.iter().find(|code| {
@@ -468,6 +606,8 @@ impl Binary {
         }
 
         let mut blocks = Vec::with_capacity(cfg.blocks.len());
+        let mut pointers = Vec::new();
+
         for block in &cfg.blocks {
             let successors: Vec<String> = block
                 .successor_addresses
@@ -485,6 +625,16 @@ impl Binary {
             for instruction in decoded.disasm.instructions.iter().filter(|instruction| {
                 block.from <= instruction.address && instruction.address < block.to
             }) {
+                // An instruction that reads through the instruction pointer
+                // points at the data it names: that is what a reference to a
+                // string is.
+                if let Some(target) = instruction.rip_relative_address {
+                    pointers.push(Pointer {
+                        site: instruction.address,
+                        target,
+                    });
+                }
+
                 let (mnemonic, operands) = decoded
                     .text
                     .get(&instruction.address)
@@ -518,6 +668,7 @@ impl Binary {
             section: code.section.name.clone(),
             blocks,
             calls,
+            pointers,
         })
     }
 }
@@ -530,6 +681,147 @@ struct FileSection {
     bytes: Vec<u8>,
     /// The instructions of the section, decoded once.
     decoded: OnceLock<Decoded>,
+}
+
+/// The shortest string the scanner reports, in bytes, the terminator included.
+const MIN_STRING: usize = 5;
+
+/// The strings of an image, and the wide strings it holds.
+///
+/// Every section that is not code and that the file holds bytes for is
+/// scanned: a string is a run of text that ends in a NUL. A section that is
+/// not mapped into memory has no address, so its text is not a string of the
+/// program, and it is left out.
+fn scan_strings(file: &[FileSection]) -> (Vec<ImageString>, Vec<ImageString>) {
+    let mut strings = Vec::new();
+    let mut wide = Vec::new();
+
+    for section in file.iter().filter(|section| !section.section.executable) {
+        // A section that is not mapped into memory has no address.
+        if section.section.vma == 0 {
+            continue;
+        }
+
+        strings.extend(scan_ascii(
+            &section.bytes,
+            section.section.vma,
+            &section.section.name,
+        ));
+        wide.extend(scan_wide(
+            &section.bytes,
+            section.section.vma,
+            &section.section.name,
+        ));
+    }
+
+    (strings, wide)
+}
+
+/// The strings of a run of bytes.
+///
+/// A string is a run of text that ends in a NUL, and the NUL is part of it.
+/// A tab, a newline and a carriage return count as text, because a format
+/// string holds them.
+fn scan_ascii(bytes: &[u8], base: u64, section: &str) -> Vec<ImageString> {
+    let mut strings = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if !is_text(bytes[index]) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && is_text(bytes[index]) {
+            index += 1;
+        }
+
+        // A string ends in a NUL, and it is long enough to be one.
+        let length = index - start;
+        if length + 1 < MIN_STRING || index >= bytes.len() || bytes[index] != 0 {
+            continue;
+        }
+
+        strings.push(ImageString {
+            address: base + start as u64,
+            section: section.to_string(),
+            text: escape(&bytes[start..index]),
+            length: (length + 1) as u64,
+        });
+    }
+
+    strings
+}
+
+/// The wide strings of a run of bytes.
+///
+/// A wide string is a run of characters that each take a byte and a NUL, and
+/// that ends in two NULs.
+fn scan_wide(bytes: &[u8], base: u64, section: &str) -> Vec<ImageString> {
+    let mut strings = Vec::new();
+    let mut index = 0;
+
+    while index + 1 < bytes.len() {
+        if !is_text(bytes[index]) || bytes[index + 1] != 0 {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < bytes.len() && is_text(bytes[index]) && bytes[index + 1] == 0 {
+            index += 2;
+        }
+
+        // A wide string ends in two NULs, and it is long enough to be one.
+        let length = index - start;
+        if length + 2 < MIN_STRING
+            || index + 1 >= bytes.len()
+            || bytes[index] != 0
+            || bytes[index + 1] != 0
+        {
+            continue;
+        }
+
+        let text: String = bytes[start..index]
+            .iter()
+            .step_by(2)
+            .map(|byte| escape(&[*byte]))
+            .collect();
+
+        strings.push(ImageString {
+            address: base + start as u64,
+            section: section.to_string(),
+            text,
+            length: (length + 2) as u64,
+        });
+
+        index += 2;
+    }
+
+    strings
+}
+
+/// Whether a byte is part of the text of a string.
+fn is_text(byte: u8) -> bool {
+    byte.is_ascii_graphic() || matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// The text of a string, with the control characters written out.
+fn escape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+
+    for &byte in bytes {
+        match byte {
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            byte if byte.is_ascii_graphic() || byte == b' ' => out.push(byte as char),
+            byte => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+
+    out
 }
 
 impl FileSection {
@@ -688,6 +980,59 @@ mod tests {
         assert!(
             block.successor_addresses.is_empty(),
             "the code after the byte is not reached: {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_text_that_ends_in_a_nul_is_a_string() {
+        let strings = scan_ascii(b"abcde\0", 0x1000, ".rodata");
+
+        assert_eq!(strings.len(), 1, "{strings:?}");
+        assert_eq!(strings[0].address, 0x1000);
+        assert_eq!(strings[0].text, "abcde");
+        assert_eq!(strings[0].length, 6, "the NUL is part of the string");
+    }
+
+    #[test]
+    fn a_run_of_text_that_is_too_short_is_not_a_string() {
+        assert!(
+            scan_ascii(b"abc\0", 0x1000, ".rodata").is_empty(),
+            "three bytes and a NUL are too few"
+        );
+    }
+
+    #[test]
+    fn a_run_of_text_that_does_not_end_in_a_nul_is_not_a_string() {
+        assert!(
+            scan_ascii(b"abcdef", 0x1000, ".rodata").is_empty(),
+            "a string ends in a NUL"
+        );
+    }
+
+    #[test]
+    fn a_newline_in_a_string_is_part_of_it() {
+        let strings = scan_ascii(b"%ld\n\0", 0x2004, ".rodata");
+
+        assert_eq!(strings.len(), 1, "{strings:?}");
+        assert_eq!(strings[0].text, "%ld\\n", "the newline is written out");
+        assert_eq!(strings[0].length, 5);
+    }
+
+    #[test]
+    fn a_wide_string_is_scanned_as_a_wide_one() {
+        let strings = scan_wide(b"h\0e\0l\0l\0o\0\0\0", 0x3000, ".data");
+
+        assert_eq!(strings.len(), 1, "{strings:?}");
+        assert_eq!(strings[0].address, 0x3000);
+        assert_eq!(strings[0].text, "hello");
+        assert_eq!(strings[0].length, 12, "the two NULs are part of it");
+    }
+
+    #[test]
+    fn a_wide_string_is_not_scanned_as_a_narrow_one() {
+        assert!(
+            scan_ascii(b"h\0e\0l\0l\0o\0\0\0", 0x3000, ".data").is_empty(),
+            "the NULs between the characters break the run"
         );
     }
 }

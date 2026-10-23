@@ -85,6 +85,10 @@ file, and the pane says so rather than showing zeroes.
 
 The File menu opens an image the same way, with `Open binary...`.
 
+The Strings tab lists the text the image holds, with the functions that use it. The list
+filters as you type, and picking a string moves the selection to it. The inspector then
+names the string, says which section holds it, and lists the functions that use it.
+
 What the workbench reads:
 
 | Surface | What the workbench does with it |
@@ -95,6 +99,7 @@ What the workbench reads:
 | The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
 | The bytes of the file | The Bytes tab and the lower Bytes panel: the bytes around the selection. |
 | The direct calls of a function | The References tab and the inspector: what the function calls, and what calls it. |
+| The strings of the data sections | The Strings tab: the text of the image, and the functions that use it. |
 
 The decoder is x86-64. An image of another architecture opens with its symbols and its
 sections, but with the listing off, and the Problems panel says why.

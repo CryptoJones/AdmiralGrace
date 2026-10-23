@@ -39,6 +39,18 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The strings the image holds.
+    Strings {
+        /// Only the strings whose text matches the regular expression.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Report the strings that are held as UTF-16LE.
+        #[arg(long)]
+        utf16: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -172,6 +184,41 @@ struct DisasmJson {
     calls: Vec<CallJson>,
 }
 
+/// One string of the image, as JSON.
+#[derive(Debug, Serialize)]
+struct StringJson {
+    /// Where the string lives.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// The text of the string.
+    text: String,
+    /// The section the string lives in.
+    section: String,
+    /// How many bytes the string holds, the terminator included.
+    length: u64,
+    /// The functions that refer to the string.
+    functions: Vec<StringFunctionJson>,
+}
+
+/// One function that refers to a string, as JSON.
+#[derive(Debug, Serialize)]
+struct StringFunctionJson {
+    /// The address of the function.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// The name of the function.
+    name: String,
+}
+
+/// The strings of the image, as JSON.
+#[derive(Debug, Serialize)]
+struct StringsJson {
+    /// The strings.
+    strings: Vec<StringJson>,
+}
+
 /// Report on a program image.
 pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     let image = Binary::open(binary).with_context(|| format!("reading {}", binary.display()))?;
@@ -180,6 +227,11 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         ImageCmd::Info { json } => info(&image, json),
         ImageCmd::Symbols { filter, json } => symbols(&image, filter.as_deref(), json),
         ImageCmd::Disasm { target, json } => disasm(&image, &target, json),
+        ImageCmd::Strings {
+            filter,
+            utf16,
+            json,
+        } => strings(&image, filter.as_deref(), utf16, json),
     }
 }
 
@@ -379,6 +431,91 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Report the strings the image holds.
+///
+/// The strings are found in the sections that are not code. The functions
+/// that refer to them are worked out as well, which needs the whole program
+/// read, so that is what this call costs.
+fn strings(image: &Binary, filter: Option<&str>, utf16: bool, json: bool) -> Result<i32> {
+    let strings = strings_of(image, filter, utf16)?;
+
+    if json {
+        let report = StringsJson { strings };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    println!("strings: {}", strings.len());
+
+    for string in &strings {
+        let users = if string.functions.is_empty() {
+            "-".to_string()
+        } else {
+            string
+                .functions
+                .iter()
+                .map(|function| function.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        println!(
+            "{} {} \"{}\" {}",
+            string.address_hex, string.section, string.text, users
+        );
+    }
+
+    Ok(0)
+}
+
+/// The strings of the image that match the filter.
+///
+/// The wide strings are the ones held as UTF-16LE; they are not in the index
+/// of the users of a string, so they carry none.
+fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<StringJson>> {
+    let pattern = filter.map(Regex::new).transpose()?;
+
+    let matches = |text: &str| match &pattern {
+        Some(pattern) => pattern.is_match(text),
+        None => true,
+    };
+
+    let found = if utf16 {
+        image.wide_strings()
+    } else {
+        image.strings()
+    };
+
+    // Who refers to each string is only known once the whole program has been
+    // read.
+    let users = image.string_users();
+
+    Ok(found
+        .iter()
+        .filter(|string| matches(&string.text))
+        .map(|string| StringJson {
+            address: string.address,
+            address_hex: format!("{:#x}", string.address),
+            text: string.text.clone(),
+            section: string.section.clone(),
+            length: string.length,
+            functions: users
+                .get(&string.address)
+                .map(|functions| {
+                    functions
+                        .iter()
+                        .map(|address| StringFunctionJson {
+                            address: *address,
+                            address_hex: format!("{address:#x}"),
+                            name: image.function_name(*address).unwrap_or("entry").to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect())
+}
+
 /// The operands of an instruction, with a call's target named.
 fn operands_of(instruction: &ag_image::Instruction) -> String {
     match instruction
@@ -505,5 +642,44 @@ mod tests {
             .expect("a call instruction");
 
         assert_eq!(operands_of(instruction), call.name.clone().unwrap());
+    }
+
+    #[test]
+    fn the_strings_of_the_image_are_listed_with_the_functions_that_use_them() {
+        let image = sample();
+
+        let strings = strings_of(&image, None, false).expect("the strings are listed");
+
+        let format = strings
+            .iter()
+            .find(|string| string.text == "%ld\\n")
+            .expect("the format string of the sample");
+
+        assert_eq!(format.address_hex, "0x2004");
+        assert_eq!(format.section, ".rodata");
+        assert_eq!(format.length, 5, "the string holds four bytes and its NUL");
+
+        assert_eq!(format.functions.len(), 1, "one function uses it");
+        assert_eq!(format.functions[0].name, "main");
+        assert_eq!(format.functions[0].address_hex, "0x1198");
+    }
+
+    #[test]
+    fn a_filter_leaves_out_the_strings_that_do_not_match() {
+        let image = sample();
+
+        let strings = strings_of(&image, Some("^%ld"), false).expect("the strings are listed");
+
+        assert_eq!(strings.len(), 1, "{strings:?}");
+        assert_eq!(strings[0].address_hex, "0x2004");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_lists_no_strings() {
+        let image = sample();
+
+        let strings = strings_of(&image, Some("nonesuch"), false).expect("the strings are listed");
+
+        assert!(strings.is_empty(), "{strings:?}");
     }
 }

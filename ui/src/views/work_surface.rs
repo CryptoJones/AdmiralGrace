@@ -1,12 +1,14 @@
 //! The center work surface: listing, pseudocode, graph, bytes, references.
 
+use std::collections::BTreeMap;
+
 use iced::widget::{
-    button, container, mouse_area, scrollable, Column, Container, Row, Space, Text,
+    button, container, mouse_area, scrollable, text_input, Column, Container, Row, Space, Text,
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
-use crate::data::{ByteLine, ListingLine, Reference};
+use crate::data::{ByteLine, ListingLine, Reference, StringEntry};
 use crate::model::Selection;
 use crate::theme::{color, MONO};
 use crate::views::{empty_state, pill, subtle};
@@ -658,7 +660,8 @@ fn hex_row(row: &ByteLine, selected: Option<(u64, usize)>) -> Element<'_, Messag
 /// A table of the strings the binary holds.
 ///
 /// The strings the selected function refers to come first: those are the ones
-/// in view. When the function refers to none, every string is listed.
+/// in view. When the function refers to none, every string is listed. The
+/// filter narrows the list as it is typed.
 fn string_table(app: &App) -> Element<'_, Message> {
     let strings = app.provider.strings();
 
@@ -670,47 +673,128 @@ fn string_table(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    let selected = app.navigator.selected;
-    let referenced: Vec<_> = strings
+    let filter = app.work.string_filter.trim().to_lowercase();
+    let matching: Vec<&StringEntry> = strings
         .iter()
+        .filter(|string| filter.is_empty() || string.text.to_lowercase().contains(&filter))
+        .collect();
+
+    let selected = app.navigator.selected;
+    let referenced: Vec<&StringEntry> = matching
+        .iter()
+        .copied()
         .filter(|string| selected.is_some_and(|address| string.functions.contains(&address)))
         .collect();
 
-    let (rows, note): (Vec<_>, &str) = if referenced.is_empty() {
-        (strings.iter().collect(), "Every string the binary holds")
+    let (rows, note): (Vec<&StringEntry>, &str) = if referenced.is_empty() {
+        (matching, "Every string the binary holds")
     } else {
         (referenced, "The strings this function refers to")
     };
 
+    // The names of the functions, so a string can say who uses it.
+    let names: BTreeMap<u64, String> = app
+        .provider
+        .functions()
+        .into_iter()
+        .map(|row| (row.address, row.name))
+        .collect();
+
     let mut list = Column::new().spacing(4).width(Length::Fill);
+    list = list.push(string_filter(app));
     list = list.push(subtle(note));
 
+    if rows.is_empty() {
+        list = list.push(subtle("No string matches the filter."));
+    }
+
     for string in rows {
-        list = list.push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .spacing(12)
-                .push(
-                    Text::new(format!("{:#x}", string.address))
-                        .size(11)
-                        .color(color::MUTED)
-                        .font(MONO)
-                        .width(Length::Fixed(96.0)),
-                )
-                .push(
-                    Text::new(string.text.clone())
-                        .size(12)
-                        .color(color::TEXT)
-                        .font(MONO),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(subtle(string.section.clone().unwrap_or_default())),
-        );
+        let users: Vec<String> = string
+            .functions
+            .iter()
+            .filter_map(|address| names.get(address).cloned())
+            .collect();
+
+        let selected = app.selection.address() == Some(string.address);
+        list = list.push(string_row(selected, string, users));
     }
 
     scrollable(list)
         .height(Length::Fill)
         .width(Length::Fill)
+        .into()
+}
+
+/// The filter of the strings list.
+fn string_filter(app: &App) -> Element<'_, Message> {
+    text_input::TextInput::new("Filter strings…", &app.work.string_filter)
+        .on_input(Message::StringFilterChanged)
+        .width(Length::Fill)
+        .size(13)
+        .padding([6, 8])
+        .style(|_, _| text_input::Style {
+            background: Background::Color(color::INPUT),
+            border: Border {
+                color: color::LINE,
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            icon: color::MUTED,
+            placeholder: color::MUTED,
+            value: color::TEXT,
+            selection: color::CYAN.scale_alpha(0.35),
+        })
+        .into()
+}
+
+/// One string in the strings list.
+fn string_row(
+    selected: bool,
+    string: &StringEntry,
+    users: Vec<String>,
+) -> Element<'static, Message> {
+    let content = Row::new()
+        .align_y(Alignment::Center)
+        .spacing(12)
+        .push(
+            Text::new(format!("{:#x}", string.address))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fixed(96.0)),
+        )
+        .push(
+            Text::new(string.text.clone())
+                .size(12)
+                .color(color::TEXT)
+                .font(MONO),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(subtle(users.join(", ")))
+        .push(subtle(string.section.clone().unwrap_or_default()))
+        // The scrollbar of the list lies over the right edge, so the last
+        // column is kept clear of it.
+        .push(Space::new().width(Length::Fixed(16.0)));
+
+    let surface = Container::new(content)
+        .padding([2, 0])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if selected {
+                color::SELECT_BG
+            } else {
+                color::PANEL
+            })),
+            border: Border {
+                color: color::PANEL,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        });
+
+    mouse_area(surface)
+        .on_press(Message::StringSelected(string.address))
         .into()
 }
 

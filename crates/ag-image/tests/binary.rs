@@ -293,3 +293,91 @@ fn the_bytes_of_a_data_section_are_the_bytes_of_the_file() {
     let bytes = binary.bytes_at(0x4000, 16).expect(".data has bytes");
     assert_eq!(bytes.len(), 16, "the whole of .data is in the file");
 }
+
+#[test]
+fn the_strings_of_the_image_are_found() {
+    let binary = sample();
+
+    let strings = binary.strings();
+    assert!(!strings.is_empty(), "the sample holds strings");
+
+    // The format string of the sample lives in .rodata, and it is the one
+    // main hands to printf.
+    let format = strings
+        .iter()
+        .find(|string| string.text == "%ld\\n")
+        .expect("the format string of the sample");
+
+    assert_eq!(format.address, 0x2004);
+    assert_eq!(format.section, ".rodata");
+    assert_eq!(format.length, 5, "the string holds four bytes and its NUL");
+}
+
+#[test]
+fn a_string_of_a_section_that_is_not_mapped_is_not_a_string_of_the_program() {
+    let binary = sample();
+
+    // The debug sections hold names as text, but they are not mapped into
+    // memory, so they have no address to be found at.
+    assert!(
+        binary.strings().iter().all(|string| string.address != 0),
+        "the strings of the unmapped sections are left out: {:?}",
+        binary.strings()
+    );
+}
+
+#[test]
+fn a_function_that_points_at_a_string_refers_to_it() {
+    let binary = sample();
+
+    let references = binary.string_references(MAIN);
+
+    assert_eq!(
+        references.len(),
+        1,
+        "main points at one string: {references:?}"
+    );
+
+    let reference = &references[0];
+    assert_eq!(reference.address, 0x2004);
+    assert_eq!(reference.text, "%ld\\n", "the newline is written out");
+    assert_eq!(reference.section, ".rodata");
+    assert_eq!(
+        reference.site, 0x11d2,
+        "the reference names the instruction that made it"
+    );
+}
+
+#[test]
+fn the_functions_that_use_a_string_are_named() {
+    let binary = sample();
+
+    let users = binary.string_users();
+
+    let users_of_the_format = users
+        .get(&0x2004)
+        .expect("the format string is used by something");
+    assert_eq!(users_of_the_format, &[MAIN], "main uses the format string");
+}
+
+#[test]
+fn the_string_users_are_not_known_until_the_whole_program_is_read() {
+    let binary = sample();
+
+    assert!(
+        binary.string_users_ready().is_none(),
+        "nothing has read the whole program yet"
+    );
+
+    let _ = binary.string_users();
+
+    assert!(binary.string_users_ready().is_some(), "the map has landed");
+}
+
+#[test]
+fn a_function_that_uses_no_string_refers_to_none() {
+    let binary = sample();
+
+    // `add` adds two numbers and names nothing.
+    assert!(binary.string_references(0x1149).is_empty());
+}
