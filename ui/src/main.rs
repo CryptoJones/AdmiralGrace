@@ -17,6 +17,7 @@ Usage: ag-ui [options]
 
 Options:
   --corpus PATH     Open a decompilation corpus (a directory with decompile-index.json)
+  --kuna PATH       Open a kuna project export (a directory with the .c, .h and .asm files)
   --methods PATH    Overlay an Objective-C method map
   --shift ADDR      Image-base shift applied to Objective-C IMP addresses (default 0x0)
   -h, --help        Show this help
@@ -46,6 +47,13 @@ fn main() -> iced::Result {
         }
     }
 
+    if let Some(root) = &config.kuna {
+        if !crate::data::is_kuna_export(root) {
+            eprintln!("error: {} does not contain a kuna export", root.display());
+            std::process::exit(1);
+        }
+    }
+
     iced::application(move || App::boot(config.clone()), App::update, App::view)
         .title(|app: &App| app.window_title())
         .theme(|_: &App| theme::theme())
@@ -63,6 +71,9 @@ fn parse_args() -> Result<Option<Config>, String> {
         match arg.as_str() {
             "--corpus" => {
                 config.corpus = Some(PathBuf::from(args.next().ok_or("--corpus needs a path")?));
+            }
+            "--kuna" => {
+                config.kuna = Some(PathBuf::from(args.next().ok_or("--kuna needs a path")?));
             }
             "--methods" => {
                 config.methods = Some(PathBuf::from(args.next().ok_or("--methods needs a path")?));

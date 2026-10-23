@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod kuna;
 pub mod objc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,7 +193,7 @@ pub fn stats(corpus: &Corpus) -> CorpusStats {
     let external = corpus
         .functions
         .iter()
-        .filter(|f| f.name.as_deref().map_or(true, |n| n.starts_with("<EXTERNAL>")))
+        .filter(|f| f.name.as_deref().is_none_or(|n| n.starts_with("<EXTERNAL>")))
         .count();
     let written = corpus.functions.iter().filter(|f| f.status == "written").count();
     let failed = corpus.functions.iter().filter(|f| f.status == "failed").count();
