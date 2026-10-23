@@ -32,8 +32,6 @@ dependencies = [
  "anyhow",
  "clap",
  "regex",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -41,7 +39,6 @@ name = "ag-corpus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "regex",
  "serde",
  "serde_json",
 ]
@@ -52,8 +49,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "iced-x86",
- "serde",
- "serde_json",
 ]
 
 [[package]]
