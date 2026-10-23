@@ -1,6 +1,6 @@
 # AdmiralGrace desktop UI plan
 
-**Status:** Initial proposal  
+**Status:** Initial proposal; desktop UI framework selected: Iced
 **Scope:** A cross-platform analysis workbench for static binary analysis, decompilation, and byte-level inspection.
 
 ## Product direction
@@ -41,7 +41,7 @@ The references below suggest interaction patterns, not a visual copy.
 
 ## Proposed default workspace
 
-Use a dark, low-glare theme with restrained semantic color. Preserve dense technical data while providing strong hierarchy, readable monospace text, keyboard navigation, and scalable text size. The static mockup shows one plausible desktop state.
+Build the desktop application with [Iced](https://iced.rs/), using its Rust-native application model and widgets for the cross-platform shell. Use a dark, low-glare theme with restrained semantic color. Preserve dense technical data while providing strong hierarchy, readable monospace text, keyboard navigation, and scalable text size. The static HTML mockup is a framework-independent layout reference; it is not the selected implementation stack.
 
 ```text
 ┌ Application menu / project tabs / global search / analysis state ─────────────┐
@@ -132,7 +132,7 @@ Dockable tabs for Problems, Search Results, Analysis Log, Patch History, and (in
 
 ### 0. UI foundation
 
-Choose the desktop framework after a small platform/accessibility spike. Define project, address, selection, navigation-history, and capability models. Build the shell, command search, status area, saved layouts, and mock data provider.
+Build the desktop shell with Iced. Start with a small platform/accessibility spike for the required dense lists, keyboard navigation, text scaling, and resizable pane layout. Define project, address, selection, navigation-history, and capability models. Build the shell, command search, status area, saved layouts, and mock data provider.
 
 ### 1. Corpus browser
 
@@ -165,11 +165,10 @@ The included HTML wireframe uses fabricated data solely to explain layout and in
 
 ## Decisions to validate
 
-1. Which desktop framework best fits Rust integration, native accessibility, docking, and cross-platform packaging?
-2. Is the first target a corpus UI, a binary viewer, or both in one application shell? This proposal starts with corpus functionality and grows toward binary analysis.
-3. Which executable formats and architectures are the first practical target?
-4. Should edits persist in a sidecar project database, in the binary, or both? The proposal keeps annotations in a project and patches explicit.
-5. How much of debugger support belongs in the initial product scope?
+1. Is the first target a corpus UI, a binary viewer, or both in one application shell? This proposal starts with corpus functionality and grows toward binary analysis.
+2. Which executable formats and architectures are the first practical target?
+3. Should edits persist in a sidecar project database, in the binary, or both? The proposal keeps annotations in a project and patches explicit.
+4. How much of debugger support belongs in the initial product scope?
 
 ## First usability review
 
