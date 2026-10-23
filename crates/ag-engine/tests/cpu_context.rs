@@ -154,3 +154,18 @@ fn segment_registers_keep_their_own_numbers() {
     assert!(set.contains(fs));
     assert!(!set.contains(gs));
 }
+
+#[test]
+fn undecodable_bytes_are_recorded_one_at_a_time_and_decoding_continues() {
+    // ret ; 0x06 (invalid in 64-bit mode) ; ret
+    let bytes = [0xc3, 0x06, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let dys = ag_engine::pipeline::Disasm::decode(&mut ctx, &bytes, 0x1000)
+        .expect("an invalid byte must not abort the segment");
+    assert_eq!(dys.instructions.len(), 3);
+    assert_eq!(dys.instructions[0].flow, Flow::Return);
+    assert_eq!(dys.instructions[1].flow, Flow::Invalid);
+    assert_eq!(dys.instructions[1].length, 1);
+    assert_eq!(dys.instructions[2].address, 0x1002);
+    assert_eq!(dys.instructions[2].flow, Flow::Return);
+}

@@ -33,6 +33,12 @@ pub struct Disasm {
 }
 
 impl Disasm {
+    /// Decode every instruction of a segment, in address order.
+    ///
+    /// Bytes that do not decode are recorded one at a time as
+    /// [`crate::cpu_context::Flow::Invalid`] entries rather than aborting the segment, so the code
+    /// after padding or a jump table is still reached. A decoder error (not an
+    /// invalid encoding) still fails the decode.
     pub fn decode(
         ctx: &mut dyn CpuContext,
         segment_bytes: &[u8],

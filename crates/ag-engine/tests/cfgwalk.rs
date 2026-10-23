@@ -202,3 +202,15 @@ fn the_loop_with_a_call_is_well_formed() {
         vec![0x1010, 0x1004]
     );
 }
+
+#[test]
+fn an_invalid_byte_ends_the_block_and_code_after_it_is_still_a_target() {
+    // 0x1000 jmp 0x1004 ; 0x1002 0x06 (invalid) ; 0x1003 nop ; 0x1004 ret
+    let cfg = cfg_of(&[0xeb, 0x02, 0x06, 0x90, 0xc3]);
+    assert_eq!(cfg.blocks.len(), 2, "the entry and the jump target");
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1004]);
+    assert!(
+        !cfg.index_by_address.contains_key(&0x1002),
+        "the data byte is not a block"
+    );
+}
