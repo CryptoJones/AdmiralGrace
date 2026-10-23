@@ -100,12 +100,21 @@ pub struct KunaExport {
     pub asm_path: Option<PathBuf>,
     /// Whether the export is still being written.
     pub streaming: bool,
+    /// The binary the export was made from, as its README records it.
+    pub binary: Option<PathBuf>,
     /// Every function the export records.
     pub functions: Vec<KunaFunction>,
     /// Function indexes by address.
     pub by_address: BTreeMap<u64, usize>,
     /// Function indexes by name.
     pub by_name: BTreeMap<String, Vec<usize>>,
+    /// The `.c` file's text, read once.
+    ///
+    /// A function's body is a slice of this file, so holding the text turns
+    /// every lookup into a slice instead of another read of the whole file.
+    c_text: String,
+    /// The `.asm` file's text, read once, for the same reason.
+    asm_text: Option<String>,
 }
 
 impl KunaExport {
@@ -125,7 +134,23 @@ impl KunaExport {
         let h_path = sibling("h");
         let asm_path = sibling("asm");
 
-        let functions = read_functions(root, &c_path)?;
+        let c_text =
+            fs::read_to_string(&c_path).with_context(|| format!("reading {}", c_path.display()))?;
+        let asm_text = asm_path
+            .as_ref()
+            .map(fs::read_to_string)
+            .transpose()
+            .with_context(|| {
+                format!(
+                    "reading {}",
+                    asm_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                )
+            })?;
+
+        let functions = read_functions(root, &c_text)?;
         let mut by_address = BTreeMap::new();
         let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, function) in functions.iter().enumerate() {
@@ -143,9 +168,12 @@ impl KunaExport {
             h_path,
             asm_path,
             streaming: root.join(STREAMING_FILE).is_file(),
+            binary: readme_binary(root),
             functions,
             by_address,
             by_name,
+            c_text,
+            asm_text,
         })
     }
 
@@ -164,11 +192,9 @@ impl KunaExport {
             return Ok(None);
         }
 
-        let raw =
-            fs::read(&self.c_path).with_context(|| format!("reading {}", self.c_path.display()))?;
         let start = usize::try_from(function.c_offset).unwrap_or(usize::MAX);
         let end = start.saturating_add(usize::try_from(function.c_len).unwrap_or(usize::MAX));
-        let block = raw.get(start..end).ok_or_else(|| {
+        let block = self.c_text.get(start..end).ok_or_else(|| {
             anyhow::anyhow!(
                 "function block {}+{} is outside {}",
                 function.c_offset,
@@ -177,7 +203,7 @@ impl KunaExport {
             )
         })?;
 
-        Ok(Some(strip_header(&String::from_utf8_lossy(block))))
+        Ok(Some(strip_header(block)))
     }
 
     /// The listing of `function`, sliced out of the `.asm` by its label.
@@ -187,12 +213,10 @@ impl KunaExport {
     /// the label, a streamed export moves them to a `; --- variables ---`
     /// section at the end of the file.
     pub fn function_listing(&self, function: &KunaFunction) -> Result<Option<KunaListing>> {
-        let Some(path) = &self.asm_path else {
+        let Some(asm) = &self.asm_text else {
             return Ok(None);
         };
-        let raw =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Some(slice_listing(&raw, &function.name, function.address)))
+        Ok(Some(slice_listing(asm, &function.name, function.address)))
     }
 }
 
@@ -222,12 +246,12 @@ fn c_file(root: &Path) -> Option<PathBuf> {
 }
 
 /// Every function the export records, in index order when there is an index.
-fn read_functions(root: &Path, c_path: &Path) -> Result<Vec<KunaFunction>> {
+fn read_functions(root: &Path, c_text: &str) -> Result<Vec<KunaFunction>> {
     let index = root.join(INDEX_FILE);
     if index.is_file() {
         return read_index(&index);
     }
-    read_headers(c_path)
+    Ok(read_headers(c_text))
 }
 
 /// Read `index.jsonl`, one record per line.
@@ -266,9 +290,7 @@ fn to_function(record: IndexRecord) -> KunaFunction {
 }
 
 /// Read the `// Function:` headers of a `.c` that carries no index.
-fn read_headers(c_path: &Path) -> Result<Vec<KunaFunction>> {
-    let raw = fs::read(c_path).with_context(|| format!("reading {}", c_path.display()))?;
-    let text = String::from_utf8_lossy(&raw);
+fn read_headers(text: &str) -> Vec<KunaFunction> {
     let mut functions = Vec::new();
 
     let mut offset = 0usize;
@@ -290,14 +312,38 @@ fn read_headers(c_path: &Path) -> Result<Vec<KunaFunction>> {
 
     // Without an index the block lengths are unknown, so each block runs to
     // the next header.
-    let total = raw.len() as u64;
+    let total = text.len() as u64;
     let offsets: Vec<u64> = functions.iter().map(|function| function.c_offset).collect();
     for (index, function) in functions.iter_mut().enumerate() {
         let end = offsets.get(index + 1).copied().unwrap_or(total);
         function.c_len = end.saturating_sub(function.c_offset);
     }
 
-    Ok(functions)
+    functions
+}
+
+/// The binary the export was made from, as the export's README records it.
+///
+/// The README's binary table has a `| Path | … |` row, and the path it names
+/// is the only thing that lets the kuna CLI answer questions the export
+/// itself cannot.
+fn readme_binary(root: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(root.join("README.md")).ok()?;
+
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("| Path |") else {
+            continue;
+        };
+        let value = rest.split('|').next().unwrap_or_default().trim();
+        let value = value.trim_matches('`').trim();
+        if value.is_empty() {
+            continue;
+        }
+        return Some(PathBuf::from(value));
+    }
+
+    None
 }
 
 /// Parse the `name @ 0xaddr` part of a `// Function:` header.
@@ -767,5 +813,50 @@ secret:  ; 0x4010
 
         assert!(!is_kuna_export(&dir.0));
         assert!(KunaExport::load(&dir.0).is_err());
+    }
+
+    #[test]
+    fn the_readme_names_the_binary_the_export_came_from() {
+        let dir = TempDir::new("readme");
+        dir.write("a.c", C);
+        dir.write(
+            "README.md",
+            "# a — kuna project export\n\n## Binary\n\n| Field | Value |\n|---|---|\n| Path | `/tmp/target.elf` |\n| File size | 17 bytes |\n",
+        );
+
+        let export = KunaExport::load(&dir.0).expect("an export");
+        assert_eq!(
+            export.binary.as_deref(),
+            Some(Path::new("/tmp/target.elf")),
+            "the README's Path row names the analysed binary"
+        );
+    }
+
+    #[test]
+    fn an_export_without_a_readme_names_no_binary() {
+        let dir = TempDir::new("no-readme");
+        dir.write("a.c", C);
+
+        let export = KunaExport::load(&dir.0).expect("an export");
+        assert!(export.binary.is_none());
+    }
+
+    #[test]
+    fn the_body_is_read_from_the_cached_text() {
+        let dir = TempDir::new("cached");
+        dir.write("a.c", C);
+        dir.write("index.jsonl", &index());
+
+        let export = KunaExport::load(&dir.0).expect("an export");
+        let one = export.function(0x1000).expect("a function");
+        let first = export.function_body(one).expect("a body").expect("a body");
+
+        // The `.c` is gone, and the body still resolves: the export holds the
+        // text it read at load time.
+        fs::remove_file(dir.0.join("a.c")).expect("the c file");
+        let second = export.function_body(one).expect("a body").expect("a body");
+
+        assert_eq!(first, second);
+        assert_eq!(first, "int one(void)\n{\n  return 1;\n}");
     }
 }

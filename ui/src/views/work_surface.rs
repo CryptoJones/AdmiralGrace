@@ -336,22 +336,82 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
+    let selection = app.selection.address();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
-    for line in body.lines() {
-        list = list.push(
-            Text::new(line.to_string())
-                .size(12)
-                .color(color::TEXT)
-                .font(MONO)
-                .width(Length::Fill),
-        );
+    for (index, line) in body.lines().enumerate() {
+        let addresses = app.work.line_addresses.get(&index).cloned();
+        list = list.push(pseudocode_row(
+            index,
+            line.to_string(),
+            addresses,
+            selection,
+        ));
     }
 
     scrollable(list)
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// One line of pseudocode.
+///
+/// A line that kuna mapped to addresses can be clicked, which moves the
+/// selection to the first of them; a line that holds the selection is
+/// highlighted, so the listing and the pseudocode stay in step.
+fn pseudocode_row(
+    index: usize,
+    line: String,
+    addresses: Option<Vec<u64>>,
+    selection: Option<u64>,
+) -> Element<'static, Message> {
+    let focused = addresses
+        .as_ref()
+        .is_some_and(|addresses| selection.is_some_and(|address| addresses.contains(&address)));
+
+    let row = Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(10)
+            .push(
+                Text::new(format!("{:4}", index + 1))
+                    .size(11)
+                    .color(color::DIM)
+                    .font(MONO)
+                    .width(Length::Fixed(38.0)),
+            )
+            .push(
+                Text::new(line)
+                    .size(12)
+                    .color(color::TEXT)
+                    .font(MONO)
+                    .width(Length::Fill),
+            ),
+    )
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(Background::Color(if focused {
+            color::FOCUS_BG
+        } else {
+            color::PANEL
+        })),
+        border: Border {
+            color: if focused { color::CYAN } else { color::PANEL },
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    });
+
+    let address = addresses.and_then(|addresses| addresses.first().copied());
+
+    match address {
+        Some(address) => mouse_area(row)
+            .on_press(Message::AddressSelected(address))
+            .into(),
+        None => row.into(),
+    }
 }
 
 /// The control-flow graph view.
@@ -456,11 +516,17 @@ fn lower_content(app: &App) -> Element<'_, Message> {
                 hex_dump(&app.work.bytes)
             }
         }
-        LowerTab::Strings => empty_state(
-            "No strings in view",
-            "String extraction is not wired up for this project yet.",
-        )
-        .into(),
+        LowerTab::Strings => {
+            if !app.capabilities.strings {
+                empty_state(
+                    "Strings are not available for this project",
+                    "The active provider does not extract strings.",
+                )
+                .into()
+            } else {
+                string_table(app)
+            }
+        }
         LowerTab::References => {
             if app.work.references.is_empty() {
                 empty_state("No references in view", "Nothing refers to this selection.").into()
@@ -529,6 +595,65 @@ fn hex_dump(rows: &[ByteLine]) -> Element<'_, Message> {
                     .push(Text::new(ascii).size(12).color(color::DIM).font(MONO)),
             )
             .width(Length::Fill),
+        );
+    }
+
+    scrollable(list)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A table of the strings the binary holds.
+///
+/// The strings the selected function refers to come first: those are the ones
+/// in view. When the function refers to none, every string is listed.
+fn string_table(app: &App) -> Element<'_, Message> {
+    let strings = app.provider.strings();
+
+    if strings.is_empty() {
+        return empty_state(
+            "No strings in view",
+            "The binary holds no strings the analysis could name.",
+        )
+        .into();
+    }
+
+    let selected = app.navigator.selected;
+    let referenced: Vec<_> = strings
+        .iter()
+        .filter(|string| selected.is_some_and(|address| string.functions.contains(&address)))
+        .collect();
+
+    let (rows, note): (Vec<_>, &str) = if referenced.is_empty() {
+        (strings.iter().collect(), "Every string the binary holds")
+    } else {
+        (referenced, "The strings this function refers to")
+    };
+
+    let mut list = Column::new().spacing(4).width(Length::Fill);
+    list = list.push(subtle(note));
+
+    for string in rows {
+        list = list.push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .spacing(12)
+                .push(
+                    Text::new(format!("{:#x}", string.address))
+                        .size(11)
+                        .color(color::MUTED)
+                        .font(MONO)
+                        .width(Length::Fixed(96.0)),
+                )
+                .push(
+                    Text::new(string.text.clone())
+                        .size(12)
+                        .color(color::TEXT)
+                        .font(MONO),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(subtle(string.section.clone().unwrap_or_default())),
         );
     }
 

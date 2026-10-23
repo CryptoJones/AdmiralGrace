@@ -63,6 +63,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .spacing(6)
             .push(section_header("Project"))
             .push(subtle(app.project.subtitle()))
+            .push(program_summary(app))
             .push(filter_input(app))
             .push(
                 Row::new()
@@ -91,6 +92,55 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ..container::Style::default()
     })
     .into()
+}
+
+/// The shape of the program, as the analysis reported it.
+///
+/// A kuna export knows the binary it was made from, so the CLI can say how
+/// the program is put together: where it starts, how much of it is reachable
+/// and how much of it nothing calls.
+fn program_summary(app: &App) -> Element<'_, Message> {
+    let Some(summary) = app.provider.summary() else {
+        return Space::new().width(Length::Fill).into();
+    };
+
+    let mut column = Column::new().spacing(2).width(Length::Fill);
+
+    if let Some((name, address)) = &summary.entry {
+        column = column.push(summary_row(
+            format!("entry {name}"),
+            format!("{address:#x}"),
+        ));
+    }
+
+    if let Some((name, address)) = &summary.main {
+        column = column.push(summary_row(format!("main {name}"), format!("{address:#x}")));
+    }
+
+    column = column.push(summary_row(
+        "reachable".into(),
+        summary.reachable.to_string(),
+    ));
+    column = column.push(summary_row(
+        "no callers".into(),
+        summary.no_callers.to_string(),
+    ));
+    column = column.push(summary_row(
+        "code bytes".into(),
+        summary.code_bytes.to_string(),
+    ));
+
+    column.into()
+}
+
+/// One row of the program summary.
+fn summary_row(key: String, value: String) -> Element<'static, Message> {
+    Row::new()
+        .align_y(Alignment::Center)
+        .push(Text::new(key).size(11).color(color::MUTED).font(MONO))
+        .push(Space::new().width(Length::Fill))
+        .push(Text::new(value).size(11).color(color::DIM).font(MONO))
+        .into()
 }
 
 /// The navigator filter.

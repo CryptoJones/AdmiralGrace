@@ -130,6 +130,25 @@ fn project_card(app: &App) -> Element<'_, Message> {
         card = card.push(kv("Root", root.display().to_string()));
     }
 
+    // The binary the export was made from, when the CLI can still reach it.
+    if let Some(binary) = app.kuna.as_ref().and_then(|kuna| kuna.cli.as_ref()) {
+        card = card.push(kv("Binary", binary.binary().display().to_string()));
+    }
+
+    // The shape of the program, when the analysis could say it.
+    if let Some(summary) = app.provider.summary() {
+        if let Some((name, address)) = &summary.entry {
+            card = card.push(kv("Entry", format!("{name} ({address:#x})")));
+        }
+        if let Some((name, address)) = &summary.main {
+            card = card.push(kv("Main", format!("{name} ({address:#x})")));
+        }
+        card = card.push(kv("Functions", summary.functions.to_string()));
+        card = card.push(kv("Reachable", summary.reachable.to_string()));
+        card = card.push(kv("No callers", summary.no_callers.to_string()));
+        card = card.push(kv("Code bytes", summary.code_bytes.to_string()));
+    }
+
     recessed(card.padding(10)).into()
 }
 

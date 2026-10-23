@@ -1,5 +1,6 @@
 //! Application state, messages, and the update loop.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use iced::keyboard::{self, Key};
@@ -7,7 +8,10 @@ use iced::{Element, Subscription, Task};
 
 use crate::data::corpus::CorpusProvider;
 use crate::data::empty::EmptyProvider;
-use crate::data::kuna::KunaProvider;
+use crate::data::kuna::{KunaProvider, SharedCache};
+use crate::data::kuna_json::{
+    self, Direction, FunctionJson, KunaCli, StringJson, SummaryJson, XrefJson,
+};
 use crate::data::sample::SampleProvider;
 use crate::data::{
     AnalysisState, ByteLine, FunctionDetail, FunctionRow, ListingLine, Problem, Provider,
@@ -95,6 +99,22 @@ pub enum Message {
     TogglePin,
     /// A key press that maps to no command.
     Ignore,
+    /// The kuna CLI answered with the shape of the program.
+    KunaSummaryReady(Result<SummaryJson, String>),
+    /// The kuna CLI answered with the program's strings.
+    KunaStringsReady(Result<Vec<StringJson>, String>),
+    /// The kuna CLI answered with one function's decompilation.
+    KunaFunctionReady(u64, Result<FunctionJson, String>),
+    /// The kuna CLI answered with one function's cross references.
+    KunaXrefsReady(u64, Direction, Result<Vec<XrefJson>, String>),
+}
+
+/// The kuna CLI a kuna project can be asked, and the answers it has given.
+pub struct KunaState {
+    /// The CLI itself, when the export names a binary that is still there.
+    pub cli: Option<KunaCli>,
+    /// Where its answers are kept.
+    pub cache: SharedCache,
 }
 
 /// What the path prompt is asking for.
@@ -162,6 +182,11 @@ pub struct WorkSurface {
     pub listing: Vec<ListingLine>,
     /// Pseudocode of the selected function.
     pub pseudocode: Option<String>,
+    /// The addresses each line of the pseudocode came from.
+    ///
+    /// The keys are line numbers counted from zero, so they line up with the
+    /// lines of [`WorkSurface::pseudocode`].
+    pub line_addresses: BTreeMap<usize, Vec<u64>>,
     /// Byte rows around the selection.
     pub bytes: Vec<ByteLine>,
     /// References to and from the selection.
@@ -221,6 +246,8 @@ pub struct App {
     pub methods_path: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
     pub shift: u64,
+    /// The kuna CLI of an open kuna project, and the answers it has given.
+    pub kuna: Option<KunaState>,
 }
 
 impl App {
@@ -265,79 +292,90 @@ impl App {
             kuna_root: config.kuna.clone(),
             methods_path: config.methods.clone(),
             shift: config.shift,
+            kuna: None,
         };
 
-        if config.corpus.is_some() || config.kuna.is_some() {
-            app.load_project();
+        let task = if config.corpus.is_some() || config.kuna.is_some() {
+            app.load_project()
         } else {
-            app.use_sample();
-        }
+            app.use_sample()
+        };
 
-        (app, Task::none())
+        (app, task)
     }
 
     /// Load the open project into the workbench.
     ///
     /// A kuna export takes precedence over a corpus: the two are different
     /// shapes of the same analysis, and only one of them is open at a time.
-    fn load_project(&mut self) {
+    fn load_project(&mut self) -> Task<Message> {
         if let Some(root) = self.kuna_root.clone() {
-            self.load_kuna(&root);
-            return;
+            return self.load_kuna(&root);
         }
 
         let Some(root) = self.corpus_root.clone() else {
-            self.use_sample();
-            return;
+            return self.use_sample();
         };
 
         match CorpusProvider::load(&root, self.methods_path.as_deref(), self.shift) {
             Ok(provider) => {
                 self.provider = Box::new(provider);
                 self.notice = Some(format!("Opened {}", root.display()));
-                self.adopt_provider();
+                return self.adopt_provider();
             }
             Err(error) => {
-                self.use_sample();
+                let _ = self.use_sample();
                 self.notice = Some(format!("Could not open {}: {error:#}", root.display()));
             }
         }
+
+        Task::none()
     }
 
     /// Load a kuna project export into the workbench.
-    fn load_kuna(&mut self, root: &Path) {
+    fn load_kuna(&mut self, root: &Path) -> Task<Message> {
         match KunaProvider::load(root) {
             Ok(provider) => {
+                let cli = provider.cli().cloned();
+                let cache = provider.cache();
+
+                self.kuna = Some(KunaState { cli, cache });
                 self.provider = Box::new(provider);
                 self.notice = Some(format!("Opened {}", root.display()));
-                self.adopt_provider();
+
+                let adopted = self.adopt_provider();
+                let asked = self.ask_kuna_about_the_program();
+                Task::batch(vec![adopted, asked])
             }
             Err(error) => {
-                self.use_sample();
+                let _ = self.use_sample();
                 self.notice = Some(format!("Could not open {}: {error:#}", root.display()));
+                Task::none()
             }
         }
     }
 
     /// Fall back to the bundled sample project.
-    fn use_sample(&mut self) {
+    fn use_sample(&mut self) -> Task<Message> {
         self.provider = Box::new(SampleProvider::new());
+        self.kuna = None;
         self.notice = Some("No corpus supplied — showing sample data".into());
-        self.adopt_provider();
+        self.adopt_provider()
     }
 
     /// Close the open project.
-    fn close_project(&mut self) {
+    fn close_project(&mut self) -> Task<Message> {
         self.provider = Box::new(EmptyProvider::new());
         self.corpus_root = None;
         self.kuna_root = None;
         self.methods_path = None;
+        self.kuna = None;
         self.notice = Some("Project closed".into());
-        self.adopt_provider();
+        self.adopt_provider()
     }
 
     /// Re-read the project identity and lists after the provider changed.
-    fn adopt_provider(&mut self) {
+    fn adopt_provider(&mut self) -> Task<Message> {
         self.project = self.provider.project();
         self.capabilities = self.provider.capabilities();
         self.navigator.counts = self.provider.counts();
@@ -345,7 +383,7 @@ impl App {
         self.selection = Selection::None;
         self.work = WorkSurface::default();
         self.refresh_functions();
-        self.select_first_function();
+        self.select_first_function()
     }
 
     /// The window title.
@@ -372,15 +410,17 @@ impl App {
     }
 
     /// Select the first function in the list, if there is one.
-    fn select_first_function(&mut self) {
+    fn select_first_function(&mut self) -> Task<Message> {
         if let Some(first) = self.navigator.rows.first() {
             let address = first.address;
-            self.select_function(address, false);
+            return self.select_function(address, false);
         }
+
+        Task::none()
     }
 
     /// Move the shared selection to a function.
-    pub fn select_function(&mut self, address: u64, record_history: bool) {
+    pub fn select_function(&mut self, address: u64, record_history: bool) -> Task<Message> {
         self.selection = Selection::Function(address);
         self.navigator.selected = Some(address);
 
@@ -389,29 +429,44 @@ impl App {
         self.work.pseudocode = self.provider.pseudocode(address);
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
+        self.work.line_addresses.clear();
 
         if record_history {
             self.history.push(self.selection);
         }
+
+        // A function the CLI has already answered for keeps its line mapping.
+        if let Some(function) = self.cached_kuna_function(address) {
+            self.apply_kuna_line_addresses(address, &function);
+        }
+
+        self.refresh_problems();
+
+        self.ask_kuna_about_the_function(address)
     }
 
     /// Apply a selection without recording it in the history.
-    fn apply_history_selection(&mut self, selection: Selection) {
+    fn apply_history_selection(&mut self, selection: Selection) -> Task<Message> {
         match selection {
             Selection::Function(address) => self.select_function(address, false),
             Selection::Address(address) => {
                 if let Some(function) = self.containing_function(address) {
-                    self.select_function(function, false);
+                    let _ = self.select_function(function, false);
                 }
                 self.selection = Selection::Address(address);
+                Task::none()
             }
             Selection::ByteRange { start, .. } => {
                 if let Some(function) = self.containing_function(start) {
-                    self.select_function(function, false);
+                    let _ = self.select_function(function, false);
                 }
                 self.selection = Selection::ByteRange { start, len: 0 };
+                Task::none()
             }
-            Selection::None => self.selection = Selection::None,
+            Selection::None => {
+                self.selection = Selection::None;
+                Task::none()
+            }
         }
     }
 
@@ -423,6 +478,105 @@ impl App {
             .filter(|row| row.address <= address)
             .max_by_key(|row| row.address)
             .map(|row| row.address)
+    }
+
+    /// Ask the kuna CLI about the program as a whole.
+    ///
+    /// The CLI answers about the binary the export was made from, so these
+    /// two questions — the shape of the program and the strings it holds —
+    /// are asked once, when the project opens.
+    fn ask_kuna_about_the_program(&mut self) -> Task<Message> {
+        let Some(cli) = self.kuna.as_ref().and_then(|state| state.cli.clone()) else {
+            return Task::none();
+        };
+
+        let summary = cli.clone();
+        let strings = cli.clone();
+
+        Task::batch(vec![
+            Task::perform(
+                async move { summary.summary().map_err(|error| format!("{error:#}")) },
+                Message::KunaSummaryReady,
+            ),
+            Task::perform(
+                async move { strings.strings().map_err(|error| format!("{error:#}")) },
+                Message::KunaStringsReady,
+            ),
+        ])
+    }
+
+    /// Ask the kuna CLI about one function.
+    ///
+    /// The decompilation carries the mapping from the body's lines to the
+    /// addresses they came from; the cross references say what the function
+    /// touches and what touches it.
+    fn ask_kuna_about_the_function(&mut self, address: u64) -> Task<Message> {
+        let Some(cli) = self.kuna.as_ref().and_then(|state| state.cli.clone()) else {
+            return Task::none();
+        };
+
+        let decompile = cli.clone();
+        let from = cli.clone();
+        let to = cli.clone();
+
+        Task::batch(vec![
+            Task::perform(
+                async move {
+                    decompile
+                        .decompile(address)
+                        .map_err(|error| format!("{error:#}"))
+                },
+                move |result| Message::KunaFunctionReady(address, result),
+            ),
+            Task::perform(
+                async move {
+                    from.xrefs(address, Direction::From)
+                        .map_err(|error| format!("{error:#}"))
+                },
+                move |result| Message::KunaXrefsReady(address, Direction::From, result),
+            ),
+            Task::perform(
+                async move {
+                    to.xrefs(address, Direction::To)
+                        .map_err(|error| format!("{error:#}"))
+                },
+                move |result| Message::KunaXrefsReady(address, Direction::To, result),
+            ),
+        ])
+    }
+
+    /// The decompilation the CLI has already given for a function.
+    fn cached_kuna_function(&self, address: u64) -> Option<FunctionJson> {
+        let state = self.kuna.as_ref()?;
+        let cache = state.cache.lock().ok()?;
+        cache.functions.get(&address).cloned()
+    }
+
+    /// Map the lines of the displayed body to the addresses they came from.
+    fn apply_kuna_line_addresses(&mut self, address: u64, function: &FunctionJson) {
+        if self.navigator.selected != Some(address) {
+            return;
+        }
+
+        let Some(body) = self.work.pseudocode.as_deref() else {
+            return;
+        };
+        let Some(code) = function.code.as_deref() else {
+            return;
+        };
+
+        self.work.line_addresses = kuna_json::line_addresses(body, code, &function.line_mappings);
+    }
+
+    /// Rebuild the problem list from the provider and the selection.
+    fn refresh_problems(&mut self) {
+        let mut problems = self.provider.problems();
+
+        if let Some(address) = self.navigator.selected {
+            problems.extend(self.provider.function_problems(address));
+        }
+
+        self.bottom.problems = problems;
     }
 
     /// Handle a message.
@@ -439,7 +593,7 @@ impl App {
 
             Message::FunctionSelected(address) => {
                 if !self.work.pinned {
-                    self.select_function(address, true);
+                    return self.select_function(address, true);
                 } else {
                     self.navigator.selected = Some(address);
                 }
@@ -480,13 +634,13 @@ impl App {
 
             Message::Back => {
                 if let Some(selection) = self.history.back().copied() {
-                    self.apply_history_selection(selection);
+                    return self.apply_history_selection(selection);
                 }
             }
 
             Message::Forward => {
                 if let Some(selection) = self.history.forward().copied() {
-                    self.apply_history_selection(selection);
+                    return self.apply_history_selection(selection);
                 }
             }
 
@@ -547,7 +701,7 @@ impl App {
                         } else {
                             self.corpus_root = Some(path);
                             self.kuna_root = None;
-                            self.load_project();
+                            return self.load_project();
                         }
                     }
                     PromptKind::Kuna => {
@@ -559,12 +713,12 @@ impl App {
                         } else {
                             self.kuna_root = Some(path);
                             self.corpus_root = None;
-                            self.load_project();
+                            return self.load_project();
                         }
                     }
                     PromptKind::Methods => {
                         self.methods_path = Some(path);
-                        self.load_project();
+                        return self.load_project();
                     }
                 }
             }
@@ -575,14 +729,14 @@ impl App {
 
             Message::FileReload => {
                 if self.corpus_root.is_some() || self.kuna_root.is_some() {
-                    self.load_project();
+                    return self.load_project();
                 } else {
                     self.notice = Some("Nothing to reload".into());
                 }
             }
 
             Message::FileClose => {
-                self.close_project();
+                return self.close_project();
             }
 
             Message::FileQuit => {
@@ -657,6 +811,86 @@ impl App {
             }
 
             Message::Ignore => {}
+
+            Message::KunaSummaryReady(result) => {
+                let Some(state) = &self.kuna else {
+                    return Task::none();
+                };
+
+                match result {
+                    Ok(summary) => {
+                        if let Ok(mut cache) = state.cache.lock() {
+                            cache.summary = Some(summary);
+                        }
+                    }
+                    Err(error) => {
+                        self.notice =
+                            Some(format!("kuna could not summarize the program: {error}"));
+                    }
+                }
+            }
+
+            Message::KunaStringsReady(result) => {
+                let Some(state) = &self.kuna else {
+                    return Task::none();
+                };
+
+                match result {
+                    Ok(strings) => {
+                        if let Ok(mut cache) = state.cache.lock() {
+                            cache.strings = strings;
+                        }
+                        self.navigator.counts = self.provider.counts();
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!("kuna could not list the strings: {error}"));
+                    }
+                }
+            }
+
+            Message::KunaFunctionReady(address, result) => {
+                let Some(state) = &self.kuna else {
+                    return Task::none();
+                };
+
+                match result {
+                    Ok(function) => {
+                        if let Ok(mut cache) = state.cache.lock() {
+                            cache.functions.insert(address, function.clone());
+                        }
+                        self.apply_kuna_line_addresses(address, &function);
+                        self.refresh_problems();
+                    }
+                    Err(error) => {
+                        self.notice =
+                            Some(format!("kuna could not decompile the function: {error}"));
+                    }
+                }
+            }
+
+            Message::KunaXrefsReady(address, direction, result) => {
+                let Some(state) = &self.kuna else {
+                    return Task::none();
+                };
+
+                match result {
+                    Ok(xrefs) => {
+                        if let Ok(mut cache) = state.cache.lock() {
+                            match direction {
+                                Direction::From => cache.xrefs_from.insert(address, xrefs),
+                                Direction::To => cache.xrefs_to.insert(address, xrefs),
+                            };
+                        }
+                        if self.navigator.selected == Some(address) {
+                            self.work.references = self.provider.references(address);
+                        }
+                    }
+                    Err(error) => {
+                        self.notice =
+                            Some(format!("kuna could not find the cross references: {error}"));
+                    }
+                }
+            }
 
             Message::TogglePin => {
                 self.work.pinned = !self.work.pinned;
@@ -907,5 +1141,164 @@ mod tests {
         };
 
         assert!(matches!(shortcut(event), Message::FileOpenCorpus));
+    }
+
+    /// A workbench holding a kuna export, whose CLI has no binary to work on.
+    fn kuna_app() -> (TempExport, App) {
+        let export = TempExport::new("kuna-json");
+        let config = Config {
+            kuna: Some(export.0.clone()),
+            ..Config::default()
+        };
+
+        let app = App::boot(config).0;
+        (export, app)
+    }
+
+    #[test]
+    fn the_line_mapping_reaches_the_pseudocode() {
+        let (_export, mut app) = kuna_app();
+
+        let function = FunctionJson {
+            code: Some("int one(void)\n{\n  return 1;\n}".into()),
+            error: None,
+            unstructured_gotos: 0,
+            line_mappings: vec![crate::data::kuna_json::LineMapping {
+                line_number: 3,
+                addresses: vec![0x1004],
+            }],
+        };
+
+        let _ = app.update(Message::KunaFunctionReady(0x1000, Ok(function)));
+
+        assert_eq!(
+            app.work.line_addresses.get(&2),
+            Some(&vec![0x1004]),
+            "the third line of the body came from 0x1004"
+        );
+    }
+
+    #[test]
+    fn a_stale_line_mapping_is_not_applied() {
+        let (_export, mut app) = kuna_app();
+
+        let function = FunctionJson {
+            code: Some("int one(void)\n{\n  return 2;\n}".into()),
+            error: None,
+            unstructured_gotos: 0,
+            line_mappings: vec![crate::data::kuna_json::LineMapping {
+                line_number: 3,
+                addresses: vec![0x1004],
+            }],
+        };
+
+        let _ = app.update(Message::KunaFunctionReady(0x1000, Ok(function)));
+
+        assert!(
+            app.work.line_addresses.is_empty(),
+            "a body that no longer matches the export carries no mapping"
+        );
+    }
+
+    #[test]
+    fn the_cross_references_reach_the_work_surface() {
+        let (_export, mut app) = kuna_app();
+
+        let xrefs = vec![XrefJson {
+            kind: "call".into(),
+            from_address: 0x1000,
+            to_address: 0x2000,
+            from_function: None,
+            to_function: Some(crate::data::kuna_json::FunctionRef {
+                name: "two".into(),
+                address: 0x2000,
+            }),
+            instruction: Some("CALL 0x2000".into()),
+        }];
+
+        let _ = app.update(Message::KunaXrefsReady(0x1000, Direction::From, Ok(xrefs)));
+
+        assert_eq!(app.work.references.len(), 1);
+        assert_eq!(app.work.references[0].label, "two");
+        assert_eq!(app.work.references[0].address, 0x2000);
+    }
+
+    #[test]
+    fn the_strings_reach_the_navigator_count() {
+        let (_export, mut app) = kuna_app();
+
+        let strings = vec![StringJson {
+            address: 0x2006,
+            text: "%ld\n".into(),
+            section: Some(".rodata".into()),
+            functions: vec![crate::data::kuna_json::FunctionRef {
+                name: "one".into(),
+                address: 0x1000,
+            }],
+        }];
+
+        let _ = app.update(Message::KunaStringsReady(Ok(strings)));
+
+        assert_eq!(app.navigator.counts.strings, 1);
+    }
+
+    #[test]
+    fn a_functions_error_and_gotos_become_problems() {
+        let (_export, mut app) = kuna_app();
+
+        let function = FunctionJson {
+            code: None,
+            error: Some("boom".into()),
+            unstructured_gotos: 1,
+            line_mappings: Vec::new(),
+        };
+
+        let _ = app.update(Message::KunaFunctionReady(0x1000, Ok(function)));
+
+        let problems = &app.bottom.problems;
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("boom")),
+            "the error is reported"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("unstructured goto")),
+            "the unstructured goto is reported"
+        );
+    }
+
+    #[test]
+    fn the_summary_reaches_the_inspector() {
+        let (_export, mut app) = kuna_app();
+
+        let summary = SummaryJson {
+            total: 13,
+            error: None,
+            warnings: Vec::new(),
+            summary: crate::data::kuna_json::SummaryBody {
+                entry: Some(crate::data::kuna_json::FunctionRef {
+                    name: "_start".into(),
+                    address: 0x1060,
+                }),
+                main: Some(crate::data::kuna_json::FunctionRef {
+                    name: "main".into(),
+                    address: 0x1198,
+                }),
+                reachable_from_entry: 5,
+                no_callers: 8,
+                code_bytes: 500,
+            },
+        };
+
+        let _ = app.update(Message::KunaSummaryReady(Ok(summary)));
+
+        let reported = app.provider.summary().expect("a summary");
+        assert_eq!(reported.functions, 13);
+        assert_eq!(reported.reachable, 5);
+        assert_eq!(reported.code_bytes, 500);
+        assert_eq!(reported.main.map(|(_, address)| address), Some(0x1198));
     }
 }

@@ -7,6 +7,7 @@
 pub mod corpus;
 pub mod empty;
 pub mod kuna;
+pub mod kuna_json;
 pub mod sample;
 
 use crate::model::{Capabilities, Project};
@@ -178,6 +179,36 @@ pub struct Problem {
     pub action: Option<String>,
 }
 
+/// A string the binary holds.
+#[derive(Debug, Clone)]
+pub struct StringEntry {
+    /// Where the string lives.
+    pub address: u64,
+    /// The string itself.
+    pub text: String,
+    /// The section it lives in.
+    pub section: Option<String>,
+    /// The functions that refer to the string.
+    pub functions: Vec<u64>,
+}
+
+/// The shape of the whole program.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectSummary {
+    /// The program's entry point, as a name and an address.
+    pub entry: Option<(String, u64)>,
+    /// The program's `main`, as a name and an address.
+    pub main: Option<(String, u64)>,
+    /// How many functions are reachable from the entry point.
+    pub reachable: usize,
+    /// How many functions nothing calls.
+    pub no_callers: usize,
+    /// How many bytes of code the program holds.
+    pub code_bytes: u64,
+    /// How many functions the program holds.
+    pub functions: usize,
+}
+
 /// Row counts for the navigator's explore sections.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SectionCounts {
@@ -229,6 +260,11 @@ pub trait Provider: Send + Sync {
     /// Cross references for an address.
     fn references(&self, address: u64) -> Vec<Reference>;
 
+    /// The strings the project holds.
+    fn strings(&self) -> Vec<StringEntry> {
+        Vec::new()
+    }
+
     /// Counts for the navigator sections.
     fn counts(&self) -> SectionCounts;
 
@@ -240,4 +276,14 @@ pub trait Provider: Send + Sync {
 
     /// Diagnostics reported by the analysis.
     fn problems(&self) -> Vec<Problem>;
+
+    /// Diagnostics reported about one function.
+    fn function_problems(&self, _address: u64) -> Vec<Problem> {
+        Vec::new()
+    }
+
+    /// The shape of the whole project.
+    fn summary(&self) -> Option<ProjectSummary> {
+        None
+    }
 }

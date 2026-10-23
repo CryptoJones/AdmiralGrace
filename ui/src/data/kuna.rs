@@ -6,27 +6,73 @@
 //! function's label, and the pseudocode comes from the `.c`, resolved through
 //! the export's index so a streamed export — whose `.c` is written in
 //! decompile order — reads correctly.
+//!
+//! The export also records the binary it was made from, and the kuna CLI can
+//! answer questions about that binary that the export cannot: which lines of
+//! C came from which addresses, what refers to what, which strings it holds.
+//! Those answers arrive over time, as the workbench asks the CLI for them, so
+//! they are kept in a cache the workbench fills and this provider reads.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use ag_corpus::kuna::{KunaExport, KunaFunction};
 use anyhow::Result;
 
+use crate::data::kuna_json::{Direction, FunctionJson, KunaCli, StringJson, SummaryJson, XrefJson};
 use crate::data::{
-    AnalysisState, ByteLine, FunctionDetail, FunctionRow, HitKind, ListingLine, Problem, Provider,
-    Reference, SearchHit, SectionCounts,
+    AnalysisState, ByteLine, FunctionDetail, FunctionRow, HitKind, ListingLine, Problem,
+    ProjectSummary, Provider, Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
+
+/// What the kuna CLI has told the workbench so far.
+///
+/// The CLI answers slowly — every answer is a process run against the
+/// binary — so the workbench asks in the background and drops the answers
+/// here, where the provider reads them.
+#[derive(Debug, Default)]
+pub struct KunaCache {
+    /// The shape of the program.
+    pub summary: Option<SummaryJson>,
+    /// The strings the binary holds.
+    pub strings: Vec<StringJson>,
+    /// The decompilation of each function the workbench has asked about.
+    pub functions: BTreeMap<u64, FunctionJson>,
+    /// The references each function makes.
+    pub xrefs_from: BTreeMap<u64, Vec<XrefJson>>,
+    /// The references made to each function.
+    pub xrefs_to: BTreeMap<u64, Vec<XrefJson>>,
+}
+
+/// A handle on the cache, shared by the workbench and the provider.
+pub type SharedCache = Arc<Mutex<KunaCache>>;
 
 /// Reads analysis results from a kuna project export.
 pub struct KunaProvider {
     export: KunaExport,
     project: Project,
+    cli: Option<KunaCli>,
+    /// The kuna executable this provider would run.
+    program: PathBuf,
+    /// Whether that executable is there to be run.
+    program_missing: bool,
+    cache: SharedCache,
 }
 
 impl KunaProvider {
     /// Load a kuna export from `root`.
     pub fn load(root: &Path) -> Result<Self> {
+        Self::load_with(root, KunaCli::program())
+    }
+
+    /// Load a kuna export from `root`, run with a named kuna executable.
+    ///
+    /// When the executable is not there — neither `AG_KUNA_BIN` nor the `PATH`
+    /// names one — the export is still read in full; only the questions that
+    /// need the CLI are left unanswered.
+    pub fn load_with(root: &Path, program: PathBuf) -> Result<Self> {
         let export = KunaExport::load(root)?;
 
         let project = Project {
@@ -39,7 +85,32 @@ impl KunaProvider {
             format: None,
         };
 
-        Ok(Self { export, project })
+        let program_missing = !KunaCli::available(&program);
+        let cli = if program_missing {
+            None
+        } else {
+            KunaCli::for_export(&export, program.clone())
+        };
+
+        Ok(Self {
+            export,
+            project,
+            cli,
+            program,
+            program_missing,
+            cache: Arc::new(Mutex::new(KunaCache::default())),
+        })
+    }
+
+    /// The kuna CLI this provider can ask, when the export names a binary
+    /// that is still there.
+    pub fn cli(&self) -> Option<&KunaCli> {
+        self.cli.as_ref()
+    }
+
+    /// The cache the kuna CLI's answers are kept in.
+    pub fn cache(&self) -> SharedCache {
+        Arc::clone(&self.cache)
     }
 
     /// The display name of a function.
@@ -59,6 +130,12 @@ impl KunaProvider {
             "written".to_string()
         }
     }
+
+    /// The cached decompilation of a function, when the CLI has answered.
+    fn cached_function(&self, address: u64) -> Option<FunctionJson> {
+        let cache = self.cache.lock().ok()?;
+        cache.functions.get(&address).cloned()
+    }
 }
 
 impl Provider for KunaProvider {
@@ -67,9 +144,13 @@ impl Provider for KunaProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
+        let json = self.cli.is_some();
+
         Capabilities {
             listing: self.export.asm_path.is_some(),
             pseudocode: true,
+            references: json,
+            strings: json,
             ..Capabilities::NONE
         }
     }
@@ -153,13 +234,67 @@ impl Provider for KunaProvider {
         None
     }
 
-    fn references(&self, _address: u64) -> Vec<Reference> {
-        Vec::new()
+    fn references(&self, address: u64) -> Vec<Reference> {
+        let Ok(cache) = self.cache.lock() else {
+            return Vec::new();
+        };
+
+        let mut references = Vec::new();
+
+        // What the function refers to.
+        for xref in cache.xrefs_from.get(&address).into_iter().flatten() {
+            references.push(Reference {
+                address: xref.to_address,
+                label: xref_label(
+                    xref.to_function.as_ref(),
+                    xref.instruction.as_deref(),
+                    xref.to_address,
+                ),
+                kind: reference_kind(&xref.kind, Direction::From),
+            });
+        }
+
+        // What refers to the function.
+        for xref in cache.xrefs_to.get(&address).into_iter().flatten() {
+            references.push(Reference {
+                address: xref.from_address,
+                label: xref_label(
+                    xref.from_function.as_ref(),
+                    xref.instruction.as_deref(),
+                    xref.from_address,
+                ),
+                kind: reference_kind(&xref.kind, Direction::To),
+            });
+        }
+
+        references
+    }
+
+    fn strings(&self) -> Vec<StringEntry> {
+        let Ok(cache) = self.cache.lock() else {
+            return Vec::new();
+        };
+
+        cache
+            .strings
+            .iter()
+            .map(|string| StringEntry {
+                address: string.address,
+                text: string.text.clone(),
+                section: string.section.clone(),
+                functions: string.functions.iter().map(|f| f.address).collect(),
+            })
+            .collect()
     }
 
     fn counts(&self) -> SectionCounts {
         SectionCounts {
             functions: self.export.functions.len(),
+            strings: self
+                .cache
+                .lock()
+                .map(|cache| cache.strings.len())
+                .unwrap_or(0),
             ..SectionCounts::default()
         }
     }
@@ -200,6 +335,17 @@ impl Provider for KunaProvider {
             }
         }
 
+        for string in self.strings() {
+            if string.text.to_lowercase().contains(&needle) {
+                hits.push(SearchHit {
+                    address: string.address,
+                    title: string.text.clone(),
+                    detail: string.section.unwrap_or_else(|| "String".to_string()),
+                    kind: HitKind::String,
+                });
+            }
+        }
+
         hits
     }
 
@@ -228,7 +374,138 @@ impl Provider for KunaProvider {
             });
         }
 
+        if let Ok(cache) = self.cache.lock() {
+            if let Some(summary) = &cache.summary {
+                if let Some(error) = &summary.error {
+                    problems.push(Problem {
+                        message: format!("kuna could not summarize the program: {error}"),
+                        address: None,
+                        action: None,
+                    });
+                }
+                for warning in &summary.warnings {
+                    problems.push(Problem {
+                        message: format!("kuna warned: {warning}"),
+                        address: None,
+                        action: None,
+                    });
+                }
+            }
+        }
+
+        if self.program_missing {
+            problems.push(Problem {
+                message: format!(
+                    "kuna was not found, so its cross references, strings and line mappings are off — looked for {}",
+                    self.program.display()
+                ),
+                address: None,
+                action: Some(format!(
+                    "Set {} to the kuna executable, or put kuna on the PATH",
+                    crate::data::kuna_json::KUNA_BIN_ENV
+                )),
+            });
+        } else if self.cli.is_none() {
+            if let Some(binary) = &self.export.binary {
+                problems.push(Problem {
+                    message: format!(
+                        "The analysed binary {} is not available, so kuna's cross references, strings and line mappings are off",
+                        binary.display()
+                    ),
+                    address: None,
+                    action: Some("Keep the binary beside the export to turn them on".into()),
+                });
+            }
+        }
+
         problems
+    }
+
+    fn function_problems(&self, address: u64) -> Vec<Problem> {
+        let mut problems = Vec::new();
+
+        let Some(function) = self.cached_function(address) else {
+            return problems;
+        };
+
+        if let Some(error) = &function.error {
+            problems.push(Problem {
+                message: format!("kuna could not decompile this function: {error}"),
+                address: Some(address),
+                action: None,
+            });
+        }
+
+        if function.unstructured_gotos > 0 {
+            problems.push(Problem {
+                message: format!(
+                    "{} unstructured goto{} in the decompiled body",
+                    function.unstructured_gotos,
+                    if function.unstructured_gotos == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                address: Some(address),
+                action: Some("The body does not follow the source's control flow".into()),
+            });
+        }
+
+        problems
+    }
+
+    fn summary(&self) -> Option<ProjectSummary> {
+        let cache = self.cache.lock().ok()?;
+        let summary = cache.summary.as_ref()?;
+
+        Some(ProjectSummary {
+            entry: summary
+                .summary
+                .entry
+                .as_ref()
+                .map(|entry| (entry.name.clone(), entry.address)),
+            main: summary
+                .summary
+                .main
+                .as_ref()
+                .map(|main| (main.name.clone(), main.address)),
+            reachable: summary.summary.reachable_from_entry,
+            no_callers: summary.summary.no_callers,
+            code_bytes: summary.summary.code_bytes,
+            functions: summary.total,
+        })
+    }
+}
+
+/// The label of a cross reference.
+///
+/// A reference to a named function is labelled with the name; a reference to
+/// something unnamed is labelled with the instruction that makes it, which
+/// says more than the address alone.
+fn xref_label(
+    function: Option<&crate::data::kuna_json::FunctionRef>,
+    instruction: Option<&str>,
+    address: u64,
+) -> String {
+    function
+        .map(|function| function.name.clone())
+        .filter(|name| !name.is_empty())
+        .or_else(|| instruction.map(|instruction| instruction.to_string()))
+        .unwrap_or_else(|| format!("{address:#x}"))
+}
+
+/// The kind of reference a cross reference is.
+///
+/// A reference out of the selection is a call it makes; a reference into it is
+/// a call that reaches it. Everything that is not a call is a data reference.
+fn reference_kind(kind: &str, direction: Direction) -> ReferenceKind {
+    let is_code = matches!(kind, "call" | "jump");
+
+    match (direction, is_code) {
+        (Direction::From, true) => ReferenceKind::Calls,
+        (Direction::To, true) => ReferenceKind::CalledBy,
+        _ => ReferenceKind::Data,
     }
 }
 
@@ -374,8 +651,12 @@ two:  ; 0x2000
         assert_eq!(rows[0].status, "failed");
 
         let problems = provider.problems();
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].message.contains("failed to decompile"));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("failed to decompile")),
+            "the failed function is reported: {problems:?}"
+        );
     }
 
     #[test]
@@ -388,5 +669,147 @@ two:  ; 0x2000
 
         let hits = provider.search("return", true);
         assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn the_json_surfaces_are_off_without_a_binary() {
+        let (_dir, provider) = provider();
+
+        assert!(provider.cli().is_none());
+        assert!(!provider.capabilities().references);
+        assert!(!provider.capabilities().strings);
+    }
+
+    #[test]
+    fn a_missing_kuna_leaves_the_export_readable_and_says_so() {
+        let dir = TempDir::new("missing-kuna");
+        dir.write("a.c", C);
+        dir.write("a.h", "int one(void);\n");
+        dir.write("index.jsonl", &index());
+        // The export names a binary that is still there, so the only thing
+        // missing is kuna itself.
+        dir.write(
+            "README.md",
+            "# a — kuna project export\n\n## Binary\n\n| Field | Value |\n|---|---|\n| Path | `/bin/sh` |\n",
+        );
+
+        let provider = KunaProvider::load_with(&dir.0, PathBuf::from("/nonexistent/kuna"))
+            .expect("a provider");
+
+        // The export is still read in full.
+        assert_eq!(provider.functions().len(), 2);
+        assert!(provider.pseudocode(0x1000).is_some());
+
+        // The questions that need the CLI are simply not answered.
+        assert!(provider.cli().is_none());
+        assert!(!provider.capabilities().references);
+        assert!(!provider.capabilities().strings);
+        assert!(provider.references(0x1000).is_empty());
+        assert!(provider.strings().is_empty());
+        assert!(provider.summary().is_none());
+
+        // And one problem says why.
+        let problems = provider.problems();
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].message.contains("kuna was not found"),
+            "the problem names the missing kuna: {}",
+            problems[0].message
+        );
+    }
+
+    #[test]
+    fn the_cross_references_become_references_to_and_from_the_selection() {
+        let (_dir, provider) = provider();
+
+        let cache = provider.cache();
+        {
+            let mut cache = cache.lock().expect("the cache");
+            cache.xrefs_from.insert(
+                0x1000,
+                vec![XrefJson {
+                    kind: "call".into(),
+                    from_address: 0x1000,
+                    to_address: 0x2000,
+                    from_function: None,
+                    to_function: Some(crate::data::kuna_json::FunctionRef {
+                        name: "two".into(),
+                        address: 0x2000,
+                    }),
+                    instruction: Some("CALL 0x2000".into()),
+                }],
+            );
+            cache.xrefs_to.insert(
+                0x1000,
+                vec![XrefJson {
+                    kind: "call".into(),
+                    from_address: 0x3000,
+                    to_address: 0x1000,
+                    from_function: Some(crate::data::kuna_json::FunctionRef {
+                        name: "three".into(),
+                        address: 0x3000,
+                    }),
+                    to_function: None,
+                    instruction: Some("CALL 0x1000".into()),
+                }],
+            );
+        }
+
+        let references = provider.references(0x1000);
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].kind, ReferenceKind::Calls);
+        assert_eq!(references[0].label, "two");
+        assert_eq!(references[1].kind, ReferenceKind::CalledBy);
+        assert_eq!(references[1].label, "three");
+    }
+
+    #[test]
+    fn a_functions_error_and_gotos_become_problems() {
+        let (_dir, provider) = provider();
+
+        let cache = provider.cache();
+        {
+            let mut cache = cache.lock().expect("the cache");
+            cache.functions.insert(
+                0x1000,
+                FunctionJson {
+                    code: None,
+                    error: Some("boom".into()),
+                    unstructured_gotos: 2,
+                    line_mappings: Vec::new(),
+                },
+            );
+        }
+
+        let problems = provider.function_problems(0x1000);
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].message.contains("boom"));
+        assert!(problems[1].message.contains("2 unstructured gotos"));
+        assert_eq!(problems[0].address, Some(0x1000));
+    }
+
+    #[test]
+    fn the_strings_become_entries() {
+        let (_dir, provider) = provider();
+
+        let cache = provider.cache();
+        {
+            let mut cache = cache.lock().expect("the cache");
+            cache.strings.push(StringJson {
+                address: 0x2006,
+                text: "%ld\n".into(),
+                section: Some(".rodata".into()),
+                functions: vec![crate::data::kuna_json::FunctionRef {
+                    name: "one".into(),
+                    address: 0x1000,
+                }],
+            });
+        }
+
+        let strings = provider.strings();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].text, "%ld\n");
+        assert_eq!(strings[0].functions, vec![0x1000]);
+        assert_eq!(provider.counts().strings, 1);
     }
 }

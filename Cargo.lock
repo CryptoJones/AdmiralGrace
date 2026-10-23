@@ -66,6 +66,8 @@ dependencies = [
  "iced_aw",
  "image",
  "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
