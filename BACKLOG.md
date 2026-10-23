@@ -28,14 +28,14 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] Byte-boundary panics: `&types[..60]` and `name.truncate(70)` panic on multi-byte characters at the cut point (valid non-ASCII names/type encodings). Needs char-safe truncation.
 - [x] `0X1000` accepted by the resolve prefix check but rejected by `parse_addr` (only lowercase `0x` is stripped) → whole subcommand errors out.
 
-## P0 — Silent data damage (`ag-corpus`) — [#13](https://github.com/CryptoJones/AdmiralGrace/issues/13)
-- [ ] Unparseable IMP silently becomes `imp_addr 0` (`unwrap_or(0)`); hex parse also strips only lowercase `0x`.
-- [ ] Class methods `+[Class sel]` rendered/stored as `-[Class sel]`; `by_name` uses that key, so collisions resolve last-write-wins via `insert`.
-- [ ] Double `with_shift` desyncs `by_imp` (keys accumulate) vs `imp_addr` (current shift only); `by_name` is never re-shifted.
-- [ ] `drop_header` cuts the function head at the first blank line (`"// hdr\nint f(void) {\n  int a;\n\n  return a;\n}"` → `"  return a;\n}"`); single-line headers stay glued in.
-- [ ] `to_function` errors silently skipped; duplicate addresses silently keep the first entry.
+## P0 — Silent data damage (`ag-corpus`) (done) — [#13](https://github.com/CryptoJones/AdmiralGrace/issues/13)
+- [x] Unparseable IMP silently becomes `imp_addr 0` (`unwrap_or(0)`); hex parse also strips only lowercase `0x`.
+- [x] Class methods `+[Class sel]` rendered/stored as `-[Class sel]`; `by_name` uses that key, so collisions resolve last-write-wins via `insert`.
+- [x] Double `with_shift` desyncs `by_imp` (keys accumulate) vs `imp_addr` (current shift only); `by_name` is never re-shifted.
+- [x] `drop_header` cuts the function head at the first blank line (`"// hdr\nint f(void) {\n  int a;\n\n  return a;\n}"` → `"  return a;\n}"`); single-line headers stay glued in.
+- [x] `to_function` errors silently skipped; duplicate addresses silently keep the first entry.
 - [x] `parse_addr` rejects uppercase `0X` prefix. — fixed in #37
-- [ ] `Sha256` field is dead storage (never read).
+- [x] `Sha256` field is dead storage (never read).
 
 ## Hygiene (done) — [#14](https://github.com/CryptoJones/AdmiralGrace/issues/14)
 - [x] `LICENSE` file missing (Cargo.toml declares MIT).
@@ -46,6 +46,8 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 
 ### data layer and workbench
 
+- [ ] Open a raw binary in the workbench through ag-engine::Image — [#42](https://github.com/CryptoJones/AdmiralGrace/issues/42)
+
 - [x] Add a kuna project-export provider (index.jsonl + .c/.h/.asm) to ag-corpus and ag-ui — [#4](https://github.com/CryptoJones/AdmiralGrace/issues/4)
 - [x] Use kuna's JSON surfaces to fill the navigator, inspector and graph panes — [#5](https://github.com/CryptoJones/AdmiralGrace/issues/5)
 
@@ -55,6 +57,8 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [ ] Option registry with a generated catalog and symptom index for engine decisions — [#8](https://github.com/CryptoJones/AdmiralGrace/issues/8)
 
 ### cli
+
+- [ ] `ag image`: inspect a binary from the CLI through ag-engine::Image — [#43](https://github.com/CryptoJones/AdmiralGrace/issues/43)
 
 - [x] `ag install-skill` and `ag docs`: ship an agent skill and the manual inside the binary — [#7](https://github.com/CryptoJones/AdmiralGrace/issues/7)
 
