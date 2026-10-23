@@ -37,10 +37,10 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [ ] `parse_addr` rejects uppercase `0X` prefix.
 - [ ] `Sha256` field is dead storage (never read).
 
-## Hygiene — [#14](https://github.com/CryptoJones/AdmiralGrace/issues/14)
-- [ ] `LICENSE` file missing (Cargo.toml declares MIT).
-- [ ] Unused dependencies: `walkdir` (workspace), `serde`/`serde_json` (`ag-engine`, `ag-cli`), `regex` (`ag-corpus`).
-- [ ] Dead variant: `Flow::Xbegin` (see decoder flow).
+## Hygiene (done) — [#14](https://github.com/CryptoJones/AdmiralGrace/issues/14)
+- [x] `LICENSE` file missing (Cargo.toml declares MIT).
+- [x] Unused dependencies: `walkdir` (workspace), `serde`/`serde_json` (`ag-engine`, `ag-cli`), `regex` (`ag-corpus`).
+- [x] Dead variant: `Flow::Xbegin` (see decoder flow) — tracked in #10.
 
 ## kuna-derived work
 
