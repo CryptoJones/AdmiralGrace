@@ -44,6 +44,9 @@ pub enum Flow {
     Trap,
     /// `xbegin`: starts a transaction whose abort handler is at the given address, otherwise falls through.
     Xbegin(u64),
+    /// Bytes that do not decode as an instruction. The decoder records one
+    /// byte and moves on; the CFG walk treats it as the end of a block.
+    Invalid,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +134,18 @@ impl CpuContext for X86IcedContext {
         let mut dec = iced_x86::Decoder::with_ip(64, bytes, address, self.options);
         let ins = dec.decode();
         if ins.is_invalid() {
-            anyhow::bail!("invalid instruction at {address:#x}");
+            // One byte of data in a code section, not an instruction. It is
+            // recorded, not fatal: a segment decode must get past padding and
+            // tables to the code after them.
+            return Ok(DecodedInsn {
+                address,
+                length: 1,
+                mnemonic: iced_x86::Mnemonic::INVALID as u32,
+                flow: Flow::Invalid,
+                operands: Vec::new(),
+                rip_relative_address: None,
+                switch_indices: false,
+            });
         }
         let mnemonic = ins.mnemonic() as u32;
         let flow = match ins.flow_control() {

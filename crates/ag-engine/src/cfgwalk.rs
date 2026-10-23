@@ -114,16 +114,18 @@ pub fn resolve_branches(disasm: &Disasm, entry: u64) -> ProcedureCfg {
         blocks.push(bb);
     }
 
-    let mut cfg = ProcedureCfg::default();
-    cfg.index_by_address = blocks
+    let index_by_address = blocks
         .iter()
         .enumerate()
         .map(|(i, b)| (b.from, i as u32))
         .collect();
-    cfg.blocks = blocks;
-    cfg.call_sites = call_sites;
-    cfg.call_targets = call_targets;
-    cfg
+    ProcedureCfg {
+        blocks,
+        index_by_address,
+        call_sites,
+        call_targets,
+        ..ProcedureCfg::default()
+    }
 }
 
 /// What one instruction does to the walk.
@@ -179,9 +181,10 @@ fn step_of(ins: &DecodedInsn) -> Step {
             is_call: true,
             ..plain
         },
-        // Returns, indirect jumps and traps end the block with no
-        // fall-through; an indirect jump's targets come from a later phase.
-        Flow::Return | Flow::IndirectBranch | Flow::Trap => Step {
+        // Returns, indirect jumps, traps and undecodable bytes end the block
+        // with no fall-through; an indirect jump's targets come from a later
+        // phase.
+        Flow::Return | Flow::IndirectBranch | Flow::Trap | Flow::Invalid => Step {
             falls_through: false,
             ends_block: true,
             ..plain
