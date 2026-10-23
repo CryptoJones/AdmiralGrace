@@ -12,7 +12,7 @@
 //!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
-//! plain data — the sections, the symbols, and the bytes of the code — and
+//! plain data — the sections, the symbols, and the bytes of the file — and
 //! that is what the workbench and the CLI both read.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -166,7 +166,7 @@ pub struct Binary {
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
-    code: Vec<CodeSection>,
+    file: Vec<FileSection>,
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     graph: OnceLock<CallGraph>,
 }
@@ -239,14 +239,14 @@ impl Binary {
             })
             .collect();
 
-        // Only the code is kept: it is what the listing decodes, and the rest
-        // of the file is not read again.
-        let code: Vec<CodeSection> = sections
+        // The bytes of every section the file holds are kept: the listing
+        // decodes the code out of them, and the byte pane shows the rest.
+        // They are read once here, because the file is read once.
+        let file: Vec<FileSection> = sections
             .iter()
-            .filter(|section| section.executable)
             .filter_map(|section| {
                 let bytes = image.bytes_from(section.vma)?.to_vec();
-                Some(CodeSection {
+                Some(FileSection {
                     section: section.clone(),
                     bytes,
                     decoded: OnceLock::new(),
@@ -260,7 +260,7 @@ impl Binary {
             sections,
             functions,
             data,
-            code,
+            file,
             disassembly: Mutex::new(HashMap::new()),
             graph: OnceLock::new(),
         }
@@ -289,6 +289,40 @@ impl Binary {
     /// The data symbols of the image.
     pub fn data_symbols(&self) -> &[DataSymbol] {
         &self.data
+    }
+
+    /// The section that holds an address, when one does.
+    pub fn section_of(&self, vma: u64) -> Option<&SectionInfo> {
+        self.sections
+            .iter()
+            .find(|section| section.vma <= vma && vma < section.vma.saturating_add(section.size))
+    }
+
+    /// The bytes at an address, out of the file's own bytes.
+    ///
+    /// The bytes come from the section that holds the address, and only as
+    /// far as the file holds them: a section that lives in memory only —
+    /// `.bss` — has no bytes to show, and the bytes of a section stop at its
+    /// end rather than running into the next one.
+    pub fn bytes_at(&self, vma: u64, len: usize) -> Option<Vec<u8>> {
+        let section = self.section_of(vma)?;
+
+        let file = self
+            .file
+            .iter()
+            .find(|file| file.section.vma == section.vma && file.section.name == section.name)?;
+
+        let offset = usize::try_from(vma - section.vma).ok()?;
+        let limit = usize::try_from(section.size)
+            .unwrap_or(usize::MAX)
+            .min(file.bytes.len());
+        let end = offset.saturating_add(len).min(limit);
+
+        if offset >= end {
+            return None;
+        }
+
+        Some(file.bytes[offset..end].to_vec())
     }
 
     /// The name of the function at `address`, when it has one.
@@ -402,8 +436,10 @@ impl Binary {
 
     /// Walk the function at `address` and gather its blocks.
     fn build_disassembly(&self, address: u64) -> Option<Disassembly> {
-        let code = self.code.iter().find(|code| {
-            code.section.vma <= address && address < code.section.vma + code.section.size
+        let code = self.file.iter().find(|code| {
+            code.section.executable
+                && code.section.vma <= address
+                && address < code.section.vma + code.section.size
         })?;
 
         let decoded = code.decoded();
@@ -486,17 +522,17 @@ impl Binary {
     }
 }
 
-/// The code of one executable section.
-struct CodeSection {
-    /// The section the code is in.
+/// The bytes of one section, as the file holds them.
+struct FileSection {
+    /// The section itself.
     section: SectionInfo,
-    /// The bytes of the section.
+    /// The bytes the file holds for the section.
     bytes: Vec<u8>,
     /// The instructions of the section, decoded once.
     decoded: OnceLock<Decoded>,
 }
 
-impl CodeSection {
+impl FileSection {
     /// The instructions of the section, decoded once.
     fn decoded(&self) -> &Decoded {
         self.decoded

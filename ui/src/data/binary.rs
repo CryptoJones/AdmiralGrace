@@ -13,8 +13,8 @@ use ag_image::Binary;
 use anyhow::Result;
 
 use crate::data::{
-    AnalysisState, FunctionDetail, FunctionRow, HitKind, ListingLine, Problem, Provider, Reference,
-    ReferenceKind, SearchHit, SectionCounts, SegmentEntry,
+    AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, HitKind, ListingLine,
+    Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts, SegmentEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
 
@@ -108,6 +108,49 @@ impl BinaryProvider {
             comment: instruction.comment.clone(),
         }
     }
+
+    /// The rows of a hex dump centred on an address.
+    ///
+    /// The dump holds eight rows of sixteen bytes with the address in the
+    /// middle of it, and it stops at the end of the section the address is
+    /// in: the bytes of a section are the bytes of the file, and the file
+    /// holds one copy of them.
+    fn byte_rows(&self, address: u64) -> Vec<ByteLine> {
+        /// The bytes of one row.
+        const ROW: u64 = 16;
+        /// The rows of the dump.
+        const ROWS: u64 = 8;
+
+        let Some(section) = self.binary.section_of(address) else {
+            return Vec::new();
+        };
+
+        let row = address / ROW;
+        let section_row = section.vma / ROW;
+        let above = (ROWS / 2).min(row.saturating_sub(section_row));
+        let first = row - above;
+
+        let mut rows = Vec::new();
+        for index in 0..ROWS {
+            let start = (first + index) * ROW;
+            if start >= section.vma.saturating_add(section.size) {
+                break;
+            }
+
+            let Some(bytes) = self.binary.bytes_at(start, ROW as usize) else {
+                // The section has no bytes in the file here, so there is
+                // nothing to show for this row.
+                continue;
+            };
+
+            rows.push(ByteLine {
+                address: start,
+                bytes,
+            });
+        }
+
+        rows
+    }
 }
 
 impl Provider for BinaryProvider {
@@ -120,6 +163,7 @@ impl Provider for BinaryProvider {
             listing: self.binary.supports_disassembly(),
             references: true,
             segments: true,
+            bytes: true,
             ..Capabilities::NONE
         }
     }
@@ -143,12 +187,31 @@ impl Provider for BinaryProvider {
     }
 
     fn function_detail(&self, address: u64) -> Option<FunctionDetail> {
-        let name = self.binary.function_name(address)?.to_string();
-        let section = self
-            .binary
-            .sections()
-            .iter()
-            .find(|section| section.vma <= address && address < section.vma + section.size);
+        let section = self.binary.section_of(address);
+
+        // A named piece of data is not a function, but the reader still wants
+        // to know what the selection is.
+        let Some(name) = self.binary.function_name(address) else {
+            let symbol = self
+                .binary
+                .data_symbols()
+                .iter()
+                .find(|symbol| symbol.address == address)?;
+
+            return Some(FunctionDetail {
+                name: symbol.name.clone(),
+                status: "Loaded".into(),
+                start: Some(address),
+                end: Some(address + symbol.size),
+                provenance: "Symbol table".to_string(),
+                summary: match section {
+                    Some(section) => format!("The symbol lives in {}.", section.name),
+                    None => "The symbol lives outside every section.".to_string(),
+                },
+            });
+        };
+
+        let name = name.to_string();
 
         let provenance = if section.is_some() {
             "Native decode".to_string()
@@ -194,8 +257,8 @@ impl Provider for BinaryProvider {
         None
     }
 
-    fn bytes(&self, _address: u64) -> Option<Vec<crate::data::ByteLine>> {
-        None
+    fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
+        Some(self.byte_rows(address))
     }
 
     fn references(&self, address: u64) -> Vec<Reference> {
@@ -255,6 +318,23 @@ impl Provider for BinaryProvider {
                 vma: section.vma,
                 size: section.size,
                 executable: section.executable,
+                mapped: section.vma != 0,
+            })
+            .collect()
+    }
+
+    fn data_symbols(&self) -> Vec<DataSymbolEntry> {
+        self.binary
+            .data_symbols()
+            .iter()
+            .map(|symbol| DataSymbolEntry {
+                address: symbol.address,
+                name: symbol.name.clone(),
+                size: Some(symbol.size),
+                section: self
+                    .binary
+                    .section_of(symbol.address)
+                    .map(|section| section.name.clone()),
             })
             .collect()
     }
@@ -265,7 +345,8 @@ impl Provider for BinaryProvider {
             return Vec::new();
         }
 
-        self.binary
+        let mut hits: Vec<SearchHit> = self
+            .binary
             .functions()
             .iter()
             .filter(|function| function.name.to_lowercase().contains(&needle))
@@ -275,7 +356,24 @@ impl Provider for BinaryProvider {
                 detail: "Function".into(),
                 kind: HitKind::Function,
             })
-            .collect()
+            .collect();
+
+        // The named data of the image is worth finding too: a search that
+        // names a symbol should lead to its bytes.
+        hits.extend(
+            self.binary
+                .data_symbols()
+                .iter()
+                .filter(|symbol| symbol.name.to_lowercase().contains(&needle))
+                .map(|symbol| SearchHit {
+                    address: symbol.address,
+                    title: symbol.name.clone(),
+                    detail: "Data".into(),
+                    kind: HitKind::Data,
+                }),
+        );
+
+        hits
     }
 
     fn problems(&self) -> Vec<Problem> {
@@ -372,6 +470,7 @@ mod tests {
         assert!(capabilities.listing);
         assert!(capabilities.references);
         assert!(capabilities.segments);
+        assert!(capabilities.bytes, "the image holds its bytes");
         assert!(!capabilities.pseudocode, "there is no lifter yet");
     }
 
@@ -540,5 +639,91 @@ mod tests {
             error.to_string().contains("reading"),
             "the error says what failed: {error}"
         );
+    }
+
+    #[test]
+    fn the_bytes_are_the_rows_around_the_selection() {
+        let provider = sample();
+
+        let rows = provider.bytes(MAIN).expect("the image has bytes");
+
+        assert_eq!(rows.len(), 8, "the dump holds eight rows");
+        assert!(
+            rows.iter().all(|row| row.bytes.len() == 16),
+            "sixteen bytes to a row: {rows:?}"
+        );
+
+        // The address is in the middle of the dump.
+        let index = rows
+            .iter()
+            .position(|row| row.address <= MAIN && MAIN < row.address + 16)
+            .expect("the address is in the dump");
+        assert_eq!(index, 4, "the address is in the middle: {rows:?}");
+    }
+
+    #[test]
+    fn the_bytes_stop_at_the_end_of_the_section() {
+        let provider = sample();
+
+        // .text runs to 0x11ec, so the dump of its last bytes is short.
+        let rows = provider.bytes(0x11e8).expect("the image has bytes");
+
+        assert_eq!(rows.len(), 5, "the dump stops at the section: {rows:?}");
+        let last = rows.last().expect("a last row");
+        assert_eq!(last.address, 0x11e0);
+        assert_eq!(last.bytes.len(), 12, "the section holds twelve more");
+    }
+
+    #[test]
+    fn a_symbol_that_lives_only_in_memory_has_no_bytes() {
+        let provider = sample();
+
+        // .bss is at 0x4010 and the file holds nothing for it.
+        let rows = provider.bytes(0x4010).expect("the image has a dump");
+
+        assert!(rows.is_empty(), "there are no bytes to show: {rows:?}");
+    }
+
+    #[test]
+    fn the_named_data_of_the_image_is_listed() {
+        let provider = sample();
+
+        let symbols = provider.data_symbols();
+        let names: Vec<&str> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+
+        assert!(names.contains(&"completed.0"), "{names:?}");
+
+        let symbol = symbols
+            .iter()
+            .find(|symbol| symbol.name == "completed.0")
+            .expect("the symbol");
+        assert_eq!(symbol.address, 0x4010);
+        assert_eq!(symbol.section.as_deref(), Some(".bss"));
+    }
+
+    #[test]
+    fn the_search_finds_the_named_data_as_well_as_the_functions() {
+        let provider = sample();
+
+        let hits = provider.search("completed", false);
+        assert!(
+            hits.iter().any(|hit| hit.kind == HitKind::Data),
+            "the named data is found: {hits:?}"
+        );
+
+        let hits = provider.search("main", false);
+        assert!(
+            hits.iter().any(|hit| hit.kind == HitKind::Function),
+            "the function is found: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn the_detail_of_a_data_symbol_says_what_it_is() {
+        let provider = sample();
+
+        let detail = provider.function_detail(0x4010).expect("a detail");
+        assert_eq!(detail.name, "completed.0");
+        assert_eq!(detail.provenance, "Symbol table");
     }
 }

@@ -227,3 +227,69 @@ fn the_entry_point_reaches_nothing_by_a_direct_call() {
     let reachable = binary.reachable_from_entry();
     assert!(reachable.is_empty(), "{reachable:?}");
 }
+
+#[test]
+fn the_bytes_at_an_address_are_the_bytes_of_the_file() {
+    let binary = sample();
+
+    let bytes = binary.bytes_at(MAIN, 4).expect("main has bytes");
+    assert_eq!(bytes.len(), 4, "the bytes are as many as were asked for");
+
+    // The listing decoded the same bytes, so the two agree.
+    let disassembly = binary.disassembly(MAIN).expect("main disassembles");
+    let instruction = &disassembly.blocks[0].instructions[0];
+    assert_eq!(bytes, instruction.bytes, "the listing and the file agree");
+}
+
+#[test]
+fn the_bytes_of_a_section_stop_at_the_end_of_the_section() {
+    let binary = sample();
+
+    // .text runs from 0x1060 to 0x11ec, and .fini starts there.
+    let bytes = binary
+        .bytes_at(0x11e8, 16)
+        .expect("the last bytes of .text are in the file");
+    assert_eq!(
+        bytes.len(),
+        4,
+        "the bytes stop at the end of the section: {bytes:?}"
+    );
+
+    // Asking for more than the section holds does not run into the next one.
+    let bytes = binary
+        .bytes_at(0x11e0, 32)
+        .expect("the last bytes of .text are in the file");
+    assert_eq!(
+        bytes.len(),
+        12,
+        "the bytes stop at the end of the section: {bytes:?}"
+    );
+}
+
+#[test]
+fn a_section_that_lives_only_in_memory_has_no_bytes() {
+    let binary = sample();
+
+    // .bss is at 0x4010 and the file holds nothing for it.
+    let bss = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".bss")
+        .expect("a .bss section");
+    assert_eq!(bss.vma, 0x4010);
+    assert!(bss.file_offset.is_none(), "the file holds none of it");
+
+    assert!(
+        binary.bytes_at(0x4010, 8).is_none(),
+        "there are no bytes to show"
+    );
+}
+
+#[test]
+fn the_bytes_of_a_data_section_are_the_bytes_of_the_file() {
+    let binary = sample();
+
+    // .data is at 0x4000 and the file holds sixteen bytes for it.
+    let bytes = binary.bytes_at(0x4000, 16).expect(".data has bytes");
+    assert_eq!(bytes.len(), 16, "the whole of .data is in the file");
+}

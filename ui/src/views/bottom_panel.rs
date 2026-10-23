@@ -6,6 +6,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
+use crate::data::HitKind;
 use crate::theme::{color, MONO};
 use crate::views::{section_header, subtle};
 
@@ -147,25 +148,35 @@ fn content(app: &App) -> Element<'_, Message> {
             let mut list = Column::new().spacing(0).width(Length::Fill);
 
             for hit in &app.bottom.hits {
+                // A result can be picked: a function opens its listing, and
+                // anything else moves the selection to its address.
+                let message = match hit.kind {
+                    HitKind::Function => Message::FunctionSelected(hit.address),
+                    _ => Message::AddressSelected(hit.address),
+                };
+
                 list = list.push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(12)
-                        .push(
-                            Text::new(format!("{:#x}", hit.address))
-                                .size(11)
-                                .color(color::MUTED)
-                                .font(MONO)
-                                .width(Length::Fixed(96.0)),
-                        )
-                        .push(
-                            Text::new(hit.title.clone())
-                                .size(12)
-                                .color(color::TEXT)
-                                .width(Length::Fill),
-                        )
-                        .push(subtle(hit.kind.label()))
-                        .push(subtle(hit.detail.clone()).width(Length::Fixed(120.0))),
+                    mouse_area(
+                        Row::new()
+                            .align_y(Alignment::Center)
+                            .spacing(12)
+                            .push(
+                                Text::new(format!("{:#x}", hit.address))
+                                    .size(11)
+                                    .color(color::MUTED)
+                                    .font(MONO)
+                                    .width(Length::Fixed(96.0)),
+                            )
+                            .push(
+                                Text::new(hit.title.clone())
+                                    .size(12)
+                                    .color(color::TEXT)
+                                    .width(Length::Fill),
+                            )
+                            .push(subtle(hit.kind.label()))
+                            .push(subtle(hit.detail.clone()).width(Length::Fixed(120.0))),
+                    )
+                    .on_press(message),
                 );
             }
 
