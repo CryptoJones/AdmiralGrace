@@ -2,8 +2,7 @@ use crate::ast::AstNode;
 use crate::register::{RegisterId, RegisterSet};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BasicBlock {
     pub from: u64,
     pub to: u64,
@@ -35,7 +34,11 @@ pub struct ProcedureCfg {
     pub blocks: Vec<BasicBlock>,
     pub index_by_address: BTreeMap<u64, u32>,
     pub block_by_group: BTreeMap<u64, u32>,
+    /// Addresses of the call instructions in the procedure.
     pub call_sites: Vec<u64>,
+    /// Targets of the direct calls, in call-site order, for the
+    /// interprocedural phase; the walk never enters them.
+    pub call_targets: Vec<u64>,
 }
 
 impl ProcedureCfg {
