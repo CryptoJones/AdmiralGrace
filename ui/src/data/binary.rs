@@ -15,6 +15,7 @@ use anyhow::Result;
 use crate::data::{
     AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, HitKind, ListingLine,
     Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts, SegmentEntry,
+    StringEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
 
@@ -164,6 +165,7 @@ impl Provider for BinaryProvider {
             references: true,
             segments: true,
             bytes: true,
+            strings: true,
             ..Capabilities::NONE
         }
     }
@@ -290,6 +292,16 @@ impl Provider for BinaryProvider {
             }
         }
 
+        // The strings the function names. This is the function's own
+        // disassembly, so it is known at once.
+        for string in self.binary.string_references(address) {
+            references.push(Reference {
+                address: string.address,
+                label: string.text,
+                kind: ReferenceKind::String,
+            });
+        }
+
         references
     }
 
@@ -305,8 +317,29 @@ impl Provider for BinaryProvider {
         SectionCounts {
             functions: self.binary.functions().len(),
             segments: self.binary.sections().len(),
+            strings: self.binary.strings().len(),
             ..SectionCounts::default()
         }
+    }
+
+    fn strings(&self) -> Vec<StringEntry> {
+        // Which functions use a string is only known once the whole program
+        // has been read, so the strings carry no users until then.
+        let users = self.binary.string_users_ready();
+
+        self.binary
+            .strings()
+            .iter()
+            .map(|string| StringEntry {
+                address: string.address,
+                text: string.text.clone(),
+                section: Some(string.section.clone()),
+                functions: users
+                    .and_then(|users| users.get(&string.address))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect()
     }
 
     fn segments(&self) -> Vec<SegmentEntry> {
@@ -370,6 +403,19 @@ impl Provider for BinaryProvider {
                     title: symbol.name.clone(),
                     detail: "Data".into(),
                     kind: HitKind::Data,
+                }),
+        );
+
+        hits.extend(
+            self.binary
+                .strings()
+                .iter()
+                .filter(|string| string.text.to_lowercase().contains(&needle))
+                .map(|string| SearchHit {
+                    address: string.address,
+                    title: string.text.clone(),
+                    detail: string.section.clone(),
+                    kind: HitKind::String,
                 }),
         );
 
@@ -725,5 +771,80 @@ mod tests {
         let detail = provider.function_detail(0x4010).expect("a detail");
         assert_eq!(detail.name, "completed.0");
         assert_eq!(detail.provenance, "Symbol table");
+    }
+
+    #[test]
+    fn the_strings_of_the_image_are_listed() {
+        let provider = sample();
+
+        let strings = provider.strings();
+        assert!(!strings.is_empty(), "the sample holds strings");
+
+        let format = strings
+            .iter()
+            .find(|string| string.text == "%ld\\n")
+            .expect("the format string of the sample");
+        assert_eq!(format.address, 0x2004);
+        assert_eq!(format.section.as_deref(), Some(".rodata"));
+    }
+
+    #[test]
+    fn the_functions_that_use_a_string_are_named_once_the_index_has_landed() {
+        let provider = sample();
+
+        // Before the index lands, no string knows who uses it.
+        let before = provider.strings();
+        let format = before
+            .iter()
+            .find(|string| string.address == 0x2004)
+            .expect("the format string");
+        assert!(format.functions.is_empty(), "{format:?}");
+
+        // The index is worked out off the UI thread; here it is done by hand.
+        let _ = provider.binary().string_users();
+        provider.mark_references_ready();
+
+        let after = provider.strings();
+        let format = after
+            .iter()
+            .find(|string| string.address == 0x2004)
+            .expect("the format string");
+        assert_eq!(format.functions, &[MAIN], "main uses the format string");
+    }
+
+    #[test]
+    fn the_references_of_a_function_name_the_strings_it_uses() {
+        let provider = sample();
+
+        let references = provider.references(MAIN);
+
+        let strings: Vec<&str> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::String)
+            .map(|reference| reference.label.as_str())
+            .collect();
+        assert_eq!(strings, vec!["%ld\\n"], "{references:?}");
+    }
+
+    #[test]
+    fn the_search_finds_the_strings_as_well_as_the_functions() {
+        let provider = sample();
+
+        let hits = provider.search("printf", false);
+
+        let strings: Vec<u64> = hits
+            .iter()
+            .filter(|hit| hit.kind == HitKind::String)
+            .map(|hit| hit.address)
+            .collect();
+        assert!(strings.contains(&0x4a2), "{hits:?}");
+    }
+
+    #[test]
+    fn the_strings_are_on_and_they_are_counted() {
+        let provider = sample();
+
+        assert!(provider.capabilities().strings);
+        assert_eq!(provider.counts().strings, provider.strings().len());
     }
 }

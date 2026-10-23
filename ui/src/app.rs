@@ -17,7 +17,7 @@ use crate::data::kuna_json::{
 use crate::data::sample::SampleProvider;
 use crate::data::{
     AnalysisState, ByteLine, FunctionDetail, FunctionRow, ListingLine, Problem, Provider,
-    Reference, SearchHit, SectionCounts,
+    Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
 };
 use crate::model::{Capabilities, History, Project, Selection};
 use crate::views::bottom_panel::BottomTab;
@@ -35,6 +35,10 @@ pub enum Message {
     FunctionSelected(u64),
     /// An address inside the current function was activated.
     AddressSelected(u64),
+    /// A string in the strings list was picked.
+    StringSelected(u64),
+    /// The filter of the strings list changed.
+    StringFilterChanged(String),
     /// A center work surface tab was activated.
     ViewTabSelected(ViewTab),
     /// A lower work surface tab was activated.
@@ -215,6 +219,8 @@ pub struct WorkSurface {
     pub bytes: Vec<ByteLine>,
     /// References to and from the selection.
     pub references: Vec<Reference>,
+    /// The filter of the strings list.
+    pub string_filter: String,
 }
 
 /// The bottom workspace.
@@ -384,6 +390,9 @@ impl App {
                 let indexed = Task::perform(
                     async move {
                         binary.call_graph();
+                        // The strings each function uses are found the same
+                        // way: over the whole program.
+                        let _ = binary.string_users();
                     },
                     |_| Message::BinaryIndexReady,
                 );
@@ -725,6 +734,30 @@ impl App {
         self.bottom.problems = problems;
     }
 
+    /// The detail of a string, for the inspector.
+    ///
+    /// A string is not a function, so the inspector is told what it is
+    /// instead of what was done to it.
+    fn detail_of_string(&self, address: u64) -> Option<FunctionDetail> {
+        let string = self
+            .provider
+            .strings()
+            .into_iter()
+            .find(|string| string.address == address)?;
+
+        Some(FunctionDetail {
+            name: string.text.clone(),
+            status: "String".into(),
+            start: Some(string.address),
+            end: None,
+            provenance: "String scan".into(),
+            summary: match &string.section {
+                Some(section) => format!("The string lives in {section}."),
+                None => "The string lives in the program image.".to_string(),
+            },
+        })
+    }
+
     /// Fill the cross references of the current selection again.
     ///
     /// The references that go the other way arrive after the project opens,
@@ -765,6 +798,21 @@ impl App {
                 }
                 // The byte pane follows the selection to the address.
                 self.refresh_bytes();
+            }
+
+            Message::StringSelected(address) => {
+                self.selection = Selection::Address(address);
+                self.history.push(self.selection);
+                self.work.detail = self.detail_of_string(address);
+                self.work.references = references_of_string(
+                    &self.provider.strings(),
+                    &self.provider.functions(),
+                    address,
+                );
+            }
+
+            Message::StringFilterChanged(filter) => {
+                self.work.string_filter = filter;
             }
 
             Message::ViewTabSelected(tab) => {
@@ -1137,6 +1185,34 @@ fn shortcut(event: keyboard::Event) -> Message {
     }
 }
 
+/// The references of a string: the functions that use it.
+///
+/// A string is used rather than called, so the inspector is told who
+/// uses it instead of who it calls.
+fn references_of_string(
+    strings: &[StringEntry],
+    functions: &[FunctionRow],
+    address: u64,
+) -> Vec<Reference> {
+    let Some(string) = strings.iter().find(|string| string.address == address) else {
+        return Vec::new();
+    };
+
+    string
+        .functions
+        .iter()
+        .filter_map(|user| {
+            let row = functions.iter().find(|row| row.address == *user)?;
+
+            Some(Reference {
+                address: row.address,
+                label: row.name.clone(),
+                kind: ReferenceKind::UsedBy,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,6 +1370,65 @@ mod tests {
     /// The sample ELF the engine's own tests read.
     fn sample_elf() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/sample.elf")
+    }
+
+    #[test]
+    fn picking_a_string_moves_the_selection_to_it() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        let _ = app.update(Message::StringSelected(0x2004));
+
+        assert_eq!(app.selection, Selection::Address(0x2004));
+
+        let detail = app.work.detail.expect("the string is described");
+        assert_eq!(detail.name, "%ld\\n");
+        assert_eq!(detail.provenance, "String scan");
+        assert!(detail.summary.contains(".rodata"), "{detail:?}");
+    }
+
+    #[test]
+    fn the_functions_that_use_a_string_are_shown_as_its_references() {
+        let provider = BinaryProvider::load(&sample_elf()).expect("the image is read");
+
+        // The users of a string are only known once the whole program has
+        // been read, so the index is worked out first.
+        provider.binary().string_users();
+
+        let strings = provider.strings();
+        let functions = provider.functions();
+
+        let references = references_of_string(&strings, &functions, 0x2004);
+
+        assert_eq!(references.len(), 1, "{references:?}");
+        assert_eq!(references[0].label, "main");
+        assert_eq!(references[0].kind, ReferenceKind::UsedBy);
+    }
+
+    #[test]
+    fn a_string_that_nothing_uses_has_no_references() {
+        let provider = BinaryProvider::load(&sample_elf()).expect("the image is read");
+        provider.binary().string_users();
+
+        let strings = provider.strings();
+        let functions = provider.functions();
+
+        let references = references_of_string(&strings, &functions, 0);
+
+        assert!(references.is_empty());
+    }
+
+    #[test]
+    fn the_filter_of_the_strings_list_is_kept() {
+        let mut app = app();
+
+        let _ = app.update(Message::StringFilterChanged("ld".into()));
+
+        assert_eq!(app.work.string_filter, "ld");
     }
 
     #[test]

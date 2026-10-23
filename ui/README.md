@@ -26,7 +26,7 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 
 The corpus directory must contain a `decompile-index.json`. Opened from the File menu, the workbench prompts for a path and refuses a directory without that index. With no corpus on the command line the workbench opens a bundled sample project so the interface can be explored.
 
-A program image is parsed by the engine's own loader: the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly. The Bytes tab and the lower Bytes panel show the bytes of the file around the selection, sixteen to a row, with the bytes of the selected instruction marked. Opened from the File menu, the workbench prompts for a path and refuses a path that is not a file.
+A program image is parsed by the engine's own loader: the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly. The Bytes tab and the lower Bytes panel show the bytes of the file around the selection, sixteen to a row, with the bytes of the selected instruction marked. The Strings tab holds the text the image carries, with the functions that use it; it filters as you type, and picking a string moves the selection to it and names the functions that use it in the inspector. Opened from the File menu, the workbench prompts for a path and refuses a path that is not a file.
 
 ## Shape of the code
 

@@ -109,6 +109,8 @@ pub enum ReferenceKind {
     Data,
     /// A string reference.
     String,
+    /// The selection uses this string.
+    UsedBy,
 }
 
 impl ReferenceKind {
@@ -119,6 +121,7 @@ impl ReferenceKind {
             ReferenceKind::CalledBy => "CALLED BY",
             ReferenceKind::Data => "DATA",
             ReferenceKind::String => "STRING",
+            ReferenceKind::UsedBy => "USED BY",
         }
     }
 }

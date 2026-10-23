@@ -25,7 +25,7 @@ The bundled sample project, which opens when no corpus or export is given, so th
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
 - `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
 - `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
-- `ag-image` reads a program image through the engine: its sections, its symbols, the bytes of the file, the disassembly of a function, and the calls between the functions.
+- `ag-image` reads a program image through the engine: its sections, its symbols, the bytes of the file, the disassembly of a function, the calls between the functions, and the strings of the data sections.
 - `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
 ## Build
@@ -75,9 +75,14 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
+
+# The strings of the image, and the functions that use them
+cargo run --bin ag -- image ./sample.elf strings
 ```
 
 Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86-64, so it refuses an image of another architecture rather than printing nonsense.
+
+`strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
 
 ## Corpus format
 
@@ -142,6 +147,8 @@ That is the native path: the image is parsed by the engine's own loader, the nav
 Who calls what is only known once the whole program has been read, so that is worked out in the background when the image opens: the References tab says `indexing…` until the callers are known.
 
 The Bytes tab shows the bytes of the file around the selection, sixteen to a row, with the address, the hex and the ASCII column, and the bytes of the selected instruction marked. The pane follows the selection, and picking a section or a named symbol in the navigator moves it there.
+
+The Strings tab lists the text the image holds, with the functions that use it. The list filters as you type, and picking a string moves the selection to it.
 
 ## Development status
 
