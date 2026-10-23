@@ -63,9 +63,13 @@ Objective-C method names can be overlaid from a method map with `--methods PATH`
 
 ## Corpus format
 
-A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points.
+A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points. The leading `//` comment header of a body is dropped; the signature and the locals are kept.
 
 A kuna project export is the other layout `ag` reads: a `.c` of every function, a `.h` of prototypes, an `.asm` of every code section, and — under `--stream` — an `index.jsonl` giving each function's byte span in the `.c`.
+
+The `--methods` map is a JSON array of records, each naming the IMP of a method, its class, its selector and its types. A class method is the instance method of the class's metaclass: the map says which it is with `is_class_method`, or by writing the class with a leading `+`. The two are told apart in the display, `-[Class sel]` and `+[Class sel]`, so they are two names and not one.
+
+Nothing is dropped in silence. A record that cannot be read is skipped and named, and two records that claim one address are both kept, with the first resolving it. `ag` says so on stderr, and the workbench shows it in the Problems pane.
 
 ## Embedded manual and agent skill
 

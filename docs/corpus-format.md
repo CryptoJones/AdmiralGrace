@@ -42,8 +42,40 @@ lives in `functions/<address>.c`, or wherever the entry's `relative_path` points
 | `body.ranges` | The byte ranges the body covers. More than one means the body is non-contiguous. |
 | `body.non_contiguous` | Whether the ranges are a scatter rather than one block. |
 
-A function with no `relative_path` is read from `functions/<address>.c`, and its leading
-`//` comment header is dropped: only the body is shown.
+A function with no `relative_path` is read from `functions/<address>.c`. Its header — the
+run of `//` comment lines at the top of the file — is dropped, and the body is kept
+whole: the signature and the locals are part of the body, and are never dropped with
+the header.
+
+## The method map
+
+The `--methods` option lays a map of Objective-C methods over a corpus. The map is a
+JSON array of records, each naming the IMP of a method, the class it belongs to, its
+selector and its types:
+
+```json
+[
+  { "imp": "0x1000", "class": "NSString", "sel": "length", "types": "Q" },
+  { "imp": "0x2000", "class": "+NSString", "sel": "alloc", "types": "@16@0:8" }
+]
+```
+
+A class method is the instance method of the class's metaclass. A map says which it is
+with `"is_class_method": true`, or by writing the class with a leading `+`; a map that
+says neither is read as instance methods, which is what such a map holds. The two are
+told apart in the display — `-[Class sel]` for an instance method, `+[Class sel]` for a
+class method — so they are two names and not one.
+
+`--shift` gives the image-base shift: a corpus address is the IMP plus the shift. The
+shift is applied once, however many times it is given.
+
+## What the loaders say
+
+Nothing is dropped in silence. A record that cannot be read — an address that is not an
+address — is skipped and named, and two records that claim one address are both kept,
+with the first resolving it. The same holds for the method map: a record whose IMP is
+not an address is skipped and named. `ag` prints what it had to say on stderr, and the
+workbench shows it in the Problems pane.
 
 ## The kuna project export layout
 
