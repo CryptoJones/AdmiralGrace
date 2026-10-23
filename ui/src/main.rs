@@ -18,6 +18,7 @@ Usage: ag-ui [options]
 Options:
   --corpus PATH     Open a decompilation corpus (a directory with decompile-index.json)
   --kuna PATH       Open a kuna project export (a directory with the .c, .h and .asm files)
+  --binary PATH     Open a program image (an ELF, PE, COFF or Mach-O file)
   --methods PATH    Overlay an Objective-C method map
   --shift ADDR      Image-base shift applied to Objective-C IMP addresses (default 0x0)
   -h, --help        Show this help
@@ -54,6 +55,13 @@ fn main() -> iced::Result {
         }
     }
 
+    if let Some(path) = &config.binary {
+        if !path.is_file() {
+            eprintln!("error: {} is not a file", path.display());
+            std::process::exit(1);
+        }
+    }
+
     iced::application(move || App::boot(config.clone()), App::update, App::view)
         .title(|app: &App| app.window_title())
         .theme(|_: &App| theme::theme())
@@ -74,6 +82,9 @@ fn parse_args() -> Result<Option<Config>, String> {
             }
             "--kuna" => {
                 config.kuna = Some(PathBuf::from(args.next().ok_or("--kuna needs a path")?));
+            }
+            "--binary" => {
+                config.binary = Some(PathBuf::from(args.next().ok_or("--binary needs a path")?));
             }
             "--methods" => {
                 config.methods = Some(PathBuf::from(args.next().ok_or("--methods needs a path")?));

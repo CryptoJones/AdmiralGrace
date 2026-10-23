@@ -68,12 +68,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .push(
                 Row::new()
                     .align_y(Alignment::Center)
-                    .push(section_header("Functions"))
+                    .push(section_header(list_heading(app)))
                     .push(Space::new().width(Length::Fill))
-                    .push(subtle(count(app.navigator.rows.len()))),
+                    .push(subtle(count(list_count(app)))),
             )
             .push(
-                scrollable(function_list(app))
+                scrollable(list_contents(app))
                     .height(Length::Fill)
                     .width(Length::Fill),
             )
@@ -163,6 +163,85 @@ fn filter_input(app: &App) -> Element<'_, Message> {
             selection: color::CYAN.scale_alpha(0.35),
         })
         .into()
+}
+
+/// The heading above the navigator's list.
+///
+/// The Segments section lists the sections of the program image; every other
+/// section lists the functions.
+fn list_heading(app: &App) -> &'static str {
+    if app.navigator.section == Section::Segments {
+        "Segments"
+    } else {
+        "Functions"
+    }
+}
+
+/// How many rows the navigator's list holds.
+fn list_count(app: &App) -> usize {
+    if app.navigator.section == Section::Segments {
+        app.provider.segments().len()
+    } else {
+        app.navigator.rows.len()
+    }
+}
+
+/// The list the navigator shows.
+///
+/// The Segments section holds the sections of the program image; every other
+/// section holds the functions.
+fn list_contents(app: &App) -> Column<'_, Message> {
+    if app.navigator.section == Section::Segments {
+        return segment_list(app);
+    }
+
+    function_list(app)
+}
+
+/// The sections of the program image.
+fn segment_list(app: &App) -> Column<'_, Message> {
+    let segments = app.provider.segments();
+
+    if segments.is_empty() {
+        return Column::new()
+            .spacing(3)
+            .push(Text::new("No sections").size(12).color(color::MUTED))
+            .push(
+                Text::new("This project has no program image behind it.")
+                    .size(11)
+                    .color(color::DIM),
+            );
+    }
+
+    let mut list = Column::new().spacing(1).width(Length::Fill);
+
+    for segment in segments {
+        list = list.push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .spacing(6)
+                .push(
+                    Text::new(segment.name.clone())
+                        .size(12)
+                        .color(color::TEXT)
+                        .width(Length::Fill),
+                )
+                .push(
+                    Text::new(if segment.executable { "x" } else { " " })
+                        .size(11)
+                        .color(color::GREEN)
+                        .font(MONO),
+                )
+                .push(
+                    Text::new(format!("{:#x}", segment.vma))
+                        .size(11)
+                        .color(color::MUTED)
+                        .font(MONO),
+                ),
+        );
+    }
+
+    list
 }
 
 /// The scrollable function list.

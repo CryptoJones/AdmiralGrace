@@ -7,6 +7,7 @@ use std::sync::Arc;
 use iced::keyboard::{self, Key};
 use iced::{Element, Subscription, Task};
 
+use crate::data::binary::BinaryProvider;
 use crate::data::corpus::CorpusProvider;
 use crate::data::empty::EmptyProvider;
 use crate::data::kuna::{KunaProvider, SharedCache};
@@ -50,6 +51,8 @@ pub enum Message {
     FileOpenCorpus,
     /// Prompt for a kuna project export directory.
     FileOpenKuna,
+    /// Prompt for a program image.
+    FileOpenBinary,
     /// Prompt for an Objective-C method map.
     FileOpenMethods,
     /// Reload the open project.
@@ -139,6 +142,8 @@ pub enum PromptKind {
     Corpus,
     /// A kuna project export directory.
     Kuna,
+    /// A program image.
+    Binary,
     /// An Objective-C method map.
     Methods,
 }
@@ -161,6 +166,8 @@ pub struct Config {
     pub corpus: Option<PathBuf>,
     /// Kuna project export directory to open.
     pub kuna: Option<PathBuf>,
+    /// Program image to open.
+    pub binary: Option<PathBuf>,
     /// Objective-C method map to overlay.
     pub methods: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
@@ -257,6 +264,8 @@ pub struct App {
     pub corpus_root: Option<PathBuf>,
     /// The kuna export directory currently open.
     pub kuna_root: Option<PathBuf>,
+    /// The program image currently open.
+    pub binary_path: Option<PathBuf>,
     /// The Objective-C method map currently open.
     pub methods_path: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
@@ -305,12 +314,13 @@ impl App {
             prompt: None,
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
+            binary_path: config.binary.clone(),
             methods_path: config.methods.clone(),
             shift: config.shift,
             kuna: None,
         };
 
-        let task = if config.corpus.is_some() || config.kuna.is_some() {
+        let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
             app.load_project()
         } else {
             app.use_sample()
@@ -321,18 +331,28 @@ impl App {
 
     /// Load the open project into the workbench.
     ///
-    /// A kuna export takes precedence over a corpus: the two are different
-    /// shapes of the same analysis, and only one of them is open at a time.
+    /// A kuna export takes precedence over a corpus, and a corpus over a
+    /// program image: the three are different shapes of the same analysis,
+    /// and only one of them is open at a time.
     fn load_project(&mut self) -> Task<Message> {
         if let Some(root) = self.kuna_root.clone() {
             return self.load_kuna(&root);
         }
 
-        let Some(root) = self.corpus_root.clone() else {
+        if let Some(root) = self.corpus_root.clone() {
+            return self.load_corpus(&root);
+        }
+
+        let Some(path) = self.binary_path.clone() else {
             return self.use_sample();
         };
 
-        match CorpusProvider::load(&root, self.methods_path.as_deref(), self.shift) {
+        self.load_binary(&path)
+    }
+
+    /// Load a corpus into the workbench.
+    fn load_corpus(&mut self, root: &Path) -> Task<Message> {
+        match CorpusProvider::load(root, self.methods_path.as_deref(), self.shift) {
             Ok(provider) => {
                 self.provider = Box::new(provider);
                 self.notice = Some(format!("Opened {}", root.display()));
@@ -345,6 +365,22 @@ impl App {
         }
 
         Task::none()
+    }
+
+    /// Load a program image into the workbench.
+    fn load_binary(&mut self, path: &Path) -> Task<Message> {
+        match BinaryProvider::load(path) {
+            Ok(provider) => {
+                self.provider = Box::new(provider);
+                self.notice = Some(format!("Opened {}", path.display()));
+                self.adopt_provider()
+            }
+            Err(error) => {
+                let _ = self.use_sample();
+                self.notice = Some(format!("Could not open {}: {error:#}", path.display()));
+                Task::none()
+            }
+        }
     }
 
     /// Load a kuna project export into the workbench.
@@ -392,6 +428,7 @@ impl App {
         self.provider = Box::new(EmptyProvider::new());
         self.corpus_root = None;
         self.kuna_root = None;
+        self.binary_path = None;
         self.methods_path = None;
         self.kuna = None;
         self.notice = Some("Project closed".into());
@@ -750,6 +787,18 @@ impl App {
                 });
             }
 
+            Message::FileOpenBinary => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Binary,
+                    title: "Open a program image",
+                    value: self
+                        .binary_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                });
+            }
+
             Message::PromptChanged(value) => {
                 if let Some(prompt) = &mut self.prompt {
                     prompt.value = value;
@@ -790,6 +839,16 @@ impl App {
                         self.methods_path = Some(path);
                         return self.load_project();
                     }
+                    PromptKind::Binary => {
+                        if !path.is_file() {
+                            self.notice = Some(format!("{} is not a file", path.display()));
+                        } else {
+                            self.binary_path = Some(path);
+                            self.corpus_root = None;
+                            self.kuna_root = None;
+                            return self.load_project();
+                        }
+                    }
                 }
             }
 
@@ -798,7 +857,10 @@ impl App {
             }
 
             Message::FileReload => {
-                if self.corpus_root.is_some() || self.kuna_root.is_some() {
+                if self.corpus_root.is_some()
+                    || self.kuna_root.is_some()
+                    || self.binary_path.is_some()
+                {
                     // A reload asks the CLI again: the export may have been
                     // written since, and the binary behind it may have
                     // changed under it.
@@ -1164,6 +1226,55 @@ mod tests {
         assert!(app.navigator.rows.is_empty());
         assert!(app.corpus_root.is_none());
         assert_eq!(app.selection, Selection::None);
+    }
+
+    /// The sample ELF the engine's own tests read.
+    fn sample_elf() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/sample.elf")
+    }
+
+    #[test]
+    fn booting_with_a_binary_shows_its_functions() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let app = App::boot(config).0;
+
+        assert_eq!(app.project.kind, crate::model::ProjectKind::Binary);
+        assert!(!app.navigator.rows.is_empty(), "the symbols are listed");
+        assert!(app.capabilities.listing, "the listing is on");
+        assert!(!app.capabilities.pseudocode, "there is no lifter yet");
+
+        // The first function is selected, and its listing is loaded.
+        let selected = app.navigator.selected.expect("a function is selected");
+        assert!(!app.work.listing.is_empty(), "the listing is shown");
+        assert_eq!(app.work.listing[0].address, selected);
+    }
+
+    #[test]
+    fn the_file_menu_opens_a_binary_prompt() {
+        let mut app = app();
+
+        let _ = app.update(Message::FileOpenBinary);
+        let prompt = app.prompt.as_ref().expect("a prompt should be open");
+        assert_eq!(prompt.kind, PromptKind::Binary);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_file_is_refused() {
+        let mut app = app();
+
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged("/tmp".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert!(app.prompt.is_none());
+        assert!(app
+            .notice
+            .is_some_and(|notice| notice.contains("not a file")));
+        assert_eq!(app.navigator.rows.len(), 5, "the sample is still open");
     }
 
     #[test]

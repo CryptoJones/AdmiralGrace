@@ -25,6 +25,7 @@ The bundled sample project, which opens when no corpus or export is given, so th
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
 - `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
 - `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
+- `ag-image` reads a program image through the engine: its sections, its symbols, the disassembly of a function, and the calls between the functions.
 - `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
 ## Build
@@ -112,6 +113,14 @@ cargo run --bin ag-ui -- --kuna ./challenge.kuna
 ```
 
 The export fills the Listing and Pseudocode tabs on its own. With the kuna executable available, named by `AG_KUNA_BIN` or found on the `PATH` as `kuna`, the workbench also asks it for the cross references, the strings, the program summary, and the mapping from each line of C to the addresses it came from. Without it those panes stay empty and the Problems panel says why.
+
+The workbench opens a program image as well:
+
+```sh
+cargo run --bin ag-ui -- --binary ./sample.elf
+```
+
+That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly of the selected function. There is no pseudocode yet, because the lifter has not been written, so that tab says so rather than showing an empty pane.
 
 ## Development status
 

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ag-corpus",
     "crates/ag-engine",
+    "crates/ag-image",
     "crates/ag-cli",
     "ui",
 ]

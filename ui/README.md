@@ -19,15 +19,20 @@ cargo run --bin ag-ui -- --corpus ./corpus
 
 # Overlay an Objective-C method map
 cargo run --bin ag-ui -- --corpus ./corpus --methods ./corpus/methods.json
+
+# Open a program image
+cargo run --bin ag-ui -- --binary ./sample.elf
 ```
 
 The corpus directory must contain a `decompile-index.json`. Opened from the File menu, the workbench prompts for a path and refuses a directory without that index. With no corpus on the command line the workbench opens a bundled sample project so the interface can be explored.
+
+A program image is parsed by the engine's own loader: the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly. Opened from the File menu, the workbench prompts for a path and refuses a path that is not a file.
 
 ## Shape of the code
 
 - `src/main.rs` — argument parsing and the Iced application entry point.
 - `src/app.rs` — application state, messages, the update loop, and the keyboard shortcuts.
-- `src/data/` — the `Provider` trait and its implementations: `corpus` (a real corpus), `sample` (the bundled demo project), and `empty` (no project open).
+- `src/data/` — the `Provider` trait and its implementations: `corpus` (a real corpus), `binary` (a program image read by the engine), `kuna` (a kuna project export), `sample` (the bundled demo project), and `empty` (no project open).
 - `src/model/` — the shared selection, navigation history, project identity, and the capability flags that tell the views what a provider can supply.
 - `src/views/` — the panes: menu bar, header, navigator, work surface, inspector, bottom workspace, status bar, and the inline path prompt.
 

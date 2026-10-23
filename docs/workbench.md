@@ -56,6 +56,34 @@ unaffected - and the JSON surfaces are off, with one problem saying kuna was not
 Every question of the CLI is asked in the background, so the workbench stays responsive
 while kuna works.
 
+## A program image in the workbench
+
+The workbench opens a program image as well:
+
+```sh
+cargo run --bin ag-ui -- --binary ./sample.elf
+```
+
+That is the native path: the image is parsed by the engine's own loader, the navigator
+lists its symbols, the inspector shows its sections and entry point, and the Listing tab
+holds the native x86-64 disassembly of the selected function. There is no pseudocode yet,
+because the lifter has not been written, so that tab says so rather than showing an empty
+pane.
+
+The File menu opens an image the same way, with `Open binary...`.
+
+What the workbench reads:
+
+| Surface | What the workbench does with it |
+|---|---|
+| The sections of the image | The Segments section of the navigator, and the inspector's image card, with the flag that says which of them hold code. |
+| The function symbols | The function list of the navigator. |
+| The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
+| The direct calls of a function | The References tab and the inspector: what the function calls, and what calls it. |
+
+The decoder is x86-64. An image of another architecture opens with its symbols and its
+sections, but with the listing off, and the Problems panel says why.
+
 ## Reading the panes
 
 The selection is shared: a function picked in the navigator, an address picked in the
