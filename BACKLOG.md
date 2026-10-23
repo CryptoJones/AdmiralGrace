@@ -51,7 +51,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 
 ### engine
 
-- [ ] Evaluate depending on kuna-sleigh and kuna-analysis instead of a hand-written decoder and loader — [#6](https://github.com/CryptoJones/AdmiralGrace/issues/6)
+- [x] Evaluate depending on kuna-sleigh and kuna-analysis instead of a hand-written decoder and loader — [#6](https://github.com/CryptoJones/AdmiralGrace/issues/6)
 - [ ] Option registry with a generated catalog and symptom index for engine decisions — [#8](https://github.com/CryptoJones/AdmiralGrace/issues/8)
 
 ### cli
