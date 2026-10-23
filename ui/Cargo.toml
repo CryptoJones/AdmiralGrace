@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ag-corpus = { path = "../crates/ag-corpus" }
+ag-image = { path = "../crates/ag-image" }
 anyhow = "1"
 iced = { version = "0.14", features = ["image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

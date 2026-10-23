@@ -4,6 +4,7 @@
 //! driven by a real corpus, a binary under analysis, or the bundled sample
 //! data used to exercise the layout.
 
+pub mod binary;
 pub mod corpus;
 pub mod empty;
 pub mod kuna;
@@ -228,6 +229,19 @@ pub struct SectionCounts {
     pub bookmarks: usize,
 }
 
+/// One section of the program image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentEntry {
+    /// The section's name, as the container spells it.
+    pub name: String,
+    /// The address the section maps to.
+    pub vma: u64,
+    /// The section's size in memory.
+    pub size: u64,
+    /// Whether the section holds code.
+    pub executable: bool,
+}
+
 pub use corpus::is_corpus;
 pub use kuna::is_kuna_export;
 
@@ -267,6 +281,11 @@ pub trait Provider: Send + Sync {
 
     /// Counts for the navigator sections.
     fn counts(&self) -> SectionCounts;
+
+    /// The sections of the program image, when the project is one.
+    fn segments(&self) -> Vec<SegmentEntry> {
+        Vec::new()
+    }
 
     /// Search the project.
     ///

@@ -53,10 +53,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ag-image"
+version = "0.1.0"
+dependencies = [
+ "ag-engine",
+ "anyhow",
+ "iced-x86",
+]
+
+[[package]]
 name = "ag-ui"
 version = "0.1.0"
 dependencies = [
  "ag-corpus",
+ "ag-image",
  "anyhow",
  "iced",
  "iced_aw",

@@ -21,6 +21,7 @@ pub fn view(_app: &App) -> Element<'_, Message> {
                 Message::FileOpenCorpus,
             )),
             Item::new(item_button("Open kuna export…", "", Message::FileOpenKuna)),
+            Item::new(item_button("Open binary…", "", Message::FileOpenBinary)),
             Item::new(item_button(
                 "Open Objective-C method map…",
                 "",

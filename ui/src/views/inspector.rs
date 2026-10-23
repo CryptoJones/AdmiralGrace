@@ -5,7 +5,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
 use crate::data::ReferenceKind;
-use crate::theme::color;
+use crate::theme::{color, MONO};
 use crate::views::{kv, pill, recessed, section_header, subtle};
 
 /// Build the inspector.
@@ -30,6 +30,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     column = column.push(section_header("Project"));
     column = column.push(project_card(app));
+
+    // The program image, when the project is one: what it is, where it
+    // starts, and how it is laid out.
+    if !app.provider.segments().is_empty() {
+        column = column.push(section_header("Image"));
+        column = column.push(image_card(app));
+    }
 
     column = column.push(section_header("Analyst notes"));
     column = column.push(
@@ -147,6 +154,56 @@ fn project_card(app: &App) -> Element<'_, Message> {
         card = card.push(kv("Reachable", summary.reachable.to_string()));
         card = card.push(kv("No callers", summary.no_callers.to_string()));
         card = card.push(kv("Code bytes", summary.code_bytes.to_string()));
+    }
+
+    recessed(card.padding(10)).into()
+}
+
+/// The image card: the language, the entry point, and the sections.
+///
+/// The sections are listed with the flag that says whether they hold code,
+/// because that is what decides whether the decoder reads them.
+fn image_card(app: &App) -> Element<'_, Message> {
+    let project = &app.project;
+    let mut card = Column::new().spacing(5).width(Length::Fill);
+
+    if let Some(language) = &project.architecture {
+        card = card.push(kv("Language", language.clone()));
+    }
+
+    if let Some(summary) = app.provider.summary() {
+        if let Some((name, address)) = summary.entry {
+            card = card.push(kv("Entry", format!("{name} ({address:#x})")));
+        }
+    }
+
+    for section in app.provider.segments() {
+        card = card.push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .spacing(6)
+                .push(
+                    Text::new(section.name.clone())
+                        .size(11)
+                        .color(color::TEXT)
+                        .font(MONO)
+                        .width(Length::Fill),
+                )
+                .push(pill(
+                    if section.executable { "exec" } else { "data" },
+                    if section.executable {
+                        color::GREEN
+                    } else {
+                        color::MUTED
+                    },
+                ))
+                .push(
+                    Text::new(format!("{:#x}", section.vma))
+                        .size(10)
+                        .color(color::MUTED)
+                        .font(MONO),
+                ),
+        );
     }
 
     recessed(card.padding(10)).into()
