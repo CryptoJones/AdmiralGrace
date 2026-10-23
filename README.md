@@ -11,6 +11,7 @@ The project is in an early, actively developing stage. The Rust workspace contai
 - `ag-corpus` loads indexed decompilation output and provides function and Objective-C metadata helpers.
 - `ag-cli` builds the `ag` command-line tool for inspecting a corpus.
 - `ag-engine` contains the developing CPU decoding, control-flow, AST, and decompilation components.
+- `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads a corpus through the same data layer the CLI uses.
 
 ## Build
 
@@ -45,6 +46,23 @@ cargo run --bin ag -- corpus --root ./corpus grep 'memcpy|malloc'
 ```
 
 Objective-C method names can be overlaid from a method map with `--methods PATH`. See `cargo run --bin ag -- corpus --help` and `cargo run --bin ag -- corpus --root ./corpus list --help` for all options.
+
+## Desktop workbench
+
+`ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work surface with listing, pseudocode, bytes and references, an inspector, and a bottom workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
+
+```sh
+# Launch with the bundled sample project
+cargo run --bin ag-ui
+
+# Launch on a corpus
+cargo run --bin ag-ui -- --corpus ./corpus
+
+# Overlay an Objective-C method map
+cargo run --bin ag-ui -- --corpus ./corpus --methods ./corpus/methods.json
+```
+
+The corpus directory must contain a `decompile-index.json`. Without one the workbench opens a bundled sample project so the interface can be explored. `ui/README.md` covers the workbench in more detail.
 
 ## Development status
 

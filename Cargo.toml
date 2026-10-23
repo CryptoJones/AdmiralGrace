@@ -4,6 +4,7 @@ members = [
     "crates/ag-corpus",
     "crates/ag-engine",
     "crates/ag-cli",
+    "ui",
 ]
 
 [workspace.package]
@@ -18,3 +19,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 walkdir = "2"
+
+[profile.release]
+opt-level = 2
+lto = "thin"

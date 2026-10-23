@@ -1,0 +1,219 @@
+//! The application menu bar.
+//!
+//! Menus are built from ordinary buttons so they carry the workbench's own
+//! styling instead of a second visual language.
+
+use iced::widget::{button, container, Container, Row, Space, Text};
+use iced::{Alignment, Background, Border, Element, Length};
+use iced_aw::menu::{Item, Menu, MenuBar};
+
+use crate::app::{App, Message};
+use crate::theme::color;
+
+/// Build the menu bar.
+pub fn view(_app: &App) -> Element<'_, Message> {
+    let file = Item::with_menu(
+        root_button("File"),
+        Menu::new(vec![
+            Item::new(item_button(
+                "Open corpus…",
+                "Ctrl+O",
+                Message::FileOpenCorpus,
+            )),
+            Item::new(item_button(
+                "Open Objective-C method map…",
+                "",
+                Message::FileOpenMethods,
+            )),
+            Item::new(item_button("Reload project", "F5", Message::FileReload)),
+            Item::new(item_button("Close project", "", Message::FileClose)),
+            Item::new(separator()),
+            Item::new(item_button("Quit", "Ctrl+Q", Message::FileQuit)),
+        ])
+        .width(260.0),
+    );
+
+    let edit = Item::with_menu(
+        root_button("Edit"),
+        Menu::new(vec![
+            Item::new(item_button("Rename function…", "F2", Message::EditRename)),
+            Item::new(item_button("Add comment", "Ctrl+/", Message::EditComment)),
+            Item::new(item_button("Toggle bookmark", "", Message::EditBookmark)),
+            Item::new(separator()),
+            Item::new(disabled_item("Undo", "Ctrl+Z")),
+            Item::new(disabled_item("Redo", "Ctrl+Shift+Z")),
+        ])
+        .width(240.0),
+    );
+
+    let view_menu = Item::with_menu(
+        root_button("View"),
+        Menu::new(vec![
+            Item::new(item_button(
+                "Show navigator",
+                "Ctrl+B",
+                Message::ViewToggleNavigator,
+            )),
+            Item::new(item_button(
+                "Show inspector",
+                "Ctrl+I",
+                Message::ViewToggleInspector,
+            )),
+            Item::new(item_button(
+                "Show bottom panel",
+                "Ctrl+J",
+                Message::ViewToggleBottom,
+            )),
+            Item::new(separator()),
+            Item::new(item_button("Reset layout", "", Message::ViewResetLayout)),
+        ])
+        .width(240.0),
+    );
+
+    let analysis = Item::with_menu(
+        root_button("Analysis"),
+        Menu::new(vec![
+            Item::new(item_button(
+                "Restart analysis",
+                "",
+                Message::AnalysisRestart,
+            )),
+            Item::new(item_button(
+                "Show analysis log",
+                "",
+                Message::AnalysisShowLog,
+            )),
+        ])
+        .width(240.0),
+    );
+
+    let help = Item::with_menu(
+        root_button("Help"),
+        Menu::new(vec![
+            Item::new(item_button(
+                "Keyboard shortcuts",
+                "",
+                Message::HelpShortcuts,
+            )),
+            Item::new(item_button("About AdmiralGrace", "", Message::HelpAbout)),
+        ])
+        .width(240.0),
+    );
+
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(MenuBar::new(vec![file, edit, view_menu, analysis, help]))
+            .push(Space::new().width(Length::Fill)),
+    )
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(color::TOPBAR)),
+        border: Border {
+            color: color::LINE,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// A top-level menu header.
+fn root_button(label: &str) -> Element<'static, Message> {
+    button::Button::new(Text::new(label.to_string()).size(12).color(color::TEXT))
+        .padding([6, 10])
+        .style(|_, status| button::Style {
+            background: match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Some(Background::Color(color::PANEL_ALT))
+                }
+                _ => None,
+            },
+            text_color: color::TEXT,
+            border: Border {
+                color: color::TOPBAR,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..button::Style::default()
+        })
+        .into()
+}
+
+/// A menu entry with an optional shortcut hint.
+fn item_button(label: &str, shortcut: &str, message: Message) -> Element<'static, Message> {
+    button::Button::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(
+                Text::new(label.to_string())
+                    .size(12)
+                    .color(color::TEXT)
+                    .width(Length::Fill),
+            )
+            .push(Text::new(shortcut.to_string()).size(11).color(color::DIM)),
+    )
+    .width(Length::Fill)
+    .padding([6, 8])
+    .on_press(message)
+    .style(|_, status| button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => {
+                Some(Background::Color(color::PANEL_ALT))
+            }
+            _ => None,
+        },
+        text_color: color::TEXT,
+        border: Border {
+            color: color::PANEL,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// A menu entry that is not available yet.
+fn disabled_item(label: &str, shortcut: &str) -> Element<'static, Message> {
+    button::Button::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(
+                Text::new(label.to_string())
+                    .size(12)
+                    .color(color::DIM)
+                    .width(Length::Fill),
+            )
+            .push(Text::new(shortcut.to_string()).size(11).color(color::DIM)),
+    )
+    .width(Length::Fill)
+    .padding([6, 8])
+    .style(|_, _| button::Style {
+        background: None,
+        text_color: color::DIM,
+        border: Border {
+            color: color::PANEL,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// A divider between groups of entries.
+fn separator() -> Element<'static, Message> {
+    Container::new(
+        iced::widget::rule::horizontal(1).style(|_| iced::widget::rule::Style {
+            color: color::LINE,
+            radius: 0.0.into(),
+            fill_mode: iced::widget::rule::FillMode::Full,
+            snap: true,
+        }),
+    )
+    .padding([4, 0])
+    .width(Length::Fill)
+    .into()
+}

@@ -1,0 +1,245 @@
+//! The left navigator: project identity, filter, function list, explore sections.
+
+use iced::widget::{
+    container, mouse_area, scrollable, text_input, Column, Container, Row, Space, Text,
+};
+use iced::{Alignment, Background, Border, Element, Length};
+
+use crate::app::{App, Message};
+use crate::data::FunctionRow;
+use crate::theme::{color, MONO};
+use crate::views::{count, section_header, subtle};
+
+/// The explorable sections of a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Section {
+    /// Functions.
+    #[default]
+    Functions,
+    /// Imported symbols.
+    Imports,
+    /// Exported symbols.
+    Exports,
+    /// Strings.
+    Strings,
+    /// File segments.
+    Segments,
+    /// Recovered types.
+    Types,
+    /// Analyst bookmarks.
+    Bookmarks,
+}
+
+impl Section {
+    /// The label shown in the navigator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Functions => "Functions",
+            Section::Imports => "Imports",
+            Section::Exports => "Exports",
+            Section::Strings => "Strings",
+            Section::Segments => "Segments",
+            Section::Types => "Types",
+            Section::Bookmarks => "Bookmarks",
+        }
+    }
+
+    /// The order the sections appear in the explore list.
+    pub const ALL: [Section; 6] = [
+        Section::Imports,
+        Section::Exports,
+        Section::Strings,
+        Section::Segments,
+        Section::Types,
+        Section::Bookmarks,
+    ];
+}
+
+/// Build the navigator.
+pub fn view(app: &App) -> Element<'_, Message> {
+    Container::new(
+        Column::new()
+            .padding(12)
+            .spacing(6)
+            .push(section_header("Project"))
+            .push(subtle(app.project.subtitle()))
+            .push(filter_input(app))
+            .push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(section_header("Functions"))
+                    .push(Space::new().width(Length::Fill))
+                    .push(subtle(count(app.navigator.rows.len()))),
+            )
+            .push(
+                scrollable(function_list(app))
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            )
+            .push(section_header("Explore"))
+            .push(explore_list(app)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(color::PANEL)),
+        border: Border {
+            color: color::LINE,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// The navigator filter.
+fn filter_input(app: &App) -> Element<'_, Message> {
+    text_input::TextInput::new("Filter functions…", &app.navigator.filter)
+        .on_input(Message::NavigatorFilterChanged)
+        .width(Length::Fill)
+        .size(13)
+        .padding([6, 8])
+        .style(|_, _| text_input::Style {
+            background: Background::Color(color::INPUT),
+            border: Border {
+                color: color::LINE,
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            icon: color::MUTED,
+            placeholder: color::MUTED,
+            value: color::TEXT,
+            selection: color::CYAN.scale_alpha(0.35),
+        })
+        .into()
+}
+
+/// The scrollable function list.
+fn function_list(app: &App) -> Column<'_, Message> {
+    let mut list = Column::new().spacing(1).width(Length::Fill);
+
+    if app.navigator.rows.is_empty() {
+        list = list.push(
+            Column::new()
+                .spacing(3)
+                .push(Text::new("No functions match").size(12).color(color::MUTED))
+                .push(
+                    Text::new("Clear the filter to see every function.")
+                        .size(11)
+                        .color(color::DIM),
+                ),
+        );
+    }
+
+    for row in &app.navigator.rows {
+        list = list.push(function_row(app, row));
+    }
+
+    list
+}
+
+/// A single function row.
+fn function_row<'a>(app: &'a App, row: &'a FunctionRow) -> Element<'a, Message> {
+    let selected = app.navigator.selected == Some(row.address);
+    let name_color = if row.objc { color::CYAN } else { color::TEXT };
+
+    let content = Row::new()
+        .align_y(Alignment::Center)
+        .spacing(6)
+        .push(
+            Text::new(row.name.clone())
+                .size(12)
+                .color(name_color)
+                .width(Length::Fill),
+        )
+        .push(
+            Text::new(format!("{:#x}", row.address))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO),
+        );
+
+    let surface = Container::new(content)
+        .padding([5, 7])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if selected {
+                color::SELECT_BG
+            } else {
+                color::PANEL
+            })),
+            border: Border {
+                color: color::PANEL,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        });
+
+    let element: Element<'a, Message> = mouse_area(surface)
+        .on_press(Message::FunctionSelected(row.address))
+        .into();
+
+    element
+}
+
+/// The explore sections with their counts.
+fn explore_list(app: &App) -> Column<'_, Message> {
+    let counts = &app.navigator.counts;
+    let mut list = Column::new().spacing(1).width(Length::Fill);
+
+    for section in Section::ALL {
+        let total = match section {
+            Section::Imports => counts.imports,
+            Section::Exports => counts.exports,
+            Section::Strings => counts.strings,
+            Section::Segments => counts.segments,
+            Section::Types => counts.types,
+            Section::Bookmarks => counts.bookmarks,
+            Section::Functions => counts.functions,
+        };
+
+        let selected = app.navigator.section == section;
+
+        let content: Row<'_, Message> = Row::new()
+            .align_y(Alignment::Center)
+            .push(
+                Text::new(format!("▸ {}", section.label()))
+                    .size(12)
+                    .color(if selected { color::CYAN } else { color::TEXT }),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(
+                Text::new(count(total))
+                    .size(11)
+                    .color(color::MUTED)
+                    .font(MONO),
+            );
+
+        let surface = Container::new(content)
+            .padding([5, 7])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if selected {
+                    color::SELECT_BG
+                } else {
+                    color::PANEL
+                })),
+                border: Border {
+                    color: color::PANEL,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+        let element: Element<'_, Message> = mouse_area(surface)
+            .on_press(Message::SectionSelected(section))
+            .into();
+
+        list = list.push(element);
+    }
+
+    list
+}
