@@ -111,6 +111,8 @@ pub enum Message {
     KunaFunctionReady(u64, Result<FunctionJson, String>),
     /// The kuna CLI answered with one function's cross references.
     KunaXrefsReady(u64, Direction, Result<Vec<XrefJson>, String>),
+    /// The calls between the functions of a program image have been worked out.
+    BinaryIndexReady,
 }
 
 /// The kuna CLI a kuna project can be asked, and the answers it has given.
@@ -371,9 +373,22 @@ impl App {
     fn load_binary(&mut self, path: &Path) -> Task<Message> {
         match BinaryProvider::load(path) {
             Ok(provider) => {
+                let binary = provider.binary();
                 self.provider = Box::new(provider);
                 self.notice = Some(format!("Opened {}", path.display()));
-                self.adopt_provider()
+
+                let adopted = self.adopt_provider();
+
+                // Who calls what is only known once the whole program has been
+                // read, and that is not the UI thread's work.
+                let indexed = Task::perform(
+                    async move {
+                        binary.call_graph();
+                    },
+                    |_| Message::BinaryIndexReady,
+                );
+
+                Task::batch(vec![adopted, indexed])
             }
             Err(error) => {
                 let _ = self.use_sample();
@@ -684,6 +699,16 @@ impl App {
         }
 
         self.bottom.problems = problems;
+    }
+
+    /// Fill the cross references of the current selection again.
+    ///
+    /// The references that go the other way arrive after the project opens,
+    /// so they are asked for again when the index has landed.
+    fn refresh_references(&mut self) {
+        if let Some(address) = self.navigator.selected {
+            self.work.references = self.provider.references(address);
+        }
     }
 
     /// Handle a message.
@@ -1028,6 +1053,13 @@ impl App {
                 }
             }
 
+            Message::BinaryIndexReady => {
+                // The callers of a function are known now, so the pane is
+                // filled in again.
+                self.provider.mark_references_ready();
+                self.refresh_references();
+            }
+
             Message::TogglePin => {
                 self.work.pinned = !self.work.pinned;
                 let state = if self.work.pinned {
@@ -1251,6 +1283,41 @@ mod tests {
         let selected = app.navigator.selected.expect("a function is selected");
         assert!(!app.work.listing.is_empty(), "the listing is shown");
         assert_eq!(app.work.listing[0].address, selected);
+    }
+
+    #[test]
+    fn the_index_fills_in_the_callers_of_the_selection() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        // The index has not landed yet, so the callers are not known.
+        assert!(app.provider.references_pending());
+
+        let _ = app.update(Message::BinaryIndexReady);
+
+        assert!(!app.provider.references_pending(), "the index has landed");
+
+        // The selection is the first function, and the callers of it are in
+        // the pane now.
+        let selected = app.navigator.selected.expect("a function is selected");
+        let callers: Vec<&str> = app
+            .work
+            .references
+            .iter()
+            .filter(|reference| reference.kind == crate::data::ReferenceKind::CalledBy)
+            .map(|reference| reference.label.as_str())
+            .collect();
+        let expected = app.provider.references(selected);
+        let expected: Vec<&str> = expected
+            .iter()
+            .filter(|reference| reference.kind == crate::data::ReferenceKind::CalledBy)
+            .map(|reference| reference.label.as_str())
+            .collect();
+        assert_eq!(callers, expected, "the pane holds the callers");
     }
 
     #[test]
@@ -1482,7 +1549,7 @@ mod tests {
 
         let reported = app.provider.summary().expect("a summary");
         assert_eq!(reported.functions, 13);
-        assert_eq!(reported.reachable, 5);
+        assert_eq!(reported.reachable, Some(5));
         assert_eq!(reported.code_bytes, 500);
         assert_eq!(reported.main.map(|(_, address)| address), Some(0x1198));
     }

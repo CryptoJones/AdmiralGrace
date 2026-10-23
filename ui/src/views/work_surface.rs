@@ -462,6 +462,14 @@ fn references_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
+    if app.provider.references_pending() {
+        return empty_state(
+            "Indexing the cross references",
+            "The whole program is being read to find who calls what.",
+        )
+        .into();
+    }
+
     if app.work.references.is_empty() {
         return empty_state(
             "No cross references",
@@ -528,7 +536,13 @@ fn lower_content(app: &App) -> Element<'_, Message> {
             }
         }
         LowerTab::References => {
-            if app.work.references.is_empty() {
+            if app.provider.references_pending() {
+                empty_state(
+                    "Indexing the cross references",
+                    "The whole program is being read to find who calls what.",
+                )
+                .into()
+            } else if app.work.references.is_empty() {
                 empty_state("No references in view", "Nothing refers to this selection.").into()
             } else {
                 reference_table(&app.work.references)

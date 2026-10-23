@@ -201,9 +201,15 @@ pub struct ProjectSummary {
     /// The program's `main`, as a name and an address.
     pub main: Option<(String, u64)>,
     /// How many functions are reachable from the entry point.
-    pub reachable: usize,
+    ///
+    /// This needs the whole program read, so it is not known until the
+    /// cross-reference index has been worked out.
+    pub reachable: Option<usize>,
     /// How many functions nothing calls.
-    pub no_callers: usize,
+    ///
+    /// This needs the whole program read, so it is not known until the
+    /// cross-reference index has been worked out.
+    pub no_callers: Option<usize>,
     /// How many bytes of code the program holds.
     pub code_bytes: u64,
     /// How many functions the program holds.
@@ -273,6 +279,17 @@ pub trait Provider: Send + Sync {
 
     /// Cross references for an address.
     fn references(&self, address: u64) -> Vec<Reference>;
+
+    /// Whether the provider is still working out its cross references.
+    ///
+    /// The references that go the other way — who calls this function — need
+    /// the whole program read, so they arrive after the project opens.
+    fn references_pending(&self) -> bool {
+        false
+    }
+
+    /// The cross-reference index has been worked out.
+    fn mark_references_ready(&self) {}
 
     /// The strings the project holds.
     fn strings(&self) -> Vec<StringEntry> {
