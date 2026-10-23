@@ -536,42 +536,23 @@ impl Decoded {
 fn decode_section(bytes: &[u8], base: u64) -> Decoded {
     let mut context = TextContext::default();
 
-    match Disasm::decode(&mut context, bytes, base) {
-        Ok(disasm) => Decoded {
-            disasm,
-            text: context.text,
-            bytes: bytes.to_vec(),
-            base,
-        },
-        Err(_) => {
-            // A code section can hold bytes that are not instructions. The
-            // engine's decode stops at the first of them, so the section is
-            // decoded here instead, one instruction at a time, stepping over
-            // the bytes that do not decode.
-            let mut context = TextContext::default();
-            let mut instructions = Vec::new();
-            let mut cursor = 0usize;
-
-            while cursor < bytes.len() {
-                match context.decode(&bytes[cursor..], base + cursor as u64) {
-                    Ok(instruction) => {
-                        cursor += instruction.length.max(1);
-                        instructions.push(instruction);
-                    }
-                    Err(_) => cursor += 1,
-                }
-            }
-
-            Decoded {
-                disasm: Disasm {
-                    file_offset_of_segment: 0,
-                    instructions,
-                },
-                text: context.text,
-                bytes: bytes.to_vec(),
-                base,
-            }
+    // The engine's decoder records the bytes that do not decode as one-byte
+    // invalid entries and carries on, so a section with padding or a jump
+    // table in it still decodes. A decode can only fail if the decoder itself
+    // fails, which this context does not do.
+    let disasm = Disasm::decode(&mut context, bytes, base).unwrap_or_else(|error| {
+        eprintln!("warning: the section at {base:#x} did not decode: {error:#}");
+        Disasm {
+            file_offset_of_segment: 0,
+            instructions: Vec::new(),
         }
+    });
+
+    Decoded {
+        disasm,
+        text: context.text,
+        bytes: bytes.to_vec(),
+        base,
     }
 }
 
@@ -587,9 +568,18 @@ struct TextContext {
 impl CpuContext for TextContext {
     fn decode(&mut self, bytes: &[u8], address: u64) -> Result<DecodedInsn> {
         let instruction = self.inner.decode(bytes, address)?;
-        if let Some(text) = iced_text(bytes, address) {
+
+        let text = match instruction.flow {
+            // A byte that does not decode is data, not an instruction, and
+            // iced has no spelling for it: it is shown as the byte it is.
+            Flow::Invalid => Some(("db".to_string(), format!("0x{:02x}", bytes[0]))),
+            _ => iced_text(bytes, address),
+        };
+
+        if let Some(text) = text {
             self.text.insert(address, text);
         }
+
         Ok(instruction)
     }
 }
@@ -611,4 +601,57 @@ fn iced_text(bytes: &[u8], address: u64) -> Option<(String, String)> {
     };
 
     Some((mnemonic, operands))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A byte that is not an instruction in x86-64.
+    const DATA: u8 = 0x06;
+
+    #[test]
+    fn a_byte_that_does_not_decode_is_shown_as_data() {
+        // A nop, a byte of data, and another nop.
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+
+        assert_eq!(
+            decoded.text.get(&0x1001),
+            Some(&("db".to_string(), "0x06".to_string())),
+            "the byte is shown as data: {:?}",
+            decoded.text
+        );
+    }
+
+    #[test]
+    fn the_code_after_a_byte_that_does_not_decode_is_still_decoded() {
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+
+        let addresses: Vec<u64> = decoded
+            .disasm
+            .instructions
+            .iter()
+            .map(|i| i.address)
+            .collect();
+        assert_eq!(
+            addresses,
+            vec![0x1000, 0x1001, 0x1002],
+            "the decode carries on past the byte: {addresses:?}"
+        );
+    }
+
+    #[test]
+    fn a_byte_that_does_not_decode_ends_the_block() {
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+        let cfg = resolve_branches(&decoded.disasm, 0x1000);
+
+        assert_eq!(cfg.blocks.len(), 1, "the block ends at the byte: {cfg:?}");
+        let block = &cfg.blocks[0];
+        assert_eq!(block.from, 0x1000);
+        assert_eq!(block.to, 0x1002, "the byte is the last of the block");
+        assert!(
+            block.successor_addresses.is_empty(),
+            "the code after the byte is not reached: {block:?}"
+        );
+    }
 }

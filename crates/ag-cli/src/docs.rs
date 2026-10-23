@@ -33,7 +33,12 @@ pub const DOCS: &[Doc] = &[
     Doc {
         topic: "cli",
         summary: "Every subcommand, option and exit code of the ag binary.",
-        readme_sections: &["Build", "Corpus CLI", "Embedded manual and agent skill"],
+        readme_sections: &[
+            "Build",
+            "Corpus CLI",
+            "Image CLI",
+            "Embedded manual and agent skill",
+        ],
         body: include_str!("../../../docs/cli.md"),
     },
     Doc {
