@@ -139,6 +139,8 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 
 That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly of the selected function. There is no pseudocode yet, because the lifter has not been written, so that tab says so rather than showing an empty pane.
 
+Who calls what is only known once the whole program has been read, so that is worked out in the background when the image opens: the References tab says `indexing…` until the callers are known.
+
 ## Development status
 
 The engine is under active development. The x86-64 decoder and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.

@@ -6,7 +6,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 use crate::app::{App, Message};
 use crate::data::ReferenceKind;
 use crate::theme::{color, MONO};
-use crate::views::{kv, pill, recessed, section_header, subtle};
+use crate::views::{count_or_indexing, kv, pill, recessed, section_header, subtle};
 
 /// Build the inspector.
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -151,8 +151,8 @@ fn project_card(app: &App) -> Element<'_, Message> {
             card = card.push(kv("Main", format!("{name} ({address:#x})")));
         }
         card = card.push(kv("Functions", summary.functions.to_string()));
-        card = card.push(kv("Reachable", summary.reachable.to_string()));
-        card = card.push(kv("No callers", summary.no_callers.to_string()));
+        card = card.push(kv("Reachable", count_or_indexing(summary.reachable)));
+        card = card.push(kv("No callers", count_or_indexing(summary.no_callers)));
         card = card.push(kv("Code bytes", summary.code_bytes.to_string()));
     }
 

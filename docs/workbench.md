@@ -70,6 +70,12 @@ holds the native x86-64 disassembly of the selected function. There is no pseudo
 because the lifter has not been written, so that tab says so rather than showing an empty
 pane.
 
+Who calls what is only known once the whole program has been read, so that is worked out
+in the background when the image opens: the References tab says `indexing…` until the
+callers are known. The two numbers of the program summary that need the whole program —
+the reachable count and the no-callers count — are unknown until then as well, and say
+so rather than showing a zero that is not true.
+
 The File menu opens an image the same way, with `Open binary...`.
 
 What the workbench reads:

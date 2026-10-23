@@ -6,6 +6,8 @@
 //! pseudocode — the workbench says so rather than showing an empty pane.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use ag_image::Binary;
 use anyhow::Result;
@@ -19,17 +21,22 @@ use crate::model::{Capabilities, Project, ProjectKind};
 /// Reads a program image the engine loaded.
 pub struct BinaryProvider {
     /// The image, read.
-    binary: Binary,
+    binary: Arc<Binary>,
     /// The project identity.
     project: Project,
     /// What the reader could not do, and why.
     warnings: Vec<String>,
+    /// Whether the calls between the functions have been worked out.
+    ///
+    /// The callers of a function are only known once the whole program has
+    /// been read, so they arrive after the project opens.
+    indexed: AtomicBool,
 }
 
 impl BinaryProvider {
     /// Read the image in the file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
-        let binary = Binary::open(path)?;
+        let binary = Arc::new(Binary::open(path)?);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -59,7 +66,19 @@ impl BinaryProvider {
             binary,
             project,
             warnings,
+            indexed: AtomicBool::new(false),
         })
+    }
+
+    /// The image itself, so that the work it needs can be done off the UI
+    /// thread.
+    pub fn binary(&self) -> Arc<Binary> {
+        Arc::clone(&self.binary)
+    }
+
+    /// Whether the calls between the functions have been worked out.
+    fn indexed(&self) -> bool {
+        self.indexed.load(Ordering::Relaxed)
     }
 
     /// The listing line of one instruction.
@@ -182,7 +201,8 @@ impl Provider for BinaryProvider {
     fn references(&self, address: u64) -> Vec<Reference> {
         let mut references = Vec::new();
 
-        // What the function calls.
+        // What the function calls. This is known at once: it is the one
+        // function's own disassembly.
         for call in self.binary.calls(address) {
             let label = call
                 .name
@@ -195,16 +215,27 @@ impl Provider for BinaryProvider {
             });
         }
 
-        // What calls the function.
-        for caller in self.binary.called_by(address) {
-            references.push(Reference {
-                address: caller.address,
-                label: caller.name,
-                kind: ReferenceKind::CalledBy,
-            });
+        // What calls the function. This is only known once the whole program
+        // has been read, so it is empty until the index has landed.
+        if self.indexed() {
+            for caller in self.binary.called_by(address) {
+                references.push(Reference {
+                    address: caller.address,
+                    label: caller.name,
+                    kind: ReferenceKind::CalledBy,
+                });
+            }
         }
 
         references
+    }
+
+    fn references_pending(&self) -> bool {
+        !self.indexed()
+    }
+
+    fn mark_references_ready(&self) {
+        self.indexed.store(true, Ordering::Relaxed);
     }
 
     fn counts(&self) -> SectionCounts {
@@ -286,8 +317,14 @@ impl Provider for BinaryProvider {
         Some(crate::data::ProjectSummary {
             entry,
             main,
-            reachable: self.binary.reachable_from_entry().len(),
-            no_callers: self.binary.functions_without_callers().len(),
+            // The two numbers that need the whole program read are not known
+            // until the index has been worked out.
+            reachable: self
+                .indexed()
+                .then(|| self.binary.reachable_from_entry().len()),
+            no_callers: self
+                .indexed()
+                .then(|| self.binary.functions_without_callers().len()),
             code_bytes,
             functions: self.binary.functions().len(),
         })
@@ -375,6 +412,7 @@ mod tests {
     #[test]
     fn the_references_name_the_callees_and_the_callers() {
         let provider = sample();
+        provider.mark_references_ready();
 
         let references = provider.references(MAIN);
 
@@ -393,6 +431,72 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
         assert!(callers.is_empty(), "{callers:?}");
+    }
+
+    #[test]
+    fn the_callers_of_a_function_arrive_with_the_index() {
+        let provider = sample();
+
+        // Before the index lands, only what the function itself calls is
+        // known: who calls it needs the whole program read.
+        let before = provider.references(0x1149);
+        assert!(
+            before
+                .iter()
+                .all(|reference| reference.kind == ReferenceKind::Calls),
+            "the callers are not known yet: {before:?}"
+        );
+
+        provider.mark_references_ready();
+
+        let after = provider.references(0x1149);
+        let callers: Vec<&str> = after
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::CalledBy)
+            .map(|reference| reference.label.as_str())
+            .collect();
+        assert!(callers.contains(&"main"), "{callers:?}");
+    }
+
+    #[test]
+    fn the_references_are_pending_until_the_index_has_landed() {
+        let provider = sample();
+
+        assert!(provider.references_pending(), "the index has not landed");
+
+        provider.mark_references_ready();
+
+        assert!(!provider.references_pending(), "the index has landed");
+    }
+
+    #[test]
+    fn the_summary_waits_for_the_index_before_it_counts_the_callers() {
+        let provider = sample();
+
+        let pending = provider.summary().expect("a summary");
+        assert_eq!(
+            pending.reachable, None,
+            "the reachable count is not known yet"
+        );
+        assert_eq!(
+            pending.no_callers, None,
+            "the caller count is not known yet"
+        );
+        assert_eq!(pending.functions, 12, "the function count is known at once");
+
+        provider.mark_references_ready();
+
+        let ready = provider.summary().expect("a summary");
+        assert_eq!(
+            ready.reachable,
+            Some(0),
+            "nothing is reached by a direct call"
+        );
+        assert_eq!(
+            ready.no_callers,
+            Some(7),
+            "only five of the twelve are called"
+        );
     }
 
     #[test]

@@ -95,6 +95,18 @@ pub fn subtle<'a>(text: impl Into<String>) -> Text<'a> {
     Text::new(text.into()).size(11).color(color::MUTED)
 }
 
+/// A count that is not known yet.
+///
+/// The numbers that need the whole program read are not known until the
+/// cross-reference index has been worked out, and the workbench says so
+/// rather than showing a zero that is not true.
+pub fn count_or_indexing(count: Option<usize>) -> String {
+    match count {
+        Some(count) => count.to_string(),
+        None => "indexing…".to_string(),
+    }
+}
+
 /// A key/value row for inspector cards.
 pub fn kv<'a>(key: &'a str, value: impl Into<String>) -> Row<'a, Message> {
     Row::new()

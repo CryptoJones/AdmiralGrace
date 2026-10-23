@@ -8,7 +8,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 use crate::app::{App, Message};
 use crate::data::FunctionRow;
 use crate::theme::{color, MONO};
-use crate::views::{count, section_header, subtle};
+use crate::views::{count, count_or_indexing, section_header, subtle};
 
 /// The explorable sections of a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,11 +119,11 @@ fn program_summary(app: &App) -> Element<'_, Message> {
 
     column = column.push(summary_row(
         "reachable".into(),
-        summary.reachable.to_string(),
+        count_or_indexing(summary.reachable),
     ));
     column = column.push(summary_row(
         "no callers".into(),
-        summary.no_callers.to_string(),
+        count_or_indexing(summary.no_callers),
     ));
     column = column.push(summary_row(
         "code bytes".into(),

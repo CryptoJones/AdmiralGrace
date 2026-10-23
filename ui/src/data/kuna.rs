@@ -497,8 +497,8 @@ impl Provider for KunaProvider {
                 .main
                 .as_ref()
                 .map(|main| (main.name.clone(), main.address)),
-            reachable: summary.summary.reachable_from_entry,
-            no_callers: summary.summary.no_callers,
+            reachable: Some(summary.summary.reachable_from_entry),
+            no_callers: Some(summary.summary.no_callers),
             code_bytes: summary.summary.code_bytes,
             functions: summary.total,
         })
