@@ -1,0 +1,11 @@
+[package]
+name = "ag-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
