@@ -16,3 +16,5 @@ iced = { version = "0.14", features = ["image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 iced_aw = "0.14"
 regex = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
