@@ -6,6 +6,7 @@
 
 pub mod corpus;
 pub mod empty;
+pub mod kuna;
 pub mod sample;
 
 use crate::model::{Capabilities, Project};
@@ -197,6 +198,7 @@ pub struct SectionCounts {
 }
 
 pub use corpus::is_corpus;
+pub use kuna::is_kuna_export;
 
 /// Read access to the open project.
 pub trait Provider: Send + Sync {

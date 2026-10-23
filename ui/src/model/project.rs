@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub enum ProjectKind {
     /// A decompilation corpus indexed by `decompile-index.json`.
     Corpus,
+    /// A kuna project export (`index.jsonl` plus `.c`, `.h` and `.asm`).
+    Kuna,
     /// A binary opened for static analysis.
     #[allow(dead_code)]
     Binary,
@@ -19,6 +21,7 @@ impl ProjectKind {
     pub fn label(self) -> &'static str {
         match self {
             ProjectKind::Corpus => "Corpus",
+            ProjectKind::Kuna => "Kuna",
             ProjectKind::Binary => "Binary",
             ProjectKind::Sample => "Sample",
         }

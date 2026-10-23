@@ -1,12 +1,13 @@
 //! Application state, messages, and the update loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use iced::keyboard::{self, Key};
 use iced::{Element, Subscription, Task};
 
 use crate::data::corpus::CorpusProvider;
 use crate::data::empty::EmptyProvider;
+use crate::data::kuna::KunaProvider;
 use crate::data::sample::SampleProvider;
 use crate::data::{
     AnalysisState, ByteLine, FunctionDetail, FunctionRow, ListingLine, Problem, Provider,
@@ -42,6 +43,8 @@ pub enum Message {
     DeepSearchSubmitted,
     /// Prompt for a corpus directory.
     FileOpenCorpus,
+    /// Prompt for a kuna project export directory.
+    FileOpenKuna,
     /// Prompt for an Objective-C method map.
     FileOpenMethods,
     /// Reload the open project.
@@ -99,6 +102,8 @@ pub enum Message {
 pub enum PromptKind {
     /// A corpus directory.
     Corpus,
+    /// A kuna project export directory.
+    Kuna,
     /// An Objective-C method map.
     Methods,
 }
@@ -119,6 +124,8 @@ pub struct Prompt {
 pub struct Config {
     /// Corpus directory to open.
     pub corpus: Option<PathBuf>,
+    /// Kuna project export directory to open.
+    pub kuna: Option<PathBuf>,
     /// Objective-C method map to overlay.
     pub methods: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
@@ -208,6 +215,8 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// The corpus directory currently open.
     pub corpus_root: Option<PathBuf>,
+    /// The kuna export directory currently open.
+    pub kuna_root: Option<PathBuf>,
     /// The Objective-C method map currently open.
     pub methods_path: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
@@ -253,11 +262,12 @@ impl App {
             show_about: false,
             prompt: None,
             corpus_root: config.corpus.clone(),
+            kuna_root: config.kuna.clone(),
             methods_path: config.methods.clone(),
             shift: config.shift,
         };
 
-        if config.corpus.is_some() {
+        if config.corpus.is_some() || config.kuna.is_some() {
             app.load_project();
         } else {
             app.use_sample();
@@ -266,8 +276,16 @@ impl App {
         (app, Task::none())
     }
 
-    /// Load the corpus (and optional method map) into the workbench.
+    /// Load the open project into the workbench.
+    ///
+    /// A kuna export takes precedence over a corpus: the two are different
+    /// shapes of the same analysis, and only one of them is open at a time.
     fn load_project(&mut self) {
+        if let Some(root) = self.kuna_root.clone() {
+            self.load_kuna(&root);
+            return;
+        }
+
         let Some(root) = self.corpus_root.clone() else {
             self.use_sample();
             return;
@@ -280,8 +298,23 @@ impl App {
                 self.adopt_provider();
             }
             Err(error) => {
-                self.notice = Some(format!("Could not open {}: {error:#}", root.display()));
                 self.use_sample();
+                self.notice = Some(format!("Could not open {}: {error:#}", root.display()));
+            }
+        }
+    }
+
+    /// Load a kuna project export into the workbench.
+    fn load_kuna(&mut self, root: &Path) {
+        match KunaProvider::load(root) {
+            Ok(provider) => {
+                self.provider = Box::new(provider);
+                self.notice = Some(format!("Opened {}", root.display()));
+                self.adopt_provider();
+            }
+            Err(error) => {
+                self.use_sample();
+                self.notice = Some(format!("Could not open {}: {error:#}", root.display()));
             }
         }
     }
@@ -297,6 +330,7 @@ impl App {
     fn close_project(&mut self) {
         self.provider = Box::new(EmptyProvider::new());
         self.corpus_root = None;
+        self.kuna_root = None;
         self.methods_path = None;
         self.notice = Some("Project closed".into());
         self.adopt_provider();
@@ -468,6 +502,18 @@ impl App {
                 });
             }
 
+            Message::FileOpenKuna => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Kuna,
+                    title: "Open kuna project export directory",
+                    value: self
+                        .kuna_root
+                        .as_ref()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default(),
+                });
+            }
+
             Message::FileOpenMethods => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Methods,
@@ -500,6 +546,19 @@ impl App {
                                 Some(format!("{} has no decompile-index.json", path.display()));
                         } else {
                             self.corpus_root = Some(path);
+                            self.kuna_root = None;
+                            self.load_project();
+                        }
+                    }
+                    PromptKind::Kuna => {
+                        if !crate::data::is_kuna_export(&path) {
+                            self.notice = Some(format!(
+                                "{} holds no kuna export (no .c file)",
+                                path.display()
+                            ));
+                        } else {
+                            self.kuna_root = Some(path);
+                            self.corpus_root = None;
                             self.load_project();
                         }
                     }
@@ -515,7 +574,7 @@ impl App {
             }
 
             Message::FileReload => {
-                if self.corpus_root.is_some() {
+                if self.corpus_root.is_some() || self.kuna_root.is_some() {
                     self.load_project();
                 } else {
                     self.notice = Some("Nothing to reload".into());
@@ -649,10 +708,44 @@ fn shortcut(event: keyboard::Event) -> Message {
 mod tests {
     use super::*;
     use crate::views::bottom_panel::BottomTab;
+    use std::fs;
 
     /// A workbench booted with the bundled sample project.
     fn app() -> App {
         App::boot(Config::default()).0
+    }
+
+    /// A temporary kuna export holding one function.
+    struct TempExport(PathBuf);
+
+    impl TempExport {
+        fn new(tag: &str) -> TempExport {
+            let path = std::env::temp_dir().join(format!(
+                "ag-ui-app-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            fs::create_dir_all(&path).expect("a temporary directory");
+
+            let c = "// Function: one @ 0x1000\nint one(void)\n{\n  return 1;\n}\n\n";
+            fs::write(path.join("a.c"), c).expect("the c file");
+            fs::write(
+                path.join("index.jsonl"),
+                format!(
+                    "{{\"seq\":0,\"name\":\"one\",\"addr\":\"0x1000\",\"size\":16,\"c_offset\":0,\"c_len\":{},\"error\":null}}\n",
+                    c.len()
+                ),
+            )
+            .expect("the index");
+
+            TempExport(path)
+        }
+    }
+
+    impl Drop for TempExport {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -709,6 +802,48 @@ mod tests {
         assert!(app
             .notice
             .is_some_and(|notice| notice.contains("decompile-index")));
+        assert_eq!(app.navigator.rows.len(), 5);
+    }
+
+    #[test]
+    fn booting_with_a_kuna_export_shows_its_functions() {
+        let export = TempExport::new("boot");
+        let config = Config {
+            kuna: Some(export.0.clone()),
+            ..Config::default()
+        };
+
+        let app = App::boot(config).0;
+
+        assert_eq!(app.project.kind, crate::model::ProjectKind::Kuna);
+        assert_eq!(app.navigator.rows.len(), 1);
+        assert_eq!(app.navigator.rows[0].name, "one");
+        assert!(app.capabilities.pseudocode);
+        assert_eq!(
+            app.work.pseudocode.as_deref(),
+            Some("int one(void)\n{\n  return 1;\n}")
+        );
+    }
+
+    #[test]
+    fn the_file_menu_opens_a_kuna_prompt() {
+        let mut app = app();
+
+        let _ = app.update(Message::FileOpenKuna);
+        let prompt = app.prompt.as_ref().expect("a prompt should be open");
+        assert_eq!(prompt.kind, PromptKind::Kuna);
+    }
+
+    #[test]
+    fn opening_a_directory_without_a_kuna_export_is_refused() {
+        let mut app = app();
+
+        let _ = app.update(Message::FileOpenKuna);
+        let _ = app.update(Message::PromptChanged("/tmp".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert!(app.prompt.is_none());
+        assert!(app.notice.is_some_and(|notice| notice.contains("kuna")));
         assert_eq!(app.navigator.rows.len(), 5);
     }
 
