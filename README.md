@@ -48,7 +48,7 @@ Objective-C method names can be overlaid from a method map with `--methods PATH`
 
 ## Development status
 
-The engine is under active development. Several stages of the full decompilation pipeline are still planned or incomplete. At this stage, AdmiralGrace should be treated as an experimental project rather than a complete replacement for a production disassembler.
+The engine is under active development. Several stages of the full decompilation pipeline are still planned or incomplete. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 
