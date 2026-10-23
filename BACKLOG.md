@@ -13,10 +13,10 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [ ] Called targets walked into the caller's `ProcedureCfg`: `e8 …` pushes the callee onto the same frontier — callee blocks end up inside the caller; targets belong in `call_sites` only.
 - [ ] Duplicate successors not filtered within a block (loop case lists target + fallthrough twice).
 
-### Decoder instruction flow — [#10](https://github.com/CryptoJones/AdmiralGrace/issues/10)
-- [ ] `ud2` / `xbegin` abort the **whole segment** decode (`FlowControl::Exception → bail!`). Real x86-64 functions carry `ud2` constantly. Expected: decode the instruction, record a trap marker, continue. Pinned test: `0f 0b c3` currently → `Err`.
-- [ ] `syscall` decodes to `Flow::Call(0)` — misleading semantics.
-- [ ] `Flow::Xbegin` declared but never constructed (dead variant).
+### Decoder instruction flow (done) — [#10](https://github.com/CryptoJones/AdmiralGrace/issues/10)
+- [x] `ud2` / `xbegin` abort the **whole segment** decode (`FlowControl::Exception → bail!`). Real x86-64 functions carry `ud2` constantly. Expected: decode the instruction, record a trap marker, continue. Pinned test: `0f 0b c3` currently → `Err`.
+- [x] `syscall` decodes to `Flow::Call(0)` — misleading semantics.
+- [x] `Flow::Xbegin` declared but never constructed (dead variant).
 
 ### Register identity — [#11](https://github.com/CryptoJones/AdmiralGrace/issues/11)
 - [ ] 8-bit GPR numbering collision: `AH` → index 4, same as `SP`/`RSP` → AH ≡ RSP in `Operands`.
@@ -56,7 +56,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 
 ### cli
 
-- [ ] `ag install-skill` and `ag docs`: ship an agent skill and the manual inside the binary — [#7](https://github.com/CryptoJones/AdmiralGrace/issues/7)
+- [x] `ag install-skill` and `ag docs`: ship an agent skill and the manual inside the binary — [#7](https://github.com/CryptoJones/AdmiralGrace/issues/7)
 
 ---
 
