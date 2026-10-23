@@ -1,17 +1,31 @@
 # AdmiralGrace
 
-![Admiral Grace Hopper](images/headshot.jpg)
+<img src="images/headshot.jpg" alt="Admiral Grace Hopper" width="220">
 
 AdmiralGrace is an open-source disassembler and decompiler utility written in Rust. It is named in honor of Admiral Grace Hopper, a pioneer of computer programming and compiler development.
 
-The project is in an early, actively developing stage. The Rust workspace contains a decompilation corpus reader and browsing CLI, plus the beginnings of a reusable disassembly and decompilation engine. The full binary-to-pseudocode pipeline is not implemented yet.
+The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool that reads decompilation output, and the beginnings of a native disassembly and decompilation engine. Today the workbench and the CLI read two kinds of analysis: an indexed decompilation corpus, and a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler. The native binary-to-pseudocode pipeline is not implemented yet.
+
+## Screenshots
+
+The workbench on a kuna project export of a small ELF. The listing comes from the export's `.asm`, the cross references, strings and program summary from the kuna CLI, and the selection is shared by every pane.
+
+![The workbench showing the listing of main from a kuna export, with calls and data references in the inspector](images/workbench-kuna.png)
+
+The same function on the Pseudocode tab. Lines that kuna mapped to addresses are numbered and clickable, so a click on a line moves the listing to the instructions it came from.
+
+![The workbench showing the decompiled C of main with numbered, address-mapped lines](images/workbench-kuna-pseudocode.png)
+
+The bundled sample project, which opens when no corpus or export is given, so the interface can be explored without a binary.
+
+![The workbench showing the bundled sample project with an ARM64 listing, bytes, and references](images/workbench-sample.png)
 
 ## Workspace
 
-- `ag-corpus` loads indexed decompilation output and provides function and Objective-C metadata helpers.
-- `ag-cli` builds the `ag` command-line tool for inspecting a corpus.
-- `ag-engine` contains the developing CPU decoding, control-flow, AST, and decompilation components.
-- `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads a corpus through the same data layer the CLI uses.
+- `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
+- `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
+- `ag-engine` holds the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
+- `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
 ## Build
 
@@ -87,9 +101,17 @@ cargo run --bin ag-ui -- --corpus ./corpus --methods ./corpus/methods.json
 
 The corpus directory must contain a `decompile-index.json`. Without one the workbench opens a bundled sample project so the interface can be explored. `ui/README.md` covers the workbench in more detail.
 
+The workbench opens a kuna project export as well:
+
+```sh
+cargo run --bin ag-ui -- --kuna ./challenge.kuna
+```
+
+The export fills the Listing and Pseudocode tabs on its own. With the kuna executable available, named by `AG_KUNA_BIN` or found on the `PATH` as `kuna`, the workbench also asks it for the cross references, the strings, the program summary, and the mapping from each line of C to the addresses it came from. Without it those panes stay empty and the Problems panel says why.
+
 ## Development status
 
-The engine is under active development. Several stages of the full decompilation pipeline are still planned or incomplete. Whether the engine should build on the kuna crates instead of its own decoder and loader is evaluated in `docs/KUNA_CRATES_EVALUATION.md`. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. The x86-64 decoder and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. Whether the engine should build on the kuna crates instead of its own decoder and loader is evaluated in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 
