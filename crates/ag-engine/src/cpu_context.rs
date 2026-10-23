@@ -2,9 +2,9 @@ use crate::register::RegisterId;
 
 pub const RC_NONE: u32 = 0;
 pub const RC_GPR: u32 = 1;
-pub const RC_XMM: u32 = 2;
-pub const RC_YMM: u32 = 3;
-pub const RC_ZMM: u32 = 4;
+/// The vector register file: `xmm`, `ymm` and `zmm` are three widths of the same
+/// 32 registers, told apart by the id's `bit_size`.
+pub const RC_VEC: u32 = 2;
 pub const RC_FLAGS: u32 = 5;
 pub const RC_SEG: u32 = 6;
 pub const RC_IP: u32 = 7;
@@ -84,32 +84,31 @@ impl Default for X86IcedContext {
     }
 }
 
-fn iced_index(r: iced_x86::Register) -> u32 {
-    r.number() as u32
-}
-
+/// The engine's id for an iced register.
+///
+/// The id names the full register (`AH`, `AX`, `EAX` and `RAX` all share GPR
+/// 0) and records the slice the operand covers, so `AH` is 8 bits at offset 8
+/// and `RSP` is GPR 4 — they never collide. Vector registers of every width
+/// share one class, numbered 0..32; segment, mask, control, debug, MMX and x87
+/// registers keep their own numbering.
 fn reg_id(r: iced_x86::Register) -> RegisterId {
     use iced_x86::Register as R;
+    if r == R::None {
+        return RegisterId::new(RC_NONE, 0, 0);
+    }
+    let bits = r.size() as u32 * 8;
     if r.is_gpr() {
-        return RegisterId {
-            class: RC_GPR,
-            index: iced_index(r),
-        };
+        let full = r.full_register();
+        let offset = if r >= R::AH && r <= R::BH { 8 } else { 0 };
+        return RegisterId::slice(RC_GPR, full.number() as u32, bits, offset);
     }
-    if r.is_xmm() {
-        return RegisterId {
-            class: RC_XMM,
-            index: iced_index(r),
-        };
+    if r.is_vector_register() {
+        return RegisterId::new(RC_VEC, r.number() as u32, bits);
     }
-    let rr = r as u32;
-    let class = if r.is_ymm() {
-        RC_YMM
-    } else if r.is_zmm() {
-        RC_ZMM
-    } else if r == R::RIP || r == R::EIP {
-        RC_IP
-    } else if r.is_segment_register() {
+    if r == R::RIP || r == R::EIP {
+        return RegisterId::new(RC_IP, 0, bits);
+    }
+    let class = if r.is_segment_register() {
         RC_SEG
     } else if r.is_k() {
         RC_KMASK
@@ -119,12 +118,12 @@ fn reg_id(r: iced_x86::Register) -> RegisterId {
         RC_DR
     } else if r.is_mm() {
         RC_MM
-    } else if rr >= R::ST0 as u32 && rr <= R::ST7 as u32 {
+    } else if r.is_st() {
         RC_FPU
     } else {
         RC_NONE
     };
-    RegisterId { class, index: 0 }
+    RegisterId::new(class, r.number() as u32, bits)
 }
 
 impl CpuContext for X86IcedContext {
