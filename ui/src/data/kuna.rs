@@ -49,6 +49,33 @@ pub struct KunaCache {
 /// A handle on the cache, shared by the workbench and the provider.
 pub type SharedCache = Arc<Mutex<KunaCache>>;
 
+impl KunaCache {
+    /// Forget every answer the CLI has given.
+    ///
+    /// The answers are held for the life of the project; a reload is how the
+    /// workbench asks the same questions again.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The decompilation of a function, when the CLI has answered for it.
+    pub fn function(&self, address: u64) -> Option<&FunctionJson> {
+        self.functions.get(&address)
+    }
+
+    /// The references of a function in one direction, when the CLI has
+    /// answered for them.
+    ///
+    /// An answer of no references at all is an answer, so the direction is
+    /// known to have been asked about.
+    pub fn xrefs(&self, address: u64, direction: Direction) -> Option<&Vec<XrefJson>> {
+        match direction {
+            Direction::From => self.xrefs_from.get(&address),
+            Direction::To => self.xrefs_to.get(&address),
+        }
+    }
+}
+
 /// Reads analysis results from a kuna project export.
 pub struct KunaProvider {
     export: KunaExport,
@@ -62,17 +89,17 @@ pub struct KunaProvider {
 }
 
 impl KunaProvider {
-    /// Load a kuna export from `root`.
-    pub fn load(root: &Path) -> Result<Self> {
-        Self::load_with(root, KunaCli::program())
-    }
-
     /// Load a kuna export from `root`, run with a named kuna executable.
     ///
     /// When the executable is not there — neither `AG_KUNA_BIN` nor the `PATH`
     /// names one — the export is still read in full; only the questions that
     /// need the CLI are left unanswered.
-    pub fn load_with(root: &Path, program: PathBuf) -> Result<Self> {
+    ///
+    /// The cache holds the answers the CLI has already given. A reload re-reads
+    /// the export from disk but keeps the cache, so that emptying it is the
+    /// reload's own doing and not a side effect of the provider being built
+    /// again. `None` starts with an empty cache.
+    pub fn load(root: &Path, program: PathBuf, cache: Option<SharedCache>) -> Result<Self> {
         let export = KunaExport::load(root)?;
 
         let project = Project {
@@ -98,7 +125,7 @@ impl KunaProvider {
             cli,
             program,
             program_missing,
-            cache: Arc::new(Mutex::new(KunaCache::default())),
+            cache: cache.unwrap_or_else(|| Arc::new(Mutex::new(KunaCache::default()))),
         })
     }
 
@@ -589,7 +616,7 @@ two:  ; 0x2000
         dir.write("a.asm", ASM);
         dir.write("index.jsonl", &index());
 
-        let provider = KunaProvider::load(&dir.0).expect("a provider");
+        let provider = KunaProvider::load(&dir.0, KunaCli::program(), None).expect("a provider");
         (dir, provider)
     }
 
@@ -646,7 +673,7 @@ two:  ; 0x2000
             "{\"seq\":0,\"name\":\"one\",\"addr\":\"0x1000\",\"size\":0,\"c_offset\":0,\"c_len\":40,\"error\":\"boom\"}\n",
         );
 
-        let provider = KunaProvider::load(&dir.0).expect("a provider");
+        let provider = KunaProvider::load(&dir.0, KunaCli::program(), None).expect("a provider");
         let rows = provider.functions();
         assert_eq!(rows[0].status, "failed");
 
@@ -693,7 +720,7 @@ two:  ; 0x2000
             "# a — kuna project export\n\n## Binary\n\n| Field | Value |\n|---|---|\n| Path | `/bin/sh` |\n",
         );
 
-        let provider = KunaProvider::load_with(&dir.0, PathBuf::from("/nonexistent/kuna"))
+        let provider = KunaProvider::load(&dir.0, PathBuf::from("/nonexistent/kuna"), None)
             .expect("a provider");
 
         // The export is still read in full.
