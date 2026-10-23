@@ -70,8 +70,14 @@ pub enum Message {
     AnalysisShowLog,
     /// Show the keyboard shortcuts.
     HelpShortcuts,
-    /// Show the about text.
+    /// Show the about dialog.
     HelpAbout,
+    /// Close the about dialog.
+    AboutClose,
+    /// Open the repository in the system browser.
+    AboutOpenRepository,
+    /// Dismiss whatever is on top.
+    Dismiss,
     /// The path prompt text changed.
     PromptChanged(String),
     /// The path prompt was submitted.
@@ -196,6 +202,8 @@ pub struct App {
     pub show_inspector: bool,
     /// Whether the bottom workspace is visible.
     pub show_bottom: bool,
+    /// Whether the about dialog is open.
+    pub show_about: bool,
     /// An open path prompt, when one is active.
     pub prompt: Option<Prompt>,
     /// The corpus directory currently open.
@@ -242,6 +250,7 @@ impl App {
             show_navigator: true,
             show_inspector: true,
             show_bottom: true,
+            show_about: false,
             prompt: None,
             corpus_root: config.corpus.clone(),
             methods_path: config.methods.clone(),
@@ -569,10 +578,23 @@ impl App {
             }
 
             Message::HelpAbout => {
-                self.notice = Some(
-                    "AdmiralGrace workbench — an open-source disassembler and decompiler for binary analysis"
-                        .into(),
-                );
+                self.show_about = true;
+            }
+
+            Message::AboutClose => {
+                self.show_about = false;
+            }
+
+            Message::AboutOpenRepository => {
+                crate::views::about::open_repository();
+            }
+
+            Message::Dismiss => {
+                if self.show_about {
+                    self.show_about = false;
+                } else if self.prompt.is_some() {
+                    self.prompt = None;
+                }
             }
 
             Message::Ignore => {}
@@ -618,7 +640,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("r"), true) => Message::FileReload,
         (Key::Named(keyboard::key::Named::F2), _) => Message::EditRename,
         (Key::Named(keyboard::key::Named::F5), _) => Message::FileReload,
-        (Key::Named(keyboard::key::Named::Escape), _) => Message::PromptCancel,
+        (Key::Named(keyboard::key::Named::Escape), _) => Message::Dismiss,
         _ => Message::Ignore,
     }
 }
@@ -709,6 +731,30 @@ mod tests {
 
         assert_eq!(app.bottom.tab, BottomTab::AnalysisLog);
         assert!(app.show_bottom);
+    }
+
+    #[test]
+    fn the_help_menu_opens_the_about_dialog() {
+        let mut app = app();
+
+        let _ = app.update(Message::HelpAbout);
+        assert!(app.show_about);
+
+        let _ = app.update(Message::AboutClose);
+        assert!(!app.show_about);
+    }
+
+    #[test]
+    fn escape_dismisses_the_about_dialog_then_the_prompt() {
+        let mut app = app();
+
+        let _ = app.update(Message::HelpAbout);
+        let _ = app.update(Message::Dismiss);
+        assert!(!app.show_about);
+
+        let _ = app.update(Message::FileOpenCorpus);
+        let _ = app.update(Message::Dismiss);
+        assert!(app.prompt.is_none());
     }
 
     #[test]

@@ -12,6 +12,6 @@ path = "src/main.rs"
 [dependencies]
 ag-corpus = { path = "../crates/ag-corpus" }
 anyhow = "1"
-iced = "0.14"
+iced = { version = "0.14", features = ["image"] }
 iced_aw = "0.14"
 regex = "1"

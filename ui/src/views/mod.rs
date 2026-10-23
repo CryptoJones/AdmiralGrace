@@ -1,5 +1,6 @@
 //! The workbench views.
 
+pub mod about;
 pub mod bottom_panel;
 pub mod inspector;
 pub mod menu_bar;
@@ -9,7 +10,7 @@ pub mod status_bar;
 pub mod top_bar;
 pub mod work_surface;
 
-use iced::widget::{container, Column, Container, Row, Text};
+use iced::widget::{container, Column, Container, Row, Stack, Text};
 use iced::{Background, Border, Color, Element, Length};
 
 use crate::app::{App, Message};
@@ -43,11 +44,22 @@ pub fn layout(app: &App) -> Element<'_, Message> {
         layout = layout.push(Container::new(bottom_panel::view(app)).height(Length::Fixed(155.0)));
     }
 
-    layout
+    let base = layout
         .push(Container::new(status_bar::view(app)).height(Length::Fixed(43.0)))
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
+        .into();
+
+    if app.show_about {
+        Stack::new()
+            .push(base)
+            .push(about::view())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        base
+    }
 }
 
 /// An uppercase section heading.
