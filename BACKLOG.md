@@ -18,11 +18,11 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] `syscall` decodes to `Flow::Call(0)` — misleading semantics.
 - [x] `Flow::Xbegin` declared but never constructed (dead variant).
 
-### Register identity — [#11](https://github.com/CryptoJones/AdmiralGrace/issues/11)
-- [ ] 8-bit GPR numbering collision: `AH` → index 4, same as `SP`/`RSP` → AH ≡ RSP in `Operands`.
-- [ ] Non-GPR/XMM registers forced to index 0: every `ymm`/`zmm`/k-register collapses to the same `RegisterId`.
-- [ ] Operand width dropped: `89 c0` and `48 89 c0` produce identical `Operands`.
-- [ ] `RegisterSet` `1u64 << (index & 63)`: silently **aliases** any index ≥ 64 into 0 (latent until identity is fixed).
+### Register identity (done) — [#11](https://github.com/CryptoJones/AdmiralGrace/issues/11)
+- [x] 8-bit GPR numbering collision: `AH` → index 4, same as `SP`/`RSP` → AH ≡ RSP in `Operands`.
+- [x] Non-GPR/XMM registers forced to index 0: every `ymm`/`zmm`/k-register collapses to the same `RegisterId`.
+- [x] Operand width dropped: `89 c0` and `48 89 c0` produce identical `Operands`.
+- [x] `RegisterSet` `1u64 << (index & 63)`: silently **aliases** any index ≥ 64 into 0 (latent until identity is fixed).
 
 ## P0 — CLI (`ag-cli`) — [#12](https://github.com/CryptoJones/AdmiralGrace/issues/12)
 - [ ] Byte-boundary panics: `&types[..60]` and `name.truncate(70)` panic on multi-byte characters at the cut point (valid non-ASCII names/type encodings). Needs char-safe truncation.
