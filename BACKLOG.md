@@ -24,9 +24,9 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] Operand width dropped: `89 c0` and `48 89 c0` produce identical `Operands`.
 - [x] `RegisterSet` `1u64 << (index & 63)`: silently **aliases** any index ≥ 64 into 0 (latent until identity is fixed).
 
-## P0 — CLI (`ag-cli`) — [#12](https://github.com/CryptoJones/AdmiralGrace/issues/12)
-- [ ] Byte-boundary panics: `&types[..60]` and `name.truncate(70)` panic on multi-byte characters at the cut point (valid non-ASCII names/type encodings). Needs char-safe truncation.
-- [ ] `0X1000` accepted by the resolve prefix check but rejected by `parse_addr` (only lowercase `0x` is stripped) → whole subcommand errors out.
+## P0 — CLI (`ag-cli`) (done) — [#12](https://github.com/CryptoJones/AdmiralGrace/issues/12)
+- [x] Byte-boundary panics: `&types[..60]` and `name.truncate(70)` panic on multi-byte characters at the cut point (valid non-ASCII names/type encodings). Needs char-safe truncation.
+- [x] `0X1000` accepted by the resolve prefix check but rejected by `parse_addr` (only lowercase `0x` is stripped) → whole subcommand errors out.
 
 ## P0 — Silent data damage (`ag-corpus`) — [#13](https://github.com/CryptoJones/AdmiralGrace/issues/13)
 - [ ] Unparseable IMP silently becomes `imp_addr 0` (`unwrap_or(0)`); hex parse also strips only lowercase `0x`.
@@ -34,7 +34,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [ ] Double `with_shift` desyncs `by_imp` (keys accumulate) vs `imp_addr` (current shift only); `by_name` is never re-shifted.
 - [ ] `drop_header` cuts the function head at the first blank line (`"// hdr\nint f(void) {\n  int a;\n\n  return a;\n}"` → `"  return a;\n}"`); single-line headers stay glued in.
 - [ ] `to_function` errors silently skipped; duplicate addresses silently keep the first entry.
-- [ ] `parse_addr` rejects uppercase `0X` prefix.
+- [x] `parse_addr` rejects uppercase `0X` prefix. — fixed in #37
 - [ ] `Sha256` field is dead storage (never read).
 
 ## Hygiene (done) — [#14](https://github.com/CryptoJones/AdmiralGrace/issues/14)
