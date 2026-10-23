@@ -6,12 +6,12 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 
 ## P0 — Engine correctness (`ag-engine`)
 
-### CFG builder — [#9](https://github.com/CryptoJones/AdmiralGrace/issues/9)
-- [ ] No block splitting → **overlapping blocks**: `74 02 90 90 c3` @0x1000 (if-diamond) yields blocks `[0x1000,0x1002)` and `[0x1002,0x1005)` overlapping tail block `[0x1004,0x1005)`; backward `jne` into mid-block (`31 c0 ff c0 83 f8 0a 75 f9 c3`) overlaps the entry block. `resolve_branches` (`cfgwalk.rs` ~23–97) never checks whether the next address starts/extends an existing block.
-- [ ] Dangling successor: `eb 00 c3` → block `[0x1000,0x1002)` lists successor `0x1002` but that block start is never scheduled.
-- [ ] Indirect calls lose the graph: `ff d0 c3` → 1 block, no successor, `call_sites` empty; the continuation is unreachable in the CFG (catch-all arm, `cfgwalk.rs` ~87–90).
-- [ ] Called targets walked into the caller's `ProcedureCfg`: `e8 …` pushes the callee onto the same frontier — callee blocks end up inside the caller; targets belong in `call_sites` only.
-- [ ] Duplicate successors not filtered within a block (loop case lists target + fallthrough twice).
+### CFG builder (done) — [#9](https://github.com/CryptoJones/AdmiralGrace/issues/9)
+- [x] No block splitting → **overlapping blocks**: `74 02 90 90 c3` @0x1000 (if-diamond) yields blocks `[0x1000,0x1002)` and `[0x1002,0x1005)` overlapping tail block `[0x1004,0x1005)`; backward `jne` into mid-block (`31 c0 ff c0 83 f8 0a 75 f9 c3`) overlaps the entry block. `resolve_branches` (`cfgwalk.rs` ~23–97) never checks whether the next address starts/extends an existing block.
+- [x] Dangling successor: `eb 00 c3` → block `[0x1000,0x1002)` lists successor `0x1002` but that block start is never scheduled.
+- [x] Indirect calls lose the graph: `ff d0 c3` → 1 block, no successor, `call_sites` empty; the continuation is unreachable in the CFG (catch-all arm, `cfgwalk.rs` ~87–90).
+- [x] Called targets walked into the caller's `ProcedureCfg`: `e8 …` pushes the callee onto the same frontier — callee blocks end up inside the caller; targets belong in `call_sites` only.
+- [x] Duplicate successors not filtered within a block (loop case lists target + fallthrough twice).
 
 ### Decoder instruction flow (done) — [#10](https://github.com/CryptoJones/AdmiralGrace/issues/10)
 - [x] `ud2` / `xbegin` abort the **whole segment** decode (`FlowControl::Exception → bail!`). Real x86-64 functions carry `ud2` constantly. Expected: decode the instruction, record a trap marker, continue. Pinned test: `0f 0b c3` currently → `Err`.
