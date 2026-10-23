@@ -263,11 +263,7 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
                     }
                 }
                 let types = m.types.clone().unwrap_or_default();
-                let types = if types.len() > 60 {
-                    types[..60].to_string()
-                } else {
-                    types
-                };
+                let types = truncate_chars(&types, 60);
                 println!("{:#x} -[{} {}] {}", imp, m.class, m.sel, types);
             }
         }
@@ -299,8 +295,8 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
         CorpusCmd::Show { target } => {
             let index = resolve(&entries, overlay.as_ref(), &target)?;
             let entry = &entries[index];
-            let mut name = display_name(entry, overlay.as_ref());
-            name.truncate(70);
+            let name = display_name(entry, overlay.as_ref());
+            let name = truncate_chars(&name, 70);
             println!("{} [{}] {:#x}", name, entry.status, entry.address);
             if let Some(r) = &entry.range {
                 match r {
@@ -364,12 +360,13 @@ fn display_name(entry: &Entry, overlay: Option<&Overlay>) -> String {
 }
 
 /// Find the index of the function `target` names.
+///
+/// A target that reads as an address is looked for as one first — `0x1000`,
+/// `0X1000`, or a bare hexadecimal number. An address that names no function
+/// is not an error: the target may still be a name.
 fn resolve(entries: &[Entry], overlay: Option<&Overlay>, target: &str) -> Result<usize> {
-    if target.starts_with("0x") || target.starts_with("0X") {
-        let a = ag_corpus::parse_addr(target)?;
-        if let Some(index) = entries.iter().position(|entry| entry.address == a) {
-            return Ok(index);
-        }
+    if let Some(index) = address_index(entries, target) {
+        return Ok(index);
     }
     if let Some(o) = overlay {
         if let Some(imp) = o.by_name.get(target) {
@@ -406,4 +403,103 @@ fn pick_body(entries: &[Entry], idxs: &[usize]) -> Result<usize> {
         .copied()
         .find(|index| entries[*index].has_body)
         .ok_or_else(|| anyhow::anyhow!("no body for matched functions"))
+}
+
+/// The index of the function at the address `target` names, when it names one.
+///
+/// The address may be written `0x1000`, `0X1000`, or as bare hexadecimal. A
+/// target that names no function is not an error here: it may still be a
+/// name, and the caller looks for one.
+fn address_index(entries: &[Entry], target: &str) -> Option<usize> {
+    let address = ag_corpus::parse_addr(target).ok()?;
+    entries.iter().position(|entry| entry.address == address)
+}
+
+/// Shorten a string to at most `limit` characters.
+///
+/// The cut is made at a character boundary, so a name or a type holding
+/// characters outside ASCII is never cut in half.
+fn truncate_chars(text: &str, limit: usize) -> &str {
+    match text.char_indices().nth(limit) {
+        Some((index, _)) => &text[..index],
+        None => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two functions, as a corpus or an export would report them.
+    fn entries() -> Vec<Entry> {
+        vec![
+            Entry {
+                address: 0x1000,
+                name: "one".into(),
+                status: "written".into(),
+                range: None,
+                has_body: true,
+            },
+            Entry {
+                address: 0x2000,
+                name: "two".into(),
+                status: "written".into(),
+                range: None,
+                has_body: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn an_address_is_found_whatever_way_it_is_written() {
+        let entries = entries();
+
+        for target in ["0x1000", "0X1000", "1000"] {
+            assert_eq!(
+                resolve(&entries, None, target).expect("a function"),
+                0,
+                "{target} names the first function"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_that_names_no_function_falls_through_to_the_name() {
+        let entries = entries();
+
+        // The target reads as an address, but no function is there.
+        let error = resolve(&entries, None, "0X9999").expect_err("no function");
+        assert!(
+            error.to_string().contains("no function matching"),
+            "the lookup falls through to the name: {error}"
+        );
+    }
+
+    #[test]
+    fn a_name_that_reads_like_an_address_is_still_a_name() {
+        let mut entries = entries();
+        entries[0].name = "add".into();
+
+        assert_eq!(
+            resolve(&entries, None, "add").expect("a function"),
+            0,
+            "the name is found, not the address 0xadd"
+        );
+    }
+
+    #[test]
+    fn a_name_with_characters_outside_ascii_is_not_cut_in_half() {
+        // The cut lands in the middle of the two-byte character.
+        let text = format!("{}é", "n".repeat(69));
+
+        let short = truncate_chars(&text, 70);
+        assert_eq!(short.chars().count(), 70);
+        assert!(short.ends_with('é'), "the character is whole: {short:?}");
+    }
+
+    #[test]
+    fn a_short_name_is_left_alone() {
+        assert_eq!(truncate_chars("short", 70), "short");
+        assert_eq!(truncate_chars("", 70), "");
+    }
 }

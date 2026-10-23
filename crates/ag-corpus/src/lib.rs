@@ -79,7 +79,9 @@ impl FunctionJson {
         };
         let path = match &self.relative_path {
             Some(rp) => corpus_root.join(rp),
-            None => corpus_root.join("functions").join(format!("{:#x}.c", address)),
+            None => corpus_root
+                .join("functions")
+                .join(format!("{:#x}.c", address)),
         };
         let name = if self.name.is_empty() {
             None
@@ -97,11 +99,23 @@ impl FunctionJson {
     }
 }
 
+/// Parse an address written as hexadecimal.
+///
+/// The prefix is optional and its case does not matter: `0x1000`, `0X1000`
+/// and `1000` all name the same address. Anything that is not hexadecimal is
+/// an error.
 pub fn parse_addr(s: &str) -> Result<u64> {
-    let h = s
+    let trimmed = s.trim();
+    let digits = trimmed
         .strip_prefix("0x")
-        .ok_or_else(|| anyhow::anyhow!("non-address {s:?}"))?;
-    u64::from_str_radix(h, 16).map_err(|_| anyhow::anyhow!("bad address {s:?}"))
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+
+    if digits.is_empty() || !digits.chars().all(|digit| digit.is_ascii_hexdigit()) {
+        return Err(anyhow::anyhow!("non-address {s:?}"));
+    }
+
+    u64::from_str_radix(digits, 16).map_err(|_| anyhow::anyhow!("bad address {s:?}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,8 +148,7 @@ impl Corpus {
         let index_path = root.join("decompile-index.json");
         let raw = fs::read_to_string(&index_path)
             .with_context(|| format!("reading {}", index_path.display()))?;
-        let idx: Index =
-            serde_json::from_str(&raw).context("parsing decompile-index.json")?;
+        let idx: Index = serde_json::from_str(&raw).context("parsing decompile-index.json")?;
         let mut functions = Vec::with_capacity(idx.functions.len());
         for fj in &idx.functions {
             let f = match fj.to_function(root) {
@@ -163,8 +176,8 @@ impl Corpus {
     }
 
     pub fn function_body(&self, f: &Function) -> Result<String> {
-        let raw = fs::read_to_string(&f.path)
-            .with_context(|| format!("reading {}", f.path.display()))?;
+        let raw =
+            fs::read_to_string(&f.path).with_context(|| format!("reading {}", f.path.display()))?;
         Ok(Self::drop_header(&raw))
     }
 
@@ -193,10 +206,22 @@ pub fn stats(corpus: &Corpus) -> CorpusStats {
     let external = corpus
         .functions
         .iter()
-        .filter(|f| f.name.as_deref().is_none_or(|n| n.starts_with("<EXTERNAL>")))
+        .filter(|f| {
+            f.name
+                .as_deref()
+                .is_none_or(|n| n.starts_with("<EXTERNAL>"))
+        })
         .count();
-    let written = corpus.functions.iter().filter(|f| f.status == "written").count();
-    let failed = corpus.functions.iter().filter(|f| f.status == "failed").count();
+    let written = corpus
+        .functions
+        .iter()
+        .filter(|f| f.status == "written")
+        .count();
+    let failed = corpus
+        .functions
+        .iter()
+        .filter(|f| f.status == "failed")
+        .count();
     let named_distinct = corpus.by_name.len();
     CorpusStats {
         total: corpus.functions.len(),
@@ -204,5 +229,26 @@ pub fn stats(corpus: &Corpus) -> CorpusStats {
         failed,
         external,
         named_distinct,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_is_read_with_or_without_its_prefix() {
+        assert_eq!(parse_addr("0x1000").expect("an address"), 0x1000);
+        assert_eq!(parse_addr("0X1000").expect("an address"), 0x1000);
+        assert_eq!(parse_addr("1000").expect("an address"), 0x1000);
+        assert_eq!(parse_addr("0xdeadbeef").expect("an address"), 0xdeadbeef);
+        assert_eq!(parse_addr(" 0x1000 ").expect("an address"), 0x1000);
+    }
+
+    #[test]
+    fn a_non_address_is_refused() {
+        for text in ["", "0x", "0X", "zzz", "0x1000h", "0x 1000", "-1"] {
+            assert!(parse_addr(text).is_err(), "{text:?} is not an address");
+        }
     }
 }
