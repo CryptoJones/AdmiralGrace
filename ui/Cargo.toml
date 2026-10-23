@@ -1,0 +1,17 @@
+[package]
+name = "ag-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "AdmiralGrace desktop analysis workbench"
+
+[[bin]]
+name = "ag-ui"
+path = "src/main.rs"
+
+[dependencies]
+ag-corpus = { path = "../crates/ag-corpus" }
+anyhow = "1"
+iced = "0.14"
+iced_aw = "0.14"
+regex = "1"
