@@ -74,7 +74,9 @@ enum CorpusCmd {
         filter: Option<String>,
     },
     Show {
-        #[arg()]
+        /// The function to show: an address, a name, or a qualified method
+        /// name such as `-[NSString length]`.
+        #[arg(allow_hyphen_values = true)]
         target: String,
     },
     Grep {
@@ -223,6 +225,19 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
     };
     let entries = source.entries();
 
+    // What the loader had to say about the data it read is said here too:
+    // nothing was dropped in silence.
+    if let Source::Corpus(corpus) = &source {
+        for warning in &corpus.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+    if let Some(overlay) = &overlay {
+        for warning in &overlay.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+
     match cmd {
         CorpusCmd::Stats => {
             let total = entries.len();
@@ -264,7 +279,12 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
                 }
                 let types = m.types.clone().unwrap_or_default();
                 let types = truncate_chars(&types, 60);
-                println!("{:#x} -[{} {}] {}", imp, m.class, m.sel, types);
+                println!(
+                    "{:#x} {} {}",
+                    imp,
+                    ag_corpus::objc::method_display(m),
+                    types
+                );
             }
         }
         CorpusCmd::List {
@@ -369,16 +389,16 @@ fn resolve(entries: &[Entry], overlay: Option<&Overlay>, target: &str) -> Result
         return Ok(index);
     }
     if let Some(o) = overlay {
-        if let Some(imp) = o.by_name.get(target) {
-            let addr = o.imp_addr(*imp);
-            if let Some(index) = entries.iter().position(|entry| entry.address == addr) {
+        // The names are qualified and already carry the shift, so they name
+        // the corpus address the method sits at.
+        if let Some(addr) = o.by_name.get(target) {
+            if let Some(index) = entries.iter().position(|entry| entry.address == *addr) {
                 return Ok(index);
             }
         }
-        for (name, imp) in &o.by_name {
+        for (name, addr) in &o.by_name {
             if name.contains(target) {
-                let addr = o.imp_addr(*imp);
-                if let Some(index) = entries.iter().position(|entry| entry.address == addr) {
+                if let Some(index) = entries.iter().position(|entry| entry.address == *addr) {
                     return Ok(index);
                 }
             }
@@ -461,6 +481,44 @@ mod tests {
                 "{target} names the first function"
             );
         }
+    }
+
+    #[test]
+    fn a_qualified_method_name_names_its_function() {
+        use ag_corpus::objc::{MethodMap, ObjCMethod};
+
+        let entries = entries();
+        let map = MethodMap {
+            methods: vec![
+                ObjCMethod {
+                    imp: 0x1000,
+                    class: "Foo".into(),
+                    sel: "bar".into(),
+                    types: None,
+                    is_class_method: false,
+                },
+                ObjCMethod {
+                    imp: 0x2000,
+                    class: "Foo".into(),
+                    sel: "bar".into(),
+                    types: None,
+                    is_class_method: true,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        let overlay = Overlay::new(map);
+
+        assert_eq!(
+            resolve(&entries, Some(&overlay), "-[Foo bar]").expect("a function"),
+            0,
+            "the instance method names the first function"
+        );
+        assert_eq!(
+            resolve(&entries, Some(&overlay), "+[Foo bar]").expect("a function"),
+            1,
+            "the class method names the second function"
+        );
     }
 
     #[test]

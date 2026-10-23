@@ -225,6 +225,28 @@ impl Provider for CorpusProvider {
     }
 
     fn problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+
+        // What the loaders had to say about the data they read. Nothing was
+        // dropped in silence, and the workbench says so too.
+        for warning in &self.corpus.warnings {
+            problems.push(Problem {
+                message: warning.clone(),
+                address: None,
+                action: Some("Check the corpus index".into()),
+            });
+        }
+
+        if let Some(overlay) = &self.overlay {
+            for warning in &overlay.warnings {
+                problems.push(Problem {
+                    message: warning.clone(),
+                    address: None,
+                    action: Some("Check the method map".into()),
+                });
+            }
+        }
+
         let failed = self
             .corpus
             .functions
@@ -232,15 +254,15 @@ impl Provider for CorpusProvider {
             .filter(|f| f.status == "failed")
             .count();
 
-        if failed == 0 {
-            return Vec::new();
+        if failed > 0 {
+            problems.push(Problem {
+                message: format!("{failed} functions failed to decompile"),
+                address: None,
+                action: Some("Re-run the provider on this target".into()),
+            });
         }
 
-        vec![Problem {
-            message: format!("{failed} functions failed to decompile"),
-            address: None,
-            action: Some("Re-run the provider on this target".into()),
-        }]
+        problems
     }
 }
 
