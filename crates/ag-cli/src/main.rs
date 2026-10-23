@@ -7,6 +7,7 @@ use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
 mod docs;
+mod image;
 mod skill;
 
 #[derive(Parser)]
@@ -53,6 +54,13 @@ enum Cmd {
     Docs {
         /// The topic to print; without one, the topics are listed.
         topic: Option<String>,
+    },
+    /// Report on a program image: an ELF, PE, COFF or Mach-O file.
+    Image {
+        /// The program image to read.
+        binary: PathBuf,
+        #[command(subcommand)]
+        cmd: image::ImageCmd,
     },
 }
 
@@ -201,6 +209,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             print,
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
+        Cmd::Image { binary, cmd } => image::run(&binary, cmd),
     }
 }
 

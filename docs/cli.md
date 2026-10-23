@@ -2,6 +2,7 @@
 
 `ag` reads an indexed decompilation corpus, or a kuna project export, and reports on it.
 Every subcommand lives under `corpus`, because both sources are described the same way.
+`ag image` reads a program image instead, through the engine's own loader.
 
 ## Building and running
 
@@ -80,6 +81,43 @@ ag corpus --root ./challenge.kuna show main
 The export holds a `.c` of every function, an `.asm` of every code section, and, under
 `--stream`, an `index.jsonl` giving each function's byte span in the `.c`. `ag docs
 corpus-format` describes both layouts.
+
+## Reading a program image
+
+`ag image` reads a program image: an ELF, PE, COFF or Mach-O file, parsed by the engine's
+own loader rather than read out of a corpus.
+
+```sh
+# The language, the entry point and the sections
+cargo run --bin ag -- image ./sample.elf info
+
+# The function and data symbols
+cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
+
+# The disassembly of one function, by name or by address
+cargo run --bin ag -- image ./sample.elf disasm main
+```
+
+## `ag image` subcommands
+
+| Subcommand | What it prints |
+|---|---|
+| `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. |
+| `symbols` | The function symbols as `address name`, and the data symbols with their size. |
+| `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
+| `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
+
+`--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
+language, the entry point and the sections; `symbols` gives the functions and the data
+symbols; `disasm` gives the blocks, their instructions, and the calls the function makes.
+Every address is reported twice, as a number and as a hex string.
+
+`disasm` takes the function as an address (`0x1198`) or as a name (`main`). A name is
+matched loosely: an exact name first, then a substring. A direct call prints the name of
+the function it calls, when that function has one.
+
+`info` and `symbols` read any format the loader reads. `disasm` decodes x86-64, so it
+refuses an image of another architecture rather than printing nonsense.
 
 ## The embedded manual and agent skill
 

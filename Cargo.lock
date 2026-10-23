@@ -29,9 +29,12 @@ name = "ag-cli"
 version = "0.1.0"
 dependencies = [
  "ag-corpus",
+ "ag-image",
  "anyhow",
  "clap",
  "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

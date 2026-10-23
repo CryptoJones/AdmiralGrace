@@ -62,6 +62,23 @@ cargo run --bin ag -- corpus --root ./corpus grep 'memcpy|malloc'
 
 Objective-C method names can be overlaid from a method map with `--methods PATH`. See `cargo run --bin ag -- corpus --help` and `cargo run --bin ag -- corpus --root ./corpus list --help` for all options.
 
+## Image CLI
+
+The CLI reads a program image as well: an ELF, PE, COFF or Mach-O file, parsed by the engine's own loader.
+
+```sh
+# The language, the entry point and the sections
+cargo run --bin ag -- image ./sample.elf info
+
+# The function and data symbols
+cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
+
+# The disassembly of one function, by name or by address
+cargo run --bin ag -- image ./sample.elf disasm main
+```
+
+Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86-64, so it refuses an image of another architecture rather than printing nonsense.
+
 ## Corpus format
 
 A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points. The leading `//` comment header of a body is dropped; the signature and the locals are kept.
