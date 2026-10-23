@@ -33,18 +33,24 @@ pub fn resolve_branches(disasm: &Disasm, entry: u64) -> ProcedureCfg {
             let ins = &disasm.instructions[i];
             cur = ins.address + ins.length as u64;
             match ins.flow {
-                Flow::Next => {
+                // A system call returns to the next instruction, like any other
+                // straight-line instruction.
+                Flow::Next | Flow::Syscall => {
                     idx = by_addr.get(&cur).copied();
                 }
                 _ if matches!(
                     ins.flow,
-                    Flow::UnconditionalBranch(_) | Flow::ConditionalBranch(_) | Flow::Call(_)
+                    Flow::UnconditionalBranch(_)
+                        | Flow::ConditionalBranch(_)
+                        | Flow::Call(_)
+                        | Flow::Xbegin(_)
                 ) =>
                 {
                     let t = match ins.flow {
                         Flow::UnconditionalBranch(t)
                         | Flow::ConditionalBranch(t)
-                        | Flow::Call(t) => t,
+                        | Flow::Call(t)
+                        | Flow::Xbegin(t) => t,
                         _ => unreachable!(),
                     };
                     if t != cur && by_addr.contains_key(&t) {
@@ -68,7 +74,10 @@ pub fn resolve_branches(disasm: &Disasm, entry: u64) -> ProcedureCfg {
                             }
                             idx = None;
                         }
-                        Flow::ConditionalBranch(t) => {
+                        // An `xbegin` either falls through into the transaction
+                        // or lands on its abort handler, so it forks like a
+                        // conditional branch.
+                        Flow::ConditionalBranch(t) | Flow::Xbegin(t) => {
                             bb.to = cur;
                             if by_addr.contains_key(&t) {
                                 bb.successor_addresses.push(t);
@@ -84,6 +93,8 @@ pub fn resolve_branches(disasm: &Disasm, entry: u64) -> ProcedureCfg {
                         }
                     }
                 }
+                // Returns, indirect transfers, interrupts and traps end the
+                // block; a trap (`ud2`) has no fall-through at all.
                 _ => {
                     bb.to = cur;
                     idx = None;

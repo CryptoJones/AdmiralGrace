@@ -36,7 +36,13 @@ pub enum Flow {
     Call(u64),
     IndirectCall,
     Return,
+    /// A software interrupt (`int n`, `int3`, `into`); control normally returns to the next instruction.
     Interrupt,
+    /// A system call (`syscall`, `sysenter`); control normally returns to the next instruction.
+    Syscall,
+    /// An instruction that always faults (`ud2`, `ud0`, `ud1`); nothing follows it in the fall-through sense.
+    Trap,
+    /// `xbegin`: starts a transaction whose abort handler is at the given address, otherwise falls through.
     Xbegin(u64),
 }
 
@@ -123,14 +129,20 @@ fn reg_id(r: iced_x86::Register) -> RegisterId {
 
 impl CpuContext for X86IcedContext {
     fn decode(&mut self, bytes: &[u8], address: u64) -> anyhow::Result<DecodedInsn> {
-        let mut dec =
-            iced_x86::Decoder::with_ip(64, bytes, address, self.options);
+        let mut dec = iced_x86::Decoder::with_ip(64, bytes, address, self.options);
         let ins = dec.decode();
         if ins.is_invalid() {
             anyhow::bail!("invalid instruction at {address:#x}");
         }
         let mnemonic = ins.mnemonic() as u32;
         let flow = match ins.flow_control() {
+            _ if matches!(
+                ins.mnemonic(),
+                iced_x86::Mnemonic::Syscall | iced_x86::Mnemonic::Sysenter
+            ) =>
+            {
+                Flow::Syscall
+            }
             iced_x86::FlowControl::Next => Flow::Next,
             iced_x86::FlowControl::UnconditionalBranch => {
                 Flow::UnconditionalBranch(ins.near_branch_target())
@@ -143,43 +155,37 @@ impl CpuContext for X86IcedContext {
             iced_x86::FlowControl::IndirectCall => Flow::IndirectCall,
             iced_x86::FlowControl::Return => Flow::Return,
             iced_x86::FlowControl::Interrupt => Flow::Interrupt,
-            other => {
-                anyhow::bail!("unhandled flow control {other:?}");
-            }
+            iced_x86::FlowControl::Exception => Flow::Trap,
+            iced_x86::FlowControl::XbeginXabortXend => match ins.mnemonic() {
+                iced_x86::Mnemonic::Xbegin => Flow::Xbegin(ins.near_branch_target()),
+                _ => Flow::Next,
+            },
         };
         let mut operands = Vec::with_capacity(4);
         for i in 0..ins.op_count() {
             let op = ins.op_kind(i);
             let o = match op {
                 iced_x86::OpKind::Register => Operand::Register(reg_id(ins.op_register(i))),
-                iced_x86::OpKind::Immediate8 | iced_x86::OpKind::Immediate8_2nd
-                | iced_x86::OpKind::Immediate16 | iced_x86::OpKind::Immediate32
+                iced_x86::OpKind::Immediate8
+                | iced_x86::OpKind::Immediate8_2nd
+                | iced_x86::OpKind::Immediate16
+                | iced_x86::OpKind::Immediate32
                 | iced_x86::OpKind::Immediate64 => Operand::Imm(ins.immediate(i) as i128),
-                iced_x86::OpKind::Immediate8to16 | iced_x86::OpKind::Immediate8to32
-                | iced_x86::OpKind::Immediate8to64 | iced_x86::OpKind::Immediate32to64 => {
-                    match op {
-                        iced_x86::OpKind::Immediate8to16 => {
-                            Operand::Imm(ins.immediate8to16() as i128)
-                        }
-                        iced_x86::OpKind::Immediate8to32 => {
-                            Operand::Imm(ins.immediate8to32() as i128)
-                        }
-                        iced_x86::OpKind::Immediate8to64 => {
-                            Operand::Imm(ins.immediate8to64() as i128)
-                        }
-                        _ => Operand::Imm(ins.immediate32to64() as i128),
-                    }
-                }
-                iced_x86::OpKind::NearBranch16 | iced_x86::OpKind::NearBranch32
-                | iced_x86::OpKind::NearBranch64 => {
-                    Operand::Imm(ins.near_branch_target() as i128)
-                }
-                iced_x86::OpKind::FarBranch16 | iced_x86::OpKind::FarBranch32 => {
-                    Operand::Imm(
-                        ((ins.far_branch_selector() as i128) << 32)
-                            | ins.far_branch32() as i128,
-                    )
-                }
+                iced_x86::OpKind::Immediate8to16
+                | iced_x86::OpKind::Immediate8to32
+                | iced_x86::OpKind::Immediate8to64
+                | iced_x86::OpKind::Immediate32to64 => match op {
+                    iced_x86::OpKind::Immediate8to16 => Operand::Imm(ins.immediate8to16() as i128),
+                    iced_x86::OpKind::Immediate8to32 => Operand::Imm(ins.immediate8to32() as i128),
+                    iced_x86::OpKind::Immediate8to64 => Operand::Imm(ins.immediate8to64() as i128),
+                    _ => Operand::Imm(ins.immediate32to64() as i128),
+                },
+                iced_x86::OpKind::NearBranch16
+                | iced_x86::OpKind::NearBranch32
+                | iced_x86::OpKind::NearBranch64 => Operand::Imm(ins.near_branch_target() as i128),
+                iced_x86::OpKind::FarBranch16 | iced_x86::OpKind::FarBranch32 => Operand::Imm(
+                    ((ins.far_branch_selector() as i128) << 32) | ins.far_branch32() as i128,
+                ),
                 _ => Operand::Mem {
                     base: reg_id(ins.memory_base()),
                     index: reg_id(ins.memory_index()),
