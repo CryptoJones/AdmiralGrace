@@ -180,6 +180,11 @@ impl KunaCli {
     /// beside the export is used instead — an export is usually kept next to
     /// what it was made from.
     ///
+    /// The fallback beside the export is `root.join(export.name)`, so it only
+    /// finds the binary when the export was named after it. An export named
+    /// for something else — a version, a target — has to keep the binary
+    /// where its README says it is.
+    ///
     /// The executable is named here, so a caller can say which kuna to run.
     pub fn for_export(export: &KunaExport, program: PathBuf) -> Option<KunaCli> {
         let binary = export

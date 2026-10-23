@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use iced::keyboard::{self, Key};
 use iced::{Element, Subscription, Task};
@@ -115,6 +116,20 @@ pub struct KunaState {
     pub cli: Option<KunaCli>,
     /// Where its answers are kept.
     pub cache: SharedCache,
+}
+
+/// What the workbench still has to ask the kuna CLI about a function.
+///
+/// Every answer the CLI gives costs a process run against the binary, so an
+/// answer already in the cache is not asked for again.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct KunaAsks {
+    /// The decompilation of the function.
+    decompile: bool,
+    /// The references the function makes.
+    xrefs_from: bool,
+    /// The references made to the function.
+    xrefs_to: bool,
 }
 
 /// What the path prompt is asking for.
@@ -334,7 +349,16 @@ impl App {
 
     /// Load a kuna project export into the workbench.
     fn load_kuna(&mut self, root: &Path) -> Task<Message> {
-        match KunaProvider::load(root) {
+        // The cache is kept only when the same export is being reloaded: the
+        // answers belong to one binary, and another export is another binary.
+        let same_project = self.provider.project().root.as_deref() == Some(root);
+        let cache = if same_project {
+            self.kuna.as_ref().map(|state| Arc::clone(&state.cache))
+        } else {
+            None
+        };
+
+        match KunaProvider::load(root, KunaCli::program(), cache) {
             Ok(provider) => {
                 let cli = provider.cli().cloned();
                 let cache = provider.cache();
@@ -510,39 +534,85 @@ impl App {
     /// The decompilation carries the mapping from the body's lines to the
     /// addresses they came from; the cross references say what the function
     /// touches and what touches it.
+    ///
+    /// A question the cache has already answered is not asked again: every
+    /// answer is a process run against the binary, and running it a second
+    /// time only repeats what is already known.
     fn ask_kuna_about_the_function(&mut self, address: u64) -> Task<Message> {
         let Some(cli) = self.kuna.as_ref().and_then(|state| state.cli.clone()) else {
             return Task::none();
         };
 
-        let decompile = cli.clone();
-        let from = cli.clone();
-        let to = cli.clone();
+        let asks = self.kuna_asks(address);
+        let mut tasks = Vec::new();
 
-        Task::batch(vec![
-            Task::perform(
+        if asks.decompile {
+            let decompile = cli.clone();
+            tasks.push(Task::perform(
                 async move {
                     decompile
                         .decompile(address)
                         .map_err(|error| format!("{error:#}"))
                 },
                 move |result| Message::KunaFunctionReady(address, result),
-            ),
-            Task::perform(
+            ));
+        }
+
+        for (direction, wanted) in [
+            (Direction::From, asks.xrefs_from),
+            (Direction::To, asks.xrefs_to),
+        ] {
+            if !wanted {
+                continue;
+            }
+
+            let xrefs = cli.clone();
+            tasks.push(Task::perform(
                 async move {
-                    from.xrefs(address, Direction::From)
+                    xrefs
+                        .xrefs(address, direction)
                         .map_err(|error| format!("{error:#}"))
                 },
-                move |result| Message::KunaXrefsReady(address, Direction::From, result),
-            ),
-            Task::perform(
-                async move {
-                    to.xrefs(address, Direction::To)
-                        .map_err(|error| format!("{error:#}"))
-                },
-                move |result| Message::KunaXrefsReady(address, Direction::To, result),
-            ),
-        ])
+                move |result| Message::KunaXrefsReady(address, direction, result),
+            ));
+        }
+
+        Task::batch(tasks)
+    }
+
+    /// What the workbench still has to ask the kuna CLI about a function.
+    fn kuna_asks(&self, address: u64) -> KunaAsks {
+        let Some(state) = &self.kuna else {
+            return KunaAsks::default();
+        };
+
+        let Ok(cache) = state.cache.lock() else {
+            // A cache that cannot be read is a cache that cannot answer, so
+            // everything is asked again.
+            return KunaAsks {
+                decompile: true,
+                xrefs_from: true,
+                xrefs_to: true,
+            };
+        };
+
+        KunaAsks {
+            decompile: cache.function(address).is_none(),
+            xrefs_from: cache.xrefs(address, Direction::From).is_none(),
+            xrefs_to: cache.xrefs(address, Direction::To).is_none(),
+        }
+    }
+
+    /// Throw away what the kuna CLI has already answered.
+    ///
+    /// The answers are held for the life of the project; a reload is how the
+    /// workbench asks the same questions again.
+    fn clear_kuna_cache(&mut self) {
+        if let Some(state) = &self.kuna {
+            if let Ok(mut cache) = state.cache.lock() {
+                cache.clear();
+            }
+        }
     }
 
     /// The decompilation the CLI has already given for a function.
@@ -729,6 +799,10 @@ impl App {
 
             Message::FileReload => {
                 if self.corpus_root.is_some() || self.kuna_root.is_some() {
+                    // A reload asks the CLI again: the export may have been
+                    // written since, and the binary behind it may have
+                    // changed under it.
+                    self.clear_kuna_cache();
                     return self.load_project();
                 } else {
                     self.notice = Some("Nothing to reload".into());
@@ -1300,5 +1374,94 @@ mod tests {
         assert_eq!(reported.reachable, 5);
         assert_eq!(reported.code_bytes, 500);
         assert_eq!(reported.main.map(|(_, address)| address), Some(0x1198));
+    }
+
+    /// The decompilation the CLI gives for the sample export's one function.
+    fn one_function() -> FunctionJson {
+        FunctionJson {
+            code: Some("int one(void)\n{\n  return 1;\n}".into()),
+            error: None,
+            unstructured_gotos: 0,
+            line_mappings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_cached_function_is_not_asked_about_again() {
+        let (_export, mut app) = kuna_app();
+
+        // Nothing has been answered yet, so everything is asked.
+        assert_eq!(
+            app.kuna_asks(0x1000),
+            KunaAsks {
+                decompile: true,
+                xrefs_from: true,
+                xrefs_to: true
+            }
+        );
+
+        let _ = app.update(Message::KunaFunctionReady(0x1000, Ok(one_function())));
+        let _ = app.update(Message::KunaXrefsReady(
+            0x1000,
+            Direction::From,
+            Ok(Vec::new()),
+        ));
+        let _ = app.update(Message::KunaXrefsReady(
+            0x1000,
+            Direction::To,
+            Ok(Vec::new()),
+        ));
+
+        let asks = app.kuna_asks(0x1000);
+        assert!(!asks.decompile, "the decompilation is known");
+        assert!(!asks.xrefs_from, "the references out are known");
+        assert!(!asks.xrefs_to, "the references in are known");
+    }
+
+    #[test]
+    fn each_direction_of_the_cross_references_is_asked_about_on_its_own() {
+        let (_export, mut app) = kuna_app();
+
+        // An answer of no references at all is an answer.
+        let _ = app.update(Message::KunaXrefsReady(
+            0x1000,
+            Direction::From,
+            Ok(Vec::new()),
+        ));
+
+        let asks = app.kuna_asks(0x1000);
+        assert!(asks.decompile, "the decompilation is not known yet");
+        assert!(!asks.xrefs_from, "the references out are known");
+        assert!(asks.xrefs_to, "the references in are not known yet");
+    }
+
+    #[test]
+    fn a_reload_throws_away_what_the_cli_answered() {
+        let (_export, mut app) = kuna_app();
+
+        let _ = app.update(Message::KunaFunctionReady(0x1000, Ok(one_function())));
+        let _ = app.update(Message::KunaXrefsReady(
+            0x1000,
+            Direction::From,
+            Ok(Vec::new()),
+        ));
+
+        let before = app.kuna.as_ref().expect("the kuna state").cache.clone();
+        assert!(before.lock().expect("the cache").function(0x1000).is_some());
+
+        // A reload asks the CLI again.
+        let _ = app.update(Message::FileReload);
+
+        let after = app.kuna.as_ref().expect("the kuna state").cache.clone();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "the reload kept the cache the answers live in"
+        );
+        assert!(after.lock().expect("the cache").function(0x1000).is_none());
+        assert!(after
+            .lock()
+            .expect("the cache")
+            .xrefs(0x1000, Direction::From)
+            .is_none());
     }
 }
