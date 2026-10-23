@@ -143,6 +143,8 @@ pub enum HitKind {
     String,
     /// A code reference matched.
     CodeRef,
+    /// A named piece of data matched.
+    Data,
 }
 
 impl HitKind {
@@ -152,6 +154,7 @@ impl HitKind {
             HitKind::Function => "Function",
             HitKind::String => "String",
             HitKind::CodeRef => "Code reference",
+            HitKind::Data => "Data",
         }
     }
 }
@@ -246,6 +249,24 @@ pub struct SegmentEntry {
     pub size: u64,
     /// Whether the section holds code.
     pub executable: bool,
+    /// Whether the section is mapped into memory.
+    ///
+    /// A section that is not mapped — the debug information of an ELF, say
+    /// — lives in the file only, and has no address to jump to.
+    pub mapped: bool,
+}
+
+/// A named piece of data in the program image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSymbolEntry {
+    /// Where the symbol lives.
+    pub address: u64,
+    /// Its name.
+    pub name: String,
+    /// How many bytes it holds, when the symbol says.
+    pub size: Option<u64>,
+    /// The section it lives in, when it is in one.
+    pub section: Option<String>,
 }
 
 pub use corpus::is_corpus;
@@ -275,6 +296,9 @@ pub trait Provider: Send + Sync {
     fn pseudocode(&self, address: u64) -> Option<String>;
 
     /// Bytes around an address, when available.
+    ///
+    /// The rows hold the bytes of the file around the address, sixteen to a
+    /// row, so a reader can see the bytes of the selection in place.
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>>;
 
     /// Cross references for an address.
@@ -301,6 +325,11 @@ pub trait Provider: Send + Sync {
 
     /// The sections of the program image, when the project is one.
     fn segments(&self) -> Vec<SegmentEntry> {
+        Vec::new()
+    }
+
+    /// The named data of the program image, when the project has some.
+    fn data_symbols(&self) -> Vec<DataSymbolEntry> {
         Vec::new()
     }
 

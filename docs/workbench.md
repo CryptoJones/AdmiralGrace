@@ -76,6 +76,13 @@ callers are known. The two numbers of the program summary that need the whole pr
 the reachable count and the no-callers count — are unknown until then as well, and say
 so rather than showing a zero that is not true.
 
+The Bytes tab and the lower Bytes panel show the bytes of the file around the selection:
+sixteen bytes to a row, with the address, the hex and the ASCII column, and the bytes of
+the selected instruction marked. The pane follows the selection, so picking an instruction
+in the listing moves the bytes to it. Picking a section or a named symbol in the navigator
+moves them there too; a symbol that lives only in memory — in `.bss` — has no bytes in the
+file, and the pane says so rather than showing zeroes.
+
 The File menu opens an image the same way, with `Open binary...`.
 
 What the workbench reads:
@@ -84,7 +91,9 @@ What the workbench reads:
 |---|---|
 | The sections of the image | The Segments section of the navigator, and the inspector's image card, with the flag that says which of them hold code. |
 | The function symbols | The function list of the navigator. |
+| The data symbols | The Data part of the Segments section of the navigator, and the search results. |
 | The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
+| The bytes of the file | The Bytes tab and the lower Bytes panel: the bytes around the selection. |
 | The direct calls of a function | The References tab and the inspector: what the function calls, and what calls it. |
 
 The decoder is x86-64. An image of another architecture opens with its symbols and its

@@ -449,7 +449,7 @@ fn bytes_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    hex_dump(&app.work.bytes)
+    hex_dump(app, &app.work.bytes)
 }
 
 /// The reference view.
@@ -521,7 +521,7 @@ fn lower_content(app: &App) -> Element<'_, Message> {
                 )
                 .into()
             } else {
-                hex_dump(&app.work.bytes)
+                hex_dump(app, &app.work.bytes)
             }
         }
         LowerTab::Strings => {
@@ -564,58 +564,95 @@ fn lower_content(app: &App) -> Element<'_, Message> {
 }
 
 /// A hex dump of the given rows.
-fn hex_dump(rows: &[ByteLine]) -> Element<'_, Message> {
+///
+/// The bytes of the selected instruction are marked, so the reader can see
+/// which bytes of the row the selection covers.
+fn hex_dump<'a>(app: &'a App, rows: &'a [ByteLine]) -> Element<'a, Message> {
+    let selected = selected_instruction(app);
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for row in rows {
-        let hex = row
-            .bytes
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let ascii: String = row
-            .bytes
-            .iter()
-            .map(|b| {
-                if b.is_ascii_graphic() || *b == b' ' {
-                    *b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-
-        list = list.push(
-            Container::new(
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .spacing(14)
-                    .push(
-                        Text::new(format!("{:08X}", row.address))
-                            .size(12)
-                            .color(color::ADDR)
-                            .font(MONO)
-                            .width(Length::Fixed(88.0)),
-                    )
-                    .push(
-                        Text::new(hex)
-                            .size(12)
-                            .color(color::BYTES)
-                            .font(MONO)
-                            .width(Length::Fixed(360.0)),
-                    )
-                    .push(Text::new(ascii).size(12).color(color::DIM).font(MONO)),
-            )
-            .width(Length::Fill),
-        );
+        list = list.push(hex_row(row, selected));
     }
 
     scrollable(list)
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// The bytes of the selected instruction, as an address and a length.
+///
+/// The listing knows how long each instruction is, so the byte pane can
+/// mark the bytes of the instruction the selection sits on.
+fn selected_instruction(app: &App) -> Option<(u64, usize)> {
+    let address = app.selection.address()?;
+    let line = app
+        .work
+        .listing
+        .iter()
+        .find(|line| line.address == address)?;
+    let length = line.bytes.split_whitespace().count();
+
+    (length > 0).then_some((address, length))
+}
+
+/// One row of the hex dump.
+fn hex_row(row: &ByteLine, selected: Option<(u64, usize)>) -> Element<'_, Message> {
+    let mut hex = Row::new().spacing(0);
+
+    for (index, byte) in row.bytes.iter().enumerate() {
+        let address = row.address + index as u64;
+        let marked = selected
+            .is_some_and(|(start, length)| address >= start && address < start + length as u64);
+
+        hex = hex.push(
+            Container::new(
+                Text::new(format!("{byte:02X}"))
+                    .size(12)
+                    .color(if marked { color::CYAN } else { color::BYTES })
+                    .font(MONO),
+            )
+            .width(Length::Fixed(21.0))
+            .style(move |_| container::Style {
+                background: if marked {
+                    Some(Background::Color(color::FOCUS_BG))
+                } else {
+                    None
+                },
+                ..container::Style::default()
+            }),
+        );
+    }
+
+    let ascii: String = row
+        .bytes
+        .iter()
+        .map(|b| {
+            if b.is_ascii_graphic() || *b == b' ' {
+                *b as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(14)
+            .push(
+                Text::new(format!("{:08X}", row.address))
+                    .size(12)
+                    .color(color::ADDR)
+                    .font(MONO)
+                    .width(Length::Fixed(88.0)),
+            )
+            .push(hex)
+            .push(Text::new(ascii).size(12).color(color::DIM).font(MONO)),
+    )
+    .width(Length::Fill)
+    .into()
 }
 
 /// A table of the strings the binary holds.

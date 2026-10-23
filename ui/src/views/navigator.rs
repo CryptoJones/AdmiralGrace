@@ -6,7 +6,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
-use crate::data::FunctionRow;
+use crate::data::{DataSymbolEntry, FunctionRow, SegmentEntry};
 use crate::theme::{color, MONO};
 use crate::views::{count, count_or_indexing, section_header, subtle};
 
@@ -180,7 +180,7 @@ fn list_heading(app: &App) -> &'static str {
 /// How many rows the navigator's list holds.
 fn list_count(app: &App) -> usize {
     if app.navigator.section == Section::Segments {
-        app.provider.segments().len()
+        app.provider.segments().len() + app.provider.data_symbols().len()
     } else {
         app.navigator.rows.len()
     }
@@ -198,11 +198,14 @@ fn list_contents(app: &App) -> Column<'_, Message> {
     function_list(app)
 }
 
-/// The sections of the program image.
+/// The sections of the program image, and the named data in it.
+///
+/// A section or a symbol can be picked, which moves the byte pane to it.
 fn segment_list(app: &App) -> Column<'_, Message> {
     let segments = app.provider.segments();
+    let symbols = app.provider.data_symbols();
 
-    if segments.is_empty() {
+    if segments.is_empty() && symbols.is_empty() {
         return Column::new()
             .spacing(3)
             .push(Text::new("No sections").size(12).color(color::MUTED))
@@ -215,33 +218,82 @@ fn segment_list(app: &App) -> Column<'_, Message> {
 
     let mut list = Column::new().spacing(1).width(Length::Fill);
 
-    for segment in segments {
-        list = list.push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .spacing(6)
-                .push(
-                    Text::new(segment.name.clone())
-                        .size(12)
-                        .color(color::TEXT)
-                        .width(Length::Fill),
-                )
-                .push(
-                    Text::new(if segment.executable { "x" } else { " " })
-                        .size(11)
-                        .color(color::GREEN)
-                        .font(MONO),
-                )
-                .push(
-                    Text::new(format!("{:#x}", segment.vma))
-                        .size(11)
-                        .color(color::MUTED)
-                        .font(MONO),
-                ),
-        );
+    if !segments.is_empty() {
+        list = list.push(subtle("Sections"));
+
+        for segment in &segments {
+            list = list.push(segment_row(segment));
+        }
+    }
+
+    if !symbols.is_empty() {
+        list = list.push(subtle("Data"));
+
+        for symbol in &symbols {
+            list = list.push(symbol_row(symbol));
+        }
     }
 
     list
+}
+
+/// One section of the program image.
+fn segment_row(segment: &SegmentEntry) -> Element<'static, Message> {
+    let content = Row::new()
+        .align_y(Alignment::Center)
+        .spacing(6)
+        .push(
+            Text::new(segment.name.clone())
+                .size(12)
+                .color(color::TEXT)
+                .width(Length::Fill),
+        )
+        .push(
+            Text::new(if segment.executable { "x" } else { " " })
+                .size(11)
+                .color(color::GREEN)
+                .font(MONO),
+        )
+        .push(
+            Text::new(format!("{:#x}", segment.vma))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fixed(72.0)),
+        );
+
+    // A section that is not mapped has no address to jump to.
+    if !segment.mapped {
+        return content.into();
+    }
+
+    mouse_area(content)
+        .on_press(Message::AddressSelected(segment.vma))
+        .into()
+}
+
+/// One named piece of data.
+fn symbol_row(symbol: &DataSymbolEntry) -> Element<'static, Message> {
+    let content = Row::new()
+        .align_y(Alignment::Center)
+        .spacing(6)
+        .push(
+            Text::new(symbol.name.clone())
+                .size(12)
+                .color(color::TEXT)
+                .width(Length::Fill),
+        )
+        .push(
+            Text::new(format!("{:#x}", symbol.address))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fixed(72.0)),
+        );
+
+    mouse_area(content)
+        .on_press(Message::AddressSelected(symbol.address))
+        .into()
 }
 
 /// The scrollable function list.

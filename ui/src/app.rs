@@ -521,6 +521,28 @@ impl App {
         self.ask_kuna_about_the_function(address)
     }
 
+    /// Reload the bytes around the selection.
+    ///
+    /// The byte pane follows the selection: it shows the bytes of the file
+    /// around the address the reader is looking at. A provider that only
+    /// knows the bytes of a whole function shows those when the selection
+    /// is an address inside one; a provider that answers with no bytes at
+    /// all has nothing to show, and says so.
+    fn refresh_bytes(&mut self) {
+        let Some(address) = self.selection.address() else {
+            self.work.bytes.clear();
+            return;
+        };
+
+        self.work.bytes = match self.provider.bytes(address) {
+            Some(bytes) => bytes,
+            None => match self.containing_function(address) {
+                Some(function) => self.provider.bytes(function).unwrap_or_default(),
+                None => Vec::new(),
+            },
+        };
+    }
+
     /// Apply a selection without recording it in the history.
     fn apply_history_selection(&mut self, selection: Selection) -> Task<Message> {
         match selection {
@@ -530,6 +552,7 @@ impl App {
                     let _ = self.select_function(function, false);
                 }
                 self.selection = Selection::Address(address);
+                self.refresh_bytes();
                 Task::none()
             }
             Selection::ByteRange { start, .. } => {
@@ -537,6 +560,7 @@ impl App {
                     let _ = self.select_function(function, false);
                 }
                 self.selection = Selection::ByteRange { start, len: 0 };
+                self.refresh_bytes();
                 Task::none()
             }
             Selection::None => {
@@ -734,6 +758,13 @@ impl App {
             Message::AddressSelected(address) => {
                 self.selection = Selection::Address(address);
                 self.history.push(self.selection);
+                // A provider that knows the address says what it is; one
+                // that does not leaves the last detail alone.
+                if let Some(detail) = self.provider.function_detail(address) {
+                    self.work.detail = Some(detail);
+                }
+                // The byte pane follows the selection to the address.
+                self.refresh_bytes();
             }
 
             Message::ViewTabSelected(tab) => {
@@ -1318,6 +1349,33 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
         assert_eq!(callers, expected, "the pane holds the callers");
+    }
+
+    #[test]
+    fn the_byte_pane_follows_the_selection() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        // The first function is selected, and the bytes around it are shown.
+        assert!(!app.work.bytes.is_empty(), "the bytes are shown");
+
+        // Picking an address in the listing moves the byte pane to it.
+        let address = app.work.listing[2].address;
+        let _ = app.update(Message::AddressSelected(address));
+
+        assert_eq!(app.selection, Selection::Address(address));
+        assert!(
+            app.work
+                .bytes
+                .iter()
+                .any(|row| row.address <= address && address < row.address + 16),
+            "the byte pane moved to the address: {:?}",
+            app.work.bytes
+        );
     }
 
     #[test]
