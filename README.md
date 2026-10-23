@@ -66,7 +66,7 @@ The corpus directory must contain a `decompile-index.json`. Without one the work
 
 ## Development status
 
-The engine is under active development. Several stages of the full decompilation pipeline are still planned or incomplete. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. Several stages of the full decompilation pipeline are still planned or incomplete. Whether the engine should build on the kuna crates instead of its own decoder and loader is evaluated in `docs/KUNA_CRATES_EVALUATION.md`. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 
