@@ -111,7 +111,7 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 `pseudocode` and `export` take the engine's options, `--option NAME VALUE` (such as `--option loop-form while`, repeated as needed), and `ag catalog` prints every option with its symptoms; the generated `docs/options.md` opens with the index of *if the output shows X, try Y*.
 
-`cfg` reports the control-flow graph of a function: its blocks, and the edges between them, each edge marked fall-through or taken. `calls` reports who calls whom: with a function, what it calls and who calls it; without one, the whole call graph. A `jmp` out of a function is a call marked `(tail call)`, so a PLT stub names the import it jumps to.
+`cfg` reports the control-flow graph of a function: its blocks, and the edges between them, each edge marked fall-through or taken. The walk stops at a `jmp` to another function the image knows — a tail call, which `calls` reports — so the sample's `frame_dummy` is its one block and not `register_tm_clones`'s after it. `calls` reports who calls whom: with a function, what it calls and who calls it; without one, the whole call graph. A `jmp` out of a function is a call marked `(tail call)`, so a PLT stub names the import it jumps to.
 
 `data` reports the data the image holds and the functions that use it: with a function, the data that function refers to; with a piece of data, the functions that use it.
 

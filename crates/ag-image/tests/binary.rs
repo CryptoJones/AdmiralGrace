@@ -570,10 +570,12 @@ fn the_functions_that_use_a_piece_of_data_are_named() {
 
     let users_of_the_flag = users.get(&0x4010).expect("the flag is used by something");
 
+    // frame_dummy tail-calls register_tm_clones, whose read of the flag is
+    // its own: the walk stops at the jump, so it is not a user.
     assert_eq!(
         users_of_the_flag,
-        &[0x1060, 0x1090, 0x10c0, 0x1100, 0x1140],
-        "the five functions of the runtime touch the flag"
+        &[0x1060, 0x1090, 0x10c0, 0x1100],
+        "the four functions of the runtime that touch the flag"
     );
 }
 

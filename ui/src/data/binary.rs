@@ -837,6 +837,14 @@ mod tests {
             provider.pseudocode(0x1140).as_deref(),
             Some("// thunk for register_tm_clones")
         );
+
+        // The listing and the graph stop at the jump: frame_dummy is its two
+        // instructions in one block, not register_tm_clones' blocks after it.
+        let addresses: Vec<u64> = listing.iter().map(|line| line.address).collect();
+        assert_eq!(addresses, vec![0x1140, 0x1144]);
+        let graph = provider.graph(0x1140).expect("frame_dummy has a graph");
+        assert_eq!(graph.blocks.len(), 1, "{graph:?}");
+        assert!(graph.edges.is_empty(), "{:?}", graph.edges);
     }
 
     #[test]
@@ -1212,8 +1220,11 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
 
-        assert_eq!(users.len(), 5, "{users:?}");
+        // Four: frame_dummy's read of the flag was register_tm_clones',
+        // which it tail-calls, and the walk stops at the jump.
+        assert_eq!(users.len(), 4, "{users:?}");
         assert!(users.contains(&"_start"), "{users:?}");
+        assert!(!users.contains(&"frame_dummy"), "{users:?}");
     }
 
     #[test]

@@ -158,7 +158,7 @@ use iced_x86::Mnemonic;
 use crate::arch::Bitness;
 use crate::ast::{AstNode, BinaryOp};
 use crate::cfg::ProcedureCfg;
-use crate::cfgwalk::resolve_branches;
+use crate::cfgwalk::{resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
@@ -197,6 +197,21 @@ pub trait Symbols {
 impl<F: Fn(u64) -> Option<String>> Symbols for F {
     fn function_name(&self, address: u64) -> Option<String> {
         self(address)
+    }
+}
+
+/// The function entries the control-flow walk stops at, read from the
+/// lifter's symbols: a function the symbols name, or a GOT slot they say
+/// holds an import. This is how [`lift_block`] walks the way an image does.
+struct SymbolEntries<'a>(&'a dyn Symbols);
+
+impl Entries for SymbolEntries<'_> {
+    fn is_function(&self, address: u64) -> bool {
+        self.0.function_name(address).is_some()
+    }
+
+    fn is_import_slot(&self, slot: u64) -> bool {
+        matches!(self.0.pointee(slot), Some(Pointee::Import(_)))
     }
 }
 
@@ -500,7 +515,8 @@ pub fn lift_function(
 }
 
 /// Lift a run of instructions as a function entered at `entry`: the graph
-/// is built from the instructions alone.
+/// is built from the instructions alone, stopping at a `jmp` to a function
+/// `symbols` names, as an image's walk does.
 pub fn lift_block(
     instructions: &[DecodedInsn],
     entry: u64,
@@ -513,7 +529,7 @@ pub fn lift_block(
         file_offset_of_segment: 0,
         instructions: instructions.to_vec(),
     };
-    let cfg = resolve_branches(&disasm, entry);
+    let cfg = resolve_branches_among(&disasm, entry, &SymbolEntries(symbols));
     lift_function(
         &disasm,
         &cfg,
@@ -571,9 +587,10 @@ struct Chain {
 /// no other block has that successor; the chain ends at the first block
 /// that does not. A chain whose last block has no successor must end in
 /// `ret` or in a `jmp` that leaves the function — one to a function
-/// `symbols` names, which the control-flow walk may have followed into but
-/// this does not, or an indirect one; a chain that ends in a trap is
-/// refused as `the block ends in <mnemonic>`.
+/// `symbols` names (a walk told the image's entries stops there too; one
+/// told nothing follows it into the callee, which this does not), or an
+/// indirect one; a chain that ends in a trap is refused as `the block ends
+/// in <mnemonic>`.
 fn chains(
     disasm: &Disasm,
     cfg: &ProcedureCfg,

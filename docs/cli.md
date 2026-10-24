@@ -303,7 +303,12 @@ block is the fall-through; every other edge is a branch that is taken. It is one
 one place, so the workbench and the command line name an edge the same way. Its JSON shape is
 the one a graph tool can be fed directly: `blocks`, with the `from`, the `to` and the
 instructions of each block, and `edges`, with the `from`, the `to` and the `kind` of each
-one.
+one. The walk is of the function alone: a `jmp` to the entry of another function the image
+names, or through a GOT slot it resolves to an import, is a tail call — the block ends there
+with no successor, and `calls` reports the call — while a jump inside the function, or to
+an address no function is known at, is an edge as any other. So the sample's `frame_dummy`,
+which is `endbr64; jmp register_tm_clones`, is one block of two instructions and no edges,
+and `register_tm_clones`' blocks are its own; `disasm` lists the same blocks.
 
 `calls` reports who calls whom, which needs the whole program read. With a function it
 gives the calls that function makes, with the address of every call site, and the

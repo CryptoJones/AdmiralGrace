@@ -1642,14 +1642,15 @@ mod tests {
             .map(|function| function.name.as_str())
             .collect();
 
+        // frame_dummy tail-calls register_tm_clones, whose read of the flag
+        // is its own: the walk stops at the jump.
         assert_eq!(
             users,
             vec![
                 "_start",
                 "deregister_tm_clones",
                 "register_tm_clones",
-                "__do_global_dtors_aux",
-                "frame_dummy"
+                "__do_global_dtors_aux"
             ],
             "{users:?}"
         );
@@ -1681,7 +1682,7 @@ mod tests {
 
         assert_eq!(entry.address_hex, "0x4010");
         assert_eq!(entry.name.as_deref(), Some("completed.0"));
-        assert_eq!(entry.functions.len(), 5, "{:?}", entry.functions);
+        assert_eq!(entry.functions.len(), 4, "{:?}", entry.functions);
     }
 
     #[test]
@@ -1691,7 +1692,7 @@ mod tests {
         let entry = data_at_entry(&image, "completed.0").expect("the flag is there");
 
         assert_eq!(entry.address_hex, "0x4010");
-        assert_eq!(entry.functions.len(), 5, "{:?}", entry.functions);
+        assert_eq!(entry.functions.len(), 4, "{:?}", entry.functions);
     }
 
     #[test]

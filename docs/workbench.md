@@ -113,7 +113,9 @@ file, and the pane says so rather than showing zeroes.
 
 The Graph tab draws the control-flow graph of the selected function. Every block the
 control-flow walk found is a box with the instructions of the block in it, and every way
-the code goes on is an arrow. A block that goes on in two ways is a branch: the arrow that
+the code goes on is an arrow. The walk stops at a `jmp` to another function the image
+knows — a tail call, which the references list — so the sample's `frame_dummy` is one box,
+not `register_tm_clones`' boxes after it. A block that goes on in two ways is a branch: the arrow that
 leaves the end of the block is the fall-through, and the other one is the branch that is
 taken, and both say so. The blocks are laid out in rows — a block sits below the deepest
 block that reaches it — and the graph is drawn to fit the pane. It can be dragged with the

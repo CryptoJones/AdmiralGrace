@@ -223,6 +223,35 @@ fn the_disassembly_of_a_32_bit_elf_is_reported_as_json() {
 }
 
 #[test]
+fn the_cfg_of_a_function_that_tail_calls_another_stops_at_the_jump() {
+    // frame_dummy is endbr64; jmp register_tm_clones: its graph is its one
+    // block, not register_tm_clones' blocks after it.
+    let report = image("sample.elf", &["cfg", "frame_dummy"]);
+
+    assert!(report.contains("blocks: 1\nedges: 0\n"), "{report}");
+    assert!(report.contains("block 0x1140 - 0x1149\n"), "{report}");
+    assert!(
+        report.contains("  instructions: 0x1140 0x1144\n"),
+        "{report}"
+    );
+    assert!(!report.contains("0x10c0"), "{report}");
+
+    let report = image_json("sample.elf", &["cfg", "frame_dummy"]);
+    assert_eq!(report["blocks"].as_array().expect("the blocks").len(), 1);
+    assert_eq!(report["edges"].as_array().expect("the edges").len(), 0);
+
+    // The listing stops there too, and the call is still reported.
+    let report = image("sample.elf", &["disasm", "frame_dummy"]);
+    assert!(report.contains("; block 0x1140\n"), "{report}");
+    assert!(!report.contains("0x10c0 "), "{report}");
+    let report = image("sample.elf", &["calls", "frame_dummy"]);
+    assert!(
+        report.contains("  0x1144 -> 0x10c0 register_tm_clones (tail call)\n"),
+        "{report}"
+    );
+}
+
+#[test]
 fn the_cfg_of_a_32_bit_elf_has_its_loop() {
     let report = image("sample32.elf", &["cfg", "main"]);
 

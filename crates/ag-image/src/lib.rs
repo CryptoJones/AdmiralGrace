@@ -7,7 +7,10 @@
 //!
 //! The disassembly is the engine's: the bytes of the section go through
 //! [`X86IcedContext`] and [`Disasm::decode`], and the control-flow graph
-//! comes from [`resolve_branches`]. The text of an instruction is iced's,
+//! comes from [`resolve_branches_among`], told which addresses are the
+//! entries of the image's functions and which GOT slots hold its imports
+//! ([`Entries`]), so a `jmp` to another function ends the graph as a tail
+//! call rather than walking into the callee. The text of an instruction is iced's,
 //! because the engine keeps the flow of an instruction and not its spelling.
 //! The width of the code — 32-bit or 64-bit x86 — is read from the image's
 //! language, and both the engine's decoder and the text are told it, so a
@@ -36,12 +39,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ag_engine::cfgwalk::resolve_branches;
+use ag_engine::cfgwalk::{resolve_branches_among, Entries};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
 use ag_engine::lift::{lift_function, Pointee, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
+use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
 
@@ -823,7 +827,7 @@ impl Binary {
         })?;
 
         let decoded = code.decoded();
-        let cfg = resolve_branches(&decoded.disasm, address);
+        let cfg = self.walk(&decoded.disasm, address);
         let name = self
             .function_name(address)
             .map(str::to_string)
@@ -989,6 +993,13 @@ impl Binary {
         })
     }
 
+    /// The control-flow graph of the function at `address`, walked among
+    /// the functions of the image: a `jmp` to another of them, or through
+    /// a GOT slot that holds an import, ends the graph as a tail call.
+    fn walk(&self, disasm: &Disasm, address: u64) -> ProcedureCfg {
+        resolve_branches_among(disasm, address, self)
+    }
+
     /// What the callers of the function at `address` do with its result:
     /// one entry per call site the call graph knows. A direct call is
     /// decided by walking the caller's code after it; a tail call hands the
@@ -1003,7 +1014,7 @@ impl Binary {
                 continue;
             };
             let decoded = code.decoded();
-            let cfg = resolve_branches(&decoded.disasm, caller);
+            let cfg = self.walk(&decoded.disasm, caller);
             let caller_name = self
                 .function_name(caller)
                 .map(str::to_string)
@@ -1034,7 +1045,7 @@ impl Binary {
         let code = self.code_at(address)?;
 
         let decoded = code.decoded();
-        let cfg = resolve_branches(&decoded.disasm, address);
+        let cfg = self.walk(&decoded.disasm, address);
 
         // The direct calls are gathered first: a listing says which symbol a
         // call goes to, and that is the same answer the references give.
@@ -1060,39 +1071,29 @@ impl Binary {
             calls.push(call);
         }
 
-        // Then the tail calls: a block that ends in a `jmp` to the entry of
+        // Then the tail calls the walk stopped at: a `jmp` to the entry of
         // another function the image names, or through a GOT slot the image
         // relocates to an import — the shape of a PLT stub. A `jmp` through
         // a register is not resolved here; the lifter reads what the
         // register holds.
-        for block in &cfg.blocks {
-            let Some(last) = decoded
-                .disasm
-                .instructions
-                .iter()
-                .rev()
-                .find(|instruction| block.contains(instruction.address))
-            else {
+        for tail in &cfg.tail_calls {
+            let Some(instruction) = decoded.disasm.instruction_at(tail.site) else {
                 continue;
             };
-            let call = match last.flow {
-                Flow::UnconditionalBranch(target) if target != address => {
-                    self.function_name(target).map(|name| Call {
-                        site: last.address,
-                        target,
-                        name: Some(name.to_string()),
-                        tail: true,
-                        slot: None,
-                    })
-                }
-                Flow::IndirectBranch => last.memory_address().and_then(|slot| {
-                    self.import_at(slot).map(|name| Call {
-                        site: last.address,
-                        target: slot,
-                        name: Some(name.to_string()),
-                        tail: true,
-                        slot: Some(slot),
-                    })
+            let call = match instruction.flow {
+                Flow::UnconditionalBranch(target) => self.function_name(target).map(|name| Call {
+                    site: tail.site,
+                    target,
+                    name: Some(name.to_string()),
+                    tail: true,
+                    slot: None,
+                }),
+                Flow::IndirectBranch => self.import_at(tail.target).map(|name| Call {
+                    site: tail.site,
+                    target: tail.target,
+                    name: Some(name.to_string()),
+                    tail: true,
+                    slot: Some(tail.target),
                 }),
                 _ => None,
             };
@@ -1169,6 +1170,19 @@ impl Binary {
             calls,
             pointers,
         })
+    }
+}
+
+/// The function entries the control-flow walk stops at: the image's
+/// functions — its function symbols, and the entry point — and the GOT
+/// slots its dynamic relocations name.
+impl Entries for Binary {
+    fn is_function(&self, address: u64) -> bool {
+        self.function_name(address).is_some()
+    }
+
+    fn is_import_slot(&self, slot: u64) -> bool {
+        self.imports.contains_key(&slot)
     }
 }
 
@@ -1499,6 +1513,7 @@ fn iced_text(bytes: &[u8], address: u64, bitness: Bitness) -> Option<(String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ag_engine::cfgwalk::resolve_branches;
 
     /// A byte that is not an instruction in x86-64.
     const DATA: u8 = 0x06;
@@ -1709,6 +1724,50 @@ mod tests {
 
         // main's three calls are direct ones still.
         assert!(binary.calls(0x1198).iter().all(|call| !call.tail));
+    }
+
+    #[test]
+    fn the_walk_stops_at_a_jmp_to_another_function() {
+        let binary = sample();
+
+        // frame_dummy is endbr64; jmp register_tm_clones: one block of two
+        // instructions, ending in the tail call, and none of
+        // register_tm_clones' own.
+        let disassembly = binary
+            .disassembly(0x1140)
+            .expect("frame_dummy disassembles");
+        assert_eq!(disassembly.blocks.len(), 1, "{disassembly:?}");
+        let block = &disassembly.blocks[0];
+        assert_eq!((block.from, block.to), (0x1140, 0x1149));
+        assert!(block.successors.is_empty(), "{block:?}");
+        let addresses: Vec<u64> = block
+            .instructions
+            .iter()
+            .map(|instruction| instruction.address)
+            .collect();
+        assert_eq!(addresses, vec![0x1140, 0x1144]);
+
+        let tails: Vec<&Call> = disassembly.calls.iter().filter(|call| call.tail).collect();
+        assert_eq!(tails.len(), 1, "{:?}", disassembly.calls);
+        assert_eq!(tails[0].site, 0x1144);
+        assert_eq!(tails[0].name.as_deref(), Some("register_tm_clones"));
+
+        let graph = binary
+            .control_flow(0x1140)
+            .expect("frame_dummy has a graph");
+        assert_eq!(graph.blocks.len(), 1);
+        assert!(graph.edges.is_empty(), "{:?}", graph.edges);
+
+        // register_tm_clones is still a function of its own, with its blocks.
+        let callee = binary
+            .disassembly(0x10c0)
+            .expect("register_tm_clones disassembles");
+        assert!(callee.blocks.len() > 1, "{callee:?}");
+
+        // A jump inside the function is an edge as before: sum_to's loop.
+        let graph = binary.control_flow(0x1161).expect("sum_to has a graph");
+        assert_eq!(graph.blocks.len(), 4, "{graph:?}");
+        assert_eq!(graph.edges.len(), 4, "{:?}", graph.edges);
     }
 
     #[test]
