@@ -3,10 +3,10 @@
 //! This is the native path: the file is parsed by the engine's own loader,
 //! its code sections are decoded by the native decoder, and its control-flow
 //! graph is walked by the engine, and its pseudocode is the engine's lifter's:
-//! straight-line x86-64 code — blocks joined only by fall-through, calls
-//! included — reads as C, with every line mapped to the instructions it came
-//! from. A function the lifter refuses has no body, and the Problems panel
-//! says why.
+//! x86-64 code with calls, branches and loops reads as C — `if`/`else`,
+//! `while`, `for`, early `return` — with every line mapped to the
+//! instructions it came from. A function the lifter refuses has no body, and
+//! the Problems panel says why.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -546,7 +546,7 @@ impl Provider for BinaryProvider {
                 message: format!("No pseudocode: {error}."),
                 address: Some(address),
                 action: Some(
-                    "The lifter reads straight-line x86-64 code, with calls but no branches".into(),
+                    "The lifter reads x86-64 code with the instructions it knows; the reason names what stopped it".into(),
                 ),
             }],
         }
@@ -606,6 +606,9 @@ mod tests {
 
     /// The address of `sum_to` in the sample, which has a loop.
     const SUM_TO: u64 = 0x1161;
+
+    /// The address of `_init` in the sample, which calls through a register.
+    const INIT: u64 = 0x1000;
 
     /// The sample ELF the engine's own tests read.
     fn sample_path() -> PathBuf {
@@ -695,20 +698,57 @@ mod tests {
     }
 
     #[test]
+    fn the_pseudocode_of_sum_to_is_a_for_loop_with_its_lines_mapped() {
+        let provider = sample();
+
+        let body = provider.pseudocode(SUM_TO).expect("sum_to lifts");
+        assert_eq!(
+            body,
+            "long sum_to(int a)\n\
+             {\n\
+             \x20 long local_10;\n\
+             \x20 int local_14;\n\
+             \n\
+             \x20 local_10 = 0;\n\
+             \x20 for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n\
+             \x20   local_10 = local_10 + (long)local_14;\n\
+             \x20 }\n\
+             \x20 return local_10;\n\
+             }"
+        );
+
+        // The for line is mapped to the compare and the branch, the body to
+        // the add, so a click on either lands in the loop.
+        let lines = provider.line_addresses(SUM_TO);
+        assert!(
+            lines
+                .get(&6)
+                .is_some_and(|addresses| addresses.contains(&0x118d)),
+            "the for came from the cmp: {lines:?}"
+        );
+        assert!(
+            lines
+                .get(&7)
+                .is_some_and(|addresses| addresses.contains(&0x1182)),
+            "the body came from the add: {lines:?}"
+        );
+        assert!(provider.function_problems(SUM_TO).is_empty());
+    }
+
+    #[test]
     fn a_function_the_lifter_refuses_has_no_body_and_a_problem_that_says_why() {
         let provider = sample();
 
-        // sum_to has a loop: its entry block ends in the jump into it.
-        assert_eq!(provider.pseudocode(SUM_TO), None);
-        assert!(provider.line_addresses(SUM_TO).is_empty());
+        assert_eq!(provider.pseudocode(INIT), None);
+        assert!(provider.line_addresses(INIT).is_empty());
 
-        let problems = provider.function_problems(SUM_TO);
+        let problems = provider.function_problems(INIT);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(
             problems[0].message,
-            "No pseudocode: not lifted yet: branches at 0x117b."
+            "No pseudocode: not lifted yet: an indirect call."
         );
-        assert_eq!(problems[0].address, Some(SUM_TO));
+        assert_eq!(problems[0].address, Some(INIT));
     }
 
     #[test]
@@ -1182,6 +1222,19 @@ mod tests {
     }
 
     #[test]
+    fn the_main_of_the_pe_is_a_for_loop_over_add() {
+        let provider = pe();
+
+        let body = provider.pseudocode(0x140001020).expect("main lifts");
+        assert!(
+            body.contains("for (local_c = 0; local_c < 3; local_c = local_c + 1) {"),
+            "{body}"
+        );
+        assert!(body.contains("local_8 = add(local_8, local_c);"), "{body}");
+        assert!(provider.function_problems(0x140001020).is_empty());
+    }
+
+    #[test]
     fn the_listing_of_a_pe_function_is_read() {
         let provider = pe();
 
@@ -1341,6 +1394,21 @@ mod tests {
 
         let body = provider.pseudocode(0x100000420).expect("_add lifts");
         assert_eq!(body, "int _add(int a, int b)\n{\n  return a + b;\n}");
+    }
+
+    #[test]
+    fn the_main_of_the_macho_is_a_for_loop_over_add() {
+        let provider = macho();
+
+        let body = provider.pseudocode(0x100000440).expect("_main lifts");
+        assert!(
+            body.contains("for (local_14 = 0; local_14 < 3; local_14 = local_14 + 1) {"),
+            "{body}"
+        );
+        assert!(
+            body.contains("local_10 = _add(local_10, local_14);"),
+            "{body}"
+        );
     }
 
     #[test]

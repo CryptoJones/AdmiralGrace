@@ -375,11 +375,11 @@ fn the_pseudocode_is_reported_as_json_with_the_addresses_of_each_line() {
 
 #[test]
 fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
-    // sum_to has a loop: its entry block ends in the jump into it.
+    // _init calls through a register.
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "sum_to"])
+        .args(["pseudocode", "_init"])
         .output()
         .expect("the ag binary runs");
 
@@ -387,13 +387,13 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     let report = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         report,
-        "// sum_to at 0x1161: not lifted yet: branches at 0x117b\n"
+        "// _init at 0x1000: not lifted yet: an indirect call\n"
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "sum_to", "--json"])
+        .args(["pseudocode", "_init", "--json"])
         .output()
         .expect("the ag binary runs");
 
@@ -403,22 +403,37 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     assert_eq!(report["lifted"], serde_json::json!(false));
     assert_eq!(
         report["reason"],
-        serde_json::json!("not lifted yet: branches at 0x117b")
+        serde_json::json!("not lifted yet: an indirect call")
     );
+    assert_eq!(report["text"], serde_json::Value::Null);
+}
 
-    // The main of the PE falls through into the head of its loop, which the
-    // loop also jumps back to: a join.
+#[test]
+fn a_loop_is_lifted_as_a_for() {
+    // sum_to counts from 1 to its argument into an accumulator.
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
-        .arg(fixture("sample.exe"))
-        .args(["pseudocode", "main"])
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "sum_to"])
         .output()
         .expect("the ag binary runs");
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0), "sum_to lifts");
+    let report = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "// main at 0x140001020: not lifted yet: joins at 0x14000103c\n"
+        report,
+        "// sum_to at 0x1161\n\
+         long sum_to(int a)\n\
+         {\n\
+         \x20 long local_10;\n\
+         \x20 int local_14;\n\
+         \n\
+         \x20 local_10 = 0;\n\
+         \x20 for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n\
+         \x20   local_10 = local_10 + (long)local_14;\n\
+         \x20 }\n\
+         \x20 return local_10;\n\
+         }\n"
     );
 }
 
@@ -642,13 +657,18 @@ fn a_function_of_an_export_names_itself_and_holds_the_four_reports() {
     );
     assert_eq!(add["pseudocode"]["lifted"], serde_json::json!(true));
 
-    // A function the lifter refuses carries the reason instead.
+    // A function with a loop is lifted too.
     let sum_to = dir.json("functions/0x1161.json");
     assert_eq!(sum_to["name"], serde_json::json!("sum_to"));
-    assert_eq!(sum_to["pseudocode"]["lifted"], serde_json::json!(false));
+    assert_eq!(sum_to["pseudocode"]["lifted"], serde_json::json!(true));
+
+    // A function the lifter refuses carries the reason instead.
+    let init = dir.json("functions/0x1000.json");
+    assert_eq!(init["name"], serde_json::json!("_init"));
+    assert_eq!(init["pseudocode"]["lifted"], serde_json::json!(false));
     assert_eq!(
-        sum_to["pseudocode"]["reason"],
-        serde_json::json!("not lifted yet: branches at 0x117b")
+        init["pseudocode"]["reason"],
+        serde_json::json!("not lifted yet: an indirect call")
     );
 
     // The listing is what `disasm` prints.

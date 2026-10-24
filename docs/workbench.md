@@ -67,14 +67,16 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 That is the native path: the image is parsed by the engine's own loader, the navigator
 lists its symbols, the inspector shows its sections and entry point, and the Listing tab
 holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
-language says. The Pseudocode tab holds the engine's own lifting of the selected function
-when it is straight-line x86-64 code — blocks joined only by fall-through, so calls are
-in: the sample's `add` reads as C, and its `main` reads as C with its three calls, the
-format string printed as the literal `"%ld\n"`. The lines are numbered and clickable like
-the kuna provider's, so a click on `return b + a;` moves the listing to the add, and a
-click on the `printf` line moves it to the call. A function the lifter refuses — one that
-branches, such as the sample's `sum_to` with its loop — leaves the tab empty, and the
-Problems panel says why.
+language says. The Pseudocode tab holds the engine's own lifting of the selected function:
+its calls, branches and loops as C, structured into `if`/`else`, `while`, `for` and early
+`return`. The sample's `add` reads as C, its `main` reads as C with its three calls, the
+format string printed as the literal `"%ld\n"`, and its `sum_to` reads as a `for` loop over
+its counter and accumulator. The lines are numbered and clickable like the kuna provider's,
+so a click on `return b + a;` moves the listing to the add, a click on the `printf` line
+moves it to the call, and a click on the `for` line moves it to the compare at the loop's
+head. A function the lifter refuses — one with an instruction it does not know, a branch
+whose condition it cannot read, or a loop with two entries, such as the sample's `_init`
+with its indirect call — leaves the tab empty, and the Problems panel says why.
 
 Who calls what is only known once the whole program has been read, so that is worked out
 in the background when the image opens: the References tab says `indexing…` until the

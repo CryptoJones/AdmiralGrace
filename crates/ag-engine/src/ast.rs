@@ -5,7 +5,7 @@ pub enum IfType {
     Ternary,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AstNode {
     Label {
         name: String,
@@ -89,6 +89,10 @@ pub enum AstNode {
     },
     ConditionTrue,
     ConditionFalse,
+    /// `break;`, out of the innermost loop.
+    Break,
+    /// `continue;`, to the innermost loop's next iteration.
+    Continue,
 }
 
 impl AstNode {
@@ -128,6 +132,49 @@ impl AstNode {
         )
     }
 
+    /// Whether the node, or any node inside it, satisfies `pred`.
+    pub fn any(&self, pred: &dyn Fn(&Self) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
+        match self {
+            Self::Binary { lhs, rhs, .. } | Self::Assign { lhs, rhs } => {
+                lhs.any(pred) || rhs.any(pred)
+            }
+            Self::Deref { target } | Self::AddressOf { target } | Self::Cast { target, .. } => {
+                target.any(pred)
+            }
+            Self::Call { callee, args } => callee.any(pred) || args.iter().any(|a| a.any(pred)),
+            Self::Intrinsic { args, .. } => args.iter().any(|a| a.any(pred)),
+            Self::Return { value } => value.as_deref().is_some_and(|v| v.any(pred)),
+            Self::If {
+                cond,
+                then_part,
+                else_part,
+                ..
+            } => {
+                cond.any(pred)
+                    || then_part.any(pred)
+                    || else_part.as_deref().is_some_and(|e| e.any(pred))
+            }
+            Self::IfGoto { cond, .. } => cond.any(pred),
+            Self::Loop { cond, body, .. } => {
+                cond.as_deref().is_some_and(|c| c.any(pred)) || body.any(pred)
+            }
+            Self::Label { .. }
+            | Self::Goto { .. }
+            | Self::Register { .. }
+            | Self::Var { .. }
+            | Self::Constant { .. }
+            | Self::FunctionName { .. }
+            | Self::StringLiteral { .. }
+            | Self::ConditionTrue
+            | Self::ConditionFalse
+            | Self::Break
+            | Self::Continue => false,
+        }
+    }
+
     /// Whether `name` is a variable the expression reads.
     pub fn reads_var(&self, name: &str) -> bool {
         match self {
@@ -154,7 +201,71 @@ impl AstNode {
             | Self::FunctionName { .. }
             | Self::StringLiteral { .. }
             | Self::ConditionTrue
-            | Self::ConditionFalse => false,
+            | Self::ConditionFalse
+            | Self::Break
+            | Self::Continue => false,
+        }
+    }
+
+    /// The variable the node assigns, when it is `name = …`.
+    pub fn assigned_var(&self) -> Option<&str> {
+        match self {
+            Self::Assign { lhs, .. } => match lhs.as_ref() {
+                Self::Var { name } => Some(name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The condition that is true when this one is false.
+    ///
+    /// A relation flips to its opposite — `a < b` to `a >= b` — which is how
+    /// a branch taken out of a loop reads as the condition to stay in it.
+    /// Anything that is not a relation is compared with zero.
+    pub fn negated(&self) -> Self {
+        match self {
+            Self::Binary { lhs, op, rhs } => match op.negated() {
+                Some(op) => Self::Binary {
+                    lhs: lhs.clone(),
+                    op,
+                    rhs: rhs.clone(),
+                },
+                None => Self::binary(self.clone(), BinaryOp::Equal, Self::constant(0, 4)),
+            },
+            Self::ConditionTrue => Self::ConditionFalse,
+            Self::ConditionFalse => Self::ConditionTrue,
+            other => Self::binary(other.clone(), BinaryOp::Equal, Self::constant(0, 4)),
+        }
+    }
+
+    /// The expression with every occurrence of `target` replaced by `with`.
+    pub fn replace(self, target: &AstNode, with: &AstNode) -> Self {
+        if &self == target {
+            return with.clone();
+        }
+        let sub = |n: Box<AstNode>| Box::new(n.replace(target, with));
+        match self {
+            Self::Binary { lhs, op, rhs } => Self::Binary {
+                lhs: sub(lhs),
+                op,
+                rhs: sub(rhs),
+            },
+            Self::Assign { lhs, rhs } => Self::Assign {
+                lhs: sub(lhs),
+                rhs: sub(rhs),
+            },
+            Self::Deref { target: t } => Self::Deref { target: sub(t) },
+            Self::AddressOf { target: t } => Self::AddressOf { target: sub(t) },
+            Self::Cast { ty, target: t } => Self::Cast { ty, target: sub(t) },
+            Self::Call { callee, args } => Self::Call {
+                callee: sub(callee),
+                args: args.into_iter().map(|a| a.replace(target, with)).collect(),
+            },
+            Self::Return { value } => Self::Return {
+                value: value.map(sub),
+            },
+            other => other,
         }
     }
 
@@ -195,7 +306,7 @@ impl AstNode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterRef {
     pub class: u32,
     pub index: u32,
@@ -230,4 +341,20 @@ pub enum BinaryOp {
     GreaterEqual,
     LogicalAnd,
     LogicalOr,
+}
+
+impl BinaryOp {
+    /// The relation that holds exactly when this one does not, for the six
+    /// relations; `None` for an arithmetic operator.
+    pub fn negated(self) -> Option<Self> {
+        Some(match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::Less => Self::GreaterEqual,
+            Self::GreaterEqual => Self::Less,
+            Self::Greater => Self::LessEqual,
+            Self::LessEqual => Self::Greater,
+            _ => return None,
+        })
+    }
 }

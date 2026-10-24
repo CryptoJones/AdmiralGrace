@@ -1691,15 +1691,44 @@ mod tests {
     }
 
     #[test]
-    fn the_pseudocode_of_sum_to_says_why_it_was_not_lifted() {
+    fn the_pseudocode_of_sum_to_is_a_counted_loop() {
         let image = sample();
 
         let report = pseudocode_json(&image, 0x1161);
 
+        assert!(report.lifted, "{report:?}");
+        let text = report.text.as_deref().expect("the text");
+        assert!(
+            text.contains("for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {"),
+            "{text}"
+        );
+        assert!(text.contains("return local_10;"), "{text}");
+        assert_eq!(report.lines.len(), 11);
+        assert_eq!(
+            report.lines[6].text,
+            "  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {"
+        );
+        for address in ["0x1174", "0x117b", "0x118d", "0x1190"] {
+            assert!(
+                report.lines[6].addresses_hex.contains(&address.to_string()),
+                "the for line came from the init, the jump in, the compare and the branch: {:?}",
+                report.lines[6].addresses_hex
+            );
+        }
+        assert!(report.lines[7].addresses.contains(&0x1182), "the add");
+    }
+
+    #[test]
+    fn the_pseudocode_of_a_refused_function_says_why() {
+        let image = sample();
+
+        // _init calls through a register.
+        let report = pseudocode_json(&image, 0x1000);
+
         assert!(!report.lifted);
         assert_eq!(
             report.reason.as_deref(),
-            Some("not lifted yet: branches at 0x117b")
+            Some("not lifted yet: an indirect call")
         );
         assert!(report.lines.is_empty());
         assert_eq!(report.text, None);
