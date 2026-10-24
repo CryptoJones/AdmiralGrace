@@ -3,11 +3,12 @@
 //! The loader, the decoder and the control-flow walk are the engine's, so
 //! what these subcommands report is what the engine itself sees. Every
 //! subcommand has a `--json` surface as well, so an agent can read the
-//! numbers without scraping the text.
+//! numbers without scraping the text. `pseudocode` and `export` take the
+//! engine's options, `--option NAME VALUE`, which `ag catalog` lists.
 
 use std::path::{Path, PathBuf};
 
-use ag_image::Binary;
+use ag_image::{Binary, Options};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use regex::Regex;
@@ -76,6 +77,10 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// Set an engine option, such as `--option loop-form while`. May be
+        /// repeated; `ag catalog` lists the options and their symptoms.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// The data the image holds, and the functions that use it.
     Data {
@@ -97,6 +102,10 @@ pub enum ImageCmd {
         /// Write into a directory that is not empty.
         #[arg(long)]
         force: bool,
+        /// Set an engine option, such as `--option loop-form while`. May be
+        /// repeated; `ag catalog` lists the options and their symptoms.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
 }
 
@@ -437,7 +446,17 @@ pub(crate) struct PseudocodeJson {
 
 /// Report on a program image.
 pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
-    let image = Binary::open(binary).with_context(|| format!("reading {}", binary.display()))?;
+    // The options are checked before the image is read, so a typo in one
+    // is answered at once and names the row.
+    let options = match &cmd {
+        ImageCmd::Pseudocode { options, .. } | ImageCmd::Export { options, .. } => {
+            Options::from_flat(options).map_err(|error| anyhow::anyhow!("{error}"))?
+        }
+        _ => Options::default(),
+    };
+    let image = Binary::open(binary)
+        .with_context(|| format!("reading {}", binary.display()))?
+        .with_options(options);
 
     match cmd {
         ImageCmd::Info { json } => info(&image, json),
@@ -450,12 +469,13 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         } => strings(&image, filter.as_deref(), utf16, json),
         ImageCmd::Cfg { target, json } => cfg(&image, &target, json),
         ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
-        ImageCmd::Pseudocode { target, json } => pseudocode(&image, &target, json),
+        ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
             dir,
             functions,
             force,
+            ..
         } => crate::export::run(&image, binary, &dir, functions.as_deref(), force),
     }
 }
@@ -1716,6 +1736,51 @@ mod tests {
             );
         }
         assert!(report.lines[7].addresses.contains(&0x1182), "the add");
+    }
+
+    #[test]
+    fn an_engine_option_changes_the_pseudocode_and_a_bad_one_is_refused_by_name() {
+        let options = Options::from_flat(&["loop-form", "while"]).expect("a known option");
+        let image = sample().with_options(options);
+
+        let report = pseudocode_json(&image, 0x1161);
+
+        assert!(report.lifted, "{report:?}");
+        let text = report.text.as_deref().expect("the text");
+        assert!(
+            text.contains("  local_14 = 1;\n  while (local_14 <= a) {\n"),
+            "{text}"
+        );
+        assert!(!text.contains("for ("), "{text}");
+
+        let error = run(
+            &sample_path(),
+            ImageCmd::Pseudocode {
+                target: "sum_to".into(),
+                json: false,
+                options: vec!["loop-form".into(), "sometimes".into()],
+            },
+        )
+        .expect_err("a bad value is refused");
+        assert_eq!(
+            error.to_string(),
+            "option \"loop-form\" takes for | while, not \"sometimes\""
+        );
+        let error = run(
+            &sample_path(),
+            ImageCmd::Pseudocode {
+                target: "sum_to".into(),
+                json: false,
+                options: vec!["loop-shape".into(), "while".into()],
+            },
+        )
+        .expect_err("an unknown name is refused");
+        assert!(
+            error
+                .to_string()
+                .starts_with("no option named \"loop-shape\"; the options are abi, "),
+            "{error}"
+        );
     }
 
     #[test]

@@ -22,6 +22,9 @@ cargo run --bin ag-ui -- --corpus ./corpus --methods ./corpus/methods.json
 
 # Open a program image
 cargo run --bin ag-ui -- --binary ./sample.elf
+
+# The same with an engine option set (`ag catalog` lists them)
+cargo run --bin ag-ui -- --binary ./sample.elf --option loop-form while
 ```
 
 The corpus directory must contain a `decompile-index.json`. Opened from the File menu, the workbench prompts for a path and refuses a directory without that index. With no corpus on the command line the workbench opens a bundled sample project so the interface can be explored.

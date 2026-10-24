@@ -107,10 +107,21 @@ struct IndexJson {
     written: String,
     /// The regular expression the per-function set was limited to, when it was.
     functions_filter: Option<String>,
+    /// The engine options set away from their defaults, in registry order.
+    options: Vec<OptionJson>,
     /// The whole-image files.
     files: IndexFilesJson,
     /// The functions, with their files.
     functions: Vec<IndexFunctionJson>,
+}
+
+/// One engine option the export was made with.
+#[derive(Debug, Serialize)]
+struct OptionJson {
+    /// The option's name, as `--option` takes it.
+    name: &'static str,
+    /// Its value.
+    value: String,
 }
 
 /// One function, as `functions/<address>.json` holds it.
@@ -269,6 +280,12 @@ pub fn run(
         entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
         written,
         functions_filter: functions.map(str::to_string),
+        options: image
+            .options()
+            .changed()
+            .into_iter()
+            .map(|(name, value)| OptionJson { name, value })
+            .collect(),
         files: IndexFilesJson {
             readme: "README.md",
             info: "info.json",
@@ -370,6 +387,14 @@ fn readme(index: &IndexJson, total: usize) -> String {
             let _ = writeln!(text, "| Functions | {} of {total} |", index.functions.len());
         }
     }
+    if !index.options.is_empty() {
+        let options: Vec<String> = index
+            .options
+            .iter()
+            .map(|option| format!("`--option {} {}`", option.name, option.value))
+            .collect();
+        let _ = writeln!(text, "| Options | {} |", options.join(" "));
+    }
     let _ = writeln!(text, "| ag | {} |", index.ag_version);
     let _ = writeln!(text, "| Written | {} |", index.written);
     let _ = writeln!(text);
@@ -464,6 +489,10 @@ mod tests {
             entry_hex: Some("0x1060".to_string()),
             written: "2026-10-24T00:00:00Z".to_string(),
             functions_filter: Some("main".to_string()),
+            options: vec![OptionJson {
+                name: "loop-form",
+                value: "while".to_string(),
+            }],
             files: IndexFilesJson {
                 readme: "README.md",
                 info: "info.json",
@@ -488,6 +517,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("| ag | 0.1.0 |"), "{text}");
+        assert!(
+            text.contains("| Options | `--option loop-form while` |"),
+            "{text}"
+        );
         assert!(text.contains("| `functions/<address>.asm` |"), "{text}");
     }
 }

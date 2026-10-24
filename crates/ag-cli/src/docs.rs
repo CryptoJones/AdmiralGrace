@@ -28,7 +28,8 @@ pub struct Doc {
 }
 
 /// The documents, in the order an agent reaches for them: the commands first,
-/// then the layout they read, then the other tool in the workspace.
+/// then the layout they read, then the options that tune the output, then
+/// the other tool in the workspace.
 pub const DOCS: &[Doc] = &[
     Doc {
         topic: "cli",
@@ -46,6 +47,13 @@ pub const DOCS: &[Doc] = &[
         summary: "The indexed corpus layout and the kuna project export layout, field by field.",
         readme_sections: &["Corpus format"],
         body: include_str!("../../../docs/corpus-format.md"),
+    },
+    Doc {
+        topic: "options",
+        summary:
+            "The engine's options, symptom index first: if the output shows X, try --option Y.",
+        readme_sections: &[],
+        body: include_str!("../../../docs/options.md"),
     },
     Doc {
         topic: "workbench",

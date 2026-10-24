@@ -180,6 +180,8 @@ pub struct Config {
     pub methods: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
     pub shift: u64,
+    /// The engine's options, for the pseudocode of a program image.
+    pub options: ag_image::Options,
 }
 
 /// The left navigator's list and selection.
@@ -283,6 +285,8 @@ pub struct App {
     pub kuna_root: Option<PathBuf>,
     /// The program image currently open.
     pub binary_path: Option<PathBuf>,
+    /// The engine's options, for the pseudocode of a program image.
+    pub options: ag_image::Options,
     /// The Objective-C method map currently open.
     pub methods_path: Option<PathBuf>,
     /// Image-base shift applied to Objective-C IMP addresses.
@@ -333,6 +337,7 @@ impl App {
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
+            options: config.options,
             methods_path: config.methods.clone(),
             shift: config.shift,
             kuna: None,
@@ -387,7 +392,7 @@ impl App {
 
     /// Load a program image into the workbench.
     fn load_binary(&mut self, path: &Path) -> Task<Message> {
-        match BinaryProvider::load(path) {
+        match BinaryProvider::load_with_options(path, self.options) {
             Ok(provider) => {
                 let binary = provider.binary();
                 self.provider = Box::new(provider);

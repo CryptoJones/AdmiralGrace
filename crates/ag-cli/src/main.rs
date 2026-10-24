@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
+mod catalog;
 mod docs;
 mod export;
 mod image;
@@ -62,6 +63,21 @@ enum Cmd {
         binary: PathBuf,
         #[command(subcommand)]
         cmd: image::ImageCmd,
+    },
+    /// The engine's options: every judgment call it makes, with its symptoms.
+    Catalog {
+        /// Print the rows as JSON.
+        #[arg(long, conflicts_with_all = ["markdown", "check"])]
+        json: bool,
+        /// Print the document, symptom index first. The default.
+        #[arg(long, conflicts_with = "check")]
+        markdown: bool,
+        /// Compare the committed document with the generated one; exit 1 when it is stale.
+        #[arg(long)]
+        check: bool,
+        /// The committed document `--check` reads.
+        #[arg(long, default_value = "docs/options.md", requires = "check")]
+        path: PathBuf,
     },
 }
 
@@ -211,6 +227,19 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
         Cmd::Image { binary, cmd } => image::run(&binary, cmd),
+        Cmd::Catalog {
+            json,
+            markdown: _,
+            check,
+            path,
+        } => {
+            let format = if json {
+                catalog::Format::Json
+            } else {
+                catalog::Format::Markdown
+            };
+            catalog::run(format, check.then_some(path.as_path()))
+        }
     }
 }
 

@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use ag_image::Binary;
+use ag_image::{Binary, Options};
 use anyhow::Result;
 
 use crate::data::{
@@ -39,9 +39,16 @@ pub struct BinaryProvider {
 }
 
 impl BinaryProvider {
-    /// Read the image in the file at `path`.
+    /// Read the image in the file at `path`, with the engine's defaults.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn load(path: &Path) -> Result<Self> {
-        let binary = Arc::new(Binary::open(path)?);
+        Self::load_with_options(path, Options::default())
+    }
+
+    /// Read the image in the file at `path`, lifting its functions under
+    /// `options` (`--option NAME VALUE` on the command line).
+    pub fn load_with_options(path: &Path, options: Options) -> Result<Self> {
+        let binary = Arc::new(Binary::open(path)?.with_options(options));
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -695,6 +702,21 @@ mod tests {
             "the printf came from the call: {lines:?}"
         );
         assert!(provider.function_problems(MAIN).is_empty());
+    }
+
+    #[test]
+    fn an_engine_option_from_the_command_line_changes_the_pseudocode() {
+        let options = Options::from_pairs([("loop-form", "while")]).expect("a known option");
+        let provider =
+            BinaryProvider::load_with_options(&sample_path(), options).expect("the sample loads");
+
+        let body = provider.pseudocode(SUM_TO).expect("sum_to lifts");
+
+        assert!(
+            body.contains("  local_14 = 1;\n  while (local_14 <= a) {\n"),
+            "{body}"
+        );
+        assert!(!body.contains("for ("), "{body}");
     }
 
     #[test]

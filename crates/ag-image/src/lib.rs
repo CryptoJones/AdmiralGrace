@@ -20,7 +20,9 @@
 //! language, so a Windows image passes its arguments the Microsoft way, and
 //! the lifter asks the image what a pointer lands on ([`Symbols`]), so a
 //! string the image knows is printed as its literal and named data as
-//! `&name`.
+//! `&name`. The engine's judgment calls — the options of
+//! [`ag_engine::options`] — are fixed when the image is opened
+//! ([`Binary::with_options`]) and read by every lift after.
 //!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
@@ -40,7 +42,8 @@ use ag_engine::pipeline::Disasm;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
 
-pub use ag_engine::{Line, NotLifted, Pseudocode};
+pub use ag_engine::options;
+pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
 /// One section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +326,8 @@ pub struct Binary {
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
+    /// The engine's options, fixed for the life of the image.
+    options: Options,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
@@ -437,6 +442,7 @@ impl Binary {
             file,
             strings,
             wide_strings,
+            options: Options::default(),
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
@@ -444,6 +450,23 @@ impl Binary {
             string_users: OnceLock::new(),
             data_users: OnceLock::new(),
         }
+    }
+
+    /// The image with the engine's options set.
+    ///
+    /// The options decide the lifter's, the structurer's and the emitter's
+    /// judgment calls, so the pseudocode built so far is forgotten.
+    pub fn with_options(mut self, options: Options) -> Self {
+        self.options = options;
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        self
+    }
+
+    /// The engine's options this image is read with.
+    pub fn options(&self) -> &Options {
+        &self.options
     }
 
     /// The SLEIGH language id the loader resolved.
@@ -718,9 +741,10 @@ impl Binary {
         self.bitness == Some(Bitness::Bits64)
     }
 
-    /// The calling convention the image's language implies.
+    /// The calling convention the functions are lifted with: the one the
+    /// image's language implies, unless the `abi` option says otherwise.
     pub fn abi(&self) -> Abi {
-        Abi::of_language(&self.language)
+        self.options.abi_for(&self.language)
     }
 
     /// The pseudocode of the function at `address`, or why it was not lifted.
@@ -782,8 +806,9 @@ impl Binary {
             code.bitness,
             self.abi(),
             &ImageSymbols(self),
+            &self.options,
         )?;
-        Ok(emit_function(&function))
+        Ok(emit_function(&function, &self.options))
     }
 
     /// The control-flow graph of the function at `address`.
@@ -1474,6 +1499,49 @@ mod tests {
         assert!(
             scan_ascii(b"h\0e\0l\0l\0o\0\0\0", 0x3000, ".data").is_empty(),
             "the NULs between the characters break the run"
+        );
+    }
+
+    /// The sample ELF the engine's own tests read.
+    fn sample() -> Binary {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
+        Binary::open(&path).expect("the sample ELF loads")
+    }
+
+    #[test]
+    fn the_options_are_read_by_every_lift_and_the_abi_one_overrides_the_language() {
+        // sum_to, at 0x1161, is a counted loop by default and a while under
+        // `loop-form while`.
+        let text = sample().pseudocode(0x1161).expect("sum_to lifts").text();
+        assert!(
+            text.contains("for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {"),
+            "{text}"
+        );
+
+        let options =
+            Options::from_pairs([("loop-form", "while"), ("stack-slot-names", "decimal")])
+                .expect("known options");
+        let binary = sample().with_options(options);
+        assert_eq!(binary.options(), &options);
+        let text = binary.pseudocode(0x1161).expect("sum_to lifts").text();
+        assert!(
+            text.contains("  local_20 = 1;\n  while (local_20 <= a) {\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    local_20 = local_20 + 1;\n  }\n"),
+            "{text}"
+        );
+
+        // add reads rsi and rdi, which under the Microsoft convention are
+        // nobody's arguments.
+        assert_eq!(sample().abi(), Abi::SystemV);
+        let binary = sample().with_options(Options::from_pairs([("abi", "win64")]).unwrap());
+        assert_eq!(binary.abi(), Abi::Win64);
+        assert_eq!(
+            binary.pseudocode(0x1149).unwrap_err().to_string(),
+            "not lifted yet: rsi is read before it is written"
         );
     }
 }

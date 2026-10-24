@@ -7,6 +7,10 @@
 //! opens on a line that carries its condition's addresses and closes on a
 //! brace that carries none. [`emit_procedure`] and [`emit_node`] are the
 //! older entry points over the [`HighLevelProcedure`] scaffolding.
+//!
+//! How a constant is spelled and how far a body is indented are the
+//! emitter's judgment calls, named in [`crate::options`]: `constant-style`
+//! and `indent`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -14,6 +18,7 @@ use std::fmt::Write;
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
 use crate::lift::{signed, LiftedFunction, Statement, StatementKind};
+use crate::options::{ConstantStyle, Options};
 
 /// One line of pseudocode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,8 +62,30 @@ impl Pseudocode {
     }
 }
 
-/// The indentation of one level of a body.
+/// The indentation of one level of a body, where no options say otherwise.
 const INDENT: &str = "  ";
+
+/// What the emitter was told: the indentation and the constant style.
+#[derive(Debug, Clone)]
+struct Style {
+    indent: String,
+    constants: ConstantStyle,
+}
+
+impl Style {
+    fn of(options: &Options) -> Self {
+        Self {
+            indent: " ".repeat(usize::from(options.indent)),
+            constants: options.constant_style,
+        }
+    }
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self::of(&Options::default())
+    }
+}
 
 /// Print a lifted function as C.
 ///
@@ -67,8 +94,10 @@ const INDENT: &str = "  ";
 /// a click on it lands on the entry. Locals are declared first, then the
 /// statements, each on a line that carries its instruction addresses; a
 /// control statement's opening line carries its condition's, and its braces
-/// carry none.
-pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
+/// carry none. `options` says how a constant is spelled and how far a body
+/// is indented.
+pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode {
+    let style = Style::of(options);
     let mut lines = Vec::new();
 
     let params = if function.params.is_empty() {
@@ -96,7 +125,7 @@ pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
 
     for local in &function.locals {
         lines.push(Line {
-            text: format!("{INDENT}{} {};", local.ty, local.name),
+            text: format!("{}{} {};", style.indent, local.ty, local.name),
             addresses: Vec::new(),
         });
     }
@@ -107,7 +136,7 @@ pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
         });
     }
 
-    emit_statements(&function.body, 1, &mut lines);
+    emit_statements(&function.body, 1, &mut lines, &style);
 
     lines.push(Line {
         text: "}".to_string(),
@@ -118,14 +147,18 @@ pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
 }
 
 /// Print statements at `depth` levels of indentation.
-fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>) {
-    let pad = INDENT.repeat(depth);
+fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>, style: &Style) {
+    let pad = style.indent.repeat(depth);
     for statement in statements {
         match &statement.kind {
             StatementKind::Plain => match &statement.node {
                 // A label sits one level out from the statements it names.
                 AstNode::Label { name, .. } => {
-                    push(lines, format!("{}{name}:", INDENT.repeat(depth - 1)), &[]);
+                    push(
+                        lines,
+                        format!("{}{name}:", style.indent.repeat(depth - 1)),
+                        &[],
+                    );
                 }
                 AstNode::Goto { label, .. } => {
                     push(lines, format!("{pad}goto {label};"), &statement.addresses);
@@ -134,7 +167,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                 AstNode::Continue => push(lines, format!("{pad}continue;"), &statement.addresses),
                 node => {
                     let mut text = String::new();
-                    emit_into(node, &mut text, 0);
+                    emit_into(node, &mut text, 0, style);
                     for part in text.lines() {
                         push(lines, format!("{pad}{part}"), &statement.addresses);
                     }
@@ -146,16 +179,16 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
             } => {
                 push(
                     lines,
-                    format!("{pad}if ({}) {{", condition(&statement.node)),
+                    format!("{pad}if ({}) {{", condition(&statement.node, style)),
                     &statement.addresses,
                 );
-                emit_statements(then_part, depth + 1, lines);
+                emit_statements(then_part, depth + 1, lines, style);
                 if !else_part.is_empty() {
                     lines.push(Line {
                         text: format!("{pad}}} else {{"),
                         addresses: Vec::new(),
                     });
-                    emit_statements(else_part, depth + 1, lines);
+                    emit_statements(else_part, depth + 1, lines, style);
                 }
                 lines.push(Line {
                     text: format!("{pad}}}"),
@@ -164,10 +197,10 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
             }
             StatementKind::While { body } => {
                 lines.push(Line {
-                    text: format!("{pad}while ({}) {{", condition(&statement.node)),
+                    text: format!("{pad}while ({}) {{", condition(&statement.node, style)),
                     addresses: statement.addresses.clone(),
                 });
-                emit_statements(body, depth + 1, lines);
+                emit_statements(body, depth + 1, lines, style);
                 lines.push(Line {
                     text: format!("{pad}}}"),
                     addresses: Vec::new(),
@@ -178,9 +211,9 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                     text: format!("{pad}do {{"),
                     addresses: Vec::new(),
                 });
-                emit_statements(body, depth + 1, lines);
+                emit_statements(body, depth + 1, lines, style);
                 lines.push(Line {
-                    text: format!("{pad}}} while ({});", condition(&statement.node)),
+                    text: format!("{pad}}} while ({});", condition(&statement.node, style)),
                     addresses: statement.addresses.clone(),
                 });
             }
@@ -188,13 +221,13 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                 lines.push(Line {
                     text: format!(
                         "{pad}for ({}; {}; {}) {{",
-                        expression(&init.node),
-                        condition(&statement.node),
-                        expression(&step.node)
+                        expression(&init.node, style),
+                        condition(&statement.node, style),
+                        expression(&step.node, style)
                     ),
                     addresses: statement.addresses.clone(),
                 });
-                emit_statements(body, depth + 1, lines);
+                emit_statements(body, depth + 1, lines, style);
                 lines.push(Line {
                     text: format!("{pad}}}"),
                     addresses: Vec::new(),
@@ -213,18 +246,18 @@ fn push(lines: &mut Vec<Line>, text: String, addresses: &[u64]) {
 }
 
 /// A condition as it reads between the parentheses: `1` for always.
-fn condition(node: &AstNode) -> String {
+fn condition(node: &AstNode, style: &Style) -> String {
     match node {
         AstNode::ConditionTrue => "1".to_string(),
         AstNode::ConditionFalse => "0".to_string(),
-        other => expression(other),
+        other => expression(other, style),
     }
 }
 
 /// An expression on its own, without a terminating semicolon.
-fn expression(node: &AstNode) -> String {
+fn expression(node: &AstNode, style: &Style) -> String {
     let mut text = String::new();
-    expr(node, &mut text, false);
+    expr(node, &mut text, false, style);
     text
 }
 
@@ -266,15 +299,15 @@ pub fn emit_procedure(
 
 pub fn emit_node(n: &AstNode) -> String {
     let mut s = String::new();
-    emit_into(n, &mut s, 0);
+    emit_into(n, &mut s, 0, &Style::default());
     let _ = writeln!(s);
     s
 }
 
-fn emit_into(n: &AstNode, out: &mut String, ind: usize) {
+fn emit_into(n: &AstNode, out: &mut String, ind: usize, style: &Style) {
     let pad = |o: &mut String, i: usize| {
         for _ in 0..i {
-            o.push_str(INDENT);
+            o.push_str(&style.indent);
         }
     };
     match n {
@@ -293,15 +326,15 @@ fn emit_into(n: &AstNode, out: &mut String, ind: usize) {
         } => {
             pad(out, ind);
             out.push_str("if (");
-            expr(cond, out, false);
+            expr(cond, out, false, style);
             out.push_str(") {\n");
-            emit_into(then_part, out, ind + 1);
+            emit_into(then_part, out, ind + 1, style);
             pad(out, ind);
             out.push_str("}\n");
             if let Some(e) = else_part {
                 pad(out, ind);
                 out.push_str("else {\n");
-                emit_into(e, out, ind + 1);
+                emit_into(e, out, ind + 1, style);
                 pad(out, ind);
                 out.push_str("}\n");
             }
@@ -312,21 +345,21 @@ fn emit_into(n: &AstNode, out: &mut String, ind: usize) {
                 LoopKind::While | LoopKind::For => {
                     out.push_str("while (");
                     match cond {
-                        Some(c) => expr(c, out, false),
+                        Some(c) => expr(c, out, false, style),
                         None => out.push('1'),
                     }
                     out.push_str(") {\n");
-                    emit_into(body, out, ind + 1);
+                    emit_into(body, out, ind + 1, style);
                     pad(out, ind);
                     out.push_str("}\n");
                 }
                 LoopKind::DoWhile => {
                     out.push_str("do {\n");
-                    emit_into(body, out, ind + 1);
+                    emit_into(body, out, ind + 1, style);
                     pad(out, ind);
                     out.push_str("} while (");
                     if let Some(c) = cond {
-                        expr(c, out, false);
+                        expr(c, out, false, style);
                     }
                     out.push_str(");\n");
                 }
@@ -337,13 +370,13 @@ fn emit_into(n: &AstNode, out: &mut String, ind: usize) {
             out.push_str("return");
             if let Some(value) = value {
                 out.push(' ');
-                expr(value, out, false);
+                expr(value, out, false, style);
             }
             out.push_str(";\n");
         }
         other => {
             pad(out, ind);
-            expr(other, out, false);
+            expr(other, out, false, style);
             out.push_str(";\n");
         }
     }
@@ -354,7 +387,7 @@ fn emit_into(n: &AstNode, out: &mut String, ind: usize) {
 /// `nested` says whether the expression sits inside another operator, which
 /// is when a binary operation needs its parentheses: `return a + b;` has
 /// none, `(a + b) * c` has them.
-fn expr(n: &AstNode, out: &mut String, nested: bool) {
+fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
     match n {
         AstNode::Register { reg } => {
             let _ = write!(
@@ -367,43 +400,43 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
         }
         AstNode::Var { name } => out.push_str(name),
         AstNode::Constant { value, width_bytes } => {
-            out.push_str(&constant_text(*value, *width_bytes))
+            out.push_str(&constant_text(*value, *width_bytes, style.constants))
         }
         AstNode::Assign { lhs, rhs } => {
-            expr(lhs, out, false);
+            expr(lhs, out, false, style);
             out.push_str(" = ");
-            expr(rhs, out, false);
+            expr(rhs, out, false, style);
         }
         AstNode::Binary { lhs, op, rhs } => {
             if nested {
                 out.push('(');
             }
-            expr(lhs, out, true);
+            expr(lhs, out, true, style);
             let _ = write!(out, " {} ", binop(*op));
-            expr(rhs, out, true);
+            expr(rhs, out, true, style);
             if nested {
                 out.push(')');
             }
         }
         AstNode::Deref { target } => {
             out.push('*');
-            operand(target, out);
+            operand(target, out, style);
         }
         AstNode::AddressOf { target } => {
             out.push('&');
-            operand(target, out);
+            operand(target, out, style);
         }
         AstNode::Cast { ty, target } => {
             let _ = write!(out, "({ty})");
-            operand(target, out);
+            operand(target, out, style);
         }
         AstNode::Call { callee, args } => {
-            expr(callee, out, true);
-            arguments(args, out);
+            expr(callee, out, true, style);
+            arguments(args, out, style);
         }
         AstNode::Intrinsic { name, args } => {
             out.push_str(name);
-            arguments(args, out);
+            arguments(args, out, style);
         }
         AstNode::FunctionName { name, .. } => out.push_str(name),
         AstNode::StringLiteral { text } => out.push_str(&string_literal(text)),
@@ -411,7 +444,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
             out.push_str("return");
             if let Some(value) = value {
                 out.push(' ');
-                expr(value, out, false);
+                expr(value, out, false, style);
             }
         }
         AstNode::ConditionTrue => out.push_str("true"),
@@ -426,7 +459,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
         }
         AstNode::If { cond, .. } => {
             out.push_str("if (");
-            expr(cond, out, false);
+            expr(cond, out, false, style);
             out.push(')');
         }
         AstNode::IfGoto {
@@ -435,13 +468,13 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
             negated,
         } => {
             out.push_str(if *negated { "if (!(" } else { "if (" });
-            expr(cond, out, false);
+            expr(cond, out, false, style);
             let _ = write!(out, ") goto {label}");
         }
         AstNode::Loop { cond, kind, .. } => {
             let _ = write!(out, "{kind:?}(");
             if let Some(c) = cond {
-                expr(c, out, false);
+                expr(c, out, false, style);
             }
             out.push_str(") { ... }");
         }
@@ -450,45 +483,56 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
 
 /// The operand of a unary operator or a cast: an atom or another unary
 /// operation as it is, anything else in parentheses.
-fn operand(n: &AstNode, out: &mut String) {
+fn operand(n: &AstNode, out: &mut String, style: &Style) {
     if n.is_atom()
         || matches!(
             n,
             AstNode::Cast { .. } | AstNode::Deref { .. } | AstNode::AddressOf { .. }
         )
     {
-        expr(n, out, true);
+        expr(n, out, true, style);
     } else {
         out.push('(');
-        expr(n, out, false);
+        expr(n, out, false, style);
         out.push(')');
     }
 }
 
 /// A parenthesised, comma-separated argument list.
-fn arguments(args: &[AstNode], out: &mut String) {
+fn arguments(args: &[AstNode], out: &mut String, style: &Style) {
     out.push('(');
     for (i, a) in args.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        expr(a, out, false);
+        expr(a, out, false, style);
     }
     out.push(')');
 }
 
 /// A constant as C spells it.
 ///
-/// A constant whose sign bit is set at its width is negative, and printed so;
-/// a small one is decimal, and anything from 10 up is hex, which is how an
-/// address or a mask is read.
-fn constant_text(value: u64, width_bytes: u32) -> String {
+/// A constant whose sign bit is set at its width is negative, and printed so.
+/// Under the mixed style a small one is decimal, and anything from 10 up is
+/// hex, which is how an address or a mask is read; the other styles are all
+/// one or all the other. A negative constant is decimal in every style but
+/// hex, where it is `-0x…`.
+fn constant_text(value: u64, width_bytes: u32, style: ConstantStyle) -> String {
     let bits = (width_bytes * 8).clamp(8, 64);
     let signed = signed(value, bits);
-    if signed < 10 {
-        format!("{signed}")
+    let hex = match style {
+        ConstantStyle::Mixed => signed >= 10,
+        ConstantStyle::Decimal => false,
+        ConstantStyle::Hex => true,
+    };
+    if hex {
+        if signed < 0 {
+            format!("-{:#x}", signed.unsigned_abs())
+        } else {
+            format!("{signed:#x}")
+        }
     } else {
-        format!("{signed:#x}")
+        format!("{signed}")
     }
 }
 
@@ -551,6 +595,7 @@ fn size_suffix(bits: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lift::Variable;
 
     #[test]
     fn a_top_level_binary_has_no_parentheses_and_a_nested_one_has() {
@@ -563,10 +608,57 @@ mod tests {
 
     #[test]
     fn constants_are_decimal_when_small_hex_when_large_and_signed_at_their_width() {
-        assert_eq!(constant_text(3, 4), "3");
-        assert_eq!(constant_text(0x2004, 8), "0x2004");
-        assert_eq!(constant_text(0xffff_ffff, 4), "-1");
-        assert_eq!(constant_text(0xffff_ffff, 8), "0xffffffff");
+        let mixed = ConstantStyle::Mixed;
+        assert_eq!(constant_text(3, 4, mixed), "3");
+        assert_eq!(constant_text(0x2004, 8, mixed), "0x2004");
+        assert_eq!(constant_text(0xffff_ffff, 4, mixed), "-1");
+        assert_eq!(constant_text(0xffff_ffff, 8, mixed), "0xffffffff");
+    }
+
+    #[test]
+    fn the_constant_style_option_spells_every_constant_one_way() {
+        assert_eq!(constant_text(0x2004, 8, ConstantStyle::Decimal), "8196");
+        assert_eq!(constant_text(0xffff_ffff, 4, ConstantStyle::Decimal), "-1");
+        assert_eq!(constant_text(3, 4, ConstantStyle::Hex), "0x3");
+        assert_eq!(constant_text(0xffff_fff0, 4, ConstantStyle::Hex), "-0x10");
+    }
+
+    #[test]
+    fn the_indent_option_sets_the_width_of_a_level() {
+        let function = LiftedFunction {
+            name: "f".into(),
+            address: 0x1000,
+            return_type: "int".into(),
+            params: Vec::new(),
+            locals: vec![Variable {
+                ty: "int".into(),
+                name: "x".into(),
+            }],
+            body: vec![Statement {
+                node: AstNode::binary(AstNode::var("x"), BinaryOp::Less, AstNode::constant(3, 4)),
+                addresses: vec![0x1000],
+                kind: StatementKind::If {
+                    then_part: vec![Statement::plain(
+                        AstNode::Return {
+                            value: Some(Box::new(AstNode::constant(16, 4))),
+                        },
+                        vec![0x1004],
+                    )],
+                    else_part: Vec::new(),
+                },
+            }],
+            frame: Vec::new(),
+        };
+        let options =
+            Options::from_pairs([("indent", "4"), ("constant-style", "decimal")]).unwrap();
+        assert_eq!(
+            emit_function(&function, &options).text(),
+            "int f(void)\n{\n    int x;\n\n    if (x < 3) {\n        return 16;\n    }\n}"
+        );
+        assert_eq!(
+            emit_function(&function, &Options::default()).text(),
+            "int f(void)\n{\n  int x;\n\n  if (x < 3) {\n    return 0x10;\n  }\n}"
+        );
     }
 
     #[test]

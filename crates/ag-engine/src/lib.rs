@@ -6,6 +6,7 @@ pub mod cpu_context;
 pub mod emit;
 pub mod image;
 pub mod lift;
+pub mod options;
 pub mod pipeline;
 pub mod procedure;
 pub mod register;
@@ -17,6 +18,7 @@ pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, Procedure
 pub use emit::{Line, Pseudocode};
 pub use image::{Image, Section};
 pub use lift::{Abi, LiftedFunction, NotLifted, Statement, StatementKind};
+pub use options::{OptionError, Options};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use procedure::FunctionSignature;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};
