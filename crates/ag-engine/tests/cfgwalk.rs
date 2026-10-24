@@ -214,3 +214,59 @@ fn an_invalid_byte_ends_the_block_and_code_after_it_is_still_a_target() {
         "the data byte is not a block"
     );
 }
+
+// `main` of the 32-bit fixture (crates/ag-image/tests/fixtures/sample32.elf),
+// at 0x804900d. A loop that calls `add` three times, then reads `counter`
+// and `greeting` through absolute memory operands.
+//
+// 0x804900d: push ebp; mov ebp,esp; sub esp,0x10; mov [ebp-4],0; mov [ebp-8],0
+// 0x8049021: jmp 0x8049038
+// 0x8049023: push [ebp-8]; push [ebp-4]; call 0x8049000 (add)
+// 0x804902e: add esp,8; mov [ebp-4],eax; add [ebp-8],1
+// 0x8049038: cmp [ebp-8],2; jle 0x8049023
+// 0x804903e: mov edx,[0x804b008]; ...; mov eax,[0x804b00c]; ...; leave; ret
+const MAIN32: &[u8] = &[
+    0x55, 0x89, 0xe5, 0x83, 0xec, 0x10, 0xc7, 0x45, 0xfc, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x45, 0xf8,
+    0x00, 0x00, 0x00, 0x00, 0xeb, 0x15, 0xff, 0x75, 0xf8, 0xff, 0x75, 0xfc, 0xe8, 0xd2, 0xff, 0xff,
+    0xff, 0x83, 0xc4, 0x08, 0x89, 0x45, 0xfc, 0x83, 0x45, 0xf8, 0x01, 0x83, 0x7d, 0xf8, 0x02, 0x7e,
+    0xe5, 0x8b, 0x15, 0x08, 0xb0, 0x04, 0x08, 0x8b, 0x45, 0xfc, 0x01, 0xc2, 0xa1, 0x0c, 0xb0, 0x04,
+    0x08, 0x0f, 0xb6, 0x00, 0x0f, 0xbe, 0xc0, 0x01, 0xd0, 0xc9, 0xc3,
+];
+
+#[test]
+fn the_walk_of_32_bit_code_finds_its_loop_and_its_call() {
+    let mut ctx = X86IcedContext::new(ag_engine::Bitness::Bits32);
+    let d = Disasm::decode(&mut ctx, MAIN32, 0x804900d).unwrap();
+    let cfg = resolve_branches(&d, 0x804900d);
+
+    let blocks: Vec<(u64, u64, Vec<u64>)> = cfg
+        .blocks
+        .iter()
+        .map(|b| (b.from, b.to, b.successor_addresses.clone()))
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            (0x804900d, 0x8049023, vec![0x8049038]),
+            (0x8049023, 0x804902e, vec![0x804902e]),
+            (0x804902e, 0x8049038, vec![0x8049038]),
+            (0x8049038, 0x804903e, vec![0x8049023, 0x804903e]),
+            (0x804903e, 0x8049058, vec![]),
+        ],
+        "the prologue, the body of the loop, the return from add, the test, the tail"
+    );
+    assert_eq!(cfg.call_sites, vec![0x8049029]);
+    assert_eq!(
+        cfg.call_targets,
+        vec![0x8049000],
+        "the call to add is recorded"
+    );
+
+    // The data the tail reads is named by the absolute operands.
+    let pointers: Vec<u64> = d
+        .instructions
+        .iter()
+        .filter_map(|i| i.memory_address())
+        .collect();
+    assert_eq!(pointers, vec![0x804b008, 0x804b00c]);
+}

@@ -1616,6 +1616,45 @@ mod tests {
         assert_eq!(app.work.listing[0].address, 0x100000440);
     }
 
+    /// The 32-bit ELF fixture the image tests read.
+    fn elf32_image() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample32.elf")
+    }
+
+    #[test]
+    fn booting_with_a_32_bit_elf_shows_its_functions_and_its_listing() {
+        let config = Config {
+            binary: Some(elf32_image()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        assert_eq!(app.project.kind, crate::model::ProjectKind::Binary);
+        assert_eq!(
+            app.project.architecture.as_deref(),
+            Some("x86:LE:32:default:gcc")
+        );
+        assert!(!app.navigator.rows.is_empty(), "the symbols are listed");
+        assert!(app.capabilities.listing, "the listing is on for 32-bit x86");
+        assert!(app.capabilities.graph, "and so is the graph");
+
+        // The first function is selected, and its listing is loaded: `add`,
+        // which starts with `push ebp`.
+        let selected = app.navigator.selected.expect("a function is selected");
+        assert_eq!(selected, 0x8049000);
+        assert!(!app.work.listing.is_empty(), "the listing is shown");
+        assert_eq!(app.work.listing[0].address, 0x8049000);
+        assert_eq!(app.work.listing[0].mnemonic, "push");
+        assert_eq!(app.work.listing[0].operands, "ebp");
+
+        // main has a graph to draw, and a string to pick.
+        let _ = app.update(Message::FunctionSelected(0x804900d));
+        assert_eq!(app.work.listing[0].address, 0x804900d);
+        let _ = app.update(Message::StringSelected(0x804a000));
+        assert_eq!(app.selection, Selection::Address(0x804a000));
+    }
+
     #[test]
     fn booting_with_a_binary_shows_its_functions() {
         let config = Config {

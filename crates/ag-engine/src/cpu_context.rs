@@ -1,3 +1,4 @@
+use crate::arch::Bitness;
 use crate::register::RegisterId;
 
 pub const RC_NONE: u32 = 0;
@@ -56,8 +57,26 @@ pub struct DecodedInsn {
     pub mnemonic: u32,
     pub flow: Flow,
     pub operands: Vec<Operand>,
+    /// The address a RIP-relative memory operand names: `[rip+disp]` resolved
+    /// against the next instruction. That is how 64-bit code names its data;
+    /// 32-bit code has no such operand, so this is `None` there.
     pub rip_relative_address: Option<u64>,
+    /// The address an absolute memory operand names: `[disp]` with no base,
+    /// no index and no segment override, so the displacement is the address.
+    /// That is how 32-bit code names its data; 64-bit code does it too when
+    /// it is not position-independent.
+    pub absolute_address: Option<u64>,
     pub switch_indices: bool,
+}
+
+impl DecodedInsn {
+    /// The address a memory operand of the instruction names outright, when
+    /// one does: the RIP-relative one in 64-bit code, the absolute one in
+    /// 32-bit code. This is the pointer a reference to a string or to data
+    /// is found by, in either width.
+    pub fn memory_address(&self) -> Option<u64> {
+        self.rip_relative_address.or(self.absolute_address)
+    }
 }
 
 pub trait CpuContext {
@@ -75,15 +94,46 @@ pub trait CpuContext {
     }
 }
 
+/// The engine's x86 decoder, over iced.
+///
+/// One decoder reads one width of x86: the bytes of a 32-bit program and of
+/// a 64-bit program do not mean the same thing, so the width comes from the
+/// image's language and is fixed when the decoder is made.
 pub struct X86IcedContext {
     options: u32,
+    bitness: Bitness,
 }
 
 impl Default for X86IcedContext {
+    /// A 64-bit decoder.
     fn default() -> Self {
+        Self::new(Bitness::Bits64)
+    }
+}
+
+impl X86IcedContext {
+    /// A decoder for a program of the given width.
+    pub fn new(bitness: Bitness) -> Self {
         Self {
             options: iced_x86::DecoderOptions::NONE,
+            bitness,
         }
+    }
+
+    /// A decoder for the program a language id names.
+    ///
+    /// `None` when the id names an architecture other than x86, or names no
+    /// width the decoder reads: the decoder reads x86 and nothing else.
+    pub fn of_language(language: &str) -> Option<Self> {
+        if !Bitness::is_x86(language) {
+            return None;
+        }
+        Some(Self::new(Bitness::of_language(language)?))
+    }
+
+    /// The width of the program this decoder reads.
+    pub fn bitness(&self) -> Bitness {
+        self.bitness
     }
 }
 
@@ -94,6 +144,14 @@ impl Default for X86IcedContext {
 /// and `RSP` is GPR 4 — they never collide. Vector registers of every width
 /// share one class, numbered 0..32; segment, mask, control, debug, MMX and x87
 /// registers keep their own numbering.
+///
+/// The id is the same whatever the width of the program: a general register
+/// is numbered by its place in the file, which `EAX` and `RAX` share, and the
+/// slice is the width of the operand. In a 32-bit program `EAX` is the whole
+/// of GPR 0, and its id — 32 bits at offset 0 — is the id of a whole register
+/// of 32 bits; `ESP` is GPR 4 and `EIP` is the instruction pointer at 32 bits.
+/// A 32-bit listing and a 64-bit one therefore name a register the same way,
+/// and nothing has to be told which it is reading.
 fn reg_id(r: iced_x86::Register) -> RegisterId {
     use iced_x86::Register as R;
     if r == R::None {
@@ -131,7 +189,7 @@ fn reg_id(r: iced_x86::Register) -> RegisterId {
 
 impl CpuContext for X86IcedContext {
     fn decode(&mut self, bytes: &[u8], address: u64) -> anyhow::Result<DecodedInsn> {
-        let mut dec = iced_x86::Decoder::with_ip(64, bytes, address, self.options);
+        let mut dec = iced_x86::Decoder::with_ip(self.bitness.bits(), bytes, address, self.options);
         let ins = dec.decode();
         if ins.is_invalid() {
             // One byte of data in a code section, not an instruction. It is
@@ -144,6 +202,7 @@ impl CpuContext for X86IcedContext {
                 flow: Flow::Invalid,
                 operands: Vec::new(),
                 rip_relative_address: None,
+                absolute_address: None,
                 switch_indices: false,
             });
         }
@@ -214,6 +273,7 @@ impl CpuContext for X86IcedContext {
         } else {
             None
         };
+        let absolute_address = absolute_address(&ins);
         Ok(DecodedInsn {
             address,
             length: ins.len(),
@@ -221,11 +281,34 @@ impl CpuContext for X86IcedContext {
             flow,
             operands,
             rip_relative_address,
+            absolute_address,
             switch_indices: false,
         })
     }
 
     fn byte_size(&self) -> u64 {
-        8
+        self.bitness.byte_size()
     }
+}
+
+/// The address an absolute memory operand of `ins` names, when it has one.
+///
+/// A memory operand with no base register and no index register is the
+/// displacement alone, and the displacement is an address: `mov eax, [0x804b008]`
+/// reads the data at that address. A segment override takes the operand out of
+/// the flat address space — `fs:[0x28]` is the stack guard, not the 40th byte
+/// of the program — so an operand with one names nothing. An operand that is
+/// relative to the instruction pointer has a base, and is left to
+/// [`DecodedInsn::rip_relative_address`].
+fn absolute_address(ins: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{OpKind, Register as R};
+    let has_memory = (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Memory);
+    if !has_memory
+        || ins.memory_base() != R::None
+        || ins.memory_index() != R::None
+        || ins.segment_prefix() != R::None
+    {
+        return None;
+    }
+    Some(ins.memory_displacement64())
 }

@@ -137,8 +137,11 @@ and as a hex string.
 matched loosely: an exact name first, then a substring. A direct call prints the name of
 the function it calls, when that function has one.
 
-`info` and `symbols` read any format the loader reads. `disasm` decodes x86-64, so it
-refuses an image of another architecture rather than printing nonsense.
+`info` and `symbols` read any format the loader reads. `disasm` decodes x86, 32-bit and
+64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), so
+it refuses an image of another architecture rather than printing nonsense. In 32-bit code
+there is no `rip`, so the strings and the data a function refers to are found through the
+absolute memory operands it names them with.
 
 `strings` reads the sections that are not code, and reports every run of text that ends
 in a NUL. A tab, a newline and a carriage return are part of the text, and they are

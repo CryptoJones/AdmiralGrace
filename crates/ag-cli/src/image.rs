@@ -507,7 +507,7 @@ fn symbols(image: &Binary, filter: Option<&str>, json: bool) -> Result<i32> {
 fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
-        "the decoder reads x86-64 and this image is {}",
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
         image.language()
     );
 
@@ -681,7 +681,7 @@ fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<S
 fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
-        "the decoder reads x86-64 and this image is {}",
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
         image.language()
     );
 
@@ -753,7 +753,7 @@ fn calls(image: &Binary, target: Option<&str>, json: bool) -> Result<i32> {
 fn calls_of(image: &Binary, target: &str, json: bool) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
-        "the decoder reads x86-64 and this image is {}",
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
         image.language()
     );
 
@@ -899,7 +899,7 @@ fn every_call(image: &Binary, json: bool) -> Result<i32> {
 fn data(image: &Binary, target: Option<&str>, json: bool) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
-        "the decoder reads x86-64 and this image is {}",
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
         image.language()
     );
 
