@@ -119,7 +119,7 @@ with the functions that use it. `--json` reports the same thing as JSON, with ev
 as both a number and a hex string.
 
 `info` and `symbols` read any format the loader reads. `disasm`, `cfg`, `calls` and `data`
-decode x86-64 only, so they refuse another architecture rather than guessing.
+decode x86 only (32-bit or 64-bit, as the image says), so they refuse another architecture.
 
 Reach for this when there is no corpus yet: the symbols say what the program has, and the
 disassembly says what one function does.

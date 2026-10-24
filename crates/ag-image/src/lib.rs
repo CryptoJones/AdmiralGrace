@@ -9,6 +9,9 @@
 //! [`X86IcedContext`] and [`Disasm::decode`], and the control-flow graph
 //! comes from [`resolve_branches`]. The text of an instruction is iced's,
 //! because the engine keeps the flow of an instruction and not its spelling.
+//! The width of the code — 32-bit or 64-bit x86 — is read from the image's
+//! language, and both the engine's decoder and the text are told it, so a
+//! 32-bit image reads like a 64-bit one.
 //!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
@@ -23,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ag_engine::cfgwalk::resolve_branches;
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::pipeline::Disasm;
-use ag_engine::Image;
+use ag_engine::{Bitness, Image};
 use anyhow::{Context, Result};
 
 /// One section of the image.
@@ -298,6 +301,8 @@ impl CallGraph {
 /// A program image, read.
 pub struct Binary {
     language: String,
+    /// The width of the program, when the native decoder reads its language.
+    bitness: Option<Bitness>,
     entry: Option<u64>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
@@ -316,6 +321,7 @@ impl std::fmt::Debug for Binary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Binary")
             .field("language", &self.language)
+            .field("bitness", &self.bitness)
             .field("entry", &self.entry)
             .field("sections", &self.sections.len())
             .field("functions", &self.functions.len())
@@ -336,6 +342,10 @@ impl Binary {
     /// result can be shared between threads.
     fn from_image(image: Image) -> Binary {
         let language = image.language();
+        // The decoder reads x86 of either width, and the language says which
+        // this image is. An image of another architecture has no bitness
+        // here: it is read and reported, but not decoded.
+        let bitness = X86IcedContext::of_language(&language).map(|decoder| decoder.bitness());
         let entry = image.entry();
 
         let sections: Vec<SectionInfo> = image
@@ -382,7 +392,8 @@ impl Binary {
 
         // The bytes of every section the file holds are kept: the listing
         // decodes the code out of them, and the byte pane shows the rest.
-        // They are read once here, because the file is read once.
+        // They are read once here, because the file is read once. Each
+        // section carries the width it is to be decoded at.
         let file: Vec<FileSection> = sections
             .iter()
             .filter_map(|section| {
@@ -390,6 +401,9 @@ impl Binary {
                 Some(FileSection {
                     section: section.clone(),
                     bytes,
+                    // An image the decoder does not read is never decoded,
+                    // so the width it would be decoded at does not matter.
+                    bitness: bitness.unwrap_or(Bitness::Bits64),
                     decoded: OnceLock::new(),
                 })
             })
@@ -401,6 +415,7 @@ impl Binary {
 
         Binary {
             language,
+            bitness,
             entry,
             sections,
             functions,
@@ -419,6 +434,14 @@ impl Binary {
     /// The SLEIGH language id the loader resolved.
     pub fn language(&self) -> &str {
         &self.language
+    }
+
+    /// The width of the program, when the native decoder reads it.
+    ///
+    /// `Bits32` for `x86:LE:32:...`, `Bits64` for `x86:LE:64:...`, and `None`
+    /// for an image of another architecture.
+    pub fn bitness(&self) -> Option<Bitness> {
+        self.bitness
     }
 
     /// The container's declared entry point.
@@ -650,10 +673,10 @@ impl Binary {
 
     /// Whether the native decoder can read this image.
     ///
-    /// The decoder is x86-64, so an image of another architecture is read and
-    /// reported, but not disassembled.
+    /// The decoder is x86, 32-bit or 64-bit as the language says, so an image
+    /// of another architecture is read and reported, but not disassembled.
     pub fn supports_disassembly(&self) -> bool {
-        self.language.starts_with("x86:LE:64")
+        self.bitness.is_some()
     }
 
     /// The disassembly of the function at `address`.
@@ -861,10 +884,12 @@ impl Binary {
             for instruction in decoded.disasm.instructions.iter().filter(|instruction| {
                 block.from <= instruction.address && instruction.address < block.to
             }) {
-                // An instruction that reads through the instruction pointer
-                // points at the data it names: that is what a reference to a
-                // string is.
-                if let Some(target) = instruction.rip_relative_address {
+                // An instruction that names an address outright points at
+                // the data there: that is what a reference to a string or to
+                // data is. In 64-bit code that is a read through the
+                // instruction pointer; in 32-bit code it is an absolute
+                // memory operand.
+                if let Some(target) = instruction.memory_address() {
                     pointers.push(Pointer {
                         site: instruction.address,
                         target,
@@ -915,6 +940,8 @@ struct FileSection {
     section: SectionInfo,
     /// The bytes the file holds for the section.
     bytes: Vec<u8>,
+    /// The width the section's code is decoded at.
+    bitness: Bitness,
     /// The instructions of the section, decoded once.
     decoded: OnceLock<Decoded>,
 }
@@ -1064,7 +1091,7 @@ impl FileSection {
     /// The instructions of the section, decoded once.
     fn decoded(&self) -> &Decoded {
         self.decoded
-            .get_or_init(|| decode_section(&self.bytes, self.section.vma))
+            .get_or_init(|| decode_section(&self.bytes, self.section.vma, self.bitness))
     }
 }
 
@@ -1096,9 +1123,10 @@ impl Decoded {
 ///
 /// The engine's decoder gives the flow of every instruction, which is what
 /// the control-flow walk needs; iced's own spelling gives the text the reader
-/// sees. Both read the same bytes, so they agree instruction for instruction.
-fn decode_section(bytes: &[u8], base: u64) -> Decoded {
-    let mut context = TextContext::default();
+/// sees. Both read the same bytes at the same width, so they agree
+/// instruction for instruction.
+fn decode_section(bytes: &[u8], base: u64, bitness: Bitness) -> Decoded {
+    let mut context = TextContext::new(bitness);
 
     // The engine's decoder records the bytes that do not decode as one-byte
     // invalid entries and carries on, so a section with padding or a jump
@@ -1121,12 +1149,21 @@ fn decode_section(bytes: &[u8], base: u64) -> Decoded {
 }
 
 /// A decoder that keeps the text of what it decodes.
-#[derive(Default)]
 struct TextContext {
-    /// The engine's decoder.
+    /// The engine's decoder, at the width of the program.
     inner: X86IcedContext,
     /// The text of every instruction decoded, by address.
     text: HashMap<u64, (String, String)>,
+}
+
+impl TextContext {
+    /// A decoder for code of the given width.
+    fn new(bitness: Bitness) -> Self {
+        Self {
+            inner: X86IcedContext::new(bitness),
+            text: HashMap::new(),
+        }
+    }
 }
 
 impl CpuContext for TextContext {
@@ -1137,7 +1174,7 @@ impl CpuContext for TextContext {
             // A byte that does not decode is data, not an instruction, and
             // iced has no spelling for it: it is shown as the byte it is.
             Flow::Invalid => Some(("db".to_string(), format!("0x{:02x}", bytes[0]))),
-            _ => iced_text(bytes, address),
+            _ => iced_text(bytes, address, self.inner.bitness()),
         };
 
         if let Some(text) = text {
@@ -1149,10 +1186,14 @@ impl CpuContext for TextContext {
 }
 
 /// The mnemonic and the operands of the instruction at `address`, as iced
-/// spells them.
-fn iced_text(bytes: &[u8], address: u64) -> Option<(String, String)> {
-    let mut decoder =
-        iced_x86::Decoder::with_ip(64, bytes, address, iced_x86::DecoderOptions::NONE);
+/// spells them, read at the width of the program.
+fn iced_text(bytes: &[u8], address: u64, bitness: Bitness) -> Option<(String, String)> {
+    let mut decoder = iced_x86::Decoder::with_ip(
+        bitness.bits(),
+        bytes,
+        address,
+        iced_x86::DecoderOptions::NONE,
+    );
     let instruction = decoder.decode();
     if instruction.is_invalid() {
         return None;
@@ -1177,7 +1218,7 @@ mod tests {
     #[test]
     fn a_byte_that_does_not_decode_is_shown_as_data() {
         // A nop, a byte of data, and another nop.
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
 
         assert_eq!(
             decoded.text.get(&0x1001),
@@ -1189,7 +1230,7 @@ mod tests {
 
     #[test]
     fn the_code_after_a_byte_that_does_not_decode_is_still_decoded() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
 
         let addresses: Vec<u64> = decoded
             .disasm
@@ -1206,7 +1247,7 @@ mod tests {
 
     #[test]
     fn a_byte_that_does_not_decode_ends_the_block() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
         let cfg = resolve_branches(&decoded.disasm, 0x1000);
 
         assert_eq!(cfg.blocks.len(), 1, "the block ends at the byte: {cfg:?}");
@@ -1216,6 +1257,39 @@ mod tests {
         assert!(
             block.successor_addresses.is_empty(),
             "the code after the byte is not reached: {block:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_byte_is_an_instruction_in_32_bit_code() {
+        // 0x06 is `push es` in 32-bit code, so the section decodes as three
+        // instructions and the text is iced's, not `db`.
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits32);
+
+        assert_eq!(
+            decoded.text.get(&0x1001),
+            Some(&("push".to_string(), "es".to_string())),
+            "{:?}",
+            decoded.text
+        );
+        let cfg = resolve_branches(&decoded.disasm, 0x1000);
+        assert_eq!(cfg.blocks.len(), 1);
+        assert_eq!(cfg.blocks[0].to, 0x1003, "the block runs to the end");
+    }
+
+    #[test]
+    fn the_text_of_32_bit_code_names_32_bit_registers() {
+        // 55 89 e5: push ebp; mov ebp, esp. In 64-bit code the same bytes
+        // spell push rbp; mov ebp, esp.
+        let decoded = decode_section(&[0x55, 0x89, 0xe5], 0x8049000, Bitness::Bits32);
+
+        assert_eq!(
+            decoded.text.get(&0x8049000),
+            Some(&("push".to_string(), "ebp".to_string()))
+        );
+        assert_eq!(
+            decoded.text.get(&0x8049001),
+            Some(&("mov".to_string(), "ebp,esp".to_string()))
         );
     }
 

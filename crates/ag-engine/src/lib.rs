@@ -1,3 +1,4 @@
+pub mod arch;
 pub mod ast;
 pub mod cpu_context;
 pub mod cfg;
@@ -8,6 +9,7 @@ pub mod pipeline;
 pub mod procedure;
 pub mod register;
 
+pub use arch::Bitness;
 pub use ast::AstNode;
 pub use image::{Image, Section};
 pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg};

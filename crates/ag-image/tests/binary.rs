@@ -777,3 +777,223 @@ fn the_strings_of_the_macho_fixture_are_found() {
         .expect("the greeting is in the image");
     assert_eq!(hello.section, "__cstring");
 }
+
+/// The 32-bit ELF fixture the image tests read.
+fn elf32_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample32.elf")
+}
+
+/// The 32-bit ELF fixture, read.
+fn elf32() -> Binary {
+    Binary::open(&elf32_path()).expect("the 32-bit ELF fixture loads")
+}
+
+/// The addresses of the 32-bit fixture.
+const ADD32: u64 = 0x8049000;
+const MAIN32: u64 = 0x804900d;
+const COUNTER32: u64 = 0x804b008;
+const GREETING32: u64 = 0x804b00c;
+
+#[test]
+fn the_32_bit_elf_fixture_is_read() {
+    let binary = elf32();
+
+    assert!(
+        binary.language().starts_with("x86:LE:32:default:gcc"),
+        "{}",
+        binary.language()
+    );
+    assert_eq!(binary.bitness(), Some(ag_engine::Bitness::Bits32));
+    assert!(binary.supports_disassembly(), "32-bit x86 is decoded");
+    assert_eq!(binary.entry(), Some(MAIN32), "the fixture enters at main");
+
+    let text = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect("a .text section");
+    assert!(text.executable);
+    assert_eq!(text.vma, ADD32);
+
+    let data = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".data")
+        .expect("a .data section");
+    assert!(!data.executable);
+    assert_eq!(data.vma, COUNTER32);
+}
+
+#[test]
+fn the_64_bit_fixtures_say_their_width() {
+    assert_eq!(sample().bitness(), Some(ag_engine::Bitness::Bits64));
+    assert_eq!(pe().bitness(), Some(ag_engine::Bitness::Bits64));
+    assert_eq!(macho().bitness(), Some(ag_engine::Bitness::Bits64));
+}
+
+#[test]
+fn the_functions_of_the_32_bit_elf_fixture_are_named() {
+    let binary = elf32();
+
+    assert_eq!(binary.function_name(ADD32), Some("add"));
+    assert_eq!(binary.function_name(MAIN32), Some("main"));
+
+    let names: Vec<&str> = binary
+        .functions()
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["add", "main"], "{names:?}");
+
+    let data: Vec<(&str, u64)> = binary
+        .data_symbols()
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol.address))
+        .collect();
+    assert!(data.contains(&("counter", COUNTER32)), "{data:?}");
+    assert!(data.contains(&("greeting", GREETING32)), "{data:?}");
+}
+
+#[test]
+fn the_32_bit_elf_fixture_decodes_as_32_bit_code() {
+    let binary = elf32();
+
+    let disassembly = binary.disassembly(ADD32).expect("add decodes");
+    assert_eq!(disassembly.section, ".text");
+    assert_eq!(disassembly.blocks.len(), 1, "add is one block");
+
+    let listing: Vec<(u64, String)> = disassembly.blocks[0]
+        .instructions
+        .iter()
+        .map(|instruction| {
+            (
+                instruction.address,
+                format!("{} {}", instruction.mnemonic, instruction.operands)
+                    .trim_end()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listing,
+        vec![
+            (0x8049000, "push ebp".to_string()),
+            (0x8049001, "mov ebp,esp".to_string()),
+            (0x8049003, "mov edx,[ebp+8]".to_string()),
+            (0x8049006, "mov eax,[ebp+0Ch]".to_string()),
+            (0x8049009, "add eax,edx".to_string()),
+            (0x804900b, "pop ebp".to_string()),
+            (0x804900c, "ret".to_string()),
+        ],
+        "the registers are the 32-bit ones and the frame is read through ebp"
+    );
+    assert_eq!(
+        disassembly.blocks[0].instructions[0].bytes,
+        vec![0x55],
+        "push ebp is one byte"
+    );
+}
+
+#[test]
+fn the_32_bit_elf_fixture_has_its_loop_and_its_call() {
+    let binary = elf32();
+
+    let disassembly = binary.disassembly(MAIN32).expect("main decodes");
+    assert_eq!(disassembly.blocks.len(), 5, "{:?}", disassembly.blocks);
+
+    let calls: Vec<(u64, u64, Option<&str>)> = disassembly
+        .calls
+        .iter()
+        .map(|call| (call.site, call.target, call.name.as_deref()))
+        .collect();
+    assert_eq!(calls, vec![(0x8049029, ADD32, Some("add"))]);
+
+    let graph = binary.control_flow(MAIN32).expect("main walks");
+    let kinds: Vec<(u64, u64, EdgeKind)> = graph
+        .edges
+        .iter()
+        .map(|edge| (edge.from, edge.to, edge.kind))
+        .collect();
+    // The test at the bottom of the loop goes back to the body or falls out.
+    assert!(
+        kinds.contains(&(0x8049038, 0x8049023, EdgeKind::Taken)),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(0x8049038, 0x804903e, EdgeKind::Fallthrough)),
+        "{kinds:?}"
+    );
+    // The jump over the body is a branch that is taken.
+    assert!(
+        kinds.contains(&(MAIN32, 0x8049038, EdgeKind::Taken)),
+        "{kinds:?}"
+    );
+
+    let call_graph = binary.call_graph();
+    assert_eq!(call_graph.calls(MAIN32), &[ADD32]);
+    assert_eq!(call_graph.callers(ADD32), &[MAIN32]);
+    let orphans: Vec<String> = binary
+        .functions_without_callers()
+        .into_iter()
+        .map(|function| function.name)
+        .collect();
+    assert_eq!(orphans, vec!["main".to_string()]);
+}
+
+#[test]
+fn the_strings_of_the_32_bit_elf_fixture_are_found() {
+    let binary = elf32();
+
+    let hello = binary
+        .strings()
+        .iter()
+        .find(|string| string.text == "hello")
+        .expect("the greeting is in the image");
+    assert_eq!(hello.section, ".rodata");
+    assert_eq!(hello.address, 0x804a000);
+
+    // The greeting is reached through the `greeting` pointer in .data, and
+    // no instruction points at the text itself.
+    assert!(binary.string_references(MAIN32).is_empty());
+}
+
+#[test]
+fn the_data_of_the_32_bit_elf_fixture_is_found_through_absolute_operands() {
+    let binary = elf32();
+
+    // main reads `counter` and `greeting` with `mov reg, [address]`: there is
+    // no rip in 32-bit code, so the address is written into the instruction.
+    let references: Vec<(Option<String>, u64, u64, String)> = binary
+        .data_references(MAIN32)
+        .into_iter()
+        .map(|reference| {
+            (
+                reference.name,
+                reference.address,
+                reference.site,
+                reference.section,
+            )
+        })
+        .collect();
+    assert_eq!(
+        references,
+        vec![
+            (Some("counter".into()), COUNTER32, 0x804903e, ".data".into()),
+            (
+                Some("greeting".into()),
+                GREETING32,
+                0x8049049,
+                ".data".into()
+            ),
+        ]
+    );
+
+    assert!(
+        binary.data_references(ADD32).is_empty(),
+        "add names nothing"
+    );
+
+    let users = binary.data_users();
+    assert_eq!(users.get(&COUNTER32), Some(&vec![MAIN32]));
+    assert_eq!(users.get(&GREETING32), Some(&vec![MAIN32]));
+}

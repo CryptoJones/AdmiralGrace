@@ -66,7 +66,8 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 
 That is the native path: the image is parsed by the engine's own loader, the navigator
 lists its symbols, the inspector shows its sections and entry point, and the Listing tab
-holds the native x86-64 disassembly of the selected function. There is no pseudocode yet,
+holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
+language says. There is no pseudocode yet,
 because the lifter has not been written, so that tab says so rather than showing an empty
 pane.
 
@@ -132,8 +133,9 @@ What the workbench reads:
 | The strings of the data sections | The Strings tab: the text of the image, and the functions that use it. |
 | The data the instructions point at | The References tab: the DATA group of a function, and the USED BY group of a piece of data. |
 
-The decoder is x86-64. An image of another architecture opens with its symbols and its
-sections, but with the listing off, and the Problems panel says why.
+The decoder is x86, and reads the width of the code — 32-bit or 64-bit — from the image's
+language. An image of another architecture opens with its symbols and its sections, but
+with the listing off, and the Problems panel says why.
 
 ## Reading the panes
 

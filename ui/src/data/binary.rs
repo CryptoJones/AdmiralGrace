@@ -58,7 +58,7 @@ impl BinaryProvider {
         let mut warnings = Vec::new();
         if !binary.supports_disassembly() {
             warnings.push(format!(
-                "The listing is off: the native decoder reads x86-64 and this image is {}.",
+                "The listing is off: the native decoder reads x86, 32-bit and 64-bit, and this image is {}.",
                 binary.language()
             ));
         }
@@ -248,8 +248,13 @@ impl Provider for BinaryProvider {
 
         let summary = match section {
             Some(section) if section.executable => {
+                let width = self
+                    .binary
+                    .bitness()
+                    .map(|bitness| format!("{bitness} "))
+                    .unwrap_or_default();
                 format!(
-                    "Decoded from {} by the native x86-64 decoder.",
+                    "Decoded from {} by the native {width}x86 decoder.",
                     section.name
                 )
             }
@@ -505,7 +510,7 @@ impl Provider for BinaryProvider {
             .map(|warning| Problem {
                 message: warning.clone(),
                 address: None,
-                action: Some("Open an x86-64 binary for a listing".into()),
+                action: Some("Open an x86 binary for a listing".into()),
             })
             .collect()
     }
@@ -1077,6 +1082,104 @@ mod tests {
             .find(|string| string.text == "hello")
             .expect("the greeting is in the image");
         assert_eq!(hello.section.as_deref(), Some(".rdata"));
+    }
+
+    /// The 32-bit ELF fixture the image tests read.
+    fn elf32_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample32.elf")
+    }
+
+    /// The 32-bit ELF fixture, opened.
+    fn elf32() -> BinaryProvider {
+        BinaryProvider::load(&elf32_path()).expect("the 32-bit ELF fixture loads")
+    }
+
+    #[test]
+    fn a_32_bit_elf_opens_as_a_binary_project_with_the_listing_on() {
+        let provider = elf32();
+
+        let project = provider.project();
+        assert_eq!(project.kind, ProjectKind::Binary);
+        assert_eq!(project.name, "sample32.elf");
+        assert_eq!(
+            project.architecture.as_deref(),
+            Some("x86:LE:32:default:gcc"),
+            "the language id is the project's architecture"
+        );
+
+        let capabilities = provider.capabilities();
+        assert!(capabilities.listing, "32-bit x86 is decoded");
+        assert!(capabilities.graph);
+        assert!(capabilities.strings);
+        assert!(
+            provider.problems().is_empty(),
+            "nothing is off: {:?}",
+            provider.problems()
+        );
+    }
+
+    #[test]
+    fn the_listing_of_a_32_bit_function_names_32_bit_registers() {
+        let provider = elf32();
+
+        let listing = provider.listing(0x8049000).expect("add is listed");
+        let text: Vec<String> = listing
+            .iter()
+            .map(|line| {
+                format!("{} {}", line.mnemonic, line.operands)
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(text[0], "push ebp", "{text:?}");
+        assert_eq!(text[1], "mov ebp,esp", "{text:?}");
+        assert!(
+            text.iter().all(|line| !line.contains("rbp")),
+            "no 64-bit register in 32-bit code: {text:?}"
+        );
+
+        let detail = provider
+            .function_detail(0x8049000)
+            .expect("add has a detail");
+        assert!(
+            detail.summary.contains("32-bit x86 decoder"),
+            "the detail says the width: {}",
+            detail.summary
+        );
+    }
+
+    #[test]
+    fn the_graph_and_the_references_of_a_32_bit_function_are_read() {
+        let provider = elf32();
+
+        let graph = provider.graph(0x804900d).expect("main has a graph");
+        assert_eq!(graph.blocks.len(), 5, "{graph:?}");
+
+        let references = provider.references(0x804900d);
+        let calls: Vec<u64> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Calls)
+            .map(|reference| reference.address)
+            .collect();
+        assert_eq!(calls, vec![0x8049000], "main calls add: {references:?}");
+
+        let data: Vec<u64> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Data)
+            .map(|reference| reference.address)
+            .collect();
+        assert_eq!(
+            data,
+            vec![0x804b008, 0x804b00c],
+            "main reads counter and greeting: {references:?}"
+        );
+
+        let hello = provider
+            .strings()
+            .into_iter()
+            .find(|string| string.text == "hello")
+            .expect("the greeting is in the image");
+        assert_eq!(hello.section.as_deref(), Some(".rodata"));
     }
 
     #[test]

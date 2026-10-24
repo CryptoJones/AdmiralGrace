@@ -32,7 +32,7 @@ The Strings tab lists the text the image holds, with the functions that use it, 
 
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
 - `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
-- `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86-64 decoder, the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
+- `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86 decoder (32-bit and 64-bit, the width read from the image's language), the control-flow graph builder, and the AST and emission scaffolding the decompiler will grow into.
 - `ag-image` reads a program image through the engine: its sections, its symbols, the bytes of the file, the disassembly of a function, the calls between the functions, and the strings of the data sections.
 - `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
@@ -97,7 +97,7 @@ cargo run --bin ag -- image ./sample.elf strings
 cargo run --bin ag -- image ./sample.elf data
 ```
 
-Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86-64, so it refuses an image of another architecture rather than printing nonsense.
+Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), so it refuses an image of another architecture rather than printing nonsense.
 
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
 
@@ -163,7 +163,7 @@ The workbench opens a program image as well:
 cargo run --bin ag-ui -- --binary ./sample.elf
 ```
 
-That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86-64 disassembly of the selected function. There is no pseudocode yet, because the lifter has not been written, so that tab says so rather than showing an empty pane.
+That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's language says. There is no pseudocode yet, because the lifter has not been written, so that tab says so rather than showing an empty pane.
 
 Who calls what is only known once the whole program has been read, so that is worked out in the background when the image opens: the References tab says `indexing…` until the callers are known.
 
@@ -175,7 +175,7 @@ The Graph tab draws the control-flow graph of the selected function: one box for
 
 ## Development status
 
-The engine is under active development. The x86-64 decoder and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. The x86 decoder (32-bit and 64-bit) and the control-flow graph builder are in place with tests; the lifter, the structuring passes and the emitter are still scaffolding. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 
