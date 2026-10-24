@@ -1,6 +1,6 @@
 ---
 name: admiralgrace
-description: Use the AdmiralGrace `ag` CLI to read a decompilation corpus, a kuna project export or a program image - list the functions, show a body, grep across the bodies, read an image's symbols and disassembly, and check what you find against the bytes. Covers driving ag, not developing it.
+description: Use the AdmiralGrace `ag` CLI to read a decompilation corpus, a kuna project export or a program image - list the functions, show a body, grep across the bodies, read an image's symbols, disassembly and pseudocode, and check what you find against the bytes. Covers driving ag, not developing it.
 ---
 
 # AdmiralGrace for reading decompilations
@@ -102,6 +102,7 @@ and `ag docs workbench` explains how.
 ag image ./sample.elf info
 ag image ./sample.elf symbols --filter 'main|add'
 ag image ./sample.elf disasm main
+ag image ./sample.elf pseudocode add
 ag image ./sample.elf cfg main
 ag image ./sample.elf calls
 ag image ./sample.elf strings
@@ -110,19 +111,18 @@ ag image ./sample.elf data
 
 `info` gives the language, the entry point and the sections. `symbols` gives the function
 and data symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per
-block, then the address, the bytes, the mnemonic and the operands of every instruction. A
-call shows the name of the function it calls. `cfg` gives the control-flow graph of a
-function: its blocks and the edges between them, each edge marked fall-through or taken.
-`calls` gives who calls whom: with a function, what it calls and who calls it; without one,
-the whole call graph. `strings` gives the text the image holds and `data` the data, each
-with the functions that use it. `--json` reports the same thing as JSON, with every address
-as both a number and a hex string.
+block, then the address, the bytes, the mnemonic and the operands of every instruction; a
+call shows the name of the function it calls. `pseudocode` gives one function as C when it
+is one block of straight-line x86-64 code, the parameters named `a`, `b`…; anything else
+prints `not lifted yet` and the reason, with exit code 1. `cfg` gives the control-flow
+graph: the blocks and the edges between them, each marked fall-through or taken. `calls`
+gives who calls whom: with a function, what it calls and who calls it; without one, the
+whole call graph. `strings` gives the text the image holds and `data` the data, each with the
+functions that use it. `--json` reports the same as JSON, every address a number and a hex string.
 
-`info` and `symbols` read any format the loader reads. `disasm`, `cfg`, `calls` and `data`
-decode x86 only (32-bit or 64-bit, as the image says), so they refuse another architecture.
-
-Reach for this when there is no corpus yet: the symbols say what the program has, and the
-disassembly says what one function does.
+`info` and `symbols` read any format the loader reads; the rest decode x86 only (32-bit or
+64-bit, as the image says) and refuse another architecture. Reach for this when there is no
+corpus yet: the symbols say what the program has, and the disassembly what one function does.
 
 ## Verify what you find
 

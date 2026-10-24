@@ -11,6 +11,8 @@ pub mod kuna;
 pub mod kuna_json;
 pub mod sample;
 
+use std::collections::BTreeMap;
+
 use crate::model::{Capabilities, Project};
 
 /// How far the analysis of the open project has progressed.
@@ -349,6 +351,16 @@ pub trait Provider: Send + Sync {
 
     /// Decompiled pseudocode for a function, when available.
     fn pseudocode(&self, address: u64) -> Option<String>;
+
+    /// The addresses each line of the pseudocode came from.
+    ///
+    /// The keys are line numbers counted from zero, so they line up with
+    /// the lines of [`Provider::pseudocode`]. A provider that learns the
+    /// mapping later — the kuna provider asks the CLI for it — answers with
+    /// nothing here and fills it in when it arrives.
+    fn line_addresses(&self, _address: u64) -> BTreeMap<usize, Vec<u64>> {
+        BTreeMap::new()
+    }
 
     /// Bytes around an address, when available.
     ///

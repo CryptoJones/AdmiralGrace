@@ -13,6 +13,12 @@
 //! language, and both the engine's decoder and the text are told it, so a
 //! 32-bit image reads like a 64-bit one.
 //!
+//! The pseudocode is the engine's too: the instructions of a function go
+//! through [`lift_function`] and [`emit_function`], and what comes back is C
+//! with every line mapped to the instructions it came from, or the reason
+//! the lifter refused. The calling convention is read from the image's
+//! language, so a Windows image passes its arguments the Microsoft way.
+//!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
 //! plain data — the sections, the symbols, the bytes of the file, and the
@@ -25,9 +31,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ag_engine::cfgwalk::resolve_branches;
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
+use ag_engine::emit::emit_function;
+use ag_engine::lift::lift_function;
 use ag_engine::pipeline::Disasm;
-use ag_engine::{Bitness, Image};
+use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
+
+pub use ag_engine::{Line, NotLifted, Pseudocode};
 
 /// One section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +322,7 @@ pub struct Binary {
     wide_strings: Vec<ImageString>,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
+    pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
     graph: OnceLock<CallGraph>,
     string_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
     data_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
@@ -425,6 +436,7 @@ impl Binary {
             wide_strings,
 
             disassembly: Mutex::new(HashMap::new()),
+            pseudocode: Mutex::new(HashMap::new()),
             graph: OnceLock::new(),
             string_users: OnceLock::new(),
             data_users: OnceLock::new(),
@@ -693,6 +705,80 @@ impl Binary {
         let built = Arc::new(self.build_disassembly(address)?);
         cache.insert(address, Arc::clone(&built));
         Some(built)
+    }
+
+    /// Whether the lifter reads this image.
+    ///
+    /// The lifter reads 64-bit x86 and nothing else yet: a 32-bit image is
+    /// disassembled, but no function of it is lifted.
+    pub fn supports_pseudocode(&self) -> bool {
+        self.bitness == Some(Bitness::Bits64)
+    }
+
+    /// The calling convention the image's language implies.
+    pub fn abi(&self) -> Abi {
+        Abi::of_language(&self.language)
+    }
+
+    /// The pseudocode of the function at `address`, or why it was not lifted.
+    ///
+    /// The lifter reads one block of straight-line x86-64 code; a function of
+    /// more blocks, or one with an instruction it does not know, is refused
+    /// with a reason. Both answers are kept, the way the disassembly is.
+    pub fn pseudocode(&self, address: u64) -> Result<Arc<Pseudocode>, NotLifted> {
+        if !self.supports_pseudocode() {
+            return Err(NotLifted {
+                reason: match self.bitness {
+                    Some(bitness) => format!("{bitness} code"),
+                    None => format!("{} code", self.language),
+                },
+            });
+        }
+
+        let mut cache = self.pseudocode.lock().map_err(|_| NotLifted {
+            reason: "the pseudocode cache is poisoned".to_string(),
+        })?;
+        if let Some(found) = cache.get(&address) {
+            return found.clone();
+        }
+
+        let built = self.build_pseudocode(address).map(Arc::new);
+        cache.insert(address, built.clone());
+        built
+    }
+
+    /// Lift the function at `address` and print it.
+    fn build_pseudocode(&self, address: u64) -> Result<Pseudocode, NotLifted> {
+        let code = self
+            .file
+            .iter()
+            .find(|code| {
+                code.section.executable
+                    && code.section.vma <= address
+                    && address < code.section.vma + code.section.size
+            })
+            .ok_or_else(|| NotLifted {
+                reason: format!("no code at {address:#x}"),
+            })?;
+
+        let decoded = code.decoded();
+        let cfg = resolve_branches(&decoded.disasm, address);
+        let name = self
+            .function_name(address)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("sub_{address:x}"));
+        let names = |target: u64| self.function_name(target).map(str::to_string);
+
+        let function = lift_function(
+            &decoded.disasm,
+            &cfg,
+            address,
+            &name,
+            code.bitness,
+            self.abi(),
+            &names,
+        )?;
+        Ok(emit_function(&function))
     }
 
     /// The control-flow graph of the function at `address`.

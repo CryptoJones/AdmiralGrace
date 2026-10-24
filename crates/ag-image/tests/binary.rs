@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ag_image::{Binary, Edge, EdgeKind};
 
@@ -996,4 +997,98 @@ fn the_data_of_the_32_bit_elf_fixture_is_found_through_absolute_operands() {
     let users = binary.data_users();
     assert_eq!(users.get(&COUNTER32), Some(&vec![MAIN32]));
     assert_eq!(users.get(&GREETING32), Some(&vec![MAIN32]));
+}
+
+// ---- Pseudocode -----------------------------------------------------------
+//
+// The lifter reads one block of straight-line x86-64 code. The `add` of every
+// fixture is one: it reads as C, with the parameters named by position. Each
+// fixture spells it differently — gcc through a frame pointer, MSVC through
+// `rsp` with the Windows argument registers, clang with a memory operand on
+// the add — and all three come out as `int add(int a, int b)`.
+
+#[test]
+fn the_add_of_the_sample_elf_lifts_to_c() {
+    let binary = sample();
+
+    let pseudocode = binary.pseudocode(0x1149).expect("add lifts");
+
+    // gcc adds edx (a) into eax (b), so the sum reads b + a.
+    assert_eq!(
+        pseudocode.text(),
+        "int add(int a, int b)\n{\n  return b + a;\n}"
+    );
+
+    // The signature stands for the entry and the frame; the return came from
+    // the stores, the loads, the add and the ret.
+    assert_eq!(
+        pseudocode.lines[0].addresses,
+        vec![0x1149, 0x114d, 0x114e, 0x115f]
+    );
+    assert_eq!(
+        pseudocode.lines[2].addresses,
+        vec![0x1151, 0x1154, 0x1157, 0x115a, 0x115d, 0x1160]
+    );
+}
+
+#[test]
+fn the_pseudocode_is_built_once_and_kept() {
+    let binary = sample();
+
+    let first = binary.pseudocode(0x1149).expect("add lifts");
+    let second = binary.pseudocode(0x1149).expect("add lifts");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the second answer is the first"
+    );
+}
+
+#[test]
+fn main_is_not_lifted_because_it_has_more_than_one_block() {
+    let binary = sample();
+
+    let error = binary.pseudocode(0x1198).expect_err("main is refused");
+    assert_eq!(error.to_string(), "not lifted yet: 4 blocks");
+
+    // The refusal is kept too.
+    let again = binary
+        .pseudocode(0x1198)
+        .expect_err("main is still refused");
+    assert_eq!(again, error);
+}
+
+#[test]
+fn the_add_of_the_pe_lifts_with_the_windows_argument_registers() {
+    let binary = pe();
+
+    assert_eq!(binary.abi(), ag_engine::Abi::Win64);
+    let pseudocode = binary.pseudocode(0x140001000).expect("add lifts");
+    assert_eq!(
+        pseudocode.text(),
+        "int add(int a, int b)\n{\n  return a + b;\n}"
+    );
+}
+
+#[test]
+fn the_add_of_the_macho_lifts_to_c() {
+    let binary = macho();
+
+    let pseudocode = binary.pseudocode(0x100000420).expect("_add lifts");
+    assert_eq!(
+        pseudocode.text(),
+        "int _add(int a, int b)\n{\n  return a + b;\n}"
+    );
+}
+
+#[test]
+fn a_32_bit_image_has_no_pseudocode_yet() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample32.elf");
+    let binary = Binary::open(&path).expect("the 32-bit ELF loads");
+
+    assert!(!binary.supports_pseudocode());
+    let error = binary
+        .pseudocode(0x8049000)
+        .expect_err("32-bit code is refused");
+    assert_eq!(error.to_string(), "not lifted yet: 32-bit code");
 }

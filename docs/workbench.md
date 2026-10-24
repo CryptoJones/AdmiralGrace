@@ -67,9 +67,11 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 That is the native path: the image is parsed by the engine's own loader, the navigator
 lists its symbols, the inspector shows its sections and entry point, and the Listing tab
 holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
-language says. There is no pseudocode yet,
-because the lifter has not been written, so that tab says so rather than showing an empty
-pane.
+language says. The Pseudocode tab holds the engine's own lifting of the selected function
+when it is one block of straight-line x86-64 code — the sample's `add` reads as C, and its
+lines are numbered and clickable like the kuna provider's, so a click on `return b + a;`
+moves the listing to the add. A function the lifter refuses leaves the tab empty, and the
+Problems panel says why.
 
 Who calls what is only known once the whole program has been read, so that is worked out
 in the background when the image opens: the References tab says `indexing…` until the

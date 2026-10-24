@@ -2,9 +2,12 @@
 //!
 //! This is the native path: the file is parsed by the engine's own loader,
 //! its code sections are decoded by the native decoder, and its control-flow
-//! graph is walked by the engine. There is no lifter yet, so there is no
-//! pseudocode — the workbench says so rather than showing an empty pane.
+//! graph is walked by the engine, and its pseudocode is the engine's lifter's:
+//! one block of straight-line x86-64 code reads as C, with every line mapped
+//! to the instructions it came from. A function the lifter refuses has no
+//! body, and the Problems panel says why.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -187,6 +190,7 @@ impl Provider for BinaryProvider {
         Capabilities {
             listing: self.binary.supports_disassembly(),
             graph: self.binary.supports_disassembly(),
+            pseudocode: self.binary.supports_pseudocode(),
             references: true,
             segments: true,
             bytes: true,
@@ -307,9 +311,23 @@ impl Provider for BinaryProvider {
         })
     }
 
-    fn pseudocode(&self, _address: u64) -> Option<String> {
-        // There is no lifter yet, so there is no pseudocode to show.
-        None
+    /// The pseudocode of a function the lifter reads.
+    ///
+    /// A function the lifter refuses has none; the reason is reported as a
+    /// problem of the function instead.
+    fn pseudocode(&self, address: u64) -> Option<String> {
+        self.binary
+            .pseudocode(address)
+            .ok()
+            .map(|pseudocode| pseudocode.text())
+    }
+
+    fn line_addresses(&self, address: u64) -> BTreeMap<usize, Vec<u64>> {
+        self.binary
+            .pseudocode(address)
+            .ok()
+            .map(|pseudocode| pseudocode.line_addresses())
+            .unwrap_or_default()
     }
 
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
@@ -515,6 +533,22 @@ impl Provider for BinaryProvider {
             .collect()
     }
 
+    /// Why the function has no pseudocode, when the lifter refused it.
+    fn function_problems(&self, address: u64) -> Vec<Problem> {
+        if !self.binary.supports_pseudocode() || self.binary.function_name(address).is_none() {
+            return Vec::new();
+        }
+
+        match self.binary.pseudocode(address) {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![Problem {
+                message: format!("No pseudocode: {error}."),
+                address: Some(address),
+                action: Some("The lifter reads one block of straight-line x86-64 code".into()),
+            }],
+        }
+    }
+
     fn summary(&self) -> Option<crate::data::ProjectSummary> {
         let entry = self.binary.entry().map(|address| {
             let name = self
@@ -592,14 +626,54 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_and_the_references_are_on_and_the_pseudocode_is_off() {
+    fn the_listing_the_references_and_the_pseudocode_are_on() {
         let capabilities = sample().capabilities();
 
         assert!(capabilities.listing);
         assert!(capabilities.references);
         assert!(capabilities.segments);
         assert!(capabilities.bytes, "the image holds its bytes");
-        assert!(!capabilities.pseudocode, "there is no lifter yet");
+        assert!(capabilities.pseudocode, "the lifter reads 64-bit x86");
+    }
+
+    #[test]
+    fn the_pseudocode_of_add_is_c_with_its_lines_mapped() {
+        let provider = sample();
+
+        let body = provider.pseudocode(0x1149).expect("add lifts");
+        assert_eq!(body, "int add(int a, int b)\n{\n  return b + a;\n}");
+
+        let lines = provider.line_addresses(0x1149);
+        assert_eq!(
+            lines.get(&0),
+            Some(&vec![0x1149, 0x114d, 0x114e, 0x115f]),
+            "the signature stands for the entry and the frame"
+        );
+        assert!(
+            lines
+                .get(&2)
+                .is_some_and(|addresses| addresses.contains(&0x115d)),
+            "the return came from the add: {lines:?}"
+        );
+        assert!(!lines.contains_key(&1), "a brace came from no instruction");
+
+        assert!(provider.function_problems(0x1149).is_empty());
+    }
+
+    #[test]
+    fn a_function_the_lifter_refuses_has_no_body_and_a_problem_that_says_why() {
+        let provider = sample();
+
+        assert_eq!(provider.pseudocode(MAIN), None);
+        assert!(provider.line_addresses(MAIN).is_empty());
+
+        let problems = provider.function_problems(MAIN);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(
+            problems[0].message,
+            "No pseudocode: not lifted yet: 4 blocks."
+        );
+        assert_eq!(problems[0].address, Some(MAIN));
     }
 
     #[test]
@@ -1065,6 +1139,14 @@ mod tests {
     }
 
     #[test]
+    fn the_add_of_the_pe_lifts_with_the_windows_argument_registers() {
+        let provider = pe();
+
+        let body = provider.pseudocode(0x140001000).expect("add lifts");
+        assert_eq!(body, "int add(int a, int b)\n{\n  return a + b;\n}");
+    }
+
+    #[test]
     fn the_listing_of_a_pe_function_is_read() {
         let provider = pe();
 
@@ -1111,6 +1193,14 @@ mod tests {
         assert!(capabilities.listing, "32-bit x86 is decoded");
         assert!(capabilities.graph);
         assert!(capabilities.strings);
+        assert!(
+            !capabilities.pseudocode,
+            "the lifter reads 64-bit code only"
+        );
+        assert!(
+            provider.function_problems(0x8049000).is_empty(),
+            "a tab that is off is not a problem of every function"
+        );
         assert!(
             provider.problems().is_empty(),
             "nothing is off: {:?}",
@@ -1208,6 +1298,14 @@ mod tests {
         // A Mach-O names its symbols with a leading underscore.
         assert!(names.contains(&"_add"), "{names:?}");
         assert!(names.contains(&"_main"), "{names:?}");
+    }
+
+    #[test]
+    fn the_add_of_the_macho_lifts_to_c() {
+        let provider = macho();
+
+        let body = provider.pseudocode(0x100000420).expect("_add lifts");
+        assert_eq!(body, "int _add(int a, int b)\n{\n  return a + b;\n}");
     }
 
     #[test]

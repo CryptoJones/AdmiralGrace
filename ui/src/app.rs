@@ -528,7 +528,7 @@ impl App {
         self.work.pseudocode = self.provider.pseudocode(address);
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
-        self.work.line_addresses.clear();
+        self.work.line_addresses = self.provider.line_addresses(address);
 
         if record_history {
             self.history.push(self.selection);
@@ -1667,12 +1667,55 @@ mod tests {
         assert_eq!(app.project.kind, crate::model::ProjectKind::Binary);
         assert!(!app.navigator.rows.is_empty(), "the symbols are listed");
         assert!(app.capabilities.listing, "the listing is on");
-        assert!(!app.capabilities.pseudocode, "there is no lifter yet");
+        assert!(app.capabilities.pseudocode, "the lifter reads 64-bit x86");
 
         // The first function is selected, and its listing is loaded.
         let selected = app.navigator.selected.expect("a function is selected");
         assert!(!app.work.listing.is_empty(), "the listing is shown");
         assert_eq!(app.work.listing[0].address, selected);
+    }
+
+    #[test]
+    fn booting_with_a_binary_fills_the_pseudocode_tab_for_add() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        let _ = app.update(Message::FunctionSelected(0x1149));
+
+        assert_eq!(
+            app.work.pseudocode.as_deref(),
+            Some("int add(int a, int b)\n{\n  return b + a;\n}")
+        );
+
+        // The lines are mapped, so a click on the return lands on the add.
+        let addresses = app
+            .work
+            .line_addresses
+            .get(&2)
+            .expect("the return line is mapped");
+        assert!(addresses.contains(&0x115d), "{addresses:?}");
+        assert_eq!(
+            app.work.line_addresses.get(&0),
+            Some(&vec![0x1149, 0x114d, 0x114e, 0x115f]),
+            "the signature stands for the entry and the frame"
+        );
+
+        // A function the lifter refuses has no body, and the problem says why.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert_eq!(app.work.pseudocode, None);
+        assert!(app.work.line_addresses.is_empty());
+        assert!(
+            app.bottom
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("not lifted yet: 4 blocks")),
+            "{:?}",
+            app.bottom.problems
+        );
     }
 
     #[test]
