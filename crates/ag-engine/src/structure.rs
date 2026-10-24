@@ -39,12 +39,18 @@
 //!   reads and the last statement of the body assigns it again.
 //! * A node reached a second time — the tail two unstructured paths share,
 //!   the target of a jump out of two loops at once — is a `goto` to a
-//!   label on it. Labels are kept only where a `goto` names them.
+//!   label on it. Labels are kept only where a `goto` names them. Under
+//!   `shared-tail duplicate` a tail that runs straight to a `return` is
+//!   copied instead.
+//!
+//! The `for` folding and the `goto` are the structurer's judgment calls,
+//! and [`crate::options`] names them: `loop-form` and `shared-tail`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::AstNode;
 use crate::lift::{NotLifted, Statement, StatementKind};
+use crate::options::{LoopForm, Options, SharedTail};
 
 /// How a node leaves.
 #[derive(Debug, Clone)]
@@ -264,6 +270,7 @@ struct LoopContext {
 struct Structurer<'a> {
     nodes: &'a [Node],
     analysis: &'a Analysis,
+    options: &'a Options,
     /// The nodes emitted so far.
     visited: Vec<bool>,
     /// The loop headers whose loop has been opened.
@@ -273,10 +280,16 @@ struct Structurer<'a> {
 }
 
 /// Structure the graph of `nodes`, entered at `entry`, into statements.
-pub fn structure(nodes: &[Node], analysis: &Analysis, entry: usize) -> Vec<Statement> {
+pub fn structure(
+    nodes: &[Node],
+    analysis: &Analysis,
+    entry: usize,
+    options: &Options,
+) -> Vec<Statement> {
     let mut structurer = Structurer {
         nodes,
         analysis,
+        options,
         visited: vec![false; nodes.len()],
         opened: vec![false; nodes.len()],
         labelled: BTreeSet::new(),
@@ -288,7 +301,9 @@ pub fn structure(nodes: &[Node], analysis: &Analysis, entry: usize) -> Vec<State
         .map(|&node| label_name(nodes[node].address))
         .collect();
     prune(&mut body, &named);
-    fold_for(&mut body);
+    if options.loop_form == LoopForm::For {
+        fold_for(&mut body);
+    }
     body
 }
 
@@ -311,7 +326,12 @@ impl Structurer<'_> {
         let mut arriving: Vec<u64> = Vec::new();
         loop {
             if self.visited[cur] {
-                seq.push(self.goto(cur, arriving));
+                match self.straight_tail(cur) {
+                    Some(tail) if self.options.shared_tail == SharedTail::Duplicate => {
+                        seq.extend(tail);
+                    }
+                    _ => seq.push(self.goto(cur, arriving)),
+                }
                 return seq;
             }
             let next = if self.analysis.loops.contains_key(&cur) && !self.opened[cur] {
@@ -396,6 +416,27 @@ impl Structurer<'_> {
         }
         if target == ctx.header {
             return Some(vec![Statement::plain(AstNode::Continue, Vec::new())]);
+        }
+        None
+    }
+
+    /// The statements of the tail from `start` when it runs straight to a
+    /// `return` — each node going to one next, none a loop header — which
+    /// is a tail that can be copied in place of a `goto`; `None` otherwise.
+    fn straight_tail(&self, start: usize) -> Option<Vec<Statement>> {
+        let mut statements = Vec::new();
+        let mut cur = start;
+        for _ in 0..self.nodes.len() {
+            if self.analysis.loops.contains_key(&cur) {
+                return None;
+            }
+            let node = &self.nodes[cur];
+            statements.extend(node.statements.iter().cloned());
+            match &node.terminator {
+                Terminator::Return => return Some(statements),
+                Terminator::Goto { target, .. } => cur = *target,
+                Terminator::Branch { .. } => return None,
+            }
         }
         None
     }
@@ -780,12 +821,17 @@ mod tests {
 
     /// Structure `nodes` and print the body as the C of `f`.
     fn c(nodes: &[Node]) -> Result<String, NotLifted> {
+        c_with(nodes, &Options::default())
+    }
+
+    /// Structure `nodes` under `options` and print the body as the C of `f`.
+    fn c_with(nodes: &[Node], options: &Options) -> Result<String, NotLifted> {
         let successors: Vec<Vec<usize>> = nodes
             .iter()
             .map(|node| node.terminator.successors())
             .collect();
         let analysis = analyze(&successors, 0, |n| nodes[n].address)?;
-        let body = structure(nodes, &analysis, 0);
+        let body = structure(nodes, &analysis, 0, options);
         let function = LiftedFunction {
             name: "f".into(),
             address: 0x1000,
@@ -798,7 +844,7 @@ mod tests {
             body,
             frame: Vec::new(),
         };
-        Ok(emit_function(&function).text())
+        Ok(emit_function(&function, options).text())
     }
 
     #[test]
@@ -953,7 +999,7 @@ mod tests {
         assert!(analysis.dominates(1, 3));
         assert!(!analysis.dominates(2, 3));
 
-        let body = structure(&nodes, &analysis, 0);
+        let body = structure(&nodes, &analysis, 0, &Options::default());
         assert_eq!(body.len(), 2, "the for and the return: {body:?}");
         assert!(matches!(body[0].kind, StatementKind::For { .. }));
         assert_eq!(
@@ -965,6 +1011,14 @@ mod tests {
         assert_eq!(
             c(&nodes).unwrap(),
             "int f(int a)\n{\n  for (i = 0; i < 3; i = i + 1) {\n    x = 1;\n  }\n  return x;\n}"
+        );
+
+        // Under `loop-form while` the init stays before the loop and the
+        // step stays last in the body.
+        let options = Options::from_pairs([("loop-form", "while")]).unwrap();
+        assert_eq!(
+            c_with(&nodes, &options).unwrap(),
+            "int f(int a)\n{\n  i = 0;\n  while (i < 3) {\n    x = 1;\n    i = i + 1;\n  }\n  return x;\n}"
         );
     }
 
@@ -1108,6 +1162,84 @@ mod tests {
             c(&nodes).unwrap(),
             "int f(int a)\n{\n  if (a == 0) {\n    if (a == 1) {\n      x = 3;\n    label_1050:\n      return x;\n    }\n  } else {\n    x = 2;\n  }\n  x = 4;\n  goto label_1050;\n}"
         );
+
+        // Under `shared-tail duplicate` the return is copied, and no label
+        // is left behind.
+        let options = Options::from_pairs([("shared-tail", "duplicate")]).unwrap();
+        assert_eq!(
+            c_with(&nodes, &options).unwrap(),
+            "int f(int a)\n{\n  if (a == 0) {\n    if (a == 1) {\n      x = 3;\n      return x;\n    }\n  } else {\n    x = 2;\n  }\n  x = 4;\n  return x;\n}"
+        );
+    }
+
+    #[test]
+    fn a_shared_tail_that_branches_or_loops_is_still_reached_by_goto_when_duplicating() {
+        // 0: if (a == 0) goto 1 else 2; 1: if (a == 1) goto 3 else 4;
+        // 2: x = 2 → 4; 3: x = 3 → 5; 4: x = 4 → 5; 5: if (x == 0) goto 6
+        // else 7; 6: return a; 7: return x. The tail at 5 branches, so it
+        // cannot be copied as a straight run.
+        let nodes = [
+            node(
+                0x1000,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("a", BinaryOp::Equal, 0),
+                    taken: 1,
+                    next: 2,
+                    addresses: vec![0x1000],
+                },
+            ),
+            node(
+                0x1010,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("a", BinaryOp::Equal, 1),
+                    taken: 3,
+                    next: 4,
+                    addresses: vec![0x1010],
+                },
+            ),
+            node(
+                0x1020,
+                vec![assign("x", 2, 0x1020)],
+                Terminator::Goto {
+                    target: 4,
+                    addresses: vec![0x1024],
+                },
+            ),
+            node(
+                0x1030,
+                vec![assign("x", 3, 0x1030)],
+                Terminator::Goto {
+                    target: 5,
+                    addresses: vec![],
+                },
+            ),
+            node(
+                0x1040,
+                vec![assign("x", 4, 0x1040)],
+                Terminator::Goto {
+                    target: 5,
+                    addresses: vec![],
+                },
+            ),
+            node(
+                0x1050,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("x", BinaryOp::Equal, 0),
+                    taken: 6,
+                    next: 7,
+                    addresses: vec![0x1050],
+                },
+            ),
+            node(0x1060, vec![ret("a", 0x1060)], Terminator::Return),
+            node(0x1070, vec![ret("x", 0x1070)], Terminator::Return),
+        ];
+        let options = Options::from_pairs([("shared-tail", "duplicate")]).unwrap();
+        let text = c_with(&nodes, &options).unwrap();
+        assert!(text.contains("goto label_1050;"), "{text}");
+        assert!(text.contains("label_1050:"), "{text}");
     }
 
     #[test]

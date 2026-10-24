@@ -78,6 +78,17 @@ head. A function the lifter refuses — one with an instruction it does not know
 whose condition it cannot read, or a loop with two entries, such as the sample's `_init`
 with its indirect call — leaves the tab empty, and the Problems panel says why.
 
+The engine's options — the judgment calls `ag catalog` lists, such as whether a counted
+loop is a `for` or a `while` — are read from the command line, `--option NAME VALUE`,
+repeated as needed, and every function of the image is lifted with them:
+
+```sh
+cargo run --bin ag-ui -- --binary ./sample.elf --option loop-form while
+```
+
+There is no options pane yet; the symptom index in `ag docs options` says which option to
+set when the pseudocode does not read the way you want.
+
 Who calls what is only known once the whole program has been read, so that is worked out
 in the background when the image opens: the References tab says `indexing…` until the
 callers are known. The two numbers of the program summary that need the whole program —

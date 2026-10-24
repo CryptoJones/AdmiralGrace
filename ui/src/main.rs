@@ -8,6 +8,7 @@ mod views;
 
 use std::path::PathBuf;
 
+use ag_image::Options;
 use app::{App, Config};
 
 const USAGE: &str = "\
@@ -21,6 +22,9 @@ Options:
   --binary PATH     Open a program image (an ELF, PE, COFF or Mach-O file)
   --methods PATH    Overlay an Objective-C method map
   --shift ADDR      Image-base shift applied to Objective-C IMP addresses (default 0x0)
+  --option NAME VALUE
+                    Set an engine option for the pseudocode of a program image, such as
+                    `--option loop-form while`; may be repeated. `ag catalog` lists them.
   -h, --help        Show this help
 ";
 
@@ -74,6 +78,7 @@ fn main() -> iced::Result {
 fn parse_args() -> Result<Option<Config>, String> {
     let mut config = Config::default();
     let mut args = std::env::args().skip(1);
+    let mut options: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -94,10 +99,19 @@ fn parse_args() -> Result<Option<Config>, String> {
                 config.shift =
                     ag_corpus::parse_addr(&value).map_err(|_| format!("bad address {value:?}"))?;
             }
+            "--option" => {
+                let name = args.next().ok_or("--option needs a name and a value")?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("--option {name} needs a value"))?;
+                options.push(name);
+                options.push(value);
+            }
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
 
+    config.options = Options::from_flat(&options).map_err(|error| error.to_string())?;
     Ok(Some(config))
 }

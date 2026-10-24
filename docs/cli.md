@@ -100,6 +100,9 @@ cargo run --bin ag -- image ./sample.elf disasm main
 # The pseudocode of one function, as C
 cargo run --bin ag -- image ./sample.elf pseudocode main
 
+# The same with an engine option set: the counted loop left as a while
+cargo run --bin ag -- image ./sample.elf pseudocode sum_to --option loop-form while
+
 # The control-flow graph of one function
 cargo run --bin ag -- image ./sample.elf cfg main
 
@@ -125,6 +128,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
 | `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then the signature, the locals and the statements. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
+| `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
@@ -134,6 +138,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
 | `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
 | `export DIR --force` | Write into a directory that is not empty. |
+| `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
@@ -223,6 +228,27 @@ reports the same as `lifted: false` and a `reason`. Every line of C carries the 
 the instructions it came from — a `for` line those of its init, its compare, its branch and
 its step — which is what the workbench's Pseudocode tab clicks through.
 
+The judgment calls in all of that — whether the counted loop is a `for` or a `while`,
+whether a tail two paths share is a `goto` or a copy, how a merged register (`eax`, `eax_2`)
+and a stack slot (`local_14`) are named, whether a load from named data prints as the name
+or as `*(int *)0x4010`, whether the operands of `b + a` keep the instruction's order, whether
+an unsigned comparison is cast, whether a `cmp` no branch reads is dropped, which argument
+registers are parameters, the calling convention, how a constant is spelled and how far a body
+is indented — are the engine's *options*, and `pseudocode` and `export` take them with
+`--option NAME VALUE`, repeated as needed:
+
+```sh
+cargo run --bin ag -- image ./sample.elf pseudocode sum_to --option loop-form while
+cargo run --bin ag -- image ./sample.elf pseudocode add --option operand-order canonical
+cargo run --bin ag -- image ./sample.elf export ./sample.ag --option constant-style hex --option indent 4
+```
+
+An option nobody registered, or a value the option does not take, is an error that names the
+row and what it takes (`option "loop-form" takes for | while, not "sometimes"`), before the
+image is read. `ag catalog` prints the registry, and `docs/options.md` — also `ag docs
+options` — is its generated document, opening with the symptom index: *if the output shows
+X, try `--option Y`*.
+
 `strings` reads the sections that are not code, and reports every run of text that ends
 in a NUL. A tab, a newline and a carriage return are part of the text, and they are
 written out as `\t`, `\n` and `\r`, so a string never breaks the line it is printed on.
@@ -274,6 +300,37 @@ takes; the whole-image files are never limited. A function the decoder cannot re
 symbol in no code section — gets no files, and a warning on stderr names it. An image the
 decoder does not read is refused, like `disasm`. An error names the file it could not write.
 
+## `ag catalog`: the engine's options
+
+Every judgment call the engine makes is a row of one registry
+(`crates/ag-engine/src/options.rs`): its name, the phase that reads it (`decode`, `lift`,
+`structure`, `emit`), its tier (`transform`, `analysis`, `rendering`), what it takes, its
+default, one line of description, and its *symptoms* — what the output looks like when you
+want to flip it. `ag catalog` prints that registry.
+
+```sh
+# The document, symptom index first: if the output shows X, try --option Y
+ag catalog --markdown
+
+# The same rows as JSON
+ag catalog --json
+
+# Does the committed docs/options.md match the registry? Exit 1 when it is stale.
+ag catalog --check
+```
+
+| Command | What it does |
+|---|---|
+| `ag catalog` | The same as `--markdown`. |
+| `ag catalog --markdown` | Prints the catalog as Markdown: the symptom index, then one section per phase with a table of its options, then what the tiers mean. This is what `docs/options.md` holds. |
+| `ag catalog --json` | Prints the rows as a JSON array: `name`, `phase`, `tier`, `type` (`{"choice": […]}` or `{"integer": {"min", "max"}}`), `default`, `description` and `symptoms` (`shows`, `value`). |
+| `ag catalog --check` | Reads `docs/options.md` and compares it with `--markdown`. Prints `is current` and exits 0 when they match; names the first line that differs and exits 1 when they do not. |
+| `ag catalog --check --path FILE` | Compares `FILE` instead. |
+
+`docs/options.md` is generated: regenerate it with `ag catalog --markdown > docs/options.md`
+after changing the registry. A test in `ag-cli` does the same comparison against the copy
+compiled into the binary, so `cargo test` fails on drift as well.
+
 ## The embedded manual and agent skill
 
 The `ag` binary carries its own documentation and an agent skill, so a session with no
@@ -292,8 +349,8 @@ ag install-skill --agent claude
 
 `ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`,
 `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with
-`--project`). `ag docs` prints the manual: the command reference, the corpus format and
-the workbench.
+`--project`). `ag docs` prints the manual: the command reference, the corpus format, the
+engine's options and the workbench.
 
 | Command | What it does |
 |---|---|
@@ -310,5 +367,5 @@ the workbench.
 | Code | Meaning |
 |---|---|
 | 0 | The command ran, or the skill was installed or already current. |
-| 1 | A write failed, a differing skill copy was kept, or a function was not lifted. |
-| 2 | A usage error: an unknown option, an unknown topic, or no agent to install for. |
+| 1 | A write failed, a differing skill copy was kept, a function was not lifted, or `catalog --check` found `docs/options.md` stale. |
+| 2 | A usage error: an unknown flag, an unknown topic, or no agent to install for. An unknown engine option or a bad value under `--option` is reported as an error, exit code 1, naming the row and what it takes. |

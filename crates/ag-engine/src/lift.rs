@@ -84,6 +84,16 @@
 //! * **`ret`** returns `rax` with the width of its last write, or nothing if
 //!   `rax` was never written; every `ret` of the function must agree.
 //!
+//! # The judgment calls
+//!
+//! Where the lifter could reasonably go either way — which argument
+//! registers are parameters, how a merged register and a stack slot are
+//! named, whether a load from named data is the name or a cast, the order
+//! of the operands of `b + a`, whether an unsigned comparison is cast,
+//! whether a `cmp` no branch reads is dropped, the calling convention — the
+//! choice is an option of [`crate::options`], passed to [`lift_function`]
+//! and documented by symptom in `docs/options.md`.
+//!
 //! # The type rule
 //!
 //! Types come from widths alone: 8 bits is `char`, 16 `short`, 32 `int` and
@@ -115,6 +125,10 @@ use crate::ast::{AstNode, BinaryOp};
 use crate::cfg::ProcedureCfg;
 use crate::cfgwalk::resolve_branches;
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
+use crate::options::{
+    DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads, SlotNames,
+    UnsignedCompare,
+};
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
 use crate::structure::{self, Analysis, Node, Terminator};
@@ -378,7 +392,9 @@ const PASSES: usize = 8;
 ///
 /// `symbols` gives the name of the function at an address, for the calls the
 /// body makes — a call to an address with no name is `sub_<hex>` — and what
-/// a pointer the body takes lands on.
+/// a pointer the body takes lands on. `options` decides the judgment calls
+/// ([`crate::options`]): the lifter's own, and the structurer's.
+#[allow(clippy::too_many_arguments)]
 pub fn lift_function(
     disasm: &Disasm,
     cfg: &ProcedureCfg,
@@ -387,6 +403,7 @@ pub fn lift_function(
     bitness: Bitness,
     abi: Abi,
     symbols: &dyn Symbols,
+    options: &Options,
 ) -> Result<LiftedFunction, NotLifted> {
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
@@ -394,10 +411,10 @@ pub fn lift_function(
     let chains = chains(disasm, cfg, entry)?;
     let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
-    let mut lifter = Lifter::new(abi, symbols);
+    let mut lifter = Lifter::new(abi, symbols, *options);
     let lifted = lifter.lift_chains(&chains, &analysis)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
-    let body = structure::structure(&nodes, &analysis, 0);
+    let body = structure::structure(&nodes, &analysis, 0, options);
     lifter.finish(name, entry, &chains, body)
 }
 
@@ -409,13 +426,23 @@ pub fn lift_block(
     name: &str,
     abi: Abi,
     symbols: &dyn Symbols,
+    options: &Options,
 ) -> Result<LiftedFunction, NotLifted> {
     let disasm = Disasm {
         file_offset_of_segment: 0,
         instructions: instructions.to_vec(),
     };
     let cfg = resolve_branches(&disasm, entry);
-    lift_function(&disasm, &cfg, entry, name, Bitness::Bits64, abi, symbols)
+    lift_function(
+        &disasm,
+        &cfg,
+        entry,
+        name,
+        Bitness::Bits64,
+        abi,
+        symbols,
+        options,
+    )
 }
 
 /// How a chain of blocks ends.
@@ -779,6 +806,14 @@ enum Stmt {
         value: Option<Value>,
         addresses: Vec<u64>,
     },
+    /// A `cmp` or `test` kept as a statement under `dead-compares keep`:
+    /// `__cmp(lhs, rhs);`. Removed again when a branch reads its flags.
+    Compare {
+        name: &'static str,
+        lhs: Value,
+        rhs: Value,
+        addresses: Vec<u64>,
+    },
 }
 
 /// The statements each path into a join appends, by the path's node.
@@ -794,6 +829,12 @@ struct Merged {
 struct Lifter<'a> {
     abi: Abi,
     symbols: &'a dyn Symbols,
+    /// The judgment calls, as the run set them.
+    options: Options,
+    /// The `cmp` or `test` statement kept under `dead-compares keep` whose
+    /// flags no branch has read yet: the producing address and the
+    /// statement's index in the chain.
+    pending_compare: Option<(u64, usize)>,
     /// The state at the instruction being lifted.
     state: State,
     /// The slots whose address was taken.
@@ -821,10 +862,12 @@ struct Lifter<'a> {
 }
 
 impl<'a> Lifter<'a> {
-    fn new(abi: Abi, symbols: &'a dyn Symbols) -> Self {
+    fn new(abi: Abi, symbols: &'a dyn Symbols, options: Options) -> Self {
         Self {
             abi,
             symbols,
+            options,
+            pending_compare: None,
             state: State::initial(),
             address_taken: BTreeSet::new(),
             locals: BTreeMap::new(),
@@ -988,6 +1031,7 @@ impl<'a> Lifter<'a> {
 
     /// Lift one chain from the current state, and say how it leaves.
     fn lift_chain(&mut self, chain: &Chain) -> Result<Terminator, NotLifted> {
+        self.pending_compare = None;
         let (last, body) = chain
             .instructions
             .split_last()
@@ -1061,7 +1105,7 @@ impl<'a> Lifter<'a> {
                             Slot {
                                 bits,
                                 value: Value::node(
-                                    AstNode::var(local_name(offset)),
+                                    AstNode::var(local_name(self.options.stack_slot_names, offset)),
                                     bits,
                                     Vec::new(),
                                 ),
@@ -1122,7 +1166,7 @@ impl<'a> Lifter<'a> {
                     slot.value = Value::unknown(
                         format!(
                             "{} was computed from {name} before the join at {at:#x}",
-                            local_name(*offset)
+                            local_name(self.options.stack_slot_names, *offset)
                         ),
                         slot.bits,
                     );
@@ -1198,7 +1242,10 @@ impl<'a> Lifter<'a> {
                     Ok(Resolution::Var { bits })
                 } else {
                     Ok(Resolution::Unknown {
-                        reason: format!("{} differs at {at:#x}", local_name(offset)),
+                        reason: format!(
+                            "{} differs at {at:#x}",
+                            local_name(self.options.stack_slot_names, offset)
+                        ),
                         bits,
                     })
                 }
@@ -1225,7 +1272,7 @@ impl<'a> Lifter<'a> {
                         Slot {
                             bits: *bits,
                             value: Value::node(
-                                AstNode::var(local_name(*offset)),
+                                AstNode::var(local_name(self.options.stack_slot_names, *offset)),
                                 *bits,
                                 Vec::new(),
                             ),
@@ -1339,9 +1386,13 @@ impl<'a> Lifter<'a> {
         if let Some(merged) = self.merged.get(&(at, index)) {
             return merged.name.clone();
         }
-        let base = gpr_name(index, bits);
-        let mut name = base.clone();
-        let mut n = 1;
+        let (base, mut name, mut n) = match self.options.merged_register_names {
+            MergedNames::Register => {
+                let base = gpr_name(index, bits);
+                (base.clone(), base, 1)
+            }
+            MergedNames::Numbered => ("var".to_string(), "var_1".to_string(), 1),
+        };
         while self.merged.values().any(|merged| merged.name == name) {
             n += 1;
             name = format!("{base}_{n}");
@@ -1509,14 +1560,18 @@ impl<'a> Lifter<'a> {
             return Value::unknown(
                 format!(
                     "the {bits} bits at {} were written in parts",
-                    local_name(offset)
+                    local_name(self.options.stack_slot_names, offset)
                 ),
                 bits,
             );
         }
         // Never written here: the slot is a variable, read as it is.
         self.locals.entry(offset).or_insert(bits);
-        let value = Value::node(AstNode::var(local_name(offset)), bits, vec![at]);
+        let value = Value::node(
+            AstNode::var(local_name(self.options.stack_slot_names, offset)),
+            bits,
+            vec![at],
+        );
         self.state.stack.insert(
             offset,
             Slot {
@@ -1537,7 +1592,7 @@ impl<'a> Lifter<'a> {
             // store is the old value, saved into a temporary if it is in
             // memory and forgotten if it is in a register; what equals the
             // stored expression is the variable now.
-            let name = local_name(offset);
+            let name = local_name(self.options.stack_slot_names, offset);
             self.variable_changed(&name, &value, at);
             self.statements.push(Stmt::Store {
                 offset,
@@ -1653,7 +1708,10 @@ impl<'a> Lifter<'a> {
         let bits = self.state.stack.get(&offset).map_or(64, |slot| slot.bits);
         self.locals.entry(offset).or_insert(bits);
         AstNode::AddressOf {
-            target: Box::new(AstNode::var(local_name(offset))),
+            target: Box::new(AstNode::var(local_name(
+                self.options.stack_slot_names,
+                offset,
+            ))),
         }
     }
 
@@ -1663,7 +1721,11 @@ impl<'a> Lifter<'a> {
     fn memory_written(&mut self, what: &str, at: u64) {
         for &offset in &self.address_taken {
             if let Some(slot) = self.state.stack.get_mut(&offset) {
-                slot.value = Value::node(AstNode::var(local_name(offset)), slot.bits, vec![at]);
+                slot.value = Value::node(
+                    AstNode::var(local_name(self.options.stack_slot_names, offset)),
+                    slot.bits,
+                    vec![at],
+                );
             }
         }
         let globals = &self.globals;
@@ -1694,7 +1756,7 @@ impl<'a> Lifter<'a> {
                 slot.value = Value::unknown(
                     format!(
                         "{} was read from memory before {what} at {at:#x}",
-                        local_name(offset)
+                        local_name(self.options.stack_slot_names, offset)
                     ),
                     slot.bits,
                 );
@@ -1801,7 +1863,11 @@ impl<'a> Lifter<'a> {
     /// global the image names at a constant address, else `*(T *)address`.
     fn place(&mut self, address: &Value, bits: u32) -> Result<Option<AstNode>, NotLifted> {
         if let Sym::Node(AstNode::Constant { value: target, .. }) = &address.sym {
-            if let Some(Pointee::Data(name)) = self.symbols.pointee(*target) {
+            let pointee = match self.options.pointer_loads {
+                PointerLoads::Named => self.symbols.pointee(*target),
+                PointerLoads::Cast => None,
+            };
+            if let Some(Pointee::Data(name)) = pointee {
                 if !name.is_empty() {
                     self.globals.insert(name.clone());
                     return Ok(Some(AstNode::var(name)));
@@ -1947,7 +2013,11 @@ impl<'a> Lifter<'a> {
         }
         let lhs = self.node_of(&lhs)?;
         let rhs = self.node_of(&rhs)?;
-        Ok(Value::node(binary(op, lhs, rhs, bits), bits, from))
+        Ok(Value::node(
+            binary(op, lhs, rhs, bits, self.options.operand_order),
+            bits,
+            from,
+        ))
     }
 
     /// Record what set the flags.
@@ -2123,6 +2193,21 @@ impl<'a> Lifter<'a> {
         let (dest, src, bits) = self.two(ins)?;
         let lhs = self.value_of(dest, bits, ins)?.also_from(ins.address);
         let rhs = self.value_of(src, bits, ins)?.also_from(ins.address);
+        if self.options.dead_compares == DeadCompares::Keep
+            && lhs.is_expression()
+            && rhs.is_expression()
+        {
+            // Kept as a statement until a branch reads the flags, which
+            // removes it again; one no branch reads stays.
+            let addresses = sorted(lhs.from.iter().chain(&rhs.from).copied());
+            self.statements.push(Stmt::Compare {
+                name: if test { "__test" } else { "__cmp" },
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                addresses,
+            });
+            self.pending_compare = Some((ins.address, self.statements.len() - 1));
+        }
         let producer = if test {
             Producer::Test(lhs, rhs)
         } else {
@@ -2158,6 +2243,13 @@ impl<'a> Lifter<'a> {
             Mnemonic::Jns => Cc::Ns,
             _ => return Err(NotLifted::new(jcc.clone())),
         };
+        // The compare has a consumer now: the statement kept for it goes.
+        if let Some((produced, index)) = self.pending_compare {
+            if produced == flags.at && index < self.statements.len() {
+                self.statements.remove(index);
+            }
+            self.pending_compare = None;
+        }
         let bits = flags.bits;
         let zero = AstNode::constant(0, bits / 8);
         let unfit = || NotLifted::new(format!("{jcc} after {} at {:#x}", flags.mnemonic, flags.at));
@@ -2168,8 +2260,12 @@ impl<'a> Lifter<'a> {
                 let l = self.node_of(lhs)?;
                 let r = self.node_of(rhs)?;
                 let signed_op = |op| AstNode::binary(l.clone(), op, r.clone());
-                let unsigned_op =
-                    |op| AstNode::binary(unsigned(l.clone(), bits), op, unsigned(r.clone(), bits));
+                let unsigned_op = |op| match self.options.unsigned_compare {
+                    UnsignedCompare::Cast => {
+                        AstNode::binary(unsigned(l.clone(), bits), op, unsigned(r.clone(), bits))
+                    }
+                    UnsignedCompare::Bare => signed_op(op),
+                };
                 match cc {
                     Cc::E => signed_op(BinaryOp::Equal),
                     Cc::Ne => signed_op(BinaryOp::NotEqual),
@@ -2499,7 +2595,11 @@ impl<'a> Lifter<'a> {
         chains: &[Chain],
         body: Vec<Statement>,
     ) -> Result<LiftedFunction, NotLifted> {
-        let params = (0..self.params.keys().next_back().map_or(0, |last| last + 1))
+        let count = match self.options.parameters {
+            Parameters::LastRead => self.params.keys().next_back().map_or(0, |last| last + 1),
+            Parameters::Convention => self.abi.argument_registers().len(),
+        };
+        let params = (0..count)
             .map(|position| Variable {
                 ty: self
                     .params
@@ -2519,7 +2619,7 @@ impl<'a> Lifter<'a> {
             .rev()
             .map(|(&offset, &bits)| Variable {
                 ty: type_name(bits).to_string(),
-                name: local_name(offset),
+                name: local_name(self.options.stack_slot_names, offset),
             })
             .collect();
         let mut merged: Vec<&Merged> = self.merged.values().collect();
@@ -2608,14 +2708,17 @@ impl Lifter<'_> {
                         }) {
                             return Err(NotLifted::new(format!(
                                 "a partial write to {}",
-                                local_name(*offset)
+                                local_name(self.options.stack_slot_names, *offset)
                             )));
                         }
                         continue;
                     }
                     let rhs = self.node_of(value)?;
                     let node = AstNode::Assign {
-                        lhs: Box::new(AstNode::var(local_name(*offset))),
+                        lhs: Box::new(AstNode::var(local_name(
+                            self.options.stack_slot_names,
+                            *offset,
+                        ))),
                         rhs: Box::new(rhs),
                     };
                     resolved.push((None, node, addresses.clone()));
@@ -2638,6 +2741,19 @@ impl Lifter<'_> {
                         None => None,
                     };
                     resolved.push((None, AstNode::Return { value }, addresses.clone()));
+                }
+                Stmt::Compare {
+                    name,
+                    lhs,
+                    rhs,
+                    addresses,
+                } => {
+                    let args = vec![self.node_of(lhs)?, self.node_of(rhs)?];
+                    let node = AstNode::Intrinsic {
+                        name: name.to_string(),
+                        args,
+                    };
+                    resolved.push((None, node, addresses.clone()));
                 }
             }
         }
@@ -2700,8 +2816,16 @@ fn unsigned(node: AstNode, bits: u32) -> AstNode {
 }
 
 /// `lhs op rhs`, with a negative constant on the right folded into the
-/// opposite operation: `a + -8` is `a - 8`.
-fn binary(op: BinaryOp, lhs: AstNode, rhs: AstNode, bits: u32) -> AstNode {
+/// opposite operation: `a + -8` is `a - 8`. Under `operand-order canonical`
+/// the operands of a commutative operator are put in canonical order first.
+fn binary(op: BinaryOp, lhs: AstNode, rhs: AstNode, bits: u32, order: OperandOrder) -> AstNode {
+    let (lhs, rhs) = match order {
+        OperandOrder::Instruction => (lhs, rhs),
+        OperandOrder::Canonical if commutes(op) && canonical_key(&rhs) < canonical_key(&lhs) => {
+            (rhs, lhs)
+        }
+        OperandOrder::Canonical => (lhs, rhs),
+    };
     if let AstNode::Constant { value, .. } = rhs {
         let signed = signed(value, bits);
         if signed < 0 {
@@ -2714,6 +2838,28 @@ fn binary(op: BinaryOp, lhs: AstNode, rhs: AstNode, bits: u32) -> AstNode {
         }
     }
     AstNode::binary(lhs, op, rhs)
+}
+
+/// Whether `a op b` is `b op a`.
+fn commutes(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Mul | BinaryOp::And | BinaryOp::Or | BinaryOp::Xor
+    )
+}
+
+/// Where an operand sorts in canonical order: a variable by its name, a
+/// cast or a dereference by what it wraps, a constant after everything, and
+/// anything compound between the two, in its place.
+fn canonical_key(node: &AstNode) -> (u8, String) {
+    match node {
+        AstNode::Var { name } | AstNode::FunctionName { name, .. } => (0, name.clone()),
+        AstNode::Cast { target, .. }
+        | AstNode::Deref { target }
+        | AstNode::AddressOf { target } => canonical_key(target),
+        AstNode::Constant { .. } => (2, String::new()),
+        _ => (1, String::new()),
+    }
 }
 
 /// A constant of `bits` bits.
@@ -2758,12 +2904,17 @@ fn parameter_name(position: usize) -> String {
     }
 }
 
-/// The name of the stack slot at `offset` from the entry stack pointer.
-fn local_name(offset: i64) -> String {
-    if offset < 0 {
-        format!("local_{:x}", -offset)
+/// The name of the stack slot at `offset` from the entry stack pointer, the
+/// offset spelled as `names` says.
+fn local_name(names: SlotNames, offset: i64) -> String {
+    let (prefix, magnitude) = if offset < 0 {
+        ("local", -offset)
     } else {
-        format!("stack_{offset:x}")
+        ("stack", offset)
+    };
+    match names {
+        SlotNames::Hex => format!("{prefix}_{magnitude:x}"),
+        SlotNames::Decimal => format!("{prefix}_{magnitude}"),
     }
 }
 
@@ -2851,13 +3002,30 @@ mod tests {
 
     /// Lift `bytes` as the function `f` under System V, and print it.
     fn lift(bytes: &[u8]) -> Result<LiftedFunction, NotLifted> {
-        lift_block(&decode(bytes), BASE, "f", Abi::SystemV, &names)
+        lift_block(
+            &decode(bytes),
+            BASE,
+            "f",
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        )
     }
 
     /// The C of `bytes`, or the reason it was not lifted.
     fn c(bytes: &[u8]) -> String {
         match lift(bytes) {
-            Ok(function) => emit_function(&function).text(),
+            Ok(function) => emit_function(&function, &Options::default()).text(),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    /// The C of `bytes` with the options `pairs` set, lifted against
+    /// `symbols`, or the reason it was not lifted.
+    fn c_with(bytes: &[u8], symbols: &dyn Symbols, pairs: &[(&str, &str)]) -> String {
+        let options = Options::from_pairs(pairs.iter().copied()).expect("the options are known");
+        match lift_block(&decode(bytes), BASE, "f", Abi::SystemV, symbols, &options) {
+            Ok(function) => emit_function(&function, &options).text(),
             Err(error) => error.to_string(),
         }
     }
@@ -3013,7 +3181,7 @@ mod tests {
         // push rbp; mov rbp, rsp; mov eax, edi; pop rbp; ret
         let function = lift(&[0x55, 0x48, 0x89, 0xe5, 0x89, 0xf8, 0x5d, 0xc3]).expect("lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "int f(int a)\n{\n  return a;\n}"
         );
         assert_eq!(
@@ -3031,7 +3199,7 @@ mod tests {
         ];
         let function = lift(&code).expect("lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "int f(int a)\n{\n  return a;\n}"
         );
         let ret = function.body.last().expect("a return");
@@ -3310,10 +3478,11 @@ mod tests {
             "add",
             Abi::Win64,
             &names,
+            &Options::default(),
         )
         .expect("lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "int add(int a, int b)\n{\n  return a + b;\n}"
         );
     }
@@ -3336,7 +3505,16 @@ mod tests {
             instructions: decode(bytes),
         };
         let cfg = crate::cfgwalk::resolve_branches(&disasm, BASE);
-        let lifted = lift_function(&disasm, &cfg, BASE, "f", bitness, Abi::SystemV, &names);
+        let lifted = lift_function(
+            &disasm,
+            &cfg,
+            BASE,
+            "f",
+            bitness,
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        );
         (cfg, lifted)
     }
 
@@ -3354,7 +3532,7 @@ mod tests {
         assert_eq!(cfg.blocks[0].successor_addresses, vec![0x100a]);
         let function = lifted.expect("the chain lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "int f(void)\n{\n  return f(1);\n}"
         );
 
@@ -3366,7 +3544,7 @@ mod tests {
         let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(
-            emit_function(&lifted.expect("the chain lifts")).text(),
+            emit_function(&lifted.expect("the chain lifts"), &Options::default()).text(),
             "long f(void)\n{\n  f();\n  return g();\n}"
         );
     }
@@ -3388,7 +3566,7 @@ mod tests {
         assert_eq!(cfg.blocks.len(), 4);
         let function = lifted.expect("the loop lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "long f(int a)\n\
              {\n\
              \x20 long local_10;\n\
@@ -3420,14 +3598,14 @@ mod tests {
         // mov eax, edi; test eax, eax; jz +0; ret
         let (_, lifted) = lift_cfg(&[0x89, 0xf8, 0x85, 0xc0, 0x74, 0x00, 0xc3], Bitness::Bits64);
         assert_eq!(
-            emit_function(&lifted.expect("lifts")).text(),
+            emit_function(&lifted.expect("lifts"), &Options::default()).text(),
             "int f(int a)\n{\n  return a;\n}"
         );
         // jmp +0; ret
         let (cfg, lifted) = lift_cfg(&[0xeb, 0x00, 0xc3], Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(
-            emit_function(&lifted.expect("lifts")).text(),
+            emit_function(&lifted.expect("lifts"), &Options::default()).text(),
             "void f(void)\n{\n  return;\n}"
         );
     }
@@ -3442,7 +3620,7 @@ mod tests {
         ];
         let function = lift(&code).expect("lifts");
         assert_eq!(
-            emit_function(&function).text(),
+            emit_function(&function, &Options::default()).text(),
             "int f(int a)\n\
              {\n\
              \x20 int eax;\n\
@@ -3588,10 +3766,7 @@ mod tests {
 
     /// The C of `bytes` lifted against [`Image`].
     fn c_with_image(bytes: &[u8]) -> String {
-        match lift_block(&decode(bytes), BASE, "f", Abi::SystemV, &Image) {
-            Ok(function) => emit_function(&function).text(),
-            Err(error) => error.to_string(),
-        }
+        c_with(bytes, &Image, &[])
     }
 
     #[test]
@@ -3641,7 +3816,7 @@ mod tests {
     fn the_signature_line_stands_for_the_entry_and_the_frame() {
         // push rbp; mov rbp, rsp; mov eax, edi; pop rbp; ret
         let function = lift(&[0x55, 0x48, 0x89, 0xe5, 0x89, 0xf8, 0x5d, 0xc3]).expect("lifts");
-        let pseudocode = emit_function(&function);
+        let pseudocode = emit_function(&function, &Options::default());
         assert_eq!(pseudocode.lines[0].addresses, vec![0x1000, 0x1001, 0x1006]);
         assert_eq!(pseudocode.lines[2].addresses, vec![0x1004, 0x1007]);
         assert_eq!(
@@ -3652,6 +3827,155 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 2],
             "the braces come from no instruction"
+        );
+    }
+
+    // ---- the options -------------------------------------------------------
+
+    #[test]
+    fn the_parameters_option_declares_every_register_of_the_convention() {
+        // mov eax, edi; ret
+        let code = [0x89, 0xf8, 0xc3];
+        assert_eq!(c(&code), "int f(int a)\n{\n  return a;\n}");
+        assert_eq!(
+            c_with(&code, &names, &[("parameters", "convention")]),
+            "int f(int a, long b, long c, long d, long e, long f)\n{\n  return a;\n}"
+        );
+    }
+
+    #[test]
+    fn the_merged_register_names_option_numbers_the_variables() {
+        // cmp edi, 0; jle .else; mov eax, 1; jmp .join; .else: mov eax, 2; .join: ret
+        let code = [
+            0x83, 0xff, 0x00, 0x7e, 0x07, 0xb8, 1, 0, 0, 0, 0xeb, 0x05, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        assert!(c(&code).contains("  int eax;\n"), "{}", c(&code));
+        let numbered = c_with(&code, &names, &[("merged-register-names", "numbered")]);
+        assert_eq!(
+            numbered,
+            "int f(int a)\n\
+             {\n\
+             \x20 int var_1;\n\
+             \n\
+             \x20 if (a <= 0) {\n\
+             \x20   var_1 = 2;\n\
+             \x20 } else {\n\
+             \x20   var_1 = 1;\n\
+             \x20 }\n\
+             \x20 return var_1;\n\
+             }"
+        );
+
+        // xor eax, eax; .top: add eax, edi; sub edi, 1; jne .top; ret: two
+        // registers become variables, numbered in turn.
+        let code = [0x31, 0xc0, 0x01, 0xf8, 0x83, 0xef, 0x01, 0x75, 0xf9, 0xc3];
+        let numbered = c_with(&code, &names, &[("merged-register-names", "numbered")]);
+        assert!(
+            numbered.contains("  int var_1;\n  int var_2;\n"),
+            "{numbered}"
+        );
+        assert!(numbered.contains("} while (var_2 != 0);"), "{numbered}");
+    }
+
+    #[test]
+    fn the_stack_slot_names_option_spells_the_offset_in_decimal() {
+        // mov [rsp-0x14], edi; lea rax, [rsp-0x14]; ret: the slot's address
+        // is taken, so it is a declared local.
+        let code = [0x89, 0x7c, 0x24, 0xec, 0x48, 0x8d, 0x44, 0x24, 0xec, 0xc3];
+        assert_eq!(
+            c(&code),
+            "long f(int a)\n{\n  int local_14;\n\n  local_14 = a;\n  return &local_14;\n}"
+        );
+        assert_eq!(
+            c_with(&code, &names, &[("stack-slot-names", "decimal")]),
+            "long f(int a)\n{\n  int local_20;\n\n  local_20 = a;\n  return &local_20;\n}"
+        );
+    }
+
+    #[test]
+    fn the_pointer_loads_option_prints_named_data_as_a_cast() {
+        // mov eax, [rip+0x2001]; ret: loads 0x3007, the data `counter`.
+        let code = [0x8b, 0x05, 0x01, 0x20, 0x00, 0x00, 0xc3];
+        assert_eq!(c_with_image(&code), "int f(void)\n{\n  return counter;\n}");
+        assert_eq!(
+            c_with(&code, &Image, &[("pointer-loads", "cast")]),
+            "int f(void)\n{\n  return *(int *)0x3007;\n}"
+        );
+        // The pointer taken through lea is still the name: the option is
+        // about loads and stores.
+        assert_eq!(
+            c_with(
+                &[0x48, 0x8d, 0x05, 0x00, 0x20, 0x00, 0x00, 0xc3],
+                &Image,
+                &[("pointer-loads", "cast")]
+            ),
+            "long f(void)\n{\n  return &counter;\n}"
+        );
+    }
+
+    #[test]
+    fn the_operand_order_option_sorts_the_operands_of_a_commutative_operator() {
+        // mov eax, esi; add eax, edi; ret: the add names b first.
+        let code = [0x89, 0xf0, 0x01, 0xf8, 0xc3];
+        assert_eq!(c(&code), "int f(int a, int b)\n{\n  return b + a;\n}");
+        assert_eq!(
+            c_with(&code, &names, &[("operand-order", "canonical")]),
+            "int f(int a, int b)\n{\n  return a + b;\n}"
+        );
+        // mov eax, 3; add eax, edi; ret: the constant goes last, and a
+        // subtraction keeps its order.
+        assert_eq!(
+            c_with(
+                &[0xb8, 3, 0, 0, 0, 0x01, 0xf8, 0xc3],
+                &names,
+                &[("operand-order", "canonical")]
+            ),
+            "int f(int a)\n{\n  return a + 3;\n}"
+        );
+        assert_eq!(
+            c_with(
+                &[0x89, 0xf0, 0x29, 0xf8, 0xc3],
+                &names,
+                &[("operand-order", "canonical")]
+            ),
+            "int f(int a, int b)\n{\n  return b - a;\n}"
+        );
+    }
+
+    #[test]
+    fn the_unsigned_compare_option_drops_the_casts() {
+        // cmp edi, esi; jb .else; mov eax, 1; jmp .join; .else: mov eax, 2; .join: ret
+        let code = [
+            0x39, 0xf7, 0x72, 0x07, 0xb8, 1, 0, 0, 0, 0xeb, 0x05, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        assert!(
+            c(&code).contains("if ((unsigned int)a < (unsigned int)b) {"),
+            "{}",
+            c(&code)
+        );
+        let bare = c_with(&code, &names, &[("unsigned-compare", "bare")]);
+        assert!(bare.contains("if (a < b) {"), "{bare}");
+        assert!(!bare.contains("unsigned"), "{bare}");
+    }
+
+    #[test]
+    fn the_dead_compares_option_keeps_a_compare_no_branch_reads() {
+        // mov eax, edi; cmp eax, esi; test eax, eax; ret: nothing reads
+        // either's flags.
+        let code = [0x89, 0xf8, 0x39, 0xf0, 0x85, 0xc0, 0xc3];
+        assert_eq!(c(&code), "int f(int a, int b)\n{\n  return a;\n}");
+        assert_eq!(
+            c_with(&code, &names, &[("dead-compares", "keep")]),
+            "int f(int a, int b)\n{\n  __cmp(a, b);\n  __test(a, a);\n  return a;\n}"
+        );
+        // cmp edi, 0; jle .else; mov eax, 1; jmp .join; .else: mov eax, 2;
+        // .join: ret: the branch reads the compare, so nothing is kept.
+        let code = [
+            0x83, 0xff, 0x00, 0x7e, 0x07, 0xb8, 1, 0, 0, 0, 0xeb, 0x05, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        assert_eq!(
+            c_with(&code, &names, &[("dead-compares", "keep")]),
+            c(&code)
         );
     }
 }
