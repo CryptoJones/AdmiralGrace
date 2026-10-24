@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ag_image::Binary;
+use ag_image::{Binary, EdgeKind};
 
 /// The sample ELF the engine's own tests read.
 fn sample_path() -> PathBuf {
@@ -380,4 +380,66 @@ fn a_function_that_uses_no_string_refers_to_none() {
 
     // `add` adds two numbers and names nothing.
     assert!(binary.string_references(0x1149).is_empty());
+}
+
+#[test]
+fn the_control_flow_graph_of_a_function_holds_its_blocks_and_its_edges() {
+    let binary = sample();
+
+    let graph = binary.control_flow(0x1000).expect("_init walks");
+
+    assert_eq!(graph.function, 0x1000);
+    assert_eq!(graph.name.as_deref(), Some("_init"));
+    assert_eq!(graph.blocks.len(), 3, "the three blocks of _init");
+    assert_eq!(graph.edges.len(), 3, "and the three ways out of them");
+}
+
+#[test]
+fn an_edge_that_leaves_the_end_of_a_block_is_the_fall_through() {
+    let binary = sample();
+
+    let graph = binary.control_flow(0x1000).expect("_init walks");
+
+    let kinds: Vec<(u64, u64, EdgeKind)> = graph
+        .edges
+        .iter()
+        .map(|edge| (edge.from, edge.to, edge.kind))
+        .collect();
+
+    // The block at 0x1000 ends at 0x1014, so the way into 0x1014 is the
+    // fall-through and the way into 0x1016 is the branch that is taken.
+    assert!(
+        kinds.contains(&(0x1000, 0x1014, EdgeKind::Fallthrough)),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(0x1000, 0x1016, EdgeKind::Taken)),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(0x1014, 0x1016, EdgeKind::Fallthrough)),
+        "{kinds:?}"
+    );
+}
+
+#[test]
+fn every_edge_of_a_graph_leaves_a_block_of_that_graph() {
+    let binary = sample();
+
+    let graph = binary.control_flow(MAIN).expect("main walks");
+
+    for edge in &graph.edges {
+        assert!(
+            graph.blocks.iter().any(|block| block.from == edge.from),
+            "the edge leaves a block of the graph: {edge:?}"
+        );
+    }
+}
+
+#[test]
+fn a_function_that_cannot_be_walked_has_no_graph() {
+    let binary = sample();
+
+    // 0xdead_0000 names no function, so there is nothing to walk.
+    assert!(binary.control_flow(0xdead_0000).is_none());
 }

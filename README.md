@@ -76,6 +76,12 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
+# The control-flow graph of one function
+cargo run --bin ag -- image ./sample.elf cfg main
+
+# Who calls whom
+cargo run --bin ag -- image ./sample.elf calls
+
 # The strings of the image, and the functions that use them
 cargo run --bin ag -- image ./sample.elf strings
 ```
@@ -83,6 +89,8 @@ cargo run --bin ag -- image ./sample.elf strings
 Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86-64, so it refuses an image of another architecture rather than printing nonsense.
 
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
+
+`cfg` reports the control-flow graph of a function: its blocks, and the edges between them, each edge marked fall-through or taken. `calls` reports who calls whom: with a function, what it calls and who calls it; without one, the whole call graph.
 
 ## Corpus format
 

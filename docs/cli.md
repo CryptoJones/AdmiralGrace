@@ -97,6 +97,12 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
+# The control-flow graph of one function
+cargo run --bin ag -- image ./sample.elf cfg main
+
+# Who calls whom
+cargo run --bin ag -- image ./sample.elf calls
+
 # The strings of the image, and the functions that use them
 cargo run --bin ag -- image ./sample.elf strings
 ```
@@ -109,6 +115,8 @@ cargo run --bin ag -- image ./sample.elf strings
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
+| `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
+| `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
@@ -116,8 +124,9 @@ cargo run --bin ag -- image ./sample.elf strings
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
 symbols; `disasm` gives the blocks, their instructions, and the calls the function makes;
-`strings` gives the strings and the functions that use them. Every address is reported
-twice, as a number and as a hex string.
+`cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
+or of the whole image; `strings` gives the strings and the functions that use them. Every
+address is reported twice, as a number and as a hex string.
 
 `disasm` takes the function as an address (`0x1198`) or as a name (`main`). A name is
 matched loosely: an exact name first, then a substring. A direct call prints the name of
@@ -134,6 +143,19 @@ it has no address, so it is left out.
 
 Who uses a string is found from the instructions that point at it, which needs the whole
 program read. The wide strings are not in that index, so they are reported without users.
+
+`cfg` reports the graph the Graph tab of the workbench draws: the blocks the walk found,
+and the ways the code goes from one block to the next. An edge that leaves the end of a
+block is the fall-through; every other edge is a branch that is taken. Its JSON shape is
+the one a graph tool can be fed directly: `blocks`, with the `from`, the `to` and the
+instructions of each block, and `edges`, with the `from`, the `to` and the `kind` of each
+one.
+
+`calls` reports who calls whom, which needs the whole program read. With a function it
+gives the calls that function makes, with the address of every call site, and the
+functions that call it. Without one it gives the whole call graph, and the two facts the
+summary of the workbench shows: the functions reachable from the entry point, and the
+functions that nothing calls.
 
 ## The embedded manual and agent skill
 
