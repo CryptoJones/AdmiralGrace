@@ -13,9 +13,9 @@ use ag_image::Binary;
 use anyhow::Result;
 
 use crate::data::{
-    AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, HitKind, ListingLine,
-    Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts, SegmentEntry,
-    StringEntry,
+    AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, GraphBlock, HitKind,
+    ListingLine, Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
+    SegmentEntry, StringEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
 
@@ -162,6 +162,7 @@ impl Provider for BinaryProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             listing: self.binary.supports_disassembly(),
+            graph: self.binary.supports_disassembly(),
             references: true,
             segments: true,
             bytes: true,
@@ -250,6 +251,27 @@ impl Provider for BinaryProvider {
                 .iter()
                 .flat_map(|block| block.instructions.iter())
                 .map(Self::listing_line)
+                .collect(),
+        )
+    }
+
+    /// The control-flow graph of a function.
+    ///
+    /// The engine's walk already cut the function into blocks, so the
+    /// blocks come back with their successors attached.
+    fn graph(&self, address: u64) -> Option<Vec<GraphBlock>> {
+        let disassembly = self.binary.disassembly(address)?;
+
+        Some(
+            disassembly
+                .blocks
+                .iter()
+                .map(|block| GraphBlock {
+                    from: block.from,
+                    to: block.to,
+                    successors: block.successors.clone(),
+                    instructions: block.instructions.iter().map(Self::listing_line).collect(),
+                })
                 .collect(),
         )
     }

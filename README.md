@@ -113,7 +113,7 @@ ag install-skill --agent claude
 
 ## Desktop workbench
 
-`ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work surface with listing, pseudocode, bytes and references, an inspector, and a bottom workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
+`ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work surface with listing, pseudocode, graph, bytes and references, an inspector, and a bottom workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
 
 ```sh
 # Launch with the bundled sample project
@@ -149,6 +149,8 @@ Who calls what is only known once the whole program has been read, so that is wo
 The Bytes tab shows the bytes of the file around the selection, sixteen to a row, with the address, the hex and the ASCII column, and the bytes of the selected instruction marked. The pane follows the selection, and picking a section or a named symbol in the navigator moves it there.
 
 The Strings tab lists the text the image holds, with the functions that use it. The list filters as you type, and picking a string moves the selection to it.
+
+The Graph tab draws the control-flow graph of the selected function: one box for each block the walk found, with the instructions in it, and an arrow for each way the code goes on. The arrow that leaves the end of a block is the fall-through, and the other one is the branch that is taken. The graph can be dragged and zoomed, and clicking a box moves the selection to it.
 
 ## Development status
 

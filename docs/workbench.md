@@ -1,7 +1,7 @@
 # The desktop workbench
 
 `ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work
-surface with listing, pseudocode, bytes and references, an inspector, and a bottom
+surface with listing, pseudocode, graph, bytes and references, an inspector, and a bottom
 workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
 
 ```sh
@@ -24,7 +24,7 @@ the workbench in more detail.
 | Pane | What it holds |
 |---|---|
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
-| Work surface | The selected function: listing, pseudocode, bytes, and references. |
+| Work surface | The selected function: listing, pseudocode, graph, bytes, and references. |
 | Inspector | The selection's detail, its cross references, the project's provenance and its shape. |
 | Bottom workspace | Search results, problems, and the log. |
 
@@ -83,6 +83,19 @@ in the listing moves the bytes to it. Picking a section or a named symbol in the
 moves them there too; a symbol that lives only in memory — in `.bss` — has no bytes in the
 file, and the pane says so rather than showing zeroes.
 
+The Graph tab draws the control-flow graph of the selected function. Every block the
+control-flow walk found is a box with the instructions of the block in it, and every way
+the code goes on is an arrow. A block that goes on in two ways is a branch: the arrow that
+leaves the end of the block is the fall-through, and the other one is the branch that is
+taken, and both say so. The blocks are laid out in rows — a block sits below the deepest
+block that reaches it — and the graph is drawn to fit the pane. It can be dragged with the
+mouse and zoomed with the wheel, and clicking a box moves the selection to the start of
+that block.
+
+The layout of the graph is worked out by pure functions that take the blocks of a
+function and say where every box is drawn, so it is tested without a window. The canvas on
+top of it draws the boxes, the arrows and the text, and takes the mouse.
+
 The File menu opens an image the same way, with `Open binary...`.
 
 The Strings tab lists the text the image holds, with the functions that use it. The list
@@ -97,6 +110,7 @@ What the workbench reads:
 | The function symbols | The function list of the navigator. |
 | The data symbols | The Data part of the Segments section of the navigator, and the search results. |
 | The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
+| The blocks of the control-flow walk | The Graph tab: a box for every block, with the arrows that join them. |
 | The bytes of the file | The Bytes tab and the lower Bytes panel: the bytes around the selection. |
 | The direct calls of a function | The References tab and the inspector: what the function calls, and what calls it. |
 | The strings of the data sections | The Strings tab: the text of the image, and the functions that use it. |

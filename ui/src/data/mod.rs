@@ -98,6 +98,23 @@ pub struct ByteLine {
     pub bytes: Vec<u8>,
 }
 
+/// One basic block of a function's control-flow graph.
+///
+/// A block is the straight run of instructions between two branches: it
+/// starts at an address, ends at an address, and goes on to the blocks that
+/// follow it.
+#[derive(Debug, Clone)]
+pub struct GraphBlock {
+    /// Where the block starts.
+    pub from: u64,
+    /// Where the block ends: the address of the instruction after it.
+    pub to: u64,
+    /// The addresses the block goes to.
+    pub successors: Vec<u64>,
+    /// The instructions of the block.
+    pub instructions: Vec<ListingLine>,
+}
+
 /// The kind of a cross reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceKind {
@@ -294,6 +311,14 @@ pub trait Provider: Send + Sync {
 
     /// Linear disassembly for a function, when available.
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>>;
+
+    /// The control-flow graph of a function, when the provider has one.
+    ///
+    /// The blocks come back in the order the walk found them; the graph
+    /// view lays them out itself.
+    fn graph(&self, _address: u64) -> Option<Vec<GraphBlock>> {
+        None
+    }
 
     /// Decompiled pseudocode for a function, when available.
     fn pseudocode(&self, address: u64) -> Option<String>;

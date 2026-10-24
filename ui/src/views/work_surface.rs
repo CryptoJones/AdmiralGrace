@@ -426,11 +426,15 @@ fn graph_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    empty_state(
-        "The graph view is not implemented yet",
-        "Use the listing to move through this function until the graph lands.",
-    )
-    .into()
+    if app.work.graph.is_empty() {
+        return empty_state(
+            "This function has no control flow to draw",
+            "Select a function that the analysis has walked to see its blocks.",
+        )
+        .into();
+    }
+
+    crate::views::graph::view(app)
 }
 
 /// The byte view.

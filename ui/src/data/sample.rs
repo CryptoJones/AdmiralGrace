@@ -6,8 +6,8 @@
 //! show. It is never presented as real analysis.
 
 use crate::data::{
-    AnalysisState, ByteLine, FunctionDetail, FunctionRow, HitKind, ListingLine, Problem, Provider,
-    Reference, ReferenceKind, SearchHit, SectionCounts,
+    AnalysisState, ByteLine, FunctionDetail, FunctionRow, GraphBlock, HitKind, ListingLine,
+    Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
 
@@ -120,6 +120,11 @@ impl Provider for SampleProvider {
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>> {
         let index = self.index_of(address)?;
         Some(self.functions[index].body.listing.clone())
+    }
+
+    fn graph(&self, address: u64) -> Option<Vec<GraphBlock>> {
+        let index = self.index_of(address)?;
+        Some(blocks_of(&self.functions[index].body.listing))
     }
 
     fn pseudocode(&self, address: u64) -> Option<String> {
@@ -241,9 +246,26 @@ fn sample_decrypt() -> Sample {
         line(start + 36, "E0 03 00 AA", "mov", "x0, x0", None),
         line(start + 40, "40 00 00 B4", "cbz", "x0, loc_100084A50", None),
         line(start + 44, "09 00 00 14", "b", "loc_100084A70", None),
-        line(start + 48, "F4 03 00 AA", "mov", "x20, x0", None),
-        line(start + 52, "E1 03 13 AA", "mov", "x1, x19", None),
-        line(start + 56, "22 00 00 94", "bl", "AES_GCM_open", None),
+        line(start + 48, "40 00 00 D2", "mov", "x0, #0", None),
+        line(start + 52, "20 00 00 B9", "str", "x0, [x19]", None),
+        line(start + 56, "E1 00 00 AA", "mov", "x1, #0", None),
+        line(start + 60, "21 00 00 B9", "str", "x1, [x20]", None),
+        line(start + 64, "42 00 00 AA", "mov", "x2, #0", None),
+        line(start + 68, "22 00 00 B9", "str", "x2, [x21]", None),
+        line(start + 72, "63 00 00 AA", "mov", "x3, #0", None),
+        line(start + 76, "63 00 00 14", "b", "loc_100084A80", None),
+        line(start + 80, "F4 03 00 AA", "mov", "x20, x0", None),
+        line(start + 84, "E1 03 13 AA", "mov", "x1, x19", None),
+        line(start + 88, "22 00 00 94", "bl", "AES_GCM_open", None),
+        line(start + 92, "63 00 00 14", "b", "loc_100084A80", None),
+        line(
+            start + 96,
+            "FD 7B C1 A9",
+            "ldp",
+            "x29, x30, [sp], #0x10",
+            None,
+        ),
+        line(start + 100, "C0 03 5F D6", "ret", "", None),
     ];
 
     let bytes = (0..4)
@@ -421,5 +443,186 @@ fn line(
         mnemonic: mnemonic.to_string(),
         operands: operands.to_string(),
         comment: comment.map(str::to_string),
+    }
+}
+
+/// The blocks of a function, worked out from its listing.
+///
+/// The listing is cut at the branches: every run of instructions between
+/// two branches is a block, and the block knows where the code goes next.
+fn blocks_of(listing: &[ListingLine]) -> Vec<GraphBlock> {
+    let mut blocks: Vec<GraphBlock> = Vec::new();
+    let mut open: Vec<ListingLine> = Vec::new();
+
+    for (index, line) in listing.iter().enumerate() {
+        open.push(line.clone());
+
+        let Some(branch) = branch_of(line) else {
+            continue;
+        };
+
+        let from = open[0].address;
+        let to = after(&open);
+
+        let mut successors = Vec::new();
+
+        if let Some(target) = branch.target {
+            successors.push(target);
+        }
+
+        // The code falls into the next instruction when the listing goes
+        // on right there.
+        if branch.falls_through && listing.get(index + 1).map(|line| line.address) == Some(to) {
+            successors.push(to);
+        }
+
+        blocks.push(GraphBlock {
+            from,
+            to,
+            successors,
+            instructions: std::mem::take(&mut open),
+        });
+    }
+
+    // Whatever is left is the last block of the function.
+    if !open.is_empty() {
+        let from = open[0].address;
+        let to = after(&open);
+
+        blocks.push(GraphBlock {
+            from,
+            to,
+            successors: Vec::new(),
+            instructions: open,
+        });
+    }
+
+    blocks
+}
+
+/// What a branch does to the flow of the code.
+struct Branch {
+    /// Where the branch goes, when it names an address.
+    target: Option<u64>,
+    /// Whether the code can fall into the next instruction.
+    falls_through: bool,
+}
+
+/// The branch an instruction is, if it is one.
+///
+/// A call is not a branch: it comes back, so the code goes on where it
+/// was.
+fn branch_of(line: &ListingLine) -> Option<Branch> {
+    let target = target_of(&line.operands);
+
+    match line.mnemonic.trim() {
+        "ret" => Some(Branch {
+            target: None,
+            falls_through: false,
+        }),
+        "b" | "br" => Some(Branch {
+            target,
+            falls_through: false,
+        }),
+        "cbz" | "cbnz" | "tbz" | "tbnz" => Some(Branch {
+            target,
+            falls_through: true,
+        }),
+        _ => None,
+    }
+}
+
+/// The address a branch names, if it names one.
+fn target_of(operands: &str) -> Option<u64> {
+    operands
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("loc_"))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+}
+
+/// The address just after the last instruction of a run.
+fn after(instructions: &[ListingLine]) -> u64 {
+    let Some(last) = instructions.last() else {
+        return 0;
+    };
+
+    last.address + last.bytes.split_whitespace().count() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_listing_is_cut_at_the_branches() {
+        let listing = vec![
+            line(0x1000, "E0 03 01 AA", "mov", "x0, x1", None),
+            line(0x1004, "40 00 00 B4", "cbz", "x0, loc_1010", None),
+            line(0x1008, "E0 03 00 AA", "mov", "x0, x0", None),
+            line(0x100C, "C0 03 5F D6", "ret", "", None),
+        ];
+
+        let blocks = blocks_of(&listing);
+
+        assert_eq!(blocks.len(), 2, "the branch cuts the listing in two");
+
+        let first = &blocks[0];
+        assert_eq!(first.from, 0x1000);
+        assert_eq!(first.to, 0x1008, "the block ends after the branch");
+        assert_eq!(first.instructions.len(), 2);
+        assert_eq!(
+            first.successors,
+            vec![0x1010, 0x1008],
+            "the branch goes two ways: the target and the fall-through"
+        );
+
+        let last = &blocks[1];
+        assert_eq!(last.from, 0x1008);
+        assert_eq!(last.to, 0x1010);
+        assert!(last.successors.is_empty(), "a return goes nowhere");
+    }
+
+    #[test]
+    fn a_jump_does_not_fall_through() {
+        let listing = vec![
+            line(0x1000, "09 00 00 14", "b", "loc_1010", None),
+            line(0x1004, "E0 03 00 AA", "mov", "x0, x0", None),
+            line(0x1008, "C0 03 5F D6", "ret", "", None),
+        ];
+
+        let blocks = blocks_of(&listing);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].successors, vec![0x1010], "only the target");
+    }
+
+    #[test]
+    fn a_call_is_not_a_branch() {
+        let listing = vec![
+            line(0x1000, "01 00 00 94", "bl", "other", None),
+            line(0x1004, "C0 03 5F D6", "ret", "", None),
+        ];
+
+        let blocks = blocks_of(&listing);
+
+        assert_eq!(blocks.len(), 1, "the call does not cut the block");
+        assert_eq!(blocks[0].from, 0x1000);
+        assert_eq!(blocks[0].to, 0x1008);
+    }
+
+    #[test]
+    fn the_sample_function_has_a_graph_to_draw() {
+        let provider = SampleProvider::new();
+
+        let blocks = provider.graph(0x100084A20).expect("the sample has a graph");
+
+        assert_eq!(blocks.len(), 5, "the sample function has five blocks");
+
+        // The branch at the top of the function goes two ways.
+        let first = &blocks[0];
+        assert_eq!(first.from, 0x100084A20);
+        assert_eq!(first.successors.len(), 2);
+        assert!(first.successors.contains(&0x100084A50), "the error path");
+        assert!(first.successors.contains(&0x100084A4C), "the way on");
     }
 }
