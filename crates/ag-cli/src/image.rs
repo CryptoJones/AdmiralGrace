@@ -1643,11 +1643,11 @@ mod tests {
             .collect();
 
         // frame_dummy tail-calls register_tm_clones, whose read of the flag
-        // is its own: the walk stops at the jump.
+        // is its own: the walk stops at the jump. _start ends in hlt before
+        // the padding and deregister_tm_clones: the walk stops there too.
         assert_eq!(
             users,
             vec![
-                "_start",
                 "deregister_tm_clones",
                 "register_tm_clones",
                 "__do_global_dtors_aux"
@@ -1660,14 +1660,16 @@ mod tests {
     fn the_data_a_function_refers_to_is_listed() {
         let image = sample();
 
-        let entries = data_of_function_entries(&image, 0x1060);
+        // deregister_tm_clones reads the flag of the runtime and the GOT
+        // slot of _ITM_deregisterTMCloneTable.
+        let entries = data_of_function_entries(&image, 0x1090);
 
-        assert_eq!(entries.len(), 3, "{entries:?}");
+        assert_eq!(entries.len(), 2, "{entries:?}");
 
         let flag = entries
             .iter()
             .find(|entry| entry.name.as_deref() == Some("completed.0"))
-            .expect("_start reads the flag of the runtime");
+            .expect("deregister_tm_clones reads the flag of the runtime");
 
         assert_eq!(flag.address_hex, "0x4010");
         assert_eq!(flag.section, ".bss");
@@ -1682,7 +1684,7 @@ mod tests {
 
         assert_eq!(entry.address_hex, "0x4010");
         assert_eq!(entry.name.as_deref(), Some("completed.0"));
-        assert_eq!(entry.functions.len(), 4, "{:?}", entry.functions);
+        assert_eq!(entry.functions.len(), 3, "{:?}", entry.functions);
     }
 
     #[test]
@@ -1692,7 +1694,7 @@ mod tests {
         let entry = data_at_entry(&image, "completed.0").expect("the flag is there");
 
         assert_eq!(entry.address_hex, "0x4010");
-        assert_eq!(entry.functions.len(), 4, "{:?}", entry.functions);
+        assert_eq!(entry.functions.len(), 3, "{:?}", entry.functions);
     }
 
     #[test]

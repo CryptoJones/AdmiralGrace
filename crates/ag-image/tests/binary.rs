@@ -511,13 +511,14 @@ fn the_edges_of_a_graph_are_the_edges_of_its_blocks() {
 fn a_function_that_points_at_data_refers_to_it() {
     let binary = sample();
 
-    // `_start` reads the flag the C runtime sets when it is done.
-    let references = binary.data_references(0x1060);
+    // `deregister_tm_clones` reads the flag the C runtime sets when it is
+    // done.
+    let references = binary.data_references(0x1090);
 
     let completed = references
         .iter()
         .find(|reference| reference.name.as_deref() == Some("completed.0"))
-        .expect("_start refers to the flag");
+        .expect("deregister_tm_clones refers to the flag");
 
     assert_eq!(completed.address, 0x4010, "the flag lives at 0x4010");
     assert_eq!(
@@ -551,8 +552,9 @@ fn a_pointer_that_lands_on_a_string_is_not_a_data_reference() {
 fn the_data_a_function_refers_to_is_named_once_per_piece() {
     let binary = sample();
 
-    // `_start` points at the flag twice: the reference is reported once.
-    let references = binary.data_references(0x1060);
+    // `deregister_tm_clones` points at the flag twice: the reference is
+    // reported once.
+    let references = binary.data_references(0x1090);
 
     let flags: Vec<&ag_image::DataReference> = references
         .iter()
@@ -571,11 +573,13 @@ fn the_functions_that_use_a_piece_of_data_are_named() {
     let users_of_the_flag = users.get(&0x4010).expect("the flag is used by something");
 
     // frame_dummy tail-calls register_tm_clones, whose read of the flag is
-    // its own: the walk stops at the jump, so it is not a user.
+    // its own: the walk stops at the jump, so it is not a user. _start ends
+    // in hlt before the padding and deregister_tm_clones, so it is not one
+    // either.
     assert_eq!(
         users_of_the_flag,
-        &[0x1060, 0x1090, 0x10c0, 0x1100],
-        "the four functions of the runtime that touch the flag"
+        &[0x1090, 0x10c0, 0x1100],
+        "the three functions of the runtime that touch the flag"
     );
 }
 

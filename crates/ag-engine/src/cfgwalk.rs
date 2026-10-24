@@ -262,10 +262,10 @@ fn step_of(ins: &DecodedInsn, entry: u64, entries: &dyn Entries) -> Step {
                 ..plain
             }
         }
-        // Returns, indirect jumps, traps and undecodable bytes end the block
-        // with no fall-through; an indirect jump's targets come from a later
-        // phase.
-        Flow::Return | Flow::IndirectBranch | Flow::Trap | Flow::Invalid => Step {
+        // Returns, indirect jumps, traps, halts and undecodable bytes end
+        // the block with no fall-through; an indirect jump's targets come
+        // from a later phase.
+        Flow::Return | Flow::IndirectBranch | Flow::Trap | Flow::Halt | Flow::Invalid => Step {
             falls_through: false,
             ends_block: true,
             ..plain

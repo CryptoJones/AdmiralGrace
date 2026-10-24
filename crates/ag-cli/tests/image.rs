@@ -223,6 +223,27 @@ fn the_disassembly_of_a_32_bit_elf_is_reported_as_json() {
 }
 
 #[test]
+fn the_cfg_of_the_start_up_glue_stops_at_the_hlt() {
+    // _start calls __libc_start_main and then halts; the nop padding and
+    // deregister_tm_clones after the hlt are not its blocks. The call ends
+    // a block of its own, so the hlt is the second.
+    let report = image("sample.elf", &["cfg", "_start"]);
+
+    assert!(report.contains("blocks: 2\nedges: 1\n"), "{report}");
+    assert!(
+        report.contains("block 0x1085 - 0x1086\n  successors: -\n  instructions: 0x1085\n"),
+        "{report}"
+    );
+    assert!(!report.contains("0x1090"), "{report}");
+    assert!(!report.contains("0x10b8"), "{report}");
+
+    // The flag of the runtime is deregister_tm_clones's to read, not _start's.
+    let report = image("sample.elf", &["data", "completed.0"]);
+    assert!(!report.contains("_start"), "{report}");
+    assert!(report.contains("deregister_tm_clones"), "{report}");
+}
+
+#[test]
 fn the_cfg_of_a_function_that_tail_calls_another_stops_at_the_jump() {
     // frame_dummy is endbr64; jmp register_tm_clones: its graph is its one
     // block, not register_tm_clones' blocks after it.

@@ -43,6 +43,8 @@ pub enum Flow {
     Syscall,
     /// An instruction that always faults (`ud2`, `ud0`, `ud1`); nothing follows it in the fall-through sense.
     Trap,
+    /// `hlt`: stops the processor; nothing follows it in the fall-through sense.
+    Halt,
     /// `xbegin`: starts a transaction whose abort handler is at the given address, otherwise falls through.
     Xbegin(u64),
     /// Bytes that do not decode as an instruction. The decoder records one
@@ -259,6 +261,9 @@ impl CpuContext for X86IcedContext {
             {
                 Flow::Syscall
             }
+            // iced files `hlt` under `Next`; control does not reach the
+            // instruction after it.
+            _ if ins.mnemonic() == iced_x86::Mnemonic::Hlt => Flow::Halt,
             iced_x86::FlowControl::Next => Flow::Next,
             iced_x86::FlowControl::UnconditionalBranch => {
                 Flow::UnconditionalBranch(ins.near_branch_target())

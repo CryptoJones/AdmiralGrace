@@ -115,11 +115,13 @@ pub fn result_use_after(disasm: &Disasm, cfg: &ProcedureCfg, site: u64) -> Resul
                     break;
                 }
                 // The callee clobbers rax; so does whatever a jmp out of
-                // the function lands in, and nothing is known past a trap.
+                // the function lands in, and nothing is known past a trap
+                // or a halt.
                 Flow::Call(_)
                 | Flow::IndirectCall
                 | Flow::IndirectBranch
                 | Flow::Trap
+                | Flow::Halt
                 | Flow::Invalid => {
                     decided = true;
                     break;
