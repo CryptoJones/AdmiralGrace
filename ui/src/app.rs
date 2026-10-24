@@ -1970,7 +1970,8 @@ mod tests {
 
     #[test]
     fn shortcuts_map_onto_menu_commands() {
-        let ctrl = keyboard::Modifiers::CTRL;
+        // The platform's command key: Cmd on macOS, Ctrl elsewhere, as `shortcut` reads it.
+        let ctrl = keyboard::Modifiers::COMMAND;
 
         let event = keyboard::Event::KeyPressed {
             key: Key::Character("o".into()),
