@@ -19,8 +19,7 @@ ag corpus --root ./corpus stats
 ```
 
 `stats` reports how many functions the index holds, how many decompiled, how many failed,
-and how many carry a name. A failed count above zero means the index lists functions with
-no body, and `ag` prints none for those.
+and how many carry a name. A failed count means some have no body, and `ag` prints none.
 
 Then list the functions, filtered:
 
@@ -106,6 +105,7 @@ ag image ./sample.elf disasm main
 ag image ./sample.elf cfg main
 ag image ./sample.elf calls
 ag image ./sample.elf strings
+ag image ./sample.elf data
 ```
 
 `info` gives the language, the entry point and the sections. `symbols` gives the function
@@ -113,13 +113,13 @@ and data symbols. `disasm` gives the blocks of one function: a `; block 0x…` h
 block, then the address, the bytes, the mnemonic and the operands of every instruction. A
 call shows the name of the function it calls. `cfg` gives the control-flow graph of a
 function: its blocks and the edges between them, each edge marked fall-through or taken.
-`calls` gives who calls whom: with a function, what it calls and who calls it; without
-one, the whole call graph. `strings` gives the text the image holds, with the functions
-that use it. `--json` reports the same thing as JSON, with every address as both a number
-and a hex string.
+`calls` gives who calls whom: with a function, what it calls and who calls it; without one,
+the whole call graph. `strings` gives the text the image holds and `data` the data, each
+with the functions that use it. `--json` reports the same thing as JSON, with every address
+as both a number and a hex string.
 
-`info` and `symbols` read any format the loader reads. `disasm`, `cfg` and `calls` decode
-x86-64 only, so they refuse another architecture rather than guessing.
+`info` and `symbols` read any format the loader reads. `disasm`, `cfg`, `calls` and `data`
+decode x86-64 only, so they refuse another architecture rather than guessing.
 
 Reach for this when there is no corpus yet: the symbols say what the program has, and the
 disassembly says what one function does.
@@ -144,7 +144,7 @@ The manual is embedded in the binary, so it is there with no repo and no network
 ## When a command fails
 
 Read the error before retrying. `no function matching` means the name is not in the index:
-list the functions and use one of those names. `reading ...` means the corpus directory is
-wrong or a body file is missing. `loading kuna export` means the directory is not an
-export. `no body for matched functions` means the name matched only functions that failed
-to decompile.
+list the functions and use one of those names. `no data matching` means the address or the
+name is in no piece of data. `reading ...` means the corpus directory is wrong or a body
+file is missing. `loading kuna export` means the directory is not an export. `no body for
+matched functions` means the name matched only functions that failed to decompile.

@@ -292,7 +292,7 @@ fn symbol_row(symbol: &DataSymbolEntry) -> Element<'static, Message> {
         );
 
     mouse_area(content)
-        .on_press(Message::AddressSelected(symbol.address))
+        .on_press(Message::DataSelected(symbol.address))
         .into()
 }
 

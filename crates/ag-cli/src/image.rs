@@ -69,6 +69,16 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The data the image holds, and the functions that use it.
+    Data {
+        /// The function or the data: an address such as `0x1198`, or a name.
+        ///
+        /// Without one, the data of the whole image is reported.
+        target: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -315,6 +325,58 @@ struct CallsJson {
     without_callers: Vec<FunctionJson>,
 }
 
+/// One piece of data, as JSON.
+#[derive(Debug, Serialize)]
+struct DataUseJson {
+    /// The address of the data.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// The name of the symbol at the data, when the image has one.
+    name: Option<String>,
+    /// The name of the section the data lives in.
+    section: String,
+    /// The functions that refer to the data.
+    functions: Vec<StringFunctionJson>,
+}
+
+/// The data of the image, as JSON.
+#[derive(Debug, Serialize)]
+struct DataReportJson {
+    /// The data.
+    data: Vec<DataUseJson>,
+}
+
+/// One reference from a function to a piece of data, as JSON.
+#[derive(Debug, Serialize)]
+struct DataReferenceJson {
+    /// The address of the data.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// The name of the symbol at the data, when the image has one.
+    name: Option<String>,
+    /// The name of the section the data lives in.
+    section: String,
+    /// The address of the instruction that points at the data.
+    site: u64,
+    /// The address, as a hex string.
+    site_hex: String,
+}
+
+/// The data one function refers to, as JSON.
+#[derive(Debug, Serialize)]
+struct FunctionDataJson {
+    /// The function's entry address.
+    function: u64,
+    /// The address, as a hex string.
+    function_hex: String,
+    /// The function's name, when it has one.
+    name: Option<String>,
+    /// The data the function refers to.
+    data: Vec<DataReferenceJson>,
+}
+
 /// Report on a program image.
 pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     let image = Binary::open(binary).with_context(|| format!("reading {}", binary.display()))?;
@@ -330,6 +392,7 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         } => strings(&image, filter.as_deref(), utf16, json),
         ImageCmd::Cfg { target, json } => cfg(&image, &target, json),
         ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
+        ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
     }
 }
 
@@ -827,6 +890,184 @@ fn every_call(image: &Binary, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Report the data of the image, of one function, or the users of one piece
+/// of data.
+///
+/// A function refers to data when one of its instructions points at it: the
+/// pointer lands in a section that holds no code. A pointer that lands on a
+/// string is a string reference, and is not data.
+fn data(image: &Binary, target: Option<&str>, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86-64 and this image is {}",
+        image.language()
+    );
+
+    match target {
+        None => every_data(image, json),
+        Some(target) => match find_function(image, target) {
+            Some(address) => data_of_function(image, address, json),
+            None => data_at(image, target, json),
+        },
+    }
+}
+
+/// Report the data of the whole image, with the functions that use it.
+///
+/// Who uses a piece of data needs the whole program read, so that is what
+/// this call costs.
+fn every_data(image: &Binary, json: bool) -> Result<i32> {
+    let entries = every_data_entries(image);
+
+    if json {
+        let report = DataReportJson { data: entries };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    println!("data: {}", entries.len());
+
+    for entry in &entries {
+        println!(
+            "  {} {} {} {}",
+            entry.address_hex,
+            entry.section,
+            entry.name.as_deref().unwrap_or("-"),
+            names_of(&entry.functions)
+        );
+    }
+
+    Ok(0)
+}
+
+/// Report the data one function refers to.
+fn data_of_function(image: &Binary, address: u64, json: bool) -> Result<i32> {
+    let entries = data_of_function_entries(image, address);
+
+    if json {
+        let report = FunctionDataJson {
+            function: address,
+            function_hex: format!("{address:#x}"),
+            name: image.function_name(address).map(str::to_string),
+            data: entries,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    let name = image.function_name(address).unwrap_or("entry");
+    println!("{name} at {address:#x}");
+    println!("data: {}", entries.len());
+
+    for entry in &entries {
+        println!(
+            "  {} {} {} at {}",
+            entry.address_hex,
+            entry.section,
+            entry.name.as_deref().unwrap_or("-"),
+            entry.site_hex
+        );
+    }
+
+    Ok(0)
+}
+
+/// Report the functions that use one piece of data.
+fn data_at(image: &Binary, target: &str, json: bool) -> Result<i32> {
+    let entry = data_at_entry(image, target)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+        return Ok(0);
+    }
+
+    println!(
+        "{} {} {}",
+        entry.address_hex,
+        entry.section,
+        entry.name.as_deref().unwrap_or("-")
+    );
+
+    println!("used by:");
+    if entry.functions.is_empty() {
+        println!("  -");
+    }
+    for function in &entry.functions {
+        println!("  {} {}", function.address_hex, function.name);
+    }
+
+    Ok(0)
+}
+
+/// The data of the whole image, with the functions that use it.
+fn every_data_entries(image: &Binary) -> Vec<DataUseJson> {
+    let users = image.data_users();
+
+    users
+        .iter()
+        .map(|(address, functions)| data_use_json(image, *address, functions))
+        .collect()
+}
+
+/// The data one function refers to.
+fn data_of_function_entries(image: &Binary, address: u64) -> Vec<DataReferenceJson> {
+    image
+        .data_references(address)
+        .iter()
+        .map(|reference| DataReferenceJson {
+            address: reference.address,
+            address_hex: format!("{:#x}", reference.address),
+            name: reference.name.clone(),
+            section: reference.section.clone(),
+            site: reference.site,
+            site_hex: format!("{:#x}", reference.site),
+        })
+        .collect()
+}
+
+/// One piece of data, with the functions that use it.
+fn data_at_entry(image: &Binary, target: &str) -> Result<DataUseJson> {
+    let address = resolve_data(image, target)?;
+
+    let users = image.data_users();
+    let functions = users.get(&address).cloned().unwrap_or_default();
+
+    Ok(data_use_json(image, address, &functions))
+}
+
+/// One piece of data, with the functions that refer to it.
+fn data_use_json(image: &Binary, address: u64, functions: &[u64]) -> DataUseJson {
+    DataUseJson {
+        address,
+        address_hex: format!("{address:#x}"),
+        name: image.data_symbol(address).map(|symbol| symbol.name.clone()),
+        section: image
+            .data_section(address)
+            .map(|section| section.name.clone())
+            .unwrap_or_default(),
+        functions: functions
+            .iter()
+            .map(|address| StringFunctionJson {
+                address: *address,
+                address_hex: format!("{address:#x}"),
+                name: image.function_name(*address).unwrap_or("entry").to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// The names of a list of functions, joined for a line of text.
+fn names_of(functions: &[StringFunctionJson]) -> String {
+    if functions.is_empty() {
+        return "-".to_string();
+    }
+    functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One block of a control-flow graph, as JSON.
 fn block_json(block: &ag_image::Block) -> BlockJson {
     BlockJson {
@@ -903,9 +1144,16 @@ fn call_json(call: &ag_image::Call) -> CallJson {
 /// `0X1000`, or a bare hexadecimal number. An address that names no function
 /// is not an error: the target may still be a name.
 fn resolve(image: &Binary, target: &str) -> Result<u64> {
+    find_function(image, target).ok_or_else(|| anyhow::anyhow!("no function matching {target:?}"))
+}
+
+/// The address of the function `target` names, when it names one.
+///
+/// The name is matched loosely: an exact name first, then a substring.
+fn find_function(image: &Binary, target: &str) -> Option<u64> {
     if let Ok(address) = ag_corpus::parse_addr(target) {
         if image.function_name(address).is_some() {
-            return Ok(address);
+            return Some(address);
         }
     }
 
@@ -914,18 +1162,54 @@ fn resolve(image: &Binary, target: &str) -> Result<u64> {
         .iter()
         .find(|function| function.name == target)
     {
-        return Ok(function.address);
+        return Some(function.address);
+    }
+
+    image
+        .functions()
+        .iter()
+        .find(|function| function.name.contains(target))
+        .map(|function| function.address)
+}
+
+/// The address of the data `target` names.
+///
+/// A target that reads as an address is looked for as one first, and the
+/// symbol that holds it is the one that is named. A name is matched loosely:
+/// an exact name first, then a substring.
+fn resolve_data(image: &Binary, target: &str) -> Result<u64> {
+    if let Ok(address) = ag_corpus::parse_addr(target) {
+        return Ok(data_key(image, address));
+    }
+
+    if let Some(symbol) = image
+        .data_symbols()
+        .iter()
+        .find(|symbol| symbol.name == target)
+    {
+        return Ok(symbol.address);
     }
 
     let loose: Vec<u64> = image
-        .functions()
+        .data_symbols()
         .iter()
-        .filter(|function| function.name.contains(target))
-        .map(|function| function.address)
+        .filter(|symbol| symbol.name.contains(target))
+        .map(|symbol| symbol.address)
         .collect();
 
-    anyhow::ensure!(!loose.is_empty(), "no function matching {target:?}");
+    anyhow::ensure!(!loose.is_empty(), "no data matching {target:?}");
     Ok(loose[0])
+}
+
+/// The address a piece of data is filed under.
+///
+/// The symbol that holds the data is the one that is named, so a pointer
+/// into the middle of a symbol and the symbol itself are the same data.
+fn data_key(image: &Binary, address: u64) -> u64 {
+    image
+        .data_symbol(address)
+        .map(|symbol| symbol.address)
+        .unwrap_or(address)
 }
 
 #[cfg(test)]
@@ -1074,6 +1358,86 @@ mod tests {
 
         let callers = image.called_by(0x1198);
         assert!(callers.is_empty(), "nothing calls main: {callers:?}");
+    }
+
+    #[test]
+    fn the_data_of_the_image_is_listed_with_the_functions_that_use_it() {
+        let image = sample();
+
+        let entries = every_data_entries(&image);
+
+        let flag = entries
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some("completed.0"))
+            .expect("the flag of the runtime is used by something");
+
+        assert_eq!(flag.address_hex, "0x4010");
+        assert_eq!(flag.section, ".bss");
+
+        let users: Vec<&str> = flag
+            .functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+
+        assert_eq!(
+            users,
+            vec![
+                "_start",
+                "deregister_tm_clones",
+                "register_tm_clones",
+                "__do_global_dtors_aux",
+                "frame_dummy"
+            ],
+            "{users:?}"
+        );
+    }
+
+    #[test]
+    fn the_data_a_function_refers_to_is_listed() {
+        let image = sample();
+
+        let entries = data_of_function_entries(&image, 0x1060);
+
+        assert_eq!(entries.len(), 3, "{entries:?}");
+
+        let flag = entries
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some("completed.0"))
+            .expect("_start reads the flag of the runtime");
+
+        assert_eq!(flag.address_hex, "0x4010");
+        assert_eq!(flag.section, ".bss");
+        assert_eq!(flag.site_hex, "0x1090");
+    }
+
+    #[test]
+    fn the_functions_that_use_a_piece_of_data_are_named() {
+        let image = sample();
+
+        let entry = data_at_entry(&image, "0x4010").expect("the flag is there");
+
+        assert_eq!(entry.address_hex, "0x4010");
+        assert_eq!(entry.name.as_deref(), Some("completed.0"));
+        assert_eq!(entry.functions.len(), 5, "{:?}", entry.functions);
+    }
+
+    #[test]
+    fn a_piece_of_data_can_be_named_by_its_symbol() {
+        let image = sample();
+
+        let entry = data_at_entry(&image, "completed.0").expect("the flag is there");
+
+        assert_eq!(entry.address_hex, "0x4010");
+        assert_eq!(entry.functions.len(), 5, "{:?}", entry.functions);
+    }
+
+    #[test]
+    fn a_target_that_names_no_data_is_an_error() {
+        let image = sample();
+
+        let error = data_at_entry(&image, "nonesuch").expect_err("no data");
+        assert!(error.to_string().contains("no data matching"), "{error}");
     }
 
     #[test]
