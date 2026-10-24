@@ -20,6 +20,14 @@ The bundled sample project, which opens when no corpus or export is given, so th
 
 ![The workbench showing the bundled sample project with an ARM64 listing, bytes, and references](images/workbench-sample.png)
 
+The native path: an ELF read by the engine's own loader, with no corpus and no export. The Graph tab draws the control-flow graph of the selected function, and the Bytes panel below holds the bytes of the file around the selection.
+
+![The workbench showing the control-flow graph of a branching function, with the bytes of the file below](images/workbench-graph.png)
+
+The Strings tab lists the text the image holds, with the functions that use it, and filters the list as you type.
+
+![The workbench showing the strings of an ELF, filtered to the ones that name a library](images/workbench-strings.png)
+
 ## Workspace
 
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
