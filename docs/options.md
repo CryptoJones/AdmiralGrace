@@ -31,6 +31,8 @@ a `for` whose step is not the increment you expected, or whose init is a stateme
 `i = 0; while (i < n) { …; i = i + 1; }` where a `for` would read better | `--option loop-form for`
 `goto label_…;` to a `return` a few lines up | `--option shared-tail duplicate`
 the same `return` statements repeated in two arms | `--option shared-tail goto`
+`if (0) { // constant: &a != &a` where you want the comparison the bytes made between the parentheses | `--option constant-conditions expression`
+`if (&completed.0 != &completed.0)`, a comparison that can only go one way, printed as if it could go either | `--option constant-conditions fold`
 `0x64` where the source said `100` | `--option constant-style decimal`
 `8` where the source said `0x8`, a mask or an offset | `--option constant-style hex`
 `16777216` where `0x1000000` would be read at a glance | `--option constant-style mixed`
@@ -66,6 +68,7 @@ Option | Tier | Takes | Default | What it decides
 
 Option | Tier | Takes | Default | What it decides
 --- | --- | --- | --- | ---
+`constant-conditions` | rendering | `fold` \| `expression` | `fold` | A condition that can only go one way — a relation with the same expression on both sides, `&completed.0 != &completed.0` or `rax != rax` — printed as the constant it is, `if (0) { // constant: &completed.0 != &completed.0`, with the comparison in the comment, or as the comparison itself.
 `constant-style` | rendering | `mixed` \| `decimal` \| `hex` | `mixed` | How a constant is spelled: decimal below 10 and hex from 10 up, all decimal, or all hex.
 `indent` | rendering | an integer, 1 to 8 | `2` | The spaces one level of a body is indented by.
 

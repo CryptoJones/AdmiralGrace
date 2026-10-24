@@ -427,7 +427,7 @@ fn a_conditional_tail_call_through_a_register_is_lifted() {
          \x20 long rax;\n\
          \n\
          \x20 rax = &completed.0;\n\
-         \x20 if (rax != rax) {\n\
+         \x20 if (0) { // constant: &completed.0 != &completed.0\n\
          \x20   rax = _ITM_deregisterTMCloneTable;\n\
          \x20   if (rax != 0) {\n\
          \x20     _ITM_deregisterTMCloneTable(&completed.0);\n\

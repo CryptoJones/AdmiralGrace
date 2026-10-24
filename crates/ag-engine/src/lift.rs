@@ -51,7 +51,14 @@
 //!   becomes a declared variable named after the register (`eax`), assigned
 //!   at the end of each path; a register one path never wrote, or whose value
 //!   a call clobbered, becomes unknown, and is refused only if it is read.
-//!   A stack pointer that differs between paths is refused. A loop header is
+//!   A condition the path computed before that assignment reads the variable
+//!   — `(edi - 1) != 0` after `edi = edi - 1` is `edi != 0` — unless the
+//!   operand is a constant at the compare, an address or a literal, which
+//!   keeps its expression: `&completed.0 != &completed.0`, never `rax !=
+//!   rax`. A relation with the same expression on both sides is folded to
+//!   the constant it is, printed as `if (0) { // constant: &completed.0 !=
+//!   &completed.0` (the `constant-conditions` option). A stack pointer that
+//!   differs between paths is refused. A loop header is
 //!   lifted with the state of the paths into it, and the loop is lifted
 //!   again with every register and slot the loop changes made a variable,
 //!   until nothing more changes.
@@ -1143,10 +1150,16 @@ impl<'a> Lifter<'a> {
                 .zip(appended)
                 .map(|(lifted, appended)| {
                     let (mut statements, mut terminator) = lifted.expect("every node is lifted");
-                    // A condition computed before the path assigned a
-                    // variable reads the variable: `(edi - 1) != 0` after
-                    // `edi = edi - 1` is `edi != 0`.
                     if let Terminator::Branch { cond, .. } = &mut terminator {
+                        // A condition computed before the path assigned a
+                        // variable reads the variable: `(edi - 1) != 0`
+                        // after `edi = edi - 1` is `edi != 0`. An operand
+                        // that is a constant at the compare — an address
+                        // such as `&completed.0`, held in `rdi` as well as
+                        // in the `rax` the join is about to name — keeps
+                        // its expression: the variable's name would say
+                        // `rax != rax` for a comparison the bytes made
+                        // between two addresses.
                         for statement in &appended {
                             if let Stmt::Assign {
                                 lhs,
@@ -1158,9 +1171,15 @@ impl<'a> Lifter<'a> {
                                 ..
                             } = statement
                             {
-                                *cond = cond.clone().replace(expression, lhs);
+                                if !expression.is_constant() {
+                                    *cond = cond.clone().replace(expression, lhs);
+                                }
                             }
                         }
+                        // A relation with the same expression on both
+                        // sides is the constant it is, and remembers the
+                        // comparison for the reader.
+                        *cond = std::mem::replace(cond, AstNode::ConditionTrue).folded();
                     }
                     statements.extend(appended);
                     (statements, terminator)
@@ -4535,6 +4554,7 @@ mod tests {
             match address {
                 0x2007 => Some(Pointee::String("%ld\n".into())),
                 0x3007 => Some(Pointee::Data("counter".into())),
+                0x3017 => Some(Pointee::Data("limit".into())),
                 0x2000 => Some(Pointee::Function("f".into())),
                 0x4000 => Some(Pointee::Import("puts".into())),
                 _ => None,
@@ -4608,6 +4628,121 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3],
             "the comment and the braces come from no instruction"
+        );
+    }
+
+    // ---- conditions over addresses -----------------------------------------
+
+    /// lea rdi, [rip+0x2000]; lea rax, [rip+disp]; cmp rax, rdi; je .ret;
+    /// mov rax, 1; .ret: ret. The first lea names 0x3007, `counter`; the
+    /// second names 0x100e + disp. The paths into the ret leave rax
+    /// different, so the join names it, and the entry path assigns it the
+    /// address after the compare.
+    fn compare_addresses(disp: u32) -> Vec<u8> {
+        let [d0, d1, d2, d3] = disp.to_le_bytes();
+        vec![
+            0x48, 0x8d, 0x3d, 0x00, 0x20, 0x00, 0x00, 0x48, 0x8d, 0x05, d0, d1, d2, d3, 0x48, 0x39,
+            0xf8, 0x74, 0x07, 0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, 0xc3,
+        ]
+    }
+
+    #[test]
+    fn a_comparison_of_two_addresses_prints_the_addresses() {
+        // The second lea names 0x3017, `limit`. The operands are constants
+        // at the compare, so the condition keeps them: the join's `rax`
+        // stands for the register after the assignment, not for the
+        // address `rdi` held.
+        let code = compare_addresses(0x2009);
+        assert_eq!(
+            c_with_image(&code),
+            "long f(void)\n\
+             {\n\
+             \x20 long rax;\n\
+             \n\
+             \x20 rax = &limit;\n\
+             \x20 if (&limit != &counter) {\n\
+             \x20   rax = 1;\n\
+             \x20 }\n\
+             \x20 return rax;\n\
+             }"
+        );
+    }
+
+    #[test]
+    fn a_comparison_of_an_address_with_itself_is_a_constant_condition() {
+        // The second lea names 0x3007 too: `&counter != &counter` can only
+        // go one way, so the condition is the constant, and the comment
+        // says what the bytes compared.
+        let code = compare_addresses(0x1ff9);
+        assert_eq!(
+            c_with_image(&code),
+            "long f(void)\n\
+             {\n\
+             \x20 long rax;\n\
+             \n\
+             \x20 rax = &counter;\n\
+             \x20 if (0) { // constant: &counter != &counter\n\
+             \x20   rax = 1;\n\
+             \x20 }\n\
+             \x20 return rax;\n\
+             }"
+        );
+
+        // `constant-conditions expression` prints the comparison instead.
+        let text = c_with(&code, &Image, &[("constant-conditions", "expression")]);
+        assert!(
+            text.contains("  rax = &counter;\n  if (&counter != &counter) {\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_value_compared_with_itself_is_a_constant_condition() {
+        // cmp rdi, rdi; jne .zero; mov eax, 1; ret; .zero: xor eax, eax;
+        // ret: the parameter against itself can only go one way.
+        let code = [
+            0x48, 0x39, 0xff, 0x75, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "int f(long a)\n\
+             {\n\
+             \x20 if (0) { // constant: a != a\n\
+             \x20   return 0;\n\
+             \x20 }\n\
+             \x20 return 1;\n\
+             }"
+        );
+    }
+
+    #[test]
+    fn a_computed_operand_still_reads_the_variable_the_join_names() {
+        // The sample's deregister_tm_clones, against the test image:
+        // lea rdi, [counter]; lea rax, [counter]; cmp rax, rdi; je .ret;
+        // mov rax, [puts@GOT]; test rax, rax; je .ret; jmp rax; .ret: ret.
+        // The addresses are constants at the compare and keep their
+        // expressions; the name loaded from the slot is a value, so the
+        // guard reads the variable the join names, `rax != 0`, as before.
+        let code = [
+            0x48, 0x8d, 0x3d, 0x00, 0x20, 0x00, 0x00, 0x48, 0x8d, 0x05, 0xf9, 0x1f, 0x00, 0x00,
+            0x48, 0x39, 0xf8, 0x74, 0x0e, 0x48, 0x8b, 0x05, 0xe6, 0x2f, 0x00, 0x00, 0x48, 0x85,
+            0xc0, 0x74, 0x02, 0xff, 0xe0, 0xc3,
+        ];
+        assert_eq!(
+            c_with_image(&code),
+            "long f(void)\n\
+             {\n\
+             \x20 long rax;\n\
+             \n\
+             \x20 rax = &counter;\n\
+             \x20 if (0) { // constant: &counter != &counter\n\
+             \x20   rax = puts;\n\
+             \x20   if (rax != 0) {\n\
+             \x20     return puts(&counter);\n\
+             \x20   }\n\
+             \x20 }\n\
+             \x20 return rax;\n\
+             }"
         );
     }
 

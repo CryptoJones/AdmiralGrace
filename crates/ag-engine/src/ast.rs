@@ -89,6 +89,15 @@ pub enum AstNode {
     },
     ConditionTrue,
     ConditionFalse,
+    /// A condition that is the constant `holds`, and the comparison it
+    /// folded from: `cmp rax, rdi` with both registers holding
+    /// `&completed.0` is `0`, and the emitter prints `// constant:
+    /// &completed.0 != &completed.0` beside it so the reader sees what the
+    /// bytes compared.
+    ConstantCondition {
+        holds: bool,
+        compared: Box<AstNode>,
+    },
     /// `break;`, out of the innermost loop.
     Break,
     /// `continue;`, to the innermost loop's next iteration.
@@ -161,6 +170,7 @@ impl AstNode {
             Self::Loop { cond, body, .. } => {
                 cond.as_deref().is_some_and(|c| c.any(pred)) || body.any(pred)
             }
+            Self::ConstantCondition { compared, .. } => compared.any(pred),
             Self::Label { .. }
             | Self::Goto { .. }
             | Self::Register { .. }
@@ -194,6 +204,7 @@ impl AstNode {
             Self::Loop { cond, body, .. } => {
                 cond.as_deref().is_some_and(|c| c.reads_var(name)) || body.reads_var(name)
             }
+            Self::ConstantCondition { compared, .. } => compared.reads_var(name),
             Self::Label { .. }
             | Self::Goto { .. }
             | Self::Register { .. }
@@ -204,6 +215,17 @@ impl AstNode {
             | Self::ConditionFalse
             | Self::Break
             | Self::Continue => false,
+        }
+    }
+
+    /// Whether the expression is a constant: a literal, a string, or the
+    /// address of something — the same on every run, so no variable stands
+    /// for it. A name loaded from a slot is a value, and is not.
+    pub fn is_constant(&self) -> bool {
+        match self {
+            Self::Constant { .. } | Self::StringLiteral { .. } | Self::AddressOf { .. } => true,
+            Self::Cast { target, .. } => target.is_constant(),
+            _ => false,
         }
     }
 
@@ -235,7 +257,34 @@ impl AstNode {
             },
             Self::ConditionTrue => Self::ConditionFalse,
             Self::ConditionFalse => Self::ConditionTrue,
+            Self::ConstantCondition { holds, compared } => Self::ConstantCondition {
+                holds: !holds,
+                compared: Box::new(compared.negated()),
+            },
             other => Self::binary(other.clone(), BinaryOp::Equal, Self::constant(0, 4)),
+        }
+    }
+
+    /// The condition folded to the constant it is, when it is one: a
+    /// relation whose two sides are the same expression — `rax != rax`,
+    /// `&completed.0 != &completed.0` — holds or fails whatever the value,
+    /// and becomes a [`Self::ConstantCondition`] that remembers the
+    /// comparison. Any other condition is returned as it is.
+    pub fn folded(self) -> Self {
+        let Self::Binary { lhs, op, rhs } = &self else {
+            return self;
+        };
+        if lhs != rhs {
+            return self;
+        }
+        let holds = match op {
+            BinaryOp::Equal | BinaryOp::LessEqual | BinaryOp::GreaterEqual => true,
+            BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::Greater => false,
+            _ => return self,
+        };
+        Self::ConstantCondition {
+            holds,
+            compared: Box::new(self),
         }
     }
 

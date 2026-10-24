@@ -349,6 +349,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "constant-conditions",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["fold", "expression"]),
+        default: "fold",
+        description: "A condition that can only go one way — a relation with the same expression on both sides, `&completed.0 != &completed.0` or `rax != rax` — printed as the constant it is, `if (0) { // constant: &completed.0 != &completed.0`, with the comparison in the comment, or as the comparison itself.",
+        symptoms: &[
+            symptom(
+                "`if (0) { // constant: &a != &a` where you want the comparison the bytes made between the parentheses",
+                "expression",
+            ),
+            symptom(
+                "`if (&completed.0 != &completed.0)`, a comparison that can only go one way, printed as if it could go either",
+                "fold",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "constant-style",
         phase: Phase::Emit,
         tier: Tier::Rendering,
@@ -491,6 +509,17 @@ pub enum UnsignedCompare {
     Bare,
 }
 
+/// How a condition that folded to a constant is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConstantConditions {
+    /// The constant, `1` or `0`, with the comparison in a comment after the
+    /// line: `if (0) { // constant: &completed.0 != &completed.0`.
+    #[default]
+    Fold,
+    /// The comparison itself: `if (&completed.0 != &completed.0) {`.
+    Expression,
+}
+
 /// What becomes of a `cmp` or `test` no branch reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeadCompares {
@@ -569,6 +598,7 @@ pub struct Options {
     pub return_liveness: ReturnLiveness,
     pub loop_form: LoopForm,
     pub shared_tail: SharedTail,
+    pub constant_conditions: ConstantConditions,
     pub constant_style: ConstantStyle,
     pub indent: u8,
 }
@@ -588,6 +618,7 @@ impl Default for Options {
             return_liveness: ReturnLiveness::default(),
             loop_form: LoopForm::default(),
             shared_tail: SharedTail::default(),
+            constant_conditions: ConstantConditions::default(),
             constant_style: ConstantStyle::default(),
             indent: 2,
         }
@@ -756,6 +787,16 @@ impl Options {
                     ],
                 )?
             }
+            "constant-conditions" => {
+                self.constant_conditions = choose(
+                    spec,
+                    value,
+                    &[
+                        ("fold", ConstantConditions::Fold),
+                        ("expression", ConstantConditions::Expression),
+                    ],
+                )?
+            }
             "constant-style" => {
                 self.constant_style = choose(
                     spec,
@@ -840,6 +881,10 @@ impl Options {
                 "shared-tail" => match self.shared_tail {
                     SharedTail::Goto => "goto",
                     SharedTail::Duplicate => "duplicate",
+                },
+                "constant-conditions" => match self.constant_conditions {
+                    ConstantConditions::Fold => "fold",
+                    ConstantConditions::Expression => "expression",
                 },
                 "constant-style" => match self.constant_style {
                     ConstantStyle::Mixed => "mixed",
