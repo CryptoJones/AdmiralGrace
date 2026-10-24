@@ -8,9 +8,10 @@
 //! brace that carries none. [`emit_procedure`] and [`emit_node`] are the
 //! older entry points over the [`HighLevelProcedure`] scaffolding.
 //!
-//! How a constant is spelled and how far a body is indented are the
-//! emitter's judgment calls, named in [`crate::options`]: `constant-style`
-//! and `indent`.
+//! How a constant is spelled, how far a body is indented, and how a
+//! condition that can only go one way is printed are the emitter's judgment
+//! calls, named in [`crate::options`]: `constant-style`, `indent` and
+//! `constant-conditions`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -18,7 +19,7 @@ use std::fmt::Write;
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
 use crate::lift::{signed, LiftedFunction, Statement, StatementKind};
-use crate::options::{ConstantStyle, Options};
+use crate::options::{ConstantConditions, ConstantStyle, Options};
 
 /// One line of pseudocode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,11 +73,13 @@ impl Pseudocode {
 /// The indentation of one level of a body, where no options say otherwise.
 const INDENT: &str = "  ";
 
-/// What the emitter was told: the indentation and the constant style.
+/// What the emitter was told: the indentation, the constant style, and
+/// how a constant condition is printed.
 #[derive(Debug, Clone)]
 struct Style {
     indent: String,
     constants: ConstantStyle,
+    constant_conditions: ConstantConditions,
 }
 
 impl Style {
@@ -84,6 +87,7 @@ impl Style {
         Self {
             indent: " ".repeat(usize::from(options.indent)),
             constants: options.constant_style,
+            constant_conditions: options.constant_conditions,
         }
     }
 }
@@ -220,7 +224,11 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
             } => {
                 push(
                     lines,
-                    format!("{pad}if ({}) {{", condition(&statement.node, style)),
+                    format!(
+                        "{pad}if ({}) {{{}",
+                        condition(&statement.node, style),
+                        constant_note(&statement.node, style)
+                    ),
                     &statement.addresses,
                 );
                 emit_statements(then_part, depth + 1, lines, style);
@@ -238,7 +246,11 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
             }
             StatementKind::While { body } => {
                 lines.push(Line {
-                    text: format!("{pad}while ({}) {{", condition(&statement.node, style)),
+                    text: format!(
+                        "{pad}while ({}) {{{}",
+                        condition(&statement.node, style),
+                        constant_note(&statement.node, style)
+                    ),
                     addresses: statement.addresses.clone(),
                 });
                 emit_statements(body, depth + 1, lines, style);
@@ -254,17 +266,22 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                 });
                 emit_statements(body, depth + 1, lines, style);
                 lines.push(Line {
-                    text: format!("{pad}}} while ({});", condition(&statement.node, style)),
+                    text: format!(
+                        "{pad}}} while ({});{}",
+                        condition(&statement.node, style),
+                        constant_note(&statement.node, style)
+                    ),
                     addresses: statement.addresses.clone(),
                 });
             }
             StatementKind::For { init, step, body } => {
                 lines.push(Line {
                     text: format!(
-                        "{pad}for ({}; {}; {}) {{",
+                        "{pad}for ({}; {}; {}) {{{}",
                         expression(&init.node, style),
                         condition(&statement.node, style),
-                        expression(&step.node, style)
+                        expression(&step.node, style),
+                        constant_note(&statement.node, style)
                     ),
                     addresses: statement.addresses.clone(),
                 });
@@ -286,12 +303,33 @@ fn push(lines: &mut Vec<Line>, text: String, addresses: &[u64]) {
     });
 }
 
-/// A condition as it reads between the parentheses: `1` for always.
+/// A condition as it reads between the parentheses: `1` for always, and a
+/// condition that folded to a constant as `1` or `0` under
+/// `constant-conditions fold`, or as the comparison it folded from under
+/// `expression`.
 fn condition(node: &AstNode, style: &Style) -> String {
     match node {
         AstNode::ConditionTrue => "1".to_string(),
         AstNode::ConditionFalse => "0".to_string(),
+        AstNode::ConstantCondition { holds, compared } => match style.constant_conditions {
+            ConstantConditions::Fold => (if *holds { "1" } else { "0" }).to_string(),
+            ConstantConditions::Expression => expression(compared, style),
+        },
         other => expression(other, style),
+    }
+}
+
+/// The note after a control statement whose condition folded to a constant:
+/// ` // constant: &completed.0 != &completed.0`, the comparison the bytes
+/// made, so the reader sees what `if (0)` stands for; empty for every other
+/// condition, and under `constant-conditions expression`, where the
+/// comparison is printed in its place.
+fn constant_note(node: &AstNode, style: &Style) -> String {
+    match (node, style.constant_conditions) {
+        (AstNode::ConstantCondition { compared, .. }, ConstantConditions::Fold) => {
+            format!(" // constant: {}", expression(compared, style))
+        }
+        _ => String::new(),
     }
 }
 
@@ -490,6 +528,9 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
         }
         AstNode::ConditionTrue => out.push_str("true"),
         AstNode::ConditionFalse => out.push_str("false"),
+        AstNode::ConstantCondition { holds, .. } => {
+            out.push_str(if *holds { "true" } else { "false" })
+        }
         AstNode::Break => out.push_str("break"),
         AstNode::Continue => out.push_str("continue"),
         AstNode::Label { name, address } => {
@@ -701,6 +742,62 @@ mod tests {
         assert_eq!(
             emit_function(&function, &Options::default()).text(),
             "int f(void)\n{\n  int x;\n\n  if (x < 3) {\n    return 0x10;\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn a_constant_condition_prints_as_the_constant_with_the_comparison_beside_it() {
+        let address = || AstNode::AddressOf {
+            target: Box::new(AstNode::var("a")),
+        };
+        let never = AstNode::binary(address(), BinaryOp::NotEqual, address()).folded();
+        assert!(
+            matches!(&never, AstNode::ConstantCondition { holds: false, .. }),
+            "{never:?}"
+        );
+        // Negating it turns the comparison round with it.
+        let always = never.negated();
+        assert!(
+            matches!(&always, AstNode::ConstantCondition { holds: true, .. }),
+            "{always:?}"
+        );
+        // A comparison of two different things is left as it is.
+        let open = AstNode::binary(address(), BinaryOp::NotEqual, AstNode::var("b")).folded();
+        assert!(matches!(&open, AstNode::Binary { .. }), "{open:?}");
+
+        let function = |cond: AstNode| LiftedFunction {
+            name: "f".into(),
+            address: 0x1000,
+            return_type: "void".into(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: vec![Statement {
+                node: cond,
+                addresses: vec![0x1000],
+                kind: StatementKind::If {
+                    then_part: vec![Statement::plain(
+                        AstNode::Return { value: None },
+                        vec![0x1004],
+                    )],
+                    else_part: Vec::new(),
+                },
+            }],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        assert_eq!(
+            emit_function(&function(never.clone()), &Options::default()).text(),
+            "void f(void)\n{\n  if (0) { // constant: &a != &a\n    return;\n  }\n}"
+        );
+        assert_eq!(
+            emit_function(&function(always), &Options::default()).text(),
+            "void f(void)\n{\n  if (1) { // constant: &a == &a\n    return;\n  }\n}"
+        );
+        let expression = Options::from_pairs([("constant-conditions", "expression")]).unwrap();
+        assert_eq!(
+            emit_function(&function(never), &expression).text(),
+            "void f(void)\n{\n  if (&a != &a) {\n    return;\n  }\n}"
         );
     }
 

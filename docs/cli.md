@@ -244,8 +244,12 @@ reads as the one line `// thunk for printf`, as `frame_dummy`, which is `endbr64
 register_tm_clones`, reads `// thunk for register_tm_clones`; its `deregister_tm_clones`
 ends in a `jmp rax` with `rax` loaded from the GOT slot of `_ITM_deregisterTMCloneTable`,
 and that path reads `return _ITM_deregisterTMCloneTable(&completed.0);` under the guard
-`if (rax != 0)`, the two `lea`s of the same address and the merged `rax` being what the
-bytes say.
+`if (rax != 0)`, the merged `rax` being what the bytes say. Its two `lea`s name the same
+address, so the `cmp` of them can only go one way: the condition is printed as the constant
+it is, `if (0) { // constant: &completed.0 != &completed.0`, the comment carrying the
+addresses the bytes compared — an address is a constant at the compare and keeps its
+expression, where a value computed on the way reads the variable the join names — and the
+`constant-conditions` option prints the comparison itself instead.
 
 The start-up glue `__do_global_dtors_aux`, which one path leaves with `deregister_tm_clones`'s
 result in `rax` and the other with nothing there, is `void` — the value is a callee's that

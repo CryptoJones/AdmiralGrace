@@ -1775,7 +1775,9 @@ mod tests {
         // lea rdi, [__TMC_END__]; lea rax, [__TMC_END__]; cmp rax, rdi; je .ret;
         // mov rax, [_ITM_deregisterTMCloneTable@GOT]; test rax, rax; je .ret;
         // jmp rax; .ret: ret. The two leas name the same address, which the
-        // image knows as completed.0; the paths into the ret leave rax
+        // image knows as completed.0, so the compare can only go one way:
+        // the condition is the constant, with the addresses the bytes
+        // compared in its comment. The paths into the ret leave rax
         // different, so it is a variable there; the jump through rax is the
         // tail call to the import the slot holds. Its one caller,
         // __do_global_dtors_aux, carries the result untouched to its own
@@ -1790,7 +1792,7 @@ mod tests {
              \x20 long rax;\n\
              \n\
              \x20 rax = &completed.0;\n\
-             \x20 if (rax != rax) {\n\
+             \x20 if (0) { // constant: &completed.0 != &completed.0\n\
              \x20   rax = _ITM_deregisterTMCloneTable;\n\
              \x20   if (rax != 0) {\n\
              \x20     _ITM_deregisterTMCloneTable(&completed.0);\n\
