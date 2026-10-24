@@ -505,3 +505,122 @@ fn the_edges_of_a_graph_are_the_edges_of_its_blocks() {
         }
     }
 }
+
+#[test]
+fn a_function_that_points_at_data_refers_to_it() {
+    let binary = sample();
+
+    // `_start` reads the flag the C runtime sets when it is done.
+    let references = binary.data_references(0x1060);
+
+    let completed = references
+        .iter()
+        .find(|reference| reference.name.as_deref() == Some("completed.0"))
+        .expect("_start refers to the flag");
+
+    assert_eq!(completed.address, 0x4010, "the flag lives at 0x4010");
+    assert_eq!(
+        completed.section, ".bss",
+        "the flag lives in the .bss section"
+    );
+    assert_eq!(
+        completed.site, 0x1090,
+        "the reference names the instruction that made it"
+    );
+}
+
+#[test]
+fn a_pointer_that_lands_on_a_string_is_not_a_data_reference() {
+    let binary = sample();
+
+    // The only thing main points at is the format string it hands to
+    // printf, and that is a string.
+    assert!(
+        binary.data_references(MAIN).is_empty(),
+        "main refers to a string and to no data: {:?}",
+        binary.data_references(MAIN)
+    );
+
+    let strings = binary.string_references(MAIN);
+    assert_eq!(strings.len(), 1, "main points at one string: {strings:?}");
+    assert_eq!(strings[0].address, 0x2004);
+}
+
+#[test]
+fn the_data_a_function_refers_to_is_named_once_per_piece() {
+    let binary = sample();
+
+    // `_start` points at the flag twice: the reference is reported once.
+    let references = binary.data_references(0x1060);
+
+    let flags: Vec<&ag_image::DataReference> = references
+        .iter()
+        .filter(|reference| reference.address == 0x4010)
+        .collect();
+
+    assert_eq!(flags.len(), 1, "one reference for the flag: {references:?}");
+}
+
+#[test]
+fn the_functions_that_use_a_piece_of_data_are_named() {
+    let binary = sample();
+
+    let users = binary.data_users();
+
+    let users_of_the_flag = users.get(&0x4010).expect("the flag is used by something");
+
+    assert_eq!(
+        users_of_the_flag,
+        &[0x1060, 0x1090, 0x10c0, 0x1100, 0x1140],
+        "the five functions of the runtime touch the flag"
+    );
+}
+
+#[test]
+fn the_data_users_are_not_known_until_the_whole_program_is_read() {
+    let binary = sample();
+
+    assert!(
+        binary.data_users_ready().is_none(),
+        "nothing has read the whole program yet"
+    );
+
+    let _ = binary.data_users();
+
+    assert!(binary.data_users_ready().is_some(), "the map has landed");
+}
+
+#[test]
+fn a_function_that_uses_no_data_refers_to_none() {
+    let binary = sample();
+
+    // `add` adds two numbers and names nothing.
+    assert!(binary.data_references(0x1149).is_empty());
+}
+
+#[test]
+fn the_data_a_pointer_lands_on_is_named_by_its_symbol() {
+    let binary = sample();
+
+    // The symbol holds the address, so a pointer into it names the symbol.
+    let symbol = binary.data_symbol(0x4010).expect("the flag has a symbol");
+    assert_eq!(symbol.name, "completed.0");
+
+    // The section that holds the data is found by its address.
+    let section = binary
+        .data_section(0x4010)
+        .expect("the flag is in a section");
+    assert_eq!(section.name, ".bss");
+}
+
+#[test]
+fn the_data_of_a_section_that_is_not_mapped_is_left_out() {
+    let binary = sample();
+
+    // The debug sections are not mapped into memory, so they have no
+    // address for a pointer to land on.
+    assert!(
+        binary.data_section(0).is_none(),
+        "an address that is in no section holds no data"
+    );
+}

@@ -105,6 +105,9 @@ cargo run --bin ag -- image ./sample.elf calls
 
 # The strings of the image, and the functions that use them
 cargo run --bin ag -- image ./sample.elf strings
+
+# The data of the image, and the functions that use it
+cargo run --bin ag -- image ./sample.elf data
 ```
 
 ## `ag image` subcommands
@@ -120,13 +123,15 @@ cargo run --bin ag -- image ./sample.elf strings
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
+| `data [TARGET]` | The data of the image: the address, the section, the name, and the functions that use it. With a function, the data that function refers to. With a piece of data, the functions that use it. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
 symbols; `disasm` gives the blocks, their instructions, and the calls the function makes;
 `cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
-or of the whole image; `strings` gives the strings and the functions that use them. Every
-address is reported twice, as a number and as a hex string.
+or of the whole image; `strings` gives the strings and the functions that use them; `data`
+gives the data and the functions that use it. Every address is reported twice, as a number
+and as a hex string.
 
 `disasm` takes the function as an address (`0x1198`) or as a name (`main`). A name is
 matched loosely: an exact name first, then a substring. A direct call prints the name of
@@ -157,6 +162,14 @@ gives the calls that function makes, with the address of every call site, and th
 functions that call it. Without one it gives the whole call graph, and the two facts the
 summary of the workbench shows: the functions reachable from the entry point, and the
 functions that nothing calls.
+
+`data` reports the data of the image. A function refers to data when one of its
+instructions points at it: the pointer lands in a section that holds no code. A pointer
+that lands on a string is a string reference, and is not reported as data. The symbol that
+holds the address is the one that is named, so a pointer into the middle of a symbol names
+that symbol. Who uses a piece of data needs the whole program read, so the whole image and
+the reverse lookup both cost that. The target is read as a function first and as a piece
+of data after: an address (`0x4010`) or a name (`completed.0`).
 
 ## The embedded manual and agent skill
 

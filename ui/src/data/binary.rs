@@ -82,6 +82,30 @@ impl BinaryProvider {
         self.indexed.load(Ordering::Relaxed)
     }
 
+    /// The functions that use the data at `address`.
+    ///
+    /// Which functions use a piece of data needs the whole program read, so
+    /// nothing is known until the index has landed. An address that is not
+    /// data at all names no users.
+    fn data_users_of(&self, address: u64) -> Vec<u64> {
+        if self.binary.data_section(address).is_none() {
+            return Vec::new();
+        }
+
+        let Some(users) = self.binary.data_users_ready() else {
+            return Vec::new();
+        };
+
+        // The symbol that holds the data is the one that is filed under it.
+        let key = self
+            .binary
+            .data_symbol(address)
+            .map(|symbol| symbol.address)
+            .unwrap_or(address);
+
+        users.get(&key).cloned().unwrap_or_default()
+    }
+
     /// The listing line of one instruction.
     ///
     /// A call to a function that has a symbol shows the symbol, the way a
@@ -323,6 +347,35 @@ impl Provider for BinaryProvider {
                 address: string.address,
                 label: string.text,
                 kind: ReferenceKind::String,
+            });
+        }
+
+        // The data the function names. This is the function's own
+        // disassembly too, so it is known at once.
+        for data in self.binary.data_references(address) {
+            let label = data
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:#x}", data.address));
+            references.push(Reference {
+                address: data.address,
+                label,
+                kind: ReferenceKind::Data,
+            });
+        }
+
+        // The functions that use the data at the address. This is only known
+        // once the whole program has been read, so it is empty until the
+        // index has landed.
+        for user in self.data_users_of(address) {
+            references.push(Reference {
+                address: user,
+                label: self
+                    .binary
+                    .function_name(user)
+                    .unwrap_or("entry")
+                    .to_string(),
+                kind: ReferenceKind::UsedBy,
             });
         }
 
@@ -872,6 +925,69 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
         assert_eq!(strings, vec!["%ld\\n"], "{references:?}");
+    }
+
+    #[test]
+    fn the_references_of_a_function_name_the_data_it_uses() {
+        let provider = sample();
+
+        // `_start` reads the flag the C runtime sets when it is done.
+        let references = provider.references(0x1060);
+
+        let data: Vec<&str> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Data)
+            .map(|reference| reference.label.as_str())
+            .collect();
+
+        assert!(
+            data.contains(&"completed.0"),
+            "the data of the function is named: {references:?}"
+        );
+    }
+
+    #[test]
+    fn the_users_of_a_piece_of_data_arrive_with_the_index() {
+        let provider = sample();
+
+        // Who uses a piece of data needs the whole program read, so nothing
+        // is known about it before the index has landed.
+        let before = provider.references(0x4010);
+        assert!(
+            before
+                .iter()
+                .all(|reference| reference.kind != ReferenceKind::UsedBy),
+            "the users are not known yet: {before:?}"
+        );
+
+        let _ = provider.binary().data_users();
+
+        let after = provider.references(0x4010);
+
+        let users: Vec<&str> = after
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::UsedBy)
+            .map(|reference| reference.label.as_str())
+            .collect();
+
+        assert_eq!(users.len(), 5, "{users:?}");
+        assert!(users.contains(&"_start"), "{users:?}");
+    }
+
+    #[test]
+    fn a_function_is_not_the_data_it_holds() {
+        let provider = sample();
+
+        // The address of a function is in a section that holds code, so it
+        // names no data and no users.
+        let references = provider.references(MAIN);
+
+        assert!(
+            references
+                .iter()
+                .all(|reference| reference.kind != ReferenceKind::UsedBy),
+            "{references:?}"
+        );
     }
 
     #[test]

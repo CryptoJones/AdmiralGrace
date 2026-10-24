@@ -102,6 +102,28 @@ pub struct StringReference {
     pub site: u64,
 }
 
+/// A piece of data a function refers to.
+///
+/// A function refers to data when one of its instructions points at it: the
+/// pointer lands in a section that holds no code. The data may be a named
+/// symbol, or the bytes around one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataReference {
+    /// The address of the data.
+    ///
+    /// This is the address of the symbol when the pointer lands on one, and
+    /// the address itself otherwise.
+    pub address: u64,
+    /// The address the instruction points at.
+    pub target: u64,
+    /// The name of the symbol at the data, when the image has one.
+    pub name: Option<String>,
+    /// The name of the section the data lives in.
+    pub section: String,
+    /// The address of the instruction that points at the data.
+    pub site: u64,
+}
+
 /// One instruction of a listing.
 #[derive(Debug, Clone)]
 pub struct Instruction {
@@ -287,6 +309,7 @@ pub struct Binary {
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     graph: OnceLock<CallGraph>,
     string_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
+    data_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
 }
 
 impl std::fmt::Debug for Binary {
@@ -389,6 +412,7 @@ impl Binary {
             disassembly: Mutex::new(HashMap::new()),
             graph: OnceLock::new(),
             string_users: OnceLock::new(),
+            data_users: OnceLock::new(),
         }
     }
 
@@ -526,6 +550,94 @@ impl Binary {
     /// and gets nothing until the whole program has been read.
     pub fn string_users_ready(&self) -> Option<&BTreeMap<u64, Vec<u64>>> {
         self.string_users.get()
+    }
+
+    /// The data the function at `address` refers to.
+    ///
+    /// A function refers to data when one of its instructions points at it:
+    /// the pointer lands in a section that holds no code. A pointer that
+    /// lands on a string is a string reference, and is not reported here.
+    pub fn data_references(&self, address: u64) -> Vec<DataReference> {
+        let Some(disassembly) = self.disassembly(address) else {
+            return Vec::new();
+        };
+
+        let mut references: Vec<DataReference> = Vec::new();
+
+        for pointer in &disassembly.pointers {
+            let Some(section) = self.data_section_of(pointer.target) else {
+                continue;
+            };
+
+            // A string is a string: it is reported as one, and not as the
+            // data around it.
+            if self.string_at(pointer.target).is_some() {
+                continue;
+            }
+
+            let symbol = self.data_symbol_of(pointer.target);
+            let data = symbol
+                .map(|symbol| symbol.address)
+                .unwrap_or(pointer.target);
+
+            // One reference for each piece of data: the first site is the
+            // one that is reported.
+            if references.iter().any(|reference| reference.address == data) {
+                continue;
+            }
+
+            references.push(DataReference {
+                address: data,
+                target: pointer.target,
+                name: symbol.map(|symbol| symbol.name.clone()),
+                section: section.name.clone(),
+                site: pointer.site,
+            });
+        }
+
+        references
+    }
+
+    /// The functions that refer to each piece of data, by its address.
+    ///
+    /// This needs the whole program read, so it is worked out once and kept.
+    pub fn data_users(&self) -> &BTreeMap<u64, Vec<u64>> {
+        self.data_users.get_or_init(|| {
+            let mut users: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+
+            for function in &self.functions {
+                for reference in self.data_references(function.address) {
+                    let functions = users.entry(reference.address).or_default();
+                    if !functions.contains(&function.address) {
+                        functions.push(function.address);
+                    }
+                }
+            }
+
+            users
+        })
+    }
+
+    /// The functions that refer to each piece of data, when they have been
+    /// worked out.
+    ///
+    /// This does not wait for the map: a reader that must not block asks this,
+    /// and gets nothing until the whole program has been read.
+    pub fn data_users_ready(&self) -> Option<&BTreeMap<u64, Vec<u64>>> {
+        self.data_users.get()
+    }
+
+    /// The data symbol at `address`, when the image has one there.
+    pub fn data_symbol(&self, address: u64) -> Option<&DataSymbol> {
+        self.data_symbol_of(address)
+    }
+
+    /// The section that holds the data at `address`, when there is one.
+    ///
+    /// A section that is not mapped into memory — the debug information of
+    /// an ELF, say — has no address to hold data at, and is left out.
+    pub fn data_section(&self, address: u64) -> Option<&SectionInfo> {
+        self.data_section_of(address)
     }
 
     /// The name of the function at `address`, when it has one.
@@ -666,6 +778,34 @@ impl Binary {
         self.strings
             .iter()
             .find(|string| address >= string.address && address < string.address + string.length)
+    }
+
+    /// The section that holds the data at `target`, when there is one.
+    ///
+    /// A section that holds code is not data, and a section that is not
+    /// mapped into memory — the debug information of an ELF, say — has no
+    /// address to hold data at, and is left out.
+    fn data_section_of(&self, target: u64) -> Option<&SectionInfo> {
+        self.sections.iter().find(|section| {
+            !section.executable
+                && section.vma != 0
+                && section.vma <= target
+                && target < section.vma.saturating_add(section.size)
+        })
+    }
+
+    /// The data symbol that holds `target`, when the image has one there.
+    ///
+    /// The symbol holds the address when its own range reaches it, so a
+    /// pointer into the middle of a symbol names that symbol.
+    fn data_symbol_of(&self, target: u64) -> Option<&DataSymbol> {
+        self.data.iter().find(|symbol| {
+            if symbol.size == 0 {
+                symbol.address == target
+            } else {
+                symbol.address <= target && target < symbol.address.saturating_add(symbol.size)
+            }
+        })
     }
 
     /// Walk the function at `address` and gather its blocks.

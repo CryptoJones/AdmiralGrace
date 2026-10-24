@@ -37,6 +37,8 @@ pub enum Message {
     AddressSelected(u64),
     /// A string in the strings list was picked.
     StringSelected(u64),
+    /// A piece of data in the navigator was picked.
+    DataSelected(u64),
     /// The filter of the strings list changed.
     StringFilterChanged(String),
     /// A center work surface tab was activated.
@@ -256,6 +258,11 @@ pub struct App {
     pub history: History<Selection>,
     /// The shared selection.
     pub selection: Selection,
+    /// The piece of data that is open, when one is.
+    ///
+    /// A piece of data is not a function, so the references pane is about
+    /// the data and not about a function.
+    pub data_selection: Option<u64>,
     /// Text in the global command field.
     pub global_query: String,
     /// Transient message shown in the status bar.
@@ -315,6 +322,7 @@ impl App {
             },
             history: History::new(64),
             selection: Selection::None,
+            data_selection: None,
             global_query: String::new(),
             notice: None,
             show_navigator: true,
@@ -395,6 +403,8 @@ impl App {
                         // The strings each function uses are found the same
                         // way: over the whole program.
                         let _ = binary.string_users();
+                        // And so is the data each function uses.
+                        let _ = binary.data_users();
                     },
                     |_| Message::BinaryIndexReady,
                 );
@@ -510,6 +520,7 @@ impl App {
     pub fn select_function(&mut self, address: u64, record_history: bool) -> Task<Message> {
         self.selection = Selection::Function(address);
         self.navigator.selected = Some(address);
+        self.data_selection = None;
 
         self.work.detail = self.provider.function_detail(address);
         self.work.listing = self.provider.listing(address).unwrap_or_default();
@@ -564,6 +575,13 @@ impl App {
                     let _ = self.select_function(function, false);
                 }
                 self.selection = Selection::Address(address);
+                // A piece of data is not a function, so it is opened on its
+                // own, the way it was when it was picked.
+                if let Some(detail) = self.detail_of_data(address) {
+                    self.data_selection = Some(address);
+                    self.work.detail = Some(detail);
+                    self.work.references = self.provider.references(address);
+                }
                 self.refresh_bytes();
                 Task::none()
             }
@@ -761,11 +779,40 @@ impl App {
         })
     }
 
+    /// The detail of a piece of data, for the inspector.
+    ///
+    /// A piece of data is not a function, so the inspector is told what it
+    /// is instead of what was done to it.
+    fn detail_of_data(&self, address: u64) -> Option<FunctionDetail> {
+        let symbol = self
+            .provider
+            .data_symbols()
+            .into_iter()
+            .find(|symbol| symbol.address == address)?;
+
+        Some(FunctionDetail {
+            name: symbol.name.clone(),
+            status: "Data".into(),
+            start: Some(symbol.address),
+            end: symbol.size.map(|size| symbol.address.saturating_add(size)),
+            provenance: "Program image".into(),
+            summary: match &symbol.section {
+                Some(section) => format!("The data lives in {section}."),
+                None => "The data lives in the program image.".to_string(),
+            },
+        })
+    }
+
     /// Fill the cross references of the current selection again.
     ///
     /// The references that go the other way arrive after the project opens,
     /// so they are asked for again when the index has landed.
     fn refresh_references(&mut self) {
+        if let Some(address) = self.data_selection {
+            self.work.references = self.provider.references(address);
+            return;
+        }
+
         if let Some(address) = self.navigator.selected {
             self.work.references = self.provider.references(address);
         }
@@ -812,6 +859,15 @@ impl App {
                     &self.provider.functions(),
                     address,
                 );
+            }
+
+            Message::DataSelected(address) => {
+                self.selection = Selection::Address(address);
+                self.data_selection = Some(address);
+                self.history.push(self.selection);
+                self.work.detail = self.detail_of_data(address);
+                self.work.references = self.provider.references(address);
+                self.refresh_bytes();
             }
 
             Message::StringFilterChanged(filter) => {
@@ -1432,6 +1488,82 @@ mod tests {
         let _ = app.update(Message::StringFilterChanged("ld".into()));
 
         assert_eq!(app.work.string_filter, "ld");
+    }
+
+    #[test]
+    fn picking_a_piece_of_data_moves_the_selection_to_it() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        let _ = app.update(Message::DataSelected(0x4010));
+
+        assert_eq!(app.selection, Selection::Address(0x4010));
+        assert_eq!(app.data_selection, Some(0x4010));
+
+        let detail = app.work.detail.expect("the data is described");
+        assert_eq!(detail.name, "completed.0");
+        assert_eq!(detail.status, "Data");
+        assert_eq!(detail.provenance, "Program image");
+        assert!(detail.summary.contains(".bss"), "{detail:?}");
+    }
+
+    #[test]
+    fn the_functions_that_use_a_piece_of_data_are_shown_as_its_references() {
+        let provider = BinaryProvider::load(&sample_elf()).expect("the image is read");
+
+        // The users of a piece of data are only known once the whole
+        // program has been read, so the index is worked out first.
+        provider.binary().data_users();
+
+        let references = provider.references(0x4010);
+
+        let users: Vec<&str> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::UsedBy)
+            .map(|reference| reference.label.as_str())
+            .collect();
+
+        assert_eq!(users.len(), 5, "{users:?}");
+        assert!(users.contains(&"_start"), "{users:?}");
+    }
+
+    #[test]
+    fn a_function_is_chosen_over_the_data_around_it() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        let _ = app.update(Message::DataSelected(0x4010));
+        assert_eq!(app.data_selection, Some(0x4010));
+
+        let _ = app.update(Message::FunctionSelected(0x1198));
+
+        assert_eq!(app.data_selection, None, "the data is not open any more");
+    }
+
+    #[test]
+    fn going_back_to_a_piece_of_data_opens_it_again() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        let _ = app.update(Message::DataSelected(0x4010));
+        let _ = app.update(Message::FunctionSelected(0x1198));
+
+        let _ = app.update(Message::Back);
+
+        assert_eq!(app.data_selection, Some(0x4010));
+        assert_eq!(app.selection, Selection::Address(0x4010));
     }
 
     #[test]

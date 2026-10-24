@@ -92,6 +92,9 @@ cargo run --bin ag -- image ./sample.elf calls
 
 # The strings of the image, and the functions that use them
 cargo run --bin ag -- image ./sample.elf strings
+
+# The data of the image, and the functions that use it
+cargo run --bin ag -- image ./sample.elf data
 ```
 
 Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86-64, so it refuses an image of another architecture rather than printing nonsense.
@@ -99,6 +102,8 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
 
 `cfg` reports the control-flow graph of a function: its blocks, and the edges between them, each edge marked fall-through or taken. `calls` reports who calls whom: with a function, what it calls and who calls it; without one, the whole call graph.
+
+`data` reports the data the image holds and the functions that use it: with a function, the data that function refers to; with a piece of data, the functions that use it.
 
 ## Corpus format
 
