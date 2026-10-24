@@ -111,6 +111,9 @@ cargo run --bin ag -- image ./sample.elf strings
 
 # The data of the image, and the functions that use it
 cargo run --bin ag -- image ./sample.elf data
+
+# All of the above, written as a directory of JSON and text
+cargo run --bin ag -- image ./sample.elf export ./sample.ag
 ```
 
 ## `ag image` subcommands
@@ -128,6 +131,9 @@ cargo run --bin ag -- image ./sample.elf data
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
 | `data [TARGET]` | The data of the image: the address, the section, the name, and the functions that use it. With a function, the data that function refers to. With a piece of data, the functions that use it. |
+| `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
+| `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
+| `export DIR --force` | Write into a directory that is not empty. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
@@ -193,6 +199,26 @@ holds the address is the one that is named, so a pointer into the middle of a sy
 that symbol. Who uses a piece of data needs the whole program read, so the whole image and
 the reverse lookup both cost that. The target is read as a function first and as a piece
 of data after: an address (`0x4010`) or a name (`completed.0`).
+
+`export` writes, in one pass, what the other subcommands print, so an agent can read the
+whole analysis offline without running six commands. `info.json`, `symbols.json`,
+`strings.json`, `data.json` and `calls.json` are what `info`, `symbols`, `strings`, `data`
+and `calls` print under `--json` for the whole image, byte for byte. `functions/<address>.json`
+holds one function — its `cfg`, its `calls`, the `data` it refers to and its `pseudocode`,
+each what that subcommand prints under `--json` for the function, so a function the lifter
+refuses carries `lifted: false` and the `reason` rather than failing the export — and
+`functions/<address>.asm` is the listing `disasm` prints. `<address>` is the entry address
+as `ag` prints it, `0x1149`. `index.json` lists every function that was written, with its
+files, and names the binary, its SHA-256, the `ag` version, the language, the entry point
+and the time the export was written, UTC; `README.md` says the same in a table whose
+`| Path |` row is the one a kuna project export's README has, so the reader that finds the
+binary of an export finds this one's too. The directory is made when it is not there. One
+that is not empty is refused unless `--force` is given, and then it is written over and
+nothing in it is removed, so `index.json` is the list of what the last run wrote.
+`--functions` limits the per-function files, with the regular expression `symbols --filter`
+takes; the whole-image files are never limited. A function the decoder cannot reach — a
+symbol in no code section — gets no files, and a warning on stderr names it. An image the
+decoder does not read is refused, like `disasm`. An error names the file it could not write.
 
 ## The embedded manual and agent skill
 

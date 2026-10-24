@@ -53,8 +53,7 @@ ag corpus --root ./corpus show 0x1000
 ag corpus --root ./corpus show main
 ```
 
-A name that matches several functions prints the first one with a body. Names are matched
-loosely, so a partial name is enough.
+A name that matches several functions prints the first one with a body. Names are matched loosely, so a partial name is enough.
 
 `grep` searches the bodies and prints the address and name of every function whose body
 matches:
@@ -107,6 +106,7 @@ ag image ./sample.elf cfg main
 ag image ./sample.elf calls
 ag image ./sample.elf strings
 ag image ./sample.elf data
+ag image ./sample.elf export ./sample.ag
 ```
 
 `info` gives the language, the entry point and the sections. `symbols` gives the function
@@ -119,6 +119,10 @@ graph: the blocks and the edges between them, each marked fall-through or taken.
 gives who calls whom: with a function, what it calls and who calls it; without one, the
 whole call graph. `strings` gives the text the image holds and `data` the data, each with the
 functions that use it. `--json` reports the same as JSON, every address a number and a hex string.
+`export DIR` writes all of it in one pass: `info.json`, `symbols.json`, `strings.json`, `data.json`,
+`calls.json`, a `functions/<address>.json` (cfg, calls, data, pseudocode) and `.asm` (the listing)
+per function, an `index.json` listing them, and a `README.md` naming the binary, its SHA-256 and the
+`ag` version. `--functions REGEX` limits the functions; a non-empty directory needs `--force`.
 
 `info` and `symbols` read any format the loader reads; the rest decode x86 only (32-bit or
 64-bit, as the image says) and refuse another architecture. Reach for this when there is no
@@ -134,12 +138,8 @@ against the bytes the function covers - the index records that range, and the ex
 
 ```sh
 ag docs            # list the embedded topics
-ag docs cli        # the command reference
-ag docs corpus-format
-ag docs workbench
+ag docs cli        # the command reference; also corpus-format and workbench
 ```
-
-The manual is embedded in the binary, so it is there with no repo and no network.
 
 ## When a command fails
 
