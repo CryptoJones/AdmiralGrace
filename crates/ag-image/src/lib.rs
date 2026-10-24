@@ -132,6 +132,13 @@ pub struct Block {
     pub instructions: Vec<Instruction>,
 }
 
+impl Block {
+    /// The edges that leave the block, each with its kind.
+    pub fn edges(&self) -> Vec<Edge> {
+        edges_of(self.from, self.to, &self.successors)
+    }
+}
+
 /// A direct call a function makes.
 #[derive(Debug, Clone)]
 pub struct Call {
@@ -163,7 +170,7 @@ impl EdgeKind {
 }
 
 /// One edge of a control-flow graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     /// The block the edge leaves.
     pub from: u64,
@@ -171,6 +178,26 @@ pub struct Edge {
     pub to: u64,
     /// What the edge means.
     pub kind: EdgeKind,
+}
+
+/// The edges that leave a block, each with its kind.
+///
+/// The way that is the address after the block is the fall-through, and
+/// every other way is a branch that is taken. This is the one rule the
+/// CLI and the workbench share, so both name an edge the same way.
+pub fn edges_of(from: u64, to: u64, successors: &[u64]) -> Vec<Edge> {
+    successors
+        .iter()
+        .map(|&successor| Edge {
+            from,
+            to: successor,
+            kind: if successor == to {
+                EdgeKind::Fallthrough
+            } else {
+                EdgeKind::Taken
+            },
+        })
+        .collect()
 }
 
 /// The control-flow graph of one function.
@@ -545,17 +572,7 @@ impl Binary {
         let edges = disassembly
             .blocks
             .iter()
-            .flat_map(|block| {
-                block.successors.iter().map(move |&successor| Edge {
-                    from: block.from,
-                    to: successor,
-                    kind: if successor == block.to {
-                        EdgeKind::Fallthrough
-                    } else {
-                        EdgeKind::Taken
-                    },
-                })
-            })
+            .flat_map(|block| block.edges())
             .collect();
 
         Some(Arc::new(ControlFlowGraph {

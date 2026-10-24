@@ -92,6 +92,10 @@ block that reaches it — and the graph is drawn to fit the pane. It can be drag
 mouse and zoomed with the wheel, and clicking a box moves the selection to the start of
 that block.
 
+The kind of an arrow is worked out by the rule the `ag image cfg` command reports by, so
+the workbench and the command line name an edge the same way: the way that is the address
+after the block is the fall-through, and every other way is the branch that is taken.
+
 An arrow that skips a row goes around the blocks in between rather than through them: it
 runs along a lane to the side of them and comes back in above the block it goes to. Every
 arrow names itself at its last bend, so the names of two arrows that leave the same block

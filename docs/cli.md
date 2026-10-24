@@ -146,7 +146,8 @@ program read. The wide strings are not in that index, so they are reported witho
 
 `cfg` reports the graph the Graph tab of the workbench draws: the blocks the walk found,
 and the ways the code goes from one block to the next. An edge that leaves the end of a
-block is the fall-through; every other edge is a branch that is taken. Its JSON shape is
+block is the fall-through; every other edge is a branch that is taken. It is one rule, in
+one place, so the workbench and the command line name an edge the same way. Its JSON shape is
 the one a graph tool can be fed directly: `blocks`, with the `from`, the `to` and the
 instructions of each block, and `edges`, with the `from`, the `to` and the `kind` of each
 one.

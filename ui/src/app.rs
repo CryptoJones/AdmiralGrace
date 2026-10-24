@@ -16,8 +16,8 @@ use crate::data::kuna_json::{
 };
 use crate::data::sample::SampleProvider;
 use crate::data::{
-    AnalysisState, ByteLine, FunctionDetail, FunctionRow, GraphBlock, ListingLine, Problem,
-    Provider, Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
+    AnalysisState, ByteLine, FunctionDetail, FunctionRow, Graph, ListingLine, Problem, Provider,
+    Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
 };
 use crate::model::{Capabilities, History, Project, Selection};
 use crate::views::bottom_panel::BottomTab;
@@ -208,8 +208,8 @@ pub struct WorkSurface {
     pub detail: Option<FunctionDetail>,
     /// Listing lines of the selected function.
     pub listing: Vec<ListingLine>,
-    /// The blocks of the selected function's control-flow graph.
-    pub graph: Vec<GraphBlock>,
+    /// The control-flow graph of the selected function.
+    pub graph: Graph,
     /// Pseudocode of the selected function.
     pub pseudocode: Option<String>,
     /// The addresses each line of the pseudocode came from.

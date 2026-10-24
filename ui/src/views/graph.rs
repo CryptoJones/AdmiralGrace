@@ -14,7 +14,7 @@ use iced::widget::text::{Alignment, LineHeight, Shaping};
 use iced::{Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
 
 use crate::app::{App, Message};
-use crate::data::{GraphBlock, ListingLine};
+use crate::data::{Graph, GraphBlock, ListingLine};
 use crate::theme::{color, MONO};
 
 /// The width of a block, in graph units.
@@ -91,15 +91,6 @@ fn short_bytes(bytes: &str) -> String {
     out
 }
 
-/// What an edge between two blocks means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeKind {
-    /// The block falls into the next one.
-    Fallthrough,
-    /// The block branches to the next one.
-    Taken,
-}
-
 /// One block of the graph, and where it is drawn.
 #[derive(Debug, Clone)]
 pub struct GraphNode {
@@ -131,7 +122,11 @@ pub struct GraphEdge {
     /// The block the edge arrives at.
     pub to: u64,
     /// What the edge means.
-    pub kind: EdgeKind,
+    ///
+    /// The kind comes from the provider, worked out by the rule the CLI
+    /// reports by, so the workbench and the command line name an edge the
+    /// same way.
+    pub kind: ag_image::EdgeKind,
     /// The points the edge is drawn through, in graph units.
     pub route: Vec<Point>,
 }
@@ -181,13 +176,18 @@ pub struct View {
     pub offset: Point,
 }
 
-/// Lay the blocks of a function out.
+/// Lay a control-flow graph out.
 ///
 /// The blocks are ranked by a depth-first walk from the entry block: the
 /// block the walk starts at is at the top, the ones it reaches next are
 /// below it. The blocks of a rank sit side by side, in address order, and
 /// the ranks stack.
-pub fn layout(blocks: &[GraphBlock]) -> GraphLayout {
+///
+/// The edges come from the provider, with the kind each edge has, and are
+/// routed around the blocks they do not connect.
+pub fn layout(graph: &Graph) -> GraphLayout {
+    let blocks = &graph.blocks;
+
     let mut nodes: Vec<GraphNode> = blocks
         .iter()
         .map(|block| GraphNode {
@@ -239,7 +239,7 @@ pub fn layout(blocks: &[GraphBlock]) -> GraphLayout {
         y += row_height + GAP_Y;
     }
 
-    let mut edges = edges_of(blocks);
+    let mut edges = drawn_edges(graph);
 
     // Every edge is routed around the blocks it does not connect.
     for edge in &mut edges {
@@ -303,34 +303,21 @@ pub fn layout(blocks: &[GraphBlock]) -> GraphLayout {
     }
 }
 
-/// The edges between the blocks.
+/// The edges of a graph, as the view draws them.
 ///
-/// A block that goes on in two ways is a branch: the way that is the
-/// address after the block is the fall-through, and the other one is the
-/// branch that is taken.
-fn edges_of(blocks: &[GraphBlock]) -> Vec<GraphEdge> {
-    let mut edges = Vec::new();
-
-    for block in blocks {
-        for &successor in &block.successors {
-            // The address after the block is the way the code falls off the
-            // end of it; every other way is a branch that is taken.
-            let kind = if successor == block.to {
-                EdgeKind::Fallthrough
-            } else {
-                EdgeKind::Taken
-            };
-
-            edges.push(GraphEdge {
-                from: block.from,
-                to: successor,
-                kind,
-                route: Vec::new(),
-            });
-        }
-    }
-
-    edges
+/// The kind of each edge is the one the provider gave it: the view lays
+/// the edges out, it does not decide what they mean.
+fn drawn_edges(graph: &Graph) -> Vec<GraphEdge> {
+    graph
+        .edges
+        .iter()
+        .map(|edge| GraphEdge {
+            from: edge.from,
+            to: edge.to,
+            kind: edge.kind,
+            route: Vec::new(),
+        })
+        .collect()
 }
 
 /// The rank of every block.
@@ -702,7 +689,7 @@ impl GraphProgram {
             }
         });
 
-        let stroke = if edge.kind == EdgeKind::Taken {
+        let stroke = if edge.kind == ag_image::EdgeKind::Taken {
             color::AMBER
         } else {
             color::LINE
@@ -729,10 +716,7 @@ impl GraphProgram {
             return;
         }
 
-        let label = match edge.kind {
-            EdgeKind::Fallthrough => "fall-through",
-            EdgeKind::Taken => "taken",
-        };
+        let label = edge.kind.name();
 
         // The label sits at the last bend of the edge, so the edges that
         // leave a block name themselves by the block they go to.
@@ -1085,6 +1069,17 @@ mod tests {
         }
     }
 
+    /// A graph of the blocks, with the edges the shared rule gives them.
+    ///
+    /// The view does not decide what an edge means, so the edges come from
+    /// the rule the CLI reports by.
+    fn graph_of(blocks: Vec<GraphBlock>) -> Graph {
+        Graph {
+            edges: Graph::edges_of_blocks(&blocks),
+            blocks,
+        }
+    }
+
     #[test]
     fn the_blocks_are_ranked_by_the_depth_of_the_walk_that_reaches_them() {
         let blocks = vec![
@@ -1094,7 +1089,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         let rank = |from: u64| {
             layout
@@ -1119,7 +1114,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         let left = layout
             .nodes
@@ -1148,7 +1143,7 @@ mod tests {
             block(0x1020, 0x1030, vec![0x1010], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         let rank = |from: u64| {
             layout
@@ -1170,7 +1165,7 @@ mod tests {
             block(0x1010, 0x1020, vec![0x1000], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         assert_eq!(layout.nodes.len(), 2);
         assert!(layout.nodes.iter().all(|node| node.rank < 2));
@@ -1183,7 +1178,7 @@ mod tests {
             block(0x2000, 0x2010, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         let rank = |from: u64| {
             layout
@@ -1206,7 +1201,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         let kind = |to: u64| {
             layout
@@ -1216,18 +1211,18 @@ mod tests {
                 .map(|edge| edge.kind)
         };
 
-        assert_eq!(kind(0x1020), Some(EdgeKind::Fallthrough));
-        assert_eq!(kind(0x1030), Some(EdgeKind::Taken));
+        assert_eq!(kind(0x1020), Some(ag_image::EdgeKind::Fallthrough));
+        assert_eq!(kind(0x1030), Some(ag_image::EdgeKind::Taken));
     }
 
     #[test]
     fn a_block_that_goes_on_in_one_way_falls_through() {
         let blocks = vec![block(0x1000, 0x1010, vec![0x1010], 1)];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         assert_eq!(layout.edges.len(), 1);
-        assert_eq!(layout.edges[0].kind, EdgeKind::Fallthrough);
+        assert_eq!(layout.edges[0].kind, ag_image::EdgeKind::Fallthrough);
         assert!(!layout.nodes[0].branching, "one way is not a branch");
     }
 
@@ -1239,7 +1234,7 @@ mod tests {
             block(0x1020, 0x1030, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
         assert!(layout.nodes[0].branching, "two ways is a branch");
 
@@ -1251,8 +1246,8 @@ mod tests {
                 .map(|edge| edge.kind)
         };
 
-        assert_eq!(kind(0x1010), Some(EdgeKind::Fallthrough));
-        assert_eq!(kind(0x1020), Some(EdgeKind::Taken));
+        assert_eq!(kind(0x1010), Some(ag_image::EdgeKind::Fallthrough));
+        assert_eq!(kind(0x1020), Some(ag_image::EdgeKind::Taken));
     }
 
     #[test]
@@ -1263,9 +1258,9 @@ mod tests {
             block(0x1020, 0x1030, vec![], 1),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
 
-        assert_eq!(layout.edges[0].kind, EdgeKind::Taken);
+        assert_eq!(layout.edges[0].kind, ag_image::EdgeKind::Taken);
     }
 
     #[test]
@@ -1275,7 +1270,7 @@ mod tests {
             block(0x1010, 0x1020, vec![], 2),
         ];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
         let view = fit(&layout, Size::new(1000.0, 1000.0));
 
         assert!(view.scale <= 1.0);
@@ -1290,7 +1285,7 @@ mod tests {
     fn the_block_under_a_point_is_found() {
         let blocks = vec![block(0x1000, 0x1010, vec![], 2)];
 
-        let layout = layout(&blocks);
+        let layout = layout(&graph_of(blocks));
         let view = fit(&layout, Size::new(1000.0, 1000.0));
 
         let inside = Point::new(view.offset.x + 10.0, view.offset.y + 10.0);
@@ -1302,7 +1297,7 @@ mod tests {
 
     #[test]
     fn the_graph_of_nothing_is_empty() {
-        let layout = layout(&[]);
+        let layout = layout(&graph_of(Vec::new()));
 
         assert!(layout.nodes.is_empty());
         assert!(layout.edges.is_empty());
@@ -1390,7 +1385,7 @@ mod tests {
 
     #[test]
     fn the_route_of_an_edge_avoids_the_blocks_it_does_not_connect() {
-        let layout = layout(&init_blocks());
+        let layout = layout(&graph_of(init_blocks()));
 
         for edge in &layout.edges {
             for node in &layout.nodes {
@@ -1411,7 +1406,7 @@ mod tests {
 
     #[test]
     fn an_edge_that_skips_a_row_goes_around_the_block_in_between() {
-        let layout = layout(&init_blocks());
+        let layout = layout(&graph_of(init_blocks()));
 
         let edge = layout
             .edges
@@ -1439,7 +1434,7 @@ mod tests {
 
     #[test]
     fn the_labels_of_the_edges_leaving_a_block_are_apart() {
-        let layout = layout(&init_blocks());
+        let layout = layout(&graph_of(init_blocks()));
 
         let anchors: Vec<Point> = layout
             .edges

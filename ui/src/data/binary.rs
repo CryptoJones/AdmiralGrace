@@ -13,8 +13,8 @@ use ag_image::Binary;
 use anyhow::Result;
 
 use crate::data::{
-    AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, GraphBlock, HitKind,
-    ListingLine, Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
+    AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, Graph, GraphBlock,
+    HitKind, ListingLine, Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
     SegmentEntry, StringEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
@@ -258,12 +258,13 @@ impl Provider for BinaryProvider {
     /// The control-flow graph of a function.
     ///
     /// The engine's walk already cut the function into blocks, so the
-    /// blocks come back with their successors attached.
-    fn graph(&self, address: u64) -> Option<Vec<GraphBlock>> {
-        let disassembly = self.binary.disassembly(address)?;
+    /// blocks come back with their successors attached, and the edges
+    /// between them come with the kind each edge has.
+    fn graph(&self, address: u64) -> Option<Graph> {
+        let graph = self.binary.control_flow(address)?;
 
-        Some(
-            disassembly
+        Some(Graph {
+            blocks: graph
                 .blocks
                 .iter()
                 .map(|block| GraphBlock {
@@ -273,7 +274,8 @@ impl Provider for BinaryProvider {
                     instructions: block.instructions.iter().map(Self::listing_line).collect(),
                 })
                 .collect(),
-        )
+            edges: graph.edges.clone(),
+        })
     }
 
     fn pseudocode(&self, _address: u64) -> Option<String> {
@@ -574,6 +576,30 @@ mod tests {
             call.operands == "add" || call.operands == "sum_to",
             "the call names its target: {call:?}"
         );
+    }
+
+    #[test]
+    fn the_graph_carries_the_edges_with_their_kinds() {
+        let provider = sample();
+
+        let graph = provider.graph(0x1000).expect("_init has a graph");
+
+        // The edges are the ones the engine's walk found, and each carries
+        // the kind the shared rule gives it.
+        let flow = provider.binary.control_flow(0x1000).expect("_init walks");
+
+        assert_eq!(graph.edges, flow.edges);
+
+        let kind = |to: u64| {
+            graph
+                .edges
+                .iter()
+                .find(|edge| edge.from == 0x1000 && edge.to == to)
+                .map(|edge| edge.kind)
+        };
+
+        assert_eq!(kind(0x1014), Some(ag_image::EdgeKind::Fallthrough));
+        assert_eq!(kind(0x1016), Some(ag_image::EdgeKind::Taken));
     }
 
     #[test]
