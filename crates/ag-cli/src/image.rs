@@ -460,6 +460,12 @@ pub(crate) struct PseudocodeJson {
     pub(crate) lifted: bool,
     /// Why it was not, when it was not.
     reason: Option<String>,
+    /// The C return type, when the function was lifted and has one of its
+    /// own: `void`, `int`, `long`. A thunk's is its callee's, and `null`.
+    return_type: Option<String>,
+    /// What decided the return type — `no caller reads the result`, `main
+    /// reads eax after the call` — as the function's leading comment says.
+    return_reason: Option<String>,
     /// The whole text, when it was.
     text: Option<String>,
     /// The lines, each with the addresses it came from.
@@ -937,6 +943,8 @@ pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
             name,
             lifted: true,
             reason: None,
+            return_type: pseudocode.return_type.clone(),
+            return_reason: pseudocode.return_reason.clone(),
             text: Some(pseudocode.text()),
             lines: pseudocode
                 .lines
@@ -960,6 +968,8 @@ pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
             name,
             lifted: false,
             reason: Some(error.to_string()),
+            return_type: None,
+            return_reason: None,
             text: None,
             lines: Vec::new(),
         },
@@ -1702,17 +1712,68 @@ mod tests {
         assert_eq!(report.name.as_deref(), Some("add"));
         assert_eq!(
             report.text.as_deref(),
-            Some("int add(int a, int b)\n{\n  return b + a;\n}")
+            Some(
+                "// returns int: main reads eax after the call\n\
+                 int add(int a, int b)\n{\n  return b + a;\n}"
+            )
         );
-        assert_eq!(report.lines.len(), 4);
+        // The return type and what decided it are fields of their own.
+        assert_eq!(report.return_type.as_deref(), Some("int"));
+        assert_eq!(
+            report.return_reason.as_deref(),
+            Some("main reads eax after the call")
+        );
+        assert_eq!(report.lines.len(), 5);
         assert_eq!(report.lines[0].line, 1);
-        assert_eq!(report.lines[0].addresses_hex[0], "0x1149");
-        assert_eq!(report.lines[2].text, "  return b + a;");
-        assert!(report.lines[2].addresses.contains(&0x115d), "the add");
         assert!(
-            report.lines[1].addresses.is_empty(),
+            report.lines[0].addresses.is_empty(),
+            "the reason comment comes from nothing"
+        );
+        assert_eq!(report.lines[1].addresses_hex[0], "0x1149");
+        assert_eq!(report.lines[3].text, "  return b + a;");
+        assert!(report.lines[3].addresses.contains(&0x115d), "the add");
+        assert!(
+            report.lines[2].addresses.is_empty(),
             "a brace comes from nothing"
         );
+    }
+
+    #[test]
+    fn the_pseudocode_of_the_start_up_glue_is_void_and_says_why() {
+        let image = sample();
+
+        // __do_global_dtors_aux leaves deregister_tm_clones's result in rax
+        // on one path and nothing on the other; nothing calls it, and the
+        // result is nobody's, so it is void rather than a disagreement.
+        let report = pseudocode_json(&image, 0x1100);
+        assert!(report.lifted, "{report:?}");
+        assert_eq!(report.return_type.as_deref(), Some("void"));
+        assert_eq!(
+            report.return_reason.as_deref(),
+            Some("no caller in the image, and rax at the ret holds only deregister_tm_clones's result, which nothing reads")
+        );
+        assert_eq!(
+            report.lines[0].text,
+            "// void: no caller in the image, and rax at the ret holds only deregister_tm_clones's result, which nothing reads"
+        );
+        assert_eq!(report.lines[1].text, "void __do_global_dtors_aux(void)");
+
+        // deregister_tm_clones is called by it, and the result is ignored.
+        let report = pseudocode_json(&image, 0x1090);
+        assert_eq!(report.return_type.as_deref(), Some("void"));
+        assert_eq!(
+            report.return_reason.as_deref(),
+            Some("no caller reads the result")
+        );
+
+        // A thunk has no return type of its own, and a refused function none
+        // at all.
+        let report = pseudocode_json(&image, 0x1050);
+        assert_eq!(report.return_type, None);
+        assert_eq!(report.return_reason, None);
+        let report = pseudocode_json(&image, 0x1000);
+        assert_eq!(report.return_type, None);
+        assert_eq!(report.return_reason, None);
     }
 
     #[test]
@@ -1727,10 +1788,15 @@ mod tests {
         assert!(text.contains("sum_to(add(a, 3))"), "{text}");
         assert!(text.contains("printf(\"%ld\\n\", v2);"), "{text}");
         assert!(text.contains("return v2;"), "{text}");
-        assert_eq!(report.lines.len(), 8);
-        assert_eq!(report.lines[5].text, "  printf(\"%ld\\n\", v2);");
+        assert_eq!(report.return_type.as_deref(), Some("long"));
+        assert_eq!(
+            report.return_reason.as_deref(),
+            Some("no caller in the image, and the function writes rax itself before the ret")
+        );
+        assert_eq!(report.lines.len(), 9);
+        assert_eq!(report.lines[6].text, "  printf(\"%ld\\n\", v2);");
         assert!(
-            report.lines[5]
+            report.lines[6]
                 .addresses_hex
                 .contains(&"0x11e1".to_string()),
             "the call"
@@ -1750,19 +1816,19 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("return local_10;"), "{text}");
-        assert_eq!(report.lines.len(), 11);
+        assert_eq!(report.lines.len(), 12);
         assert_eq!(
-            report.lines[6].text,
+            report.lines[7].text,
             "  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {"
         );
         for address in ["0x1174", "0x117b", "0x118d", "0x1190"] {
             assert!(
-                report.lines[6].addresses_hex.contains(&address.to_string()),
+                report.lines[7].addresses_hex.contains(&address.to_string()),
                 "the for line came from the init, the jump in, the compare and the branch: {:?}",
-                report.lines[6].addresses_hex
+                report.lines[7].addresses_hex
             );
         }
-        assert!(report.lines[7].addresses.contains(&0x1182), "the add");
+        assert!(report.lines[8].addresses.contains(&0x1182), "the add");
     }
 
     #[test]

@@ -102,9 +102,9 @@ ag image ./sample.elf export ./sample.ag
 symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per block, then
 the address, bytes, mnemonic and operands of every instruction; a call names its callee.
 `pseudocode` gives one function as C — calls, `if`/`else`, `while` and `for`, early `return`,
-the parameters named `a`, `b`…; a `jmp` to another function is `return callee(args);`, a PLT
-stub the one line `// thunk for printf`; a function it cannot read prints `not lifted yet` and
-the reason, exit code 1. `cfg` gives the blocks and the edges between them, each marked
+the parameters `a`, `b`…, opening with what decided the return type (`// returns int: main
+reads eax after the call`, `// void: no caller reads the result`); a `jmp` out is `return
+callee(args);`, a PLT stub `// thunk for printf`; one it cannot read prints `not lifted yet`. `cfg` gives the blocks and the edges between them, each marked
 fall-through or taken. `calls` gives who calls whom, a `jmp` out marked `(tail call)`: with a
 function, what it calls and who calls it; without one, the whole call graph. `strings` gives
 the text the image holds and `data` the data, each with the functions that use it. `--json`

@@ -127,7 +127,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
-| `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);`, and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
+| `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then a comment that says what decided the return type (`// returns int: main reads eax after the call`, `// void: no caller reads the result`), then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result — and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
 | `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. A `jmp` out of a function — to a function the image names, or through a GOT slot it resolves to an import — is a call marked `(tail call)`. |
@@ -143,8 +143,8 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
 symbols; `disasm` gives the blocks, their instructions, and the calls the function makes;
-`pseudocode` gives the text and the lines, each with the addresses it came from, or
-`lifted: false` and the `reason`; `cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
+`pseudocode` gives the text, the `return_type` and the `return_reason` that decided it, and
+the lines, each with the addresses it came from, or `lifted: false` and the `reason`; `cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
 or of the whole image; `strings` gives the strings and the functions that use them; `data`
 gives the data and the functions that use it. Every address is reported twice, as a number
 and as a hex string.
@@ -182,17 +182,30 @@ instruction that set the flags: `cmp a, b; jl` is `a < b`, `jb` is the unsigned
 read before they are written are the parameters, named by position (`a`, `b`, …), with
 `rdi, rsi, rdx, rcx, r8, r9` under System V and `rcx, rdx, r8, r9` for a Windows image; a
 call passes the argument registers written before it, and its result is a temporary (`v1`,
-`v2`, …) that is inlined where it is used once and declared where it is used more; the
-return is `rax` at the width of its last write, and a width is a type: 32 bits is `int`, 64
-is `long`. A pointer taken through `lea` is asked of the image: one that lands on a string
+`v2`, …) that is inlined where it is used once and declared where it is used more. The
+return is decided from use, not presence: when the image knows the function's callers, a
+caller that reads `eax`/`rax` after the call — a store, a compare, a move into another
+register, an argument to the next call — makes the function return a value at the width of
+the widest read, and callers that all write or ignore it make it `void` (a caller that
+carries the value untouched to its own `ret` passes the question to its callers); with no
+caller in the image, a value at a `ret` counts only if the function wrote `rax` itself on
+that path, and a callee's result left untouched there, read by nothing else in the function,
+is dead. The decision opens the function as a comment — `// returns int: main reads eax after
+the call`, `// void: no caller reads the result`, `// void: no caller in the image, and rax at
+the ret holds only deregister_tm_clones's result, which nothing reads` — and is the
+`return_type` and `return_reason` of the JSON; every `ret` must agree on what is live, and
+`--option return-liveness presence` restores the old rule, `rax` at the width of its last
+write, whatever reads it. A width is a type: 32 bits is `int`, 64 is `long`. A pointer taken
+through `lea` is asked of the image: one that lands on a string
 prints as the string's literal, one that lands on named data as `&name`, and one on a
 function as its name; a load through a pointer is `*(int *)p`, and one from an address the
 image does not name is `*(int *)0x…`. A `jmp` out of the function is a tail call: a node that
 ends in a `jmp` to another function — direct, or through a GOT slot the image's dynamic
 relocations name as an import, or through a register that holds one — with the stack back
 where it was at entry is lifted as the `call` and the `ret` it stands for, `return callee(args);`,
-the arguments from the register state as a call's and the result `long`, since nothing reads
-it narrower; a function that is only the jump, behind at most `endbr64` and `nop`s — a PLT
+the arguments from the register state as a call's, and the callee's result returned at the
+width the callers read it — or, when nothing in the image reads it, the call followed by a
+bare `return;`; a function that is only the jump, behind at most `endbr64` and `nop`s — a PLT
 stub, a forwarding stub — is a thunk, and its whole pseudocode is the one line
 `// thunk for callee`, which carries every instruction of the stub. A `jmp` to an address inside
 the function is an edge of the graph. The sample's `add` reads
@@ -233,6 +246,11 @@ ends in a `jmp rax` with `rax` loaded from the GOT slot of `_ITM_deregisterTMClo
 and that path reads `return _ITM_deregisterTMCloneTable(&completed.0);` under the guard
 `if (rax != 0)`, the two `lea`s of the same address and the merged `rax` being what the
 bytes say.
+
+The start-up glue `__do_global_dtors_aux`, which one path leaves with `deregister_tm_clones`'s
+result in `rax` and the other with nothing there, is `void` — the value is a callee's that
+nothing reads, and its comment says so — where deciding from presence alone would refuse it
+for returning a value at one `ret` and nothing at another.
 
 A function with an instruction outside that set, a 32-bit function, an indirect call, a
 `jmp` to an address outside the function that no symbol names (`jumps to 0x…`) or through a

@@ -81,8 +81,24 @@
 //!   pointer is a typed dereference, `*(int *)a`; one at an address the
 //!   image names as data is that name, and one at an address it does not
 //!   name is `*(int *)0x…`.
-//! * **`ret`** returns `rax` with the width of its last write, or nothing if
-//!   `rax` was never written; every `ret` of the function must agree.
+//! * **`ret`** returns `rax`, or nothing — decided from use, not presence
+//!   (the `return-liveness` option). When the image knows the function's
+//!   callers ([`Symbols::result_uses`]), what they do with `rax` after the
+//!   call decides: a caller that reads `eax`/`rax` before writing it — a
+//!   store, a compare, a move into another register, an argument — makes
+//!   the function return a value at the width of the widest read, and
+//!   callers that all write or ignore it make it `void`; a caller that
+//!   carries it untouched to its own `ret` passes the question to its
+//!   callers. With no caller in the image, a value at a `ret` counts only
+//!   if the function wrote `rax` itself on that path: a callee's result
+//!   left untouched in `rax`, read by nothing else in the function, is dead,
+//!   and that path returns nothing — unless another path returns a value of
+//!   the function's own, in which case the leftover path hands on the
+//!   callee's result. The live decisions of every `ret` must then agree. The decision is recorded in the function's leading comment
+//!   — `// void: no caller reads the result`, `// returns int: main reads
+//!   eax after the call` — and in [`LiftedFunction::return_reason`]. Under
+//!   `return-liveness presence`, `rax` written on the way to a `ret` is
+//!   returned at the width of its last write, whatever reads it.
 //! * **A `jmp` out of the function is a tail call.** A node whose last
 //!   instruction is a `jmp` to another function — direct, or through a GOT
 //!   slot the image resolves to an import ([`Pointee::Import`]), or through
@@ -103,7 +119,8 @@
 //! registers are parameters, how a merged register and a stack slot are
 //! named, whether a load from named data is the name or a cast, the order
 //! of the operands of `b + a`, whether an unsigned comparison is cast,
-//! whether a `cmp` no branch reads is dropped, the calling convention — the
+//! whether a `cmp` no branch reads is dropped, the calling convention,
+//! whether a return value is decided from its use or its presence — the
 //! choice is an option of [`crate::options`], passed to [`lift_function`]
 //! and documented by symptom in `docs/options.md`.
 //!
@@ -128,8 +145,10 @@
 //! flags are not tracked; a stack the lifter loses track of or that differs
 //! between paths; `ret`s that disagree; and a value that reaches a
 //! statement without being known — a register read before it is written
-//! that is not an argument register, one clobbered by a call, or one that
-//! two paths left different and the lifter could not name.
+//! that is not an argument register, one clobbered by a call, one that
+//! two paths left different and the lifter could not name, or a callee's
+//! result on one path and nothing on another, which is dead at a `ret`
+//! but refused if read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -141,19 +160,21 @@ use crate::ast::{AstNode, BinaryOp};
 use crate::cfg::ProcedureCfg;
 use crate::cfgwalk::resolve_branches;
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
+use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
-    DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads, SlotNames,
-    TailCalls, UnsignedCompare,
+    DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads, ReturnLiveness,
+    SlotNames, TailCalls, UnsignedCompare,
 };
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
 use crate::structure::{self, Analysis, Node, Terminator};
 
-/// What the lifter asks the image: the name of a function it calls, and what
-/// a pointer it takes lands on.
+/// What the lifter asks the image: the name of a function it calls, what a
+/// pointer it takes lands on, and what the callers of the function being
+/// lifted do with its result.
 ///
 /// A plain function from an address to a function name is a `Symbols` that
-/// knows no data, which is what the tests of the lifter use.
+/// knows no data and no callers, which is what the tests of the lifter use.
 pub trait Symbols {
     /// The name of the function at `address`, when it has one.
     fn function_name(&self, address: u64) -> Option<String>;
@@ -161,6 +182,15 @@ pub trait Symbols {
     /// What the pointer to `address` lands on, when the image knows.
     fn pointee(&self, _address: u64) -> Option<Pointee> {
         None
+    }
+
+    /// What the callers of the function at `address` do with the value it
+    /// leaves in `rax`: one entry per call site the image knows, decided by
+    /// [`crate::liveness::result_use_after`] over the caller's code. Empty
+    /// when the image knows of no caller — or of no call graph at all —
+    /// and the lifter falls back to what the function itself does.
+    fn result_uses(&self, _address: u64) -> Vec<CallSiteUse> {
+        Vec::new()
     }
 }
 
@@ -379,7 +409,9 @@ pub struct LiftedFunction {
     pub name: String,
     /// The function's entry address.
     pub address: u64,
-    /// The C return type; `void` when `rax` is never written.
+    /// The C return type: `void`, or the type of the width the function
+    /// returns at. Decided from use (see the module's `ret` rule);
+    /// `return_reason` says what decided it.
     pub return_type: String,
     /// The parameters, in order.
     pub params: Vec<Variable>,
@@ -396,6 +428,11 @@ pub struct LiftedFunction {
     /// of its own — they are the callee's — and prints as the one line
     /// `// thunk for callee`; `frame` holds every instruction.
     pub thunk: Option<String>,
+    /// What decided the return type, completing `// void: …` or `// returns
+    /// int: …` in the function's leading comment: `no caller reads the
+    /// result`, `main reads eax after the call`. `None` for a thunk, whose
+    /// return type is its callee's.
+    pub return_reason: Option<String>,
 }
 
 // The GPR indices iced numbers the registers by.
@@ -450,11 +487,13 @@ pub fn lift_function(
                 .map(|ins| ins.address)
                 .collect(),
             thunk: Some(callee),
+            return_reason: None,
         });
     }
     let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
     let lifted = lifter.lift_chains(&chains, &analysis)?;
+    lifter.decide_return(entry, &lifted)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
     let body = structure::structure(&nodes, &analysis, 0, options);
     lifter.finish(name, entry, &chains, body)
@@ -667,8 +706,17 @@ enum Sym {
     Entry(u32),
     /// The result of the call that made temporary `n`.
     Temp(usize),
+    /// A callee's result, untouched, on the paths into a join that had the
+    /// register, and nothing on the others: no value of the function's own,
+    /// by the callee's name. Refused if read; dead at a `ret`.
+    Dead(String),
     /// Not tracked, and why.
     Unknown(String),
+}
+
+/// Why a [`Sym::Dead`] value cannot be read.
+fn dead_reason(callee: &str) -> String {
+    format!("{callee}'s result on one path and nothing on another")
 }
 
 /// A value, its width, and the instructions that produced it.
@@ -719,6 +767,7 @@ fn same(a: &Value, b: &Value) -> bool {
             (Sym::Stack(x), Sym::Stack(y)) => x == y,
             (Sym::Entry(x), Sym::Entry(y)) => x == y,
             (Sym::Temp(x), Sym::Temp(y)) => x == y,
+            (Sym::Dead(x), Sym::Dead(y)) => x == y,
             (Sym::Unknown(_), Sym::Unknown(_)) => true,
             _ => false,
         }
@@ -832,6 +881,9 @@ enum Resolution {
     Same(Value),
     /// Different, and a variable.
     Var { bits: u32 },
+    /// A callee's result, untouched, on the paths that have the register,
+    /// and nothing on the others: no value of the function's own.
+    Dead(String),
     /// Different, and not something a variable could hold.
     Unknown { reason: String, bits: u32 },
 }
@@ -842,6 +894,8 @@ struct Temp {
     name: String,
     /// The width the result is read at; `None` until it is read.
     bits: Option<u32>,
+    /// The callee whose result it is.
+    callee: String,
 }
 
 /// A statement before the temporaries are resolved.
@@ -866,9 +920,13 @@ enum Stmt {
         value: Value,
         addresses: Vec<u64>,
     },
-    /// The return.
+    /// The return. `leftover` is the call result that `rax` holds exactly
+    /// as the call left it, when it does: the value is then a callee's, not
+    /// the function's own, and whether it is returned is decided by
+    /// [`Lifter::decide_return`].
     Return {
         value: Option<Value>,
+        leftover: Option<usize>,
         addresses: Vec<u64>,
     },
     /// A `cmp` or `test` kept as a statement under `dead-compares keep`:
@@ -919,9 +977,10 @@ struct Lifter<'a> {
     globals: BTreeSet<String>,
     /// The statements of the chain being lifted.
     statements: Vec<Stmt>,
-    /// The width of the return value, once a `ret` is seen: `Some(None)`
-    /// for a `ret` with `rax` never written.
-    returns: Option<Option<u32>>,
+    /// The width the function returns at, once decided; `None` for `void`.
+    return_bits: Option<u32>,
+    /// What decided it.
+    return_reason: String,
     /// The temporaries declared, once the statements are resolved.
     declared: Vec<Variable>,
 }
@@ -942,7 +1001,8 @@ impl<'a> Lifter<'a> {
             merged: BTreeMap::new(),
             globals: BTreeSet::new(),
             statements: Vec::new(),
-            returns: None,
+            return_bits: None,
+            return_reason: String::new(),
             declared: Vec::new(),
         }
     }
@@ -958,7 +1018,6 @@ impl<'a> Lifter<'a> {
         self.saved.clear();
         self.globals.clear();
         self.statements.clear();
-        self.returns = None;
     }
 
     // ---- the graph --------------------------------------------------------
@@ -1197,6 +1256,13 @@ impl<'a> Lifter<'a> {
                         named.push(name);
                     }
                 },
+                Resolution::Dead(callee) => {
+                    let Key::Reg(index) = key else {
+                        unreachable!("only a register holds a call result");
+                    };
+                    out.regs
+                        .insert(index, Value::new(Sym::Dead(callee), 64, Vec::new()));
+                }
                 Resolution::Unknown { reason, bits } => match key {
                     Key::Reg(index) => {
                         out.regs.insert(index, Value::unknown(reason, bits));
@@ -1290,10 +1356,34 @@ impl<'a> Lifter<'a> {
         let expressions = present.iter().all(|value| value.is_expression());
         match key {
             Key::Reg(index) => {
+                // A callee's result exactly as the call left it on the paths
+                // that have the register, and nothing on the others: no
+                // value of the function's own reaches the join. The common
+                // shape is `if (c) f(); return;`.
+                if !all_present {
+                    let leftover = |value: &Value| match &value.sym {
+                        Sym::Temp(temp) if value.from.len() == 1 => {
+                            Some(self.temps[*temp].callee.clone())
+                        }
+                        Sym::Dead(callee) => Some(callee.clone()),
+                        _ => None,
+                    };
+                    if let Some(callee) = present.first().and_then(|value| leftover(value)) {
+                        if present.iter().all(|value| leftover(value).is_some()) {
+                            return Ok(Resolution::Dead(callee));
+                        }
+                    }
+                }
                 // An argument register a path never wrote still holds its
-                // parameter there.
-                let known = all_present || self.parameter_of(index, bits).is_some();
+                // parameter there — and it is a parameter only if the merge
+                // reads it, which an unknown merge never does: a register a
+                // call clobbered on one path is unknown after the join, not
+                // the parameter the other path never touched.
+                let known = all_present || self.abi.argument_registers().contains(&index);
                 if known && expressions && agree {
+                    if !all_present {
+                        self.parameter_of(index, bits);
+                    }
                     Ok(Resolution::Var { bits })
                 } else {
                     Ok(Resolution::Unknown {
@@ -1393,6 +1483,13 @@ impl<'a> Lifter<'a> {
             match self.resolve_key(key, &[head, latch], at)? {
                 Resolution::Same(_) => {}
                 Resolution::Var { bits } => forced.push((key, Forced::Var { bits })),
+                Resolution::Dead(callee) => forced.push((
+                    key,
+                    Forced::Unknown {
+                        reason: dead_reason(&callee),
+                        bits: 64,
+                    },
+                )),
                 Resolution::Unknown { reason, bits } => {
                     forced.push((key, Forced::Unknown { reason, bits }))
                 }
@@ -1564,6 +1661,7 @@ impl<'a> Lifter<'a> {
                 ))
             }
             Sym::Unknown(reason) => return Ok(Value::unknown(reason, bits)),
+            Sym::Dead(callee) => return Ok(Value::unknown(dead_reason(&callee), bits)),
             Sym::Stack(_) => {
                 return Ok(Value::unknown(
                     format!("the stack pointer read as {bits} bits at {at:#x}"),
@@ -1949,7 +2047,7 @@ impl<'a> Lifter<'a> {
                 let value = self.at_width(address.clone(), 64, RAX, 0)?;
                 self.node_of(&value)?
             }
-            Sym::Unknown(_) | Sym::Stack(_) | Sym::Entry(_) => return Ok(None),
+            Sym::Unknown(_) | Sym::Dead(_) | Sym::Stack(_) | Sym::Entry(_) => return Ok(None),
         };
         Ok(Some(AstNode::Deref {
             target: Box::new(AstNode::Cast {
@@ -2053,6 +2151,7 @@ impl<'a> Lifter<'a> {
                 "{} is read before it is written",
                 gpr_name(*index, 64)
             ))),
+            Sym::Dead(callee) => Err(NotLifted::new(dead_reason(callee))),
             Sym::Unknown(reason) => Err(NotLifted::new(reason.clone())),
         }
     }
@@ -2595,6 +2694,7 @@ impl<'a> Lifter<'a> {
             addresses.extend(value.from.iter().copied());
             args.push(self.node_of(&value)?);
         }
+        let callee_name = name.clone();
         let node = AstNode::Call {
             callee: Box::new(AstNode::FunctionName {
                 name,
@@ -2620,6 +2720,7 @@ impl<'a> Lifter<'a> {
         self.temps.push(Temp {
             name: format!("v{}", temp + 1),
             bits: None,
+            callee: callee_name,
         });
         let temp = self.temps.len() - 1;
         self.state
@@ -2639,41 +2740,181 @@ impl<'a> Lifter<'a> {
             return Err(NotLifted::new("the stack is not balanced at ret"));
         }
         let at = ins.address;
-        let value = match self.state.regs.get(&RAX).cloned() {
-            None => None,
-            Some(value) => {
-                let bits = match value.sym {
-                    Sym::Temp(temp) => self.temps[temp].bits.unwrap_or(64),
-                    _ => value.bits,
-                };
-                Some(self.at_width(value, bits, RAX, at)?)
-            }
+        let held = self.state.regs.get(&RAX).cloned();
+        // A call result exactly as the call left it — nothing of the
+        // function's own went into it — is a leftover, and whether it is
+        // returned is decided once every ret is seen.
+        let leftover = match &held {
+            Some(Value {
+                sym: Sym::Temp(temp),
+                from,
+                ..
+            }) if from.len() == 1 => Some(*temp),
+            _ => None,
         };
+        // The value is kept as it is: a call result's width is the width it
+        // is read at, which the decision of the return fixes once every
+        // ret is seen.
         let mut addresses = vec![at];
-        if let Some(value) = &value {
+        if let Some(value) = &held {
             addresses.extend(value.from.iter().copied());
         }
-        let bits = value.as_ref().map(|value| value.bits);
-        match self.returns {
-            None => self.returns = Some(bits),
-            Some(known) if known == bits => {}
-            Some(Some(known)) => {
-                return Err(NotLifted::new(match bits {
-                    Some(bits) => format!("returns {known} bits at one ret and {bits} at another"),
-                    None => "returns a value at one ret and nothing at another".to_string(),
-                }))
-            }
-            Some(None) => {
-                return Err(NotLifted::new(
-                    "returns a value at one ret and nothing at another",
-                ))
-            }
-        }
         self.statements.push(Stmt::Return {
-            value,
+            value: held,
+            leftover,
             addresses: sorted(addresses),
         });
         Ok(())
+    }
+
+    // ---- the return -------------------------------------------------------
+
+    /// Decide whether the function returns a value, and at what width, from
+    /// its `ret`s and from what its callers do with the result; record why.
+    ///
+    /// A function no `ret` of which has a value in `rax` is `void`. Under
+    /// `return-liveness callers` the callers decide when the image knows
+    /// them: one that reads the result makes every `ret` return at the width
+    /// of the widest read, and a `ret` with nothing in `rax` is then a
+    /// disagreement; callers that all discard it make the function `void`.
+    /// With no caller in the image, a `ret` whose value is a callee's
+    /// leftover that nothing else in the function reads returns nothing —
+    /// unless another `ret` returns a value the function wrote itself, in
+    /// which case the leftover path hands on the callee's result — and the
+    /// `ret`s must agree on what is left. Under `presence` every value in
+    /// `rax` counts, and the `ret`s must agree.
+    fn decide_return(
+        &mut self,
+        entry: u64,
+        lifted: &[(Vec<Stmt>, Terminator)],
+    ) -> Result<(), NotLifted> {
+        // Every ret: the width of the value in rax — a call result's is the
+        // width it is read at, and one nothing reads has none of its own —
+        // and the callee whose dead leftover that value is, when it is one:
+        // a call result exactly as the call left it that nothing else in the
+        // function reads, or what is left where such a result joined nothing.
+        let presence = self.options.return_liveness == ReturnLiveness::Presence;
+        let mut rets: Vec<(Option<Width>, Option<String>)> = Vec::new();
+        for (statements, _) in lifted {
+            for stmt in statements {
+                let Stmt::Return {
+                    value, leftover, ..
+                } = stmt
+                else {
+                    continue;
+                };
+                let width = value.as_ref().map(|value| match value.sym {
+                    Sym::Temp(temp) => match self.temps[temp].bits {
+                        Some(bits) => Width::Fixed(bits),
+                        // Under presence the width is the last write's, as
+                        // it always was: a call writes 64 bits.
+                        None if presence => Width::Fixed(64),
+                        None => Width::Any,
+                    },
+                    Sym::Dead(_) if !presence => Width::Any,
+                    _ => Width::Fixed(value.bits),
+                });
+                let dead = match value.as_ref().map(|value| &value.sym) {
+                    Some(Sym::Dead(callee)) => Some(callee.clone()),
+                    _ => leftover
+                        .filter(|&temp| !self.result_is_read(lifted, temp))
+                        .map(|temp| self.temps[temp].callee.clone()),
+                };
+                rets.push((width, dead));
+            }
+        }
+
+        if rets.iter().all(|(width, _)| width.is_none()) {
+            self.return_bits = None;
+            self.return_reason = "no ret has a value in rax".to_string();
+            return Ok(());
+        }
+
+        match self.options.return_liveness {
+            ReturnLiveness::Presence => {
+                self.return_bits = agree(rets.iter().map(|(width, _)| *width))?;
+                self.return_reason = "rax holds a value at the ret".to_string();
+            }
+            ReturnLiveness::Callers => {
+                match callers_verdict(self.symbols, entry, &mut BTreeSet::from([entry])) {
+                    Verdict::Read { bits, reason } => {
+                        if rets.iter().any(|(width, _)| width.is_none()) {
+                            return Err(NotLifted::new(
+                                "returns a value at one ret and nothing at another",
+                            ));
+                        }
+                        self.return_bits = Some(bits);
+                        self.return_reason = reason;
+                    }
+                    Verdict::Ignored => {
+                        self.return_bits = None;
+                        self.return_reason = "no caller reads the result".to_string();
+                    }
+                    Verdict::Unknown => {
+                        // A leftover is dead only when no ret returns a
+                        // value the function wrote itself; when one does,
+                        // the leftover paths hand on the callee's result.
+                        let own = rets
+                            .iter()
+                            .any(|(width, dead)| width.is_some() && dead.is_none());
+                        let live =
+                            rets.iter().map(
+                                |(width, dead)| {
+                                    if dead.is_some() && !own {
+                                        None
+                                    } else {
+                                        *width
+                                    }
+                                },
+                            );
+                        self.return_bits = agree(live)?;
+                        self.return_reason = match self.return_bits {
+                            Some(_) => "no caller in the image, and the function writes rax \
+                                        itself before the ret"
+                                .to_string(),
+                            None => {
+                                let callee = rets
+                                    .iter()
+                                    .find_map(|(_, dead)| dead.clone())
+                                    .expect("a ret has a value, and it is a leftover");
+                                format!(
+                                    "no caller in the image, and rax at the ret holds only \
+                                     {callee}'s result, which nothing reads"
+                                )
+                            }
+                        };
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether anything in the function reads the call result `temp` — a
+    /// statement, a store into a variable, a condition — the `ret`s that
+    /// return it untouched aside.
+    fn result_is_read(&self, lifted: &[(Vec<Stmt>, Terminator)], temp: usize) -> bool {
+        let name = self.temps[temp].name.as_str();
+        let mentions = |value: &Value| {
+            matches!(value.sym, Sym::Temp(other) if other == temp) || value.reads_var(name)
+        };
+        lifted.iter().any(|(statements, terminator)| {
+            statements.iter().any(|stmt| match stmt {
+                Stmt::Return {
+                    leftover: Some(other),
+                    ..
+                } if *other == temp => false,
+                Stmt::Return { value, .. } => value.as_ref().is_some_and(mentions),
+                Stmt::Call { node, .. } => node.reads_var(name),
+                // A store to a slot that is not a variable only carries the
+                // value, and the load that reads it back is the read.
+                Stmt::Store { offset, value, .. } => {
+                    self.locals.contains_key(offset) && mentions(value)
+                }
+                Stmt::Assign { lhs, value, .. } => lhs.reads_var(name) || mentions(value),
+                Stmt::Compare { lhs, rhs, .. } => mentions(lhs) || mentions(rhs),
+            }) || matches!(terminator, Terminator::Branch { cond, .. } if cond.reads_var(name))
+        })
     }
 
     // ---- the function -----------------------------------------------------
@@ -2831,13 +3072,116 @@ impl<'a> Lifter<'a> {
         Ok(LiftedFunction {
             name: name.to_string(),
             address: entry,
-            return_type: self.returns.flatten().map_or("void", type_name).to_string(),
+            return_type: self.return_bits.map_or("void", type_name).to_string(),
             params,
             locals,
             body,
             frame,
             thunk: None,
+            return_reason: Some(self.return_reason),
         })
+    }
+}
+
+/// The width of the value a `ret` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Width {
+    /// Written at, or read at, this many bits.
+    Fixed(u32),
+    /// A call result nothing reads: whatever width the function returns at.
+    Any,
+}
+
+/// The one width every `ret` returns at — `None` for none — or the
+/// disagreement, refused: a value at one `ret` and nothing at another, or
+/// two fixed widths. Widths that are anything agree with any width, and are
+/// 64 bits when nothing fixes them.
+fn agree(decisions: impl IntoIterator<Item = Option<Width>>) -> Result<Option<u32>, NotLifted> {
+    let mut fixed: Option<u32> = None;
+    let mut value = false;
+    let mut nothing = false;
+    for decision in decisions {
+        match decision {
+            None => nothing = true,
+            Some(Width::Any) => value = true,
+            Some(Width::Fixed(bits)) => {
+                value = true;
+                match fixed {
+                    None => fixed = Some(bits),
+                    Some(known) if known == bits => {}
+                    Some(known) => {
+                        return Err(NotLifted::new(format!(
+                            "returns {known} bits at one ret and {bits} at another"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+    if value && nothing {
+        return Err(NotLifted::new(
+            "returns a value at one ret and nothing at another",
+        ));
+    }
+    Ok(value.then(|| fixed.unwrap_or(64)))
+}
+
+/// What the callers the image knows do with a function's result.
+enum Verdict {
+    /// Some caller reads it; `bits` is the widest read, and `reason` names
+    /// the caller: `main reads eax after the call`.
+    Read { bits: u32, reason: String },
+    /// Every caller writes or ignores it.
+    Ignored,
+    /// The image knows no caller.
+    Unknown,
+}
+
+/// What the callers of the function at `address` do with its result. A
+/// caller that carries the result untouched to its own `ret` is asked about
+/// in turn — its callers decide — with `visited` keeping a cycle of such
+/// callers from being followed twice; a chain that ends in a function with
+/// no caller reads nothing, by the rule for a function with no caller.
+fn callers_verdict(symbols: &dyn Symbols, address: u64, visited: &mut BTreeSet<u64>) -> Verdict {
+    let uses = symbols.result_uses(address);
+    if uses.is_empty() {
+        return Verdict::Unknown;
+    }
+    let mut widest: Option<(u32, String)> = None;
+    let mut consider = |bits: u32, reason: String| {
+        if widest.as_ref().is_none_or(|(known, _)| bits > *known) {
+            widest = Some((bits, reason));
+        }
+    };
+    for site in uses {
+        match site.result {
+            ResultUse::Read { bits } => consider(
+                bits,
+                format!(
+                    "{} reads {} after the call",
+                    site.caller_name,
+                    rax_name(bits)
+                ),
+            ),
+            ResultUse::Killed => {}
+            ResultUse::Returned => {
+                if !visited.insert(site.caller) {
+                    continue;
+                }
+                if let Verdict::Read { bits, reason } =
+                    callers_verdict(symbols, site.caller, visited)
+                {
+                    consider(
+                        bits,
+                        format!("{} returns it, and {reason}", site.caller_name),
+                    );
+                }
+            }
+        }
+    }
+    match widest {
+        Some((bits, reason)) => Verdict::Read { bits, reason },
+        None => Verdict::Ignored,
     }
 }
 
@@ -2914,10 +3258,27 @@ impl Lifter<'_> {
                     };
                     resolved.push((None, node, addresses.clone()));
                 }
-                Stmt::Return { value, addresses } => {
-                    let value = match value {
-                        Some(value) => Some(Box::new(self.node_of(value)?)),
-                        None => None,
+                Stmt::Return {
+                    value, addresses, ..
+                } => {
+                    // A value nothing returns is dropped, and one returned
+                    // at another width than it was written is cast. A call
+                    // result nothing read is read here, at the width the
+                    // function returns at.
+                    let value = match (value, self.return_bits) {
+                        (Some(value), Some(bits)) => {
+                            let had = match value.sym {
+                                Sym::Temp(temp) => *self.temps[temp].bits.get_or_insert(bits),
+                                _ => value.bits,
+                            };
+                            let node = self.node_of(value)?;
+                            Some(Box::new(if had == bits {
+                                node
+                            } else {
+                                cast(node, had, bits)
+                            }))
+                        }
+                        _ => None,
                     };
                     resolved.push((None, AstNode::Return { value }, addresses.clone()));
                 }
@@ -3157,7 +3518,7 @@ fn sorted(addresses: impl IntoIterator<Item = u64>) -> Vec<u64> {
 mod tests {
     use super::*;
     use crate::cpu_context::X86IcedContext;
-    use crate::emit::emit_function;
+    use crate::emit::{emit_function, Pseudocode};
 
     /// The base the test code is decoded at.
     const BASE: u64 = 0x1000;
@@ -3191,22 +3552,54 @@ mod tests {
         )
     }
 
-    /// The C of `bytes`, or the reason it was not lifted.
+    /// The C of `bytes`, or the reason it was not lifted. The leading
+    /// comment that records the return decision is left out, so the tests
+    /// read the signature and the body alone; the tests of the decision
+    /// read the comment through [`decided`].
     fn c(bytes: &[u8]) -> String {
         match lift(bytes) {
-            Ok(function) => emit_function(&function, &Options::default()).text(),
+            Ok(function) => without_reason(&emit_function(&function, &Options::default())),
             Err(error) => error.to_string(),
         }
     }
 
     /// The C of `bytes` with the options `pairs` set, lifted against
-    /// `symbols`, or the reason it was not lifted.
+    /// `symbols`, or the reason it was not lifted; the reason comment left
+    /// out as in [`c`].
     fn c_with(bytes: &[u8], symbols: &dyn Symbols, pairs: &[(&str, &str)]) -> String {
         let options = Options::from_pairs(pairs.iter().copied()).expect("the options are known");
         match lift_block(&decode(bytes), BASE, "f", Abi::SystemV, symbols, &options) {
-            Ok(function) => emit_function(&function, &options).text(),
+            Ok(function) => without_reason(&emit_function(&function, &options)),
             Err(error) => error.to_string(),
         }
+    }
+
+    /// The text of `pseudocode` without the `// void: …` or `// returns …:
+    /// …` comment that opens it.
+    fn without_reason(pseudocode: &Pseudocode) -> String {
+        pseudocode
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .filter(|text| !(text.starts_with("// void: ") || text.starts_with("// returns ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The return decision of `bytes` lifted against `symbols` with `pairs`
+    /// set: the comment that opens the pseudocode, which says the type and
+    /// what decided it.
+    fn decided(bytes: &[u8], symbols: &dyn Symbols, pairs: &[(&str, &str)]) -> String {
+        let options = Options::from_pairs(pairs.iter().copied()).expect("the options are known");
+        let function = lift_block(&decode(bytes), BASE, "f", Abi::SystemV, symbols, &options)
+            .expect("the code lifts");
+        let pseudocode = emit_function(&function, &options);
+        assert_eq!(
+            pseudocode.return_type.as_deref(),
+            Some(function.return_type.as_str())
+        );
+        assert_eq!(pseudocode.return_reason, function.return_reason);
+        pseudocode.lines[0].text.clone()
     }
 
     /// The reason `bytes` were not lifted.
@@ -3360,7 +3753,7 @@ mod tests {
         // push rbp; mov rbp, rsp; mov eax, edi; pop rbp; ret
         let function = lift(&[0x55, 0x48, 0x89, 0xe5, 0x89, 0xf8, 0x5d, 0xc3]).expect("lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "int f(int a)\n{\n  return a;\n}"
         );
         assert_eq!(
@@ -3378,7 +3771,7 @@ mod tests {
         ];
         let function = lift(&code).expect("lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "int f(int a)\n{\n  return a;\n}"
         );
         let ret = function.body.last().expect("a return");
@@ -3464,7 +3857,9 @@ mod tests {
         let code = [
             0xbe, 3, 0, 0, 0, 0x89, 0xff, 0xe8, 0xf4, 0x0f, 0x00, 0x00, 0xc3,
         ];
-        assert_eq!(c(&code), "long f(int a)\n{\n  return f(a, 3);\n}");
+        // Nothing in the image calls f, and f's own code never touches the
+        // result: it is a callee's leftover, and dead.
+        assert_eq!(c(&code), "void f(int a)\n{\n  f(a, 3);\n  return;\n}");
     }
 
     #[test]
@@ -3498,7 +3893,7 @@ mod tests {
     fn a_call_to_an_address_with_no_name_is_sub() {
         // mov edi, 1; call 0x4000; ret
         let code = [0xbf, 1, 0, 0, 0, 0xe8, 0xf6, 0x2f, 0x00, 0x00, 0xc3];
-        assert_eq!(c(&code), "long f(void)\n{\n  return sub_4000(1);\n}");
+        assert_eq!(c(&code), "void f(void)\n{\n  sub_4000(1);\n  return;\n}");
     }
 
     #[test]
@@ -3603,25 +3998,27 @@ mod tests {
     #[test]
     fn a_jmp_to_another_function_is_a_tail_call() {
         // mov edi, 5; jmp g: the jmp is at 0x1005, so 0x3000 is 0x1ff6 on.
-        // The jump stands for `call g; ret`: g's result, which nothing reads
-        // narrower, is returned as a long.
+        // The jump stands for `call g; ret`. With no caller in the image,
+        // g's result is a leftover nothing reads, so nothing is returned;
+        // a caller that reads it makes it `return g(5);` (see the tests of
+        // the return decision).
         assert_eq!(
             c(&[0xbf, 5, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00]),
-            "long f(void)\n{\n  return g(5);\n}"
+            "void f(void)\n{\n  g(5);\n  return;\n}"
         );
         // mov edi, esi; jmp g: as at a call, every argument register the
         // state holds is passed, and reading esi put the parameter there.
         assert_eq!(
             c(&[0x89, 0xf7, 0xe9, 0xf9, 0x1f, 0x00, 0x00]),
-            "long f(long a, int b)\n{\n  return g(b, b);\n}"
+            "void f(long a, int b)\n{\n  g(b, b);\n  return;\n}"
         );
         // push rbp; mov rbp, rsp; pop rbp; jmp g: the frame is torn down, so
         // the stack is back where it was.
         let function =
             lift(&[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xe9, 0xf6, 0x1f, 0x00, 0x00]).expect("lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
-            "long f(void)\n{\n  return g();\n}"
+            without_reason(&emit_function(&function, &Options::default())),
+            "void f(void)\n{\n  g();\n  return;\n}"
         );
         assert_eq!(function.thunk, None, "a frame is a body of its own");
         let ret = function.body.last().expect("the return");
@@ -3634,7 +4031,7 @@ mod tests {
         // long, so it reads 0x4000, the slot the image relocates to puts.
         assert_eq!(
             c_with_image(&[0xbf, 7, 0, 0, 0, 0xff, 0x25, 0xf5, 0x2f, 0x00, 0x00]),
-            "long f(void)\n{\n  return puts(7);\n}"
+            "void f(void)\n{\n  puts(7);\n  return;\n}"
         );
         // The plain names know no slot: the jump goes through memory the
         // lifter cannot name.
@@ -3650,7 +4047,7 @@ mod tests {
         // 0x4000, the slot of puts; what rax holds is that function.
         assert_eq!(
             c_with_image(&[0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xff, 0xe0]),
-            "long f(void)\n{\n  return puts();\n}"
+            "void f(void)\n{\n  puts();\n  return;\n}"
         );
     }
 
@@ -3659,8 +4056,9 @@ mod tests {
         // mov rax, [rip+0x2ff9]; test rax, rax; je .ret; jmp rax; .ret: ret —
         // the shape of the glibc start-up glue: call the weak import if it
         // is linked. The path that does not jump returns rax, which is the
-        // function it tested, by the rule that a written rax is returned;
-        // that arm never falls through, so it is the guard.
+        // function it tested — a value of the function's own, so the tail
+        // call's result is handed on with it; that arm never falls through,
+        // so it is the guard.
         let code = [
             0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x74, 0x02, 0xff, 0xe0,
             0xc3,
@@ -3716,7 +4114,7 @@ mod tests {
         assert_eq!(c(&[0xe9, 0xfb, 0x1f, 0x00, 0x00]), "// thunk for g");
         assert_eq!(
             c(&[0xbf, 1, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00]),
-            "long f(void)\n{\n  return g(1);\n}"
+            "void f(void)\n{\n  g(1);\n  return;\n}"
         );
     }
 
@@ -3840,7 +4238,7 @@ mod tests {
         )
         .expect("lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "int add(int a, int b)\n{\n  return a + b;\n}"
         );
     }
@@ -3890,20 +4288,23 @@ mod tests {
         assert_eq!(cfg.blocks[0].successor_addresses, vec![0x100a]);
         let function = lifted.expect("the chain lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "int f(void)\n{\n  return f(1);\n}"
         );
 
         // call f; call g; ret: three blocks, two calls, the second's
-        // result returned.
+        // result left in rax — a leftover nobody in the image reads.
         let code = [
             0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xe8, 0xf6, 0x1f, 0x00, 0x00, 0xc3,
         ];
         let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(
-            emit_function(&lifted.expect("the chain lifts"), &Options::default()).text(),
-            "long f(void)\n{\n  f();\n  return g();\n}"
+            without_reason(&emit_function(
+                &lifted.expect("the chain lifts"),
+                &Options::default()
+            )),
+            "void f(void)\n{\n  f();\n  g();\n  return;\n}"
         );
     }
 
@@ -3924,7 +4325,7 @@ mod tests {
         assert_eq!(cfg.blocks.len(), 4);
         let function = lifted.expect("the loop lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "long f(int a)\n\
              {\n\
              \x20 long local_10;\n\
@@ -3956,14 +4357,14 @@ mod tests {
         // mov eax, edi; test eax, eax; jz +0; ret
         let (_, lifted) = lift_cfg(&[0x89, 0xf8, 0x85, 0xc0, 0x74, 0x00, 0xc3], Bitness::Bits64);
         assert_eq!(
-            emit_function(&lifted.expect("lifts"), &Options::default()).text(),
+            without_reason(&emit_function(&lifted.expect("lifts"), &Options::default())),
             "int f(int a)\n{\n  return a;\n}"
         );
         // jmp +0; ret
         let (cfg, lifted) = lift_cfg(&[0xeb, 0x00, 0xc3], Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(
-            emit_function(&lifted.expect("lifts"), &Options::default()).text(),
+            without_reason(&emit_function(&lifted.expect("lifts"), &Options::default())),
             "void f(void)\n{\n  return;\n}"
         );
     }
@@ -3978,7 +4379,7 @@ mod tests {
         ];
         let function = lift(&code).expect("lifts");
         assert_eq!(
-            emit_function(&function, &Options::default()).text(),
+            without_reason(&emit_function(&function, &Options::default())),
             "int f(int a)\n\
              {\n\
              \x20 int eax;\n\
@@ -4138,7 +4539,7 @@ mod tests {
         ];
         assert_eq!(
             c_with_image(&code),
-            "long f(void)\n{\n  return f(\"%ld\\n\");\n}"
+            "void f(void)\n{\n  f(\"%ld\\n\");\n  return;\n}"
         );
     }
 
@@ -4177,16 +4578,19 @@ mod tests {
         // push rbp; mov rbp, rsp; mov eax, edi; pop rbp; ret
         let function = lift(&[0x55, 0x48, 0x89, 0xe5, 0x89, 0xf8, 0x5d, 0xc3]).expect("lifts");
         let pseudocode = emit_function(&function, &Options::default());
-        assert_eq!(pseudocode.lines[0].addresses, vec![0x1000, 0x1001, 0x1006]);
-        assert_eq!(pseudocode.lines[2].addresses, vec![0x1004, 0x1007]);
+        // The reason comment opens the function, and came from no
+        // instruction; the signature follows it.
+        assert!(pseudocode.lines[0].text.starts_with("// returns int: "));
+        assert_eq!(pseudocode.lines[1].addresses, vec![0x1000, 0x1001, 0x1006]);
+        assert_eq!(pseudocode.lines[3].addresses, vec![0x1004, 0x1007]);
         assert_eq!(
             pseudocode
                 .line_addresses()
                 .keys()
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![0, 2],
-            "the braces come from no instruction"
+            vec![1, 3],
+            "the comment and the braces come from no instruction"
         );
     }
 
@@ -4336,6 +4740,310 @@ mod tests {
         assert_eq!(
             c_with(&code, &names, &[("dead-compares", "keep")]),
             c(&code)
+        );
+    }
+
+    // ---- the return decision ----------------------------------------------
+
+    /// Symbols under which the function being lifted, at [`BASE`], has the
+    /// given call sites, and nothing else has any.
+    struct Callers(Vec<CallSiteUse>);
+
+    impl Symbols for Callers {
+        fn function_name(&self, address: u64) -> Option<String> {
+            names(address)
+        }
+
+        fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
+            if address == BASE {
+                self.0.clone()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    /// A call site in the caller `name` at `caller`, with what it does with
+    /// the result.
+    fn site(caller: u64, name: &str, result: ResultUse) -> CallSiteUse {
+        CallSiteUse {
+            caller,
+            caller_name: name.to_string(),
+            site: caller + 0x10,
+            result,
+        }
+    }
+
+    /// `call f; ret`: f's result exactly as the call left it.
+    const CALL_F_RET: [u8; 6] = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xc3];
+
+    #[test]
+    fn a_caller_that_reads_the_result_makes_it_returned_at_the_width_read() {
+        // The leftover of f is returned because main reads it, as eax.
+        let callers = Callers(vec![site(0x5000, "main", ResultUse::Read { bits: 32 })]);
+        assert_eq!(
+            c_with(&CALL_F_RET, &callers, &[]),
+            "int f(void)\n{\n  return f();\n}"
+        );
+        assert_eq!(
+            decided(&CALL_F_RET, &callers, &[]),
+            "// returns int: main reads eax after the call"
+        );
+
+        // The widest read decides the width, and names the reader; a
+        // caller that discards it has no say.
+        let callers = Callers(vec![
+            site(0x5000, "main", ResultUse::Read { bits: 32 }),
+            site(0x6000, "h", ResultUse::Read { bits: 64 }),
+            site(0x7000, "k", ResultUse::Killed),
+        ]);
+        assert_eq!(
+            c_with(&CALL_F_RET, &callers, &[]),
+            "long f(void)\n{\n  return f();\n}"
+        );
+        assert_eq!(
+            decided(&CALL_F_RET, &callers, &[]),
+            "// returns long: h reads rax after the call"
+        );
+
+        // mov rax, rdi; ret: a value written wider than its callers read
+        // is returned at the width read, cast.
+        let code = [0x48, 0x89, 0xf8, 0xc3];
+        let callers = Callers(vec![site(0x5000, "main", ResultUse::Read { bits: 32 })]);
+        assert_eq!(
+            c_with(&code, &callers, &[]),
+            "int f(long a)\n{\n  return (int)a;\n}"
+        );
+
+        // A tail call whose result a caller reads is the return it stands
+        // for: mov edi, 5; jmp g.
+        let code = [0xbf, 5, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00];
+        assert_eq!(
+            c_with(&code, &callers, &[]),
+            "int f(void)\n{\n  return g(5);\n}"
+        );
+    }
+
+    #[test]
+    fn callers_that_all_discard_the_result_make_the_function_void() {
+        // mov eax, edi; ret: a value the function computed, read by nobody.
+        let code = [0x89, 0xf8, 0xc3];
+        let callers = Callers(vec![
+            site(0x5000, "main", ResultUse::Killed),
+            site(0x6000, "h", ResultUse::Killed),
+        ]);
+        assert_eq!(
+            c_with(&code, &callers, &[]),
+            "void f(int a)\n{\n  return;\n}"
+        );
+        assert_eq!(
+            decided(&code, &callers, &[]),
+            "// void: no caller reads the result"
+        );
+
+        // A tail call, likewise: the callee is called, and nothing returned.
+        let code = [0xbf, 5, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00];
+        assert_eq!(
+            c_with(&code, &callers, &[]),
+            "void f(void)\n{\n  g(5);\n  return;\n}"
+        );
+
+        // Under `return-liveness presence` the callers are not asked, and a
+        // written rax is returned as it always was.
+        let presence = [("return-liveness", "presence")];
+        assert_eq!(
+            c_with(&[0x89, 0xf8, 0xc3], &callers, &presence),
+            "int f(int a)\n{\n  return a;\n}"
+        );
+        assert_eq!(
+            decided(&[0x89, 0xf8, 0xc3], &callers, &presence),
+            "// returns int: rax holds a value at the ret"
+        );
+        assert_eq!(
+            c_with(&CALL_F_RET, &names, &presence),
+            "long f(void)\n{\n  return f();\n}"
+        );
+    }
+
+    #[test]
+    fn a_caller_that_returns_the_result_passes_the_question_to_its_callers() {
+        // f's caller g carries the result untouched to its own ret, and g's
+        // caller main reads it as eax: f returns an int, through g.
+        struct Chain;
+        impl Symbols for Chain {
+            fn function_name(&self, address: u64) -> Option<String> {
+                names(address)
+            }
+            fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
+                match address {
+                    BASE => vec![site(0x3000, "g", ResultUse::Returned)],
+                    0x3000 => vec![site(0x5000, "main", ResultUse::Read { bits: 32 })],
+                    _ => Vec::new(),
+                }
+            }
+        }
+        let code = [0x89, 0xf8, 0xc3];
+        assert_eq!(
+            c_with(&code, &Chain, &[]),
+            "int f(int a)\n{\n  return a;\n}"
+        );
+        assert_eq!(
+            decided(&code, &Chain, &[]),
+            "// returns int: g returns it, and main reads eax after the call"
+        );
+
+        // A chain that ends in a function with no caller reads nothing, and
+        // a cycle of returning callers is followed once.
+        struct Cycle;
+        impl Symbols for Cycle {
+            fn function_name(&self, address: u64) -> Option<String> {
+                names(address)
+            }
+            fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
+                match address {
+                    BASE => vec![site(0x3000, "g", ResultUse::Returned)],
+                    0x3000 => vec![
+                        site(BASE, "f", ResultUse::Returned),
+                        site(0x2000, "f2", ResultUse::Returned),
+                    ],
+                    _ => Vec::new(),
+                }
+            }
+        }
+        assert_eq!(c_with(&code, &Cycle, &[]), "void f(int a)\n{\n  return;\n}");
+        assert_eq!(
+            decided(&code, &Cycle, &[]),
+            "// void: no caller reads the result"
+        );
+    }
+
+    #[test]
+    fn with_no_caller_a_callees_leftover_is_dead_and_an_own_value_is_returned() {
+        // call f; ret: nothing of the function's own went into rax.
+        assert_eq!(c(&CALL_F_RET), "void f(void)\n{\n  f();\n  return;\n}");
+        assert_eq!(
+            decided(&CALL_F_RET, &names, &[]),
+            "// void: no caller in the image, and rax at the ret holds only f's result, \
+             which nothing reads"
+        );
+
+        // call f; mov eax, eax; ret: the mov is the function's own write.
+        let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x89, 0xc0, 0xc3];
+        assert_eq!(c(&code), "int f(void)\n{\n  return f();\n}");
+        assert_eq!(
+            decided(&code, &names, &[]),
+            "// returns int: no caller in the image, and the function writes rax itself \
+             before the ret"
+        );
+
+        // call f; cmp eax, 1; jne .a; call g; ret; .a: ret: f's result is
+        // read by the function itself — the branch tests it — so it is not
+        // a dead leftover, and is returned at the width read; g's, read by
+        // nothing, is handed on at that width on the other path.
+        let code = [
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x83, 0xf8, 0x01, 0x75, 0x06, 0xe8, 0xf1, 0x1f, 0x00,
+            0x00, 0xc3, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "int f(void)\n{\n  int v1;\n\n  v1 = f();\n  if (v1 != 1) {\n    return v1;\n  }\n  \
+             return g();\n}"
+        );
+
+        // A function that never writes rax says so.
+        assert_eq!(
+            decided(&[0x90, 0xc3], &names, &[]),
+            "// void: no ret has a value in rax"
+        );
+    }
+
+    #[test]
+    fn the_rets_must_agree_on_the_live_decisions() {
+        // The shape of __do_global_dtors_aux: cmp edi, 0; jne .done; call f;
+        // ret; .done: ret. One path leaves f's dead result, the other
+        // nothing: void, not a disagreement.
+        let dtors = [
+            0x83, 0xff, 0x00, 0x75, 0x06, 0xe8, 0xf6, 0x0f, 0x00, 0x00, 0xc3, 0xc3,
+        ];
+        assert_eq!(
+            c(&dtors),
+            "void f(int a)\n{\n  if (a != 0) {\n    return;\n  }\n  f(a);\n  return;\n}"
+        );
+        assert_eq!(
+            decided(&dtors, &names, &[]),
+            "// void: no caller in the image, and rax at the ret holds only f's result, \
+             which nothing reads"
+        );
+        // Under `presence` it is the disagreement it always was.
+        assert_eq!(
+            c_with(&dtors, &names, &[("return-liveness", "presence")]),
+            "not lifted yet: returns a value at one ret and nothing at another"
+        );
+        // And with a caller that reads the result, the path with nothing in
+        // rax is a disagreement.
+        let callers = Callers(vec![site(0x5000, "main", ResultUse::Read { bits: 32 })]);
+        assert_eq!(
+            c_with(&dtors, &callers, &[]),
+            "not lifted yet: returns a value at one ret and nothing at another"
+        );
+
+        // cmp edi, 0; jne .done; mov eax, 1; ret; .done: ret: an own value
+        // on one path and nothing on the other is refused.
+        let code = [0x83, 0xff, 0x00, 0x75, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xc3];
+        assert_eq!(
+            c(&code),
+            "not lifted yet: returns a value at one ret and nothing at another"
+        );
+        // cmp edi, 0; jne .done; mov eax, 1; ret; .done: mov rax, rdi; ret:
+        // own values of two widths are refused.
+        let code = [
+            0x83, 0xff, 0x00, 0x75, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0x48, 0x89, 0xf8, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "not lifted yet: returns 64 bits at one ret and 32 at another"
+        );
+        // cmp rdi, 0; jne .call; mov rax, rdi; ret; .call: call f; ret: an
+        // own value on one path lets the other hand on f's result.
+        let code = [
+            0x48, 0x83, 0xff, 0x00, 0x75, 0x04, 0x48, 0x89, 0xf8, 0xc3, 0xe8, 0xf1, 0x0f, 0x00,
+            0x00, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "long f(long a)\n{\n  if (a != 0) {\n    return f(a);\n  }\n  return a;\n}"
+        );
+    }
+
+    #[test]
+    fn a_register_a_call_clobbered_on_one_path_is_not_a_parameter_after_the_join() {
+        // test edi, edi; je .skip; call f; .skip: ret: the call clobbers the
+        // argument registers on one path, and the other never touched them.
+        // Nothing reads them after the join, so they are not parameters —
+        // only edi, which the test read, is one. The join leaves rax as f's
+        // result on one path and nothing on the other: no value of the
+        // function's own, so the ret returns nothing.
+        let code = [0x85, 0xff, 0x74, 0x05, 0xe8, 0xf7, 0x0f, 0x00, 0x00, 0xc3];
+        assert_eq!(
+            c(&code),
+            "void f(int a)\n{\n  if (a != 0) {\n    f(a);\n  }\n  return;\n}"
+        );
+        assert_eq!(
+            decided(&code, &names, &[]),
+            "// void: no caller in the image, and rax at the ret holds only f's result, \
+             which nothing reads"
+        );
+        // A caller that reads the result asks for a value one path does not
+        // have, and that is refused.
+        let callers = Callers(vec![site(0x5000, "main", ResultUse::Read { bits: 32 })]);
+        assert_eq!(
+            c_with(&code, &callers, &[]),
+            "not lifted yet: f's result on one path and nothing on another"
+        );
+        // Under presence the merge is unknown, as it always was.
+        assert_eq!(
+            c_with(&code, &names, &[("return-liveness", "presence")]),
+            "not lifted yet: f's result on one path and nothing on another"
         );
     }
 }

@@ -6,6 +6,7 @@ pub mod cpu_context;
 pub mod emit;
 pub mod image;
 pub mod lift;
+pub mod liveness;
 pub mod options;
 pub mod pipeline;
 pub mod procedure;

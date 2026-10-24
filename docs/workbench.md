@@ -69,13 +69,18 @@ lists its symbols, the inspector shows its sections and entry point, and the Lis
 holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
 language says. The Pseudocode tab holds the engine's own lifting of the selected function:
 its calls, branches and loops as C, structured into `if`/`else`, `while`, `for` and early
-`return`. The sample's `add` reads as C, its `main` reads as C with its three calls, the
-format string printed as the literal `"%ld\n"`, and its `sum_to` reads as a `for` loop over
-its counter and accumulator. The lines are numbered and clickable like the kuna provider's,
-so a click on `return b + a;` moves the listing to the add, a click on the `printf` line
-moves it to the call, and a click on the `for` line moves it to the compare at the loop's
-head. A function that ends in a `jmp` to another function reads as the call and the return
-it stands for, `return callee(args);`, and one that is only that jump — a PLT stub such as
+`return`. Each function opens with a comment that says what decided its return type —
+`// returns int: main reads eax after the call`, `// void: no caller reads the result` — since
+the type is decided from use: what the callers do with `eax`/`rax` after the call, or, with
+no caller in the image, whether the function wrote `rax` itself. The sample's `add` reads as
+C, its `main` reads as C with its three calls, the format string printed as the literal
+`"%ld\n"`, and its `sum_to` reads as a `for` loop over its counter and accumulator. The
+lines are numbered and clickable like the kuna provider's, so a click on `return b + a;`
+moves the listing to the add, a click on the `printf` line moves it to the call, and a click
+on the `for` line moves it to the compare at the loop's head; the comment came from no
+instruction. A function that ends in a `jmp` to another function reads as the call and the
+return it stands for, `return callee(args);` — or the call and a bare `return;` when nothing
+in the image reads the result — and one that is only that jump — a PLT stub such as
 the sample's `printf`, or its `frame_dummy` — is a thunk, whose whole pseudocode is the one
 line `// thunk for printf`, standing for both of its instructions. A function the lifter
 refuses — one with an instruction it does not know, a branch whose condition it cannot

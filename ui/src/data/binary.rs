@@ -667,21 +667,29 @@ mod tests {
         let provider = sample();
 
         let body = provider.pseudocode(0x1149).expect("add lifts");
-        assert_eq!(body, "int add(int a, int b)\n{\n  return b + a;\n}");
+        assert_eq!(
+            body,
+            "// returns int: main reads eax after the call\n\
+             int add(int a, int b)\n{\n  return b + a;\n}"
+        );
 
         let lines = provider.line_addresses(0x1149);
+        assert!(
+            !lines.contains_key(&0),
+            "the reason comment came from no instruction"
+        );
         assert_eq!(
-            lines.get(&0),
+            lines.get(&1),
             Some(&vec![0x1149, 0x114d, 0x114e, 0x115f]),
             "the signature stands for the entry and the frame"
         );
         assert!(
             lines
-                .get(&2)
+                .get(&3)
                 .is_some_and(|addresses| addresses.contains(&0x115d)),
             "the return came from the add: {lines:?}"
         );
-        assert!(!lines.contains_key(&1), "a brace came from no instruction");
+        assert!(!lines.contains_key(&2), "a brace came from no instruction");
 
         assert!(provider.function_problems(0x1149).is_empty());
     }
@@ -693,7 +701,8 @@ mod tests {
         let body = provider.pseudocode(MAIN).expect("main lifts");
         assert_eq!(
             body,
-            "long main(int a, long b)\n\
+            "// returns long: no caller in the image, and the function writes rax itself before the ret\n\
+             long main(int a, long b)\n\
              {\n\
              \x20 long v2;\n\
              \n\
@@ -707,7 +716,7 @@ mod tests {
         let lines = provider.line_addresses(MAIN);
         assert!(
             lines
-                .get(&5)
+                .get(&6)
                 .is_some_and(|addresses| addresses.contains(&0x11e1)),
             "the printf came from the call: {lines:?}"
         );
@@ -736,7 +745,8 @@ mod tests {
         let body = provider.pseudocode(SUM_TO).expect("sum_to lifts");
         assert_eq!(
             body,
-            "long sum_to(int a)\n\
+            "// returns long: main reads rax after the call\n\
+             long sum_to(int a)\n\
              {\n\
              \x20 long local_10;\n\
              \x20 int local_14;\n\
@@ -754,13 +764,13 @@ mod tests {
         let lines = provider.line_addresses(SUM_TO);
         assert!(
             lines
-                .get(&6)
+                .get(&7)
                 .is_some_and(|addresses| addresses.contains(&0x118d)),
             "the for came from the cmp: {lines:?}"
         );
         assert!(
             lines
-                .get(&7)
+                .get(&8)
                 .is_some_and(|addresses| addresses.contains(&0x1182)),
             "the body came from the add: {lines:?}"
         );
@@ -1296,7 +1306,11 @@ mod tests {
         let provider = pe();
 
         let body = provider.pseudocode(0x140001000).expect("add lifts");
-        assert_eq!(body, "int add(int a, int b)\n{\n  return a + b;\n}");
+        assert_eq!(
+            body,
+            "// returns int: main reads eax after the call\n\
+             int add(int a, int b)\n{\n  return a + b;\n}"
+        );
     }
 
     #[test]
@@ -1471,7 +1485,11 @@ mod tests {
         let provider = macho();
 
         let body = provider.pseudocode(0x100000420).expect("_add lifts");
-        assert_eq!(body, "int _add(int a, int b)\n{\n  return a + b;\n}");
+        assert_eq!(
+            body,
+            "// returns int: _main reads eax after the call\n\
+             int _add(int a, int b)\n{\n  return a + b;\n}"
+        );
     }
 
     #[test]

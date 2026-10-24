@@ -291,6 +291,28 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "return-liveness",
+        phase: Phase::Lift,
+        tier: Tier::Analysis,
+        kind: Kind::Choice(&["callers", "presence"]),
+        default: "callers",
+        description: "Whether a function returns a value, and at what width: from use — a caller that reads `eax`/`rax` after the call decides it, and with no caller in the image only a value the function wrote itself counts, not a callee's leftover — or from presence, `rax` written on the way to a `ret`, whatever reads it.",
+        symptoms: &[
+            symptom(
+                "`void f(…)` with `// void: no caller reads the result` on a function you know returns a value, whose callers in the image all discard it",
+                "presence",
+            ),
+            symptom(
+                "`long f(void)` and `return g();` on a function whose source is `void`, the value only what the callee left in `rax`",
+                "callers",
+            ),
+            symptom(
+                "`not lifted yet: returns a value at one ret and nothing at another` on glue such as `__do_global_dtors_aux`",
+                "callers",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "loop-form",
         phase: Phase::Structure,
         tier: Tier::Transform,
@@ -489,6 +511,17 @@ pub enum TailCalls {
     Refuse,
 }
 
+/// How the lifter decides whether a function returns a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReturnLiveness {
+    /// From use: a caller that reads the result, or, with no caller in the
+    /// image, a value the function wrote itself.
+    #[default]
+    Callers,
+    /// From presence: `rax` written on the way to a `ret`.
+    Presence,
+}
+
 /// The form of a counted loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoopForm {
@@ -533,6 +566,7 @@ pub struct Options {
     pub unsigned_compare: UnsignedCompare,
     pub dead_compares: DeadCompares,
     pub tail_calls: TailCalls,
+    pub return_liveness: ReturnLiveness,
     pub loop_form: LoopForm,
     pub shared_tail: SharedTail,
     pub constant_style: ConstantStyle,
@@ -551,6 +585,7 @@ impl Default for Options {
             unsigned_compare: UnsignedCompare::default(),
             dead_compares: DeadCompares::default(),
             tail_calls: TailCalls::default(),
+            return_liveness: ReturnLiveness::default(),
             loop_form: LoopForm::default(),
             shared_tail: SharedTail::default(),
             constant_style: ConstantStyle::default(),
@@ -694,6 +729,16 @@ impl Options {
                     &[("return", TailCalls::Return), ("refuse", TailCalls::Refuse)],
                 )?
             }
+            "return-liveness" => {
+                self.return_liveness = choose(
+                    spec,
+                    value,
+                    &[
+                        ("callers", ReturnLiveness::Callers),
+                        ("presence", ReturnLiveness::Presence),
+                    ],
+                )?
+            }
             "loop-form" => {
                 self.loop_form = choose(
                     spec,
@@ -783,6 +828,10 @@ impl Options {
                 "tail-calls" => match self.tail_calls {
                     TailCalls::Return => "return",
                     TailCalls::Refuse => "refuse",
+                },
+                "return-liveness" => match self.return_liveness {
+                    ReturnLiveness::Callers => "callers",
+                    ReturnLiveness::Presence => "presence",
                 },
                 "loop-form" => match self.loop_form {
                     LoopForm::For => "for",
