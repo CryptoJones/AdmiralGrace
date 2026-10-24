@@ -112,9 +112,9 @@ ag image ./sample.elf export ./sample.ag
 `info` gives the language, the entry point and the sections. `symbols` gives the function
 and data symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per
 block, then the address, the bytes, the mnemonic and the operands of every instruction; a
-call shows the name of the function it calls. `pseudocode` gives one function as C when it
-is straight-line x86-64 code (calls yes, branches no), the parameters named `a`, `b`…; anything
-else prints `not lifted yet` and the reason, with exit code 1. `cfg` gives the control-flow
+call shows the name of the function it calls. `pseudocode` gives one function as C — calls,
+`if`/`else`, `while` and `for` loops, early `return` — the parameters named `a`, `b`…; a function
+it cannot read prints `not lifted yet` and the reason, with exit code 1. `cfg` gives the control-flow
 graph: the blocks and the edges between them, each marked fall-through or taken. `calls`
 gives who calls whom: with a function, what it calls and who calls it; without one, the
 whole call graph. `strings` gives the text the image holds and `data` the data, each with the

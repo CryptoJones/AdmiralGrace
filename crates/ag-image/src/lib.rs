@@ -725,11 +725,12 @@ impl Binary {
 
     /// The pseudocode of the function at `address`, or why it was not lifted.
     ///
-    /// The lifter reads straight-line x86-64 code: blocks joined only by
-    /// fall-through, so a function that calls reads as C, but one that
-    /// branches, or one with an instruction the lifter does not know, is
-    /// refused with a reason. Both answers are kept, the way the disassembly
-    /// is.
+    /// The lifter reads x86-64 code through its control-flow graph: calls,
+    /// branches and loops read as C, with `if`/`else`, `while`, `for` and
+    /// early `return`; a function with an instruction the lifter does not
+    /// know, a branch whose condition it cannot read, or a graph it cannot
+    /// structure is refused with a reason. Both answers are kept, the way
+    /// the disassembly is.
     pub fn pseudocode(&self, address: u64) -> Result<Arc<Pseudocode>, NotLifted> {
         if !self.supports_pseudocode() {
             return Err(NotLifted {

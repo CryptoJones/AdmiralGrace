@@ -1,26 +1,28 @@
-//! The lifter: from the decoded x86-64 instructions of a straight-line
-//! function to a C function.
+//! The lifter: from the decoded x86-64 instructions of a function to a C
+//! function.
 //!
-//! This is the second slice of the decompiler, and it is deliberately small.
-//! It reads straight-line code — a function whose blocks are joined only by
-//! fall-through, ending in `ret` — and anything it does not understand is
-//! refused with a reason ([`NotLifted`]) rather than guessed.
+//! This is the third slice of the decompiler. It reads a function's whole
+//! control-flow graph — straight-line code, branches and loops — and
+//! anything it does not understand is refused with a reason ([`NotLifted`])
+//! rather than guessed.
 //!
-//! # The chain
+//! # The graph
 //!
 //! The control-flow walk ends a block at every call, so a function that
-//! calls is several blocks even when nothing in it branches. The lifter
-//! starts at the entry block and, while the block falls through — its last
-//! instruction is not a branch, its one successor starts where the block
-//! ends, and that successor has no other predecessor — continues into the
-//! successor with the same symbolic state. The chain stops at the first
-//! block that does not fall through, and that block must end in `ret`. A
-//! branch (`branches at 0x…`) or a block that another block also reaches
-//! (`joins at 0x…`) is refused.
+//! calls is several blocks even when nothing in it branches. Blocks joined
+//! only by fall-through — the block's last instruction is not a branch, its
+//! one successor starts where it ends, and nothing else reaches that
+//! successor — are lifted as one *node*. A node ends in `ret`, in a `jmp`,
+//! in a `jcc`, or by falling into a node that other blocks also reach. The
+//! graph of nodes is analyzed and structured by [`crate::structure`]:
+//! dominators, natural loops from the back edges, `if`/`else`, `while`,
+//! `do`/`while`, `for`, `break`, `continue`, early `return`, and `goto`
+//! where nothing fits; a graph with a loop that has two entries is refused
+//! as irreducible.
 //!
 //! # How it works
 //!
-//! The chain is walked once, instruction by instruction, with a symbolic
+//! Each node is walked once, instruction by instruction, with a symbolic
 //! machine state:
 //!
 //! * **Registers are temporaries, not variables.** Each general register maps
@@ -38,8 +40,28 @@
 //!   is propagated: the copies through `[rbp-4]` and `[rbp-8]` in a `-O0`
 //!   prologue vanish, and `return a + b;` comes out as the source wrote it.
 //!   A slot becomes a real variable — declared, with its stores emitted —
-//!   when its address is taken (`lea`), or when it is read before it is
-//!   written. A partial overwrite of a slot makes its value unknown.
+//!   when its address is taken (`lea`), when it is read before it is
+//!   written, or when it differs between two paths that join. A partial
+//!   overwrite of a slot makes its value unknown.
+//! * **The state is split at a branch and merged at a join.** Each successor
+//!   starts from a copy of the state its predecessor ended in. Where paths
+//!   join, a register or slot that holds the same expression on every path
+//!   stays that expression; a slot that differs becomes a variable, assigned
+//!   on each path by the stores already there; a register that differs
+//!   becomes a declared variable named after the register (`eax`), assigned
+//!   at the end of each path; a register one path never wrote, or whose value
+//!   a call clobbered, becomes unknown, and is refused only if it is read.
+//!   A stack pointer that differs between paths is refused. A loop header is
+//!   lifted with the state of the paths into it, and the loop is lifted
+//!   again with every register and slot the loop changes made a variable,
+//!   until nothing more changes.
+//! * **Conditions come from the flag producer.** `cmp`, `test` and the
+//!   arithmetic instructions record what they compared or computed; a `jcc`
+//!   turns that into a relation, with the signedness of the condition code —
+//!   `cmp a, b; jl` is `a < b`, `jb` is `(unsigned int)a < (unsigned int)b`,
+//!   `test x, x; je` is `x == 0`. A branch whose flags no tracked instruction
+//!   set, or whose condition code does not fit the producer (`js` after
+//!   `cmp`), is refused by name.
 //! * **Parameters** are the argument registers of the calling convention
 //!   (System V: `rdi, rsi, rdx, rcx, r8, r9`; Microsoft x64 for a `windows`
 //!   language: `rcx, rdx, r8, r9`) that are read before they are written,
@@ -47,36 +69,41 @@
 //!   type.
 //! * **Calls** pass the argument registers written before the call, in
 //!   convention order up to the first one not written; the result is `rax`,
-//!   and the caller-saved registers are forgotten. A call is a statement of
-//!   its own; its result is a temporary (`v1`) that is inlined into the next
+//!   and the caller-saved registers are forgotten, and so is every value read
+//!   from memory the callee could write. A call is a statement of its own;
+//!   its result is a temporary (`v1`) that is inlined into the next
 //!   statement when that is its only use.
 //! * **Pointers** the code takes through `lea` off the instruction pointer
 //!   are asked of the image ([`Symbols::pointee`]): one that lands on a
 //!   string is that string's literal, one that lands on a named piece of
 //!   data is `&name`, one that lands on a function is its name, and one the
-//!   image does not know stays the address it is.
+//!   image does not know stays the address it is. A load or store through a
+//!   pointer is a typed dereference, `*(int *)a`; one at an address the
+//!   image names as data is that name, and one at an address it does not
+//!   name is `*(int *)0x…`.
 //! * **`ret`** returns `rax` with the width of its last write, or nothing if
-//!   `rax` was never written.
-//! * **Flags** have no consumer in straight-line code, so a pure
-//!   flag-setter (`cmp`, `test`) is dropped, and `endbr64` and `nop` with it.
+//!   `rax` was never written; every `ret` of the function must agree.
 //!
 //! # The type rule
 //!
 //! Types come from widths alone: 8 bits is `char`, 16 `short`, 32 `int` and
-//! 64 `long`; the unsigned forms appear only in zero-extension casts. Nothing
-//! in a `mov` or an `add` says whether a value is signed, so the signed name
-//! is the default. An argument register that is passed on but never read has
-//! no width here, and is declared `long`.
+//! 64 `long`; the unsigned forms appear only in zero-extension casts and
+//! unsigned comparisons. Nothing in a `mov` or an `add` says whether a value
+//! is signed, so the signed name is the default. An argument register that
+//! is passed on but never read has no width here, and is declared `long`.
 //!
 //! # What is refused
 //!
-//! A branch or a join; 32-bit or 16-bit code; a chain that does not end in
-//! `ret`; any mnemonic outside `mov`, `add`, `sub`, `and`, `or`, `xor`,
-//! `lea`, `push`, `pop`, `leave`, `call`, `ret`, `cmp`, `test`, `nop` and
-//! `endbr64`; a memory operand that is not a stack slot; an indirect call;
-//! a stack the lifter loses track of; and a value that reaches a statement
-//! without being known — a register read before it is written that is not an
-//! argument register, or one clobbered by a call.
+//! 32-bit or 16-bit code; irreducible control flow; a node that ends in an
+//! indirect jump or a trap; any mnemonic outside `mov`, `movsx`, `movsxd`,
+//! `movzx`, `cdqe`, `add`, `sub`, `and`, `or`, `xor`, `inc`, `dec`, `imul`,
+//! `lea`, `push`, `pop`, `leave`, `call`, `ret`, `cmp`, `test`, `jmp`, the
+//! conditional jumps, `nop` and `endbr64`; an indirect call; a branch whose
+//! flags are not tracked; a stack the lifter loses track of or that differs
+//! between paths; `ret`s that disagree; and a value that reaches a
+//! statement without being known — a register read before it is written
+//! that is not an argument register, one clobbered by a call, or one that
+//! two paths left different and the lifter could not name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -85,10 +112,12 @@ use iced_x86::Mnemonic;
 
 use crate::arch::Bitness;
 use crate::ast::{AstNode, BinaryOp};
-use crate::cfg::{BasicBlock, ProcedureCfg};
+use crate::cfg::ProcedureCfg;
+use crate::cfgwalk::resolve_branches;
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
+use crate::structure::{self, Analysis, Node, Terminator};
 
 /// What the lifter asks the image: the name of a function it calls, and what
 /// a pointer it takes lands on.
@@ -125,7 +154,7 @@ pub enum Pointee {
 /// Why a function was not lifted.
 ///
 /// The reason is a short phrase that completes "not lifted yet: …": the
-/// mnemonic the lifter stopped at, the number of blocks, or what it lost
+/// mnemonic the lifter stopped at, the shape of the graph, or what it lost
 /// track of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotLifted {
@@ -134,7 +163,7 @@ pub struct NotLifted {
 }
 
 impl NotLifted {
-    fn new(reason: impl Into<String>) -> Self {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
@@ -206,12 +235,107 @@ pub struct Variable {
 }
 
 /// One statement of a lifted function, with the instructions it came from.
-#[derive(Debug, Clone)]
+///
+/// A plain statement is its node; a control statement is its condition and
+/// the statements it holds.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
-    /// The statement.
+    /// The statement, or the condition of a control statement. A `while (1)`
+    /// has [`AstNode::ConditionTrue`].
     pub node: AstNode,
-    /// The addresses of the instructions that went into it, in order.
+    /// The addresses of the instructions that went into it, in order: for a
+    /// control statement, the ones its condition and its jumps came from.
     pub addresses: Vec<u64>,
+    /// What kind of statement it is.
+    pub kind: StatementKind,
+}
+
+/// The kinds of statement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatementKind {
+    /// An expression, an assignment, a `return`, a `goto`, a label, a
+    /// `break` or a `continue`.
+    Plain,
+    /// `if (cond) { then_part } else { else_part }`; the else may be empty.
+    If {
+        then_part: Vec<Statement>,
+        else_part: Vec<Statement>,
+    },
+    /// `while (cond) { body }`.
+    While { body: Vec<Statement> },
+    /// `do { body } while (cond);`.
+    DoWhile { body: Vec<Statement> },
+    /// `for (init; cond; step) { body }`.
+    For {
+        init: Box<Statement>,
+        step: Box<Statement>,
+        body: Vec<Statement>,
+    },
+}
+
+impl Statement {
+    /// A plain statement.
+    pub fn plain(node: AstNode, addresses: Vec<u64>) -> Self {
+        Self {
+            node,
+            addresses,
+            kind: StatementKind::Plain,
+        }
+    }
+
+    /// The statement lists the statement holds.
+    pub fn children(&self) -> Vec<&Vec<Statement>> {
+        match &self.kind {
+            StatementKind::Plain => Vec::new(),
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => vec![then_part, else_part],
+            StatementKind::While { body } | StatementKind::DoWhile { body } => vec![body],
+            StatementKind::For { body, .. } => vec![body],
+        }
+    }
+
+    /// The statement lists the statement holds, mutably.
+    pub fn children_mut(&mut self) -> Vec<&mut Vec<Statement>> {
+        match &mut self.kind {
+            StatementKind::Plain => Vec::new(),
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => vec![then_part, else_part],
+            StatementKind::While { body } | StatementKind::DoWhile { body } => vec![body],
+            StatementKind::For { body, .. } => vec![body],
+        }
+    }
+
+    /// Every address the statement and the statements it holds came from.
+    pub fn claimed(&self, out: &mut BTreeSet<u64>) {
+        out.extend(self.addresses.iter().copied());
+        if let StatementKind::For { init, step, .. } = &self.kind {
+            init.claimed(out);
+            step.claimed(out);
+        }
+        for child in self.children() {
+            for statement in child {
+                statement.claimed(out);
+            }
+        }
+    }
+
+    /// Whether the statement, or one it holds, reads or assigns `name`.
+    fn mentions(&self, name: &str) -> bool {
+        self.node.reads_var(name)
+            || self.node.assigned_var() == Some(name)
+            || match &self.kind {
+                StatementKind::For { init, step, .. } => init.mentions(name) || step.mentions(name),
+                _ => false,
+            }
+            || self
+                .children()
+                .iter()
+                .any(|child| child.iter().any(|statement| statement.mentions(name)))
+    }
 }
 
 /// A function lifted to C.
@@ -246,8 +370,11 @@ const RDI: u32 = 7;
 const R8: u32 = 8;
 const R9: u32 = 9;
 
-/// Lift the function at `entry`, when it is straight-line code: a chain of
-/// blocks joined only by fall-through, ending in `ret`.
+/// How many times the loops of a function are lifted again before the
+/// lifter gives up on them settling.
+const PASSES: usize = 8;
+
+/// Lift the function at `entry` through its control-flow graph.
 ///
 /// `symbols` gives the name of the function at an address, for the calls the
 /// body makes — a call to an address with no name is `sub_<hex>` — and what
@@ -264,71 +391,165 @@ pub fn lift_function(
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
     }
-    let instructions: Vec<DecodedInsn> = fall_through_chain(disasm, cfg, entry)?
-        .into_iter()
-        .flat_map(|block| {
-            disasm
-                .instructions
-                .iter()
-                .filter(|ins| block.contains(ins.address))
-                .cloned()
-        })
-        .collect();
-    lift_block(&instructions, entry, name, abi, symbols)
+    let chains = chains(disasm, cfg, entry)?;
+    let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
+    let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
+    let mut lifter = Lifter::new(abi, symbols);
+    let lifted = lifter.lift_chains(&chains, &analysis)?;
+    let nodes = lifter.resolve_all(&chains, lifted)?;
+    let body = structure::structure(&nodes, &analysis, 0);
+    lifter.finish(name, entry, &chains, body)
 }
 
-/// The blocks from `entry` that are joined only by fall-through, in order.
+/// Lift a run of instructions as a function entered at `entry`: the graph
+/// is built from the instructions alone.
+pub fn lift_block(
+    instructions: &[DecodedInsn],
+    entry: u64,
+    name: &str,
+    abi: Abi,
+    symbols: &dyn Symbols,
+) -> Result<LiftedFunction, NotLifted> {
+    let disasm = Disasm {
+        file_offset_of_segment: 0,
+        instructions: instructions.to_vec(),
+    };
+    let cfg = resolve_branches(&disasm, entry);
+    lift_function(&disasm, &cfg, entry, name, Bitness::Bits64, abi, symbols)
+}
+
+/// How a chain of blocks ends.
+#[derive(Debug, Clone)]
+enum End {
+    /// In `ret`.
+    Return,
+    /// In a `jmp` to the chain.
+    Jump(usize),
+    /// In a `jcc`: to `taken` when it holds, else into `next`.
+    Branch { taken: usize, next: usize },
+    /// By falling into the chain, which other blocks also reach.
+    Fall(usize),
+}
+
+impl End {
+    fn successors(&self) -> Vec<usize> {
+        match self {
+            End::Return => Vec::new(),
+            End::Jump(target) | End::Fall(target) => vec![*target],
+            End::Branch { taken, next } => vec![*taken, *next],
+        }
+    }
+}
+
+/// Blocks joined only by fall-through, lifted as one node of the graph.
+#[derive(Debug, Clone)]
+struct Chain {
+    /// The address of the first instruction.
+    address: u64,
+    /// The instructions, in order.
+    instructions: Vec<DecodedInsn>,
+    /// How the chain ends.
+    end: End,
+}
+
+/// The chains of the function at `entry`, the entry's first.
 ///
 /// A block is followed into its successor when its last instruction is not
-/// a branch, its one successor starts where the block ends, and no other
-/// block has that successor. The chain ends at a block with no successor;
-/// what that block ends in is for [`lift_block`] to judge. A block whose
-/// last instruction branches is refused as `branches at <its address>`, and
-/// a successor another block also reaches as `joins at <its address>`.
-fn fall_through_chain<'c>(
-    disasm: &Disasm,
-    cfg: &'c ProcedureCfg,
-    entry: u64,
-) -> Result<Vec<&'c BasicBlock>, NotLifted> {
+/// a branch or a return, its one successor starts where the block ends, and
+/// no other block has that successor; the chain ends at the first block
+/// that does not. A chain whose last block has no successor must end in
+/// `ret`; one that ends in an indirect jump or a trap is refused as `the
+/// block ends in <mnemonic>`.
+fn chains(disasm: &Disasm, cfg: &ProcedureCfg, entry: u64) -> Result<Vec<Chain>, NotLifted> {
     let block_at = |address: u64| cfg.blocks.iter().find(|block| block.from == address);
-    let Some(entry_block) = block_at(entry) else {
-        return Err(NotLifted::new(format!("no code at {entry:#x}")));
-    };
-    let mut chain = vec![entry_block];
-    loop {
-        let block = *chain.last().expect("the chain starts at the entry");
-        let last = disasm
-            .instructions
-            .iter()
-            .rfind(|ins| block.contains(ins.address));
-        if last.is_some_and(branches) {
-            let at = last.map_or(block.from, |ins| ins.address);
-            return Err(NotLifted::new(format!("branches at {at:#x}")));
+    let mut predecessors: BTreeMap<u64, usize> = BTreeMap::new();
+    for block in &cfg.blocks {
+        for &successor in &block.successor_addresses {
+            *predecessors.entry(successor).or_default() += 1;
         }
-        let next = match block.successor_addresses.as_slice() {
-            [] => break,
-            [next] if *next == block.to => *next,
-            _ => {
-                let at = last.map_or(block.from, |ins| ins.address);
-                return Err(NotLifted::new(format!("branches at {at:#x}")));
-            }
-        };
-        let predecessors = cfg
-            .blocks
-            .iter()
-            .filter(|other| other.successor_addresses.contains(&next))
-            .count();
-        if predecessors != 1 {
-            return Err(NotLifted::new(format!("joins at {next:#x}")));
-        }
-        let Some(successor) = block_at(next) else {
-            return Err(NotLifted::new(format!("no code at {next:#x}")));
-        };
-        // Each block starts where the one before ends, so the chain climbs
-        // through memory and cannot come round.
-        chain.push(successor);
     }
-    Ok(chain)
+
+    let mut starts = vec![entry];
+    let mut seen = BTreeSet::from([entry]);
+    let mut raw: Vec<(u64, Vec<DecodedInsn>, Vec<u64>)> = Vec::new();
+    let mut i = 0;
+    while i < starts.len() {
+        let start = starts[i];
+        i += 1;
+        let Some(mut block) = block_at(start) else {
+            return Err(NotLifted::new(format!("no code at {start:#x}")));
+        };
+        let mut instructions: Vec<DecodedInsn> = Vec::new();
+        loop {
+            instructions.extend(
+                disasm
+                    .instructions
+                    .iter()
+                    .filter(|ins| block.contains(ins.address))
+                    .cloned(),
+            );
+            let last = instructions.last();
+            let continues = last.is_some_and(|ins| !branches(ins) && ins.flow != Flow::Return)
+                && block.successor_addresses.as_slice() == [block.to]
+                && predecessors.get(&block.to) == Some(&1);
+            if !continues {
+                break;
+            }
+            // Each block starts where the one before ends, so the chain
+            // climbs through memory and cannot come round.
+            block = block_at(block.to)
+                .ok_or_else(|| NotLifted::new(format!("no code at {:#x}", block.to)))?;
+        }
+        for &successor in &block.successor_addresses {
+            if seen.insert(successor) {
+                starts.push(successor);
+            }
+        }
+        raw.push((start, instructions, block.successor_addresses.clone()));
+    }
+
+    let index: BTreeMap<u64, usize> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, (address, _, _))| (*address, i))
+        .collect();
+    let node_at = |address: u64| {
+        index
+            .get(&address)
+            .copied()
+            .ok_or_else(|| NotLifted::new(format!("jumps to {address:#x}")))
+    };
+    raw.into_iter()
+        .map(|(address, instructions, successors)| {
+            let Some(last) = instructions.last() else {
+                return Err(NotLifted::new(format!("no code at {address:#x}")));
+            };
+            let after = last.address + last.length as u64;
+            let end = match last.flow {
+                Flow::Return => End::Return,
+                Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
+                Flow::ConditionalBranch(target) if target == after => End::Jump(node_at(after)?),
+                Flow::ConditionalBranch(target) => End::Branch {
+                    taken: node_at(target)?,
+                    next: node_at(after)?,
+                },
+                _ => match successors.as_slice() {
+                    [next] if *next == after => End::Fall(node_at(after)?),
+                    _ => {
+                        return Err(NotLifted::new(format!(
+                            "the block ends in {}",
+                            mnemonic_name(last)
+                        )))
+                    }
+                },
+            };
+            Ok(Chain {
+                address,
+                instructions,
+                end,
+            })
+        })
+        .collect()
 }
 
 /// Whether the instruction is a branch of any kind: it may go somewhere
@@ -341,31 +562,6 @@ fn branches(ins: &DecodedInsn) -> bool {
             | Flow::Xbegin(_)
             | Flow::IndirectBranch
     )
-}
-
-/// Lift a run of straight-line instructions — one block, or a chain of
-/// blocks joined by fall-through — which must end in `ret`.
-pub fn lift_block(
-    instructions: &[DecodedInsn],
-    entry: u64,
-    name: &str,
-    abi: Abi,
-    symbols: &dyn Symbols,
-) -> Result<LiftedFunction, NotLifted> {
-    let Some(last) = instructions.last() else {
-        return Err(NotLifted::new(format!("no code at {entry:#x}")));
-    };
-    if last.flow != Flow::Return {
-        return Err(NotLifted::new(format!(
-            "the block ends in {}",
-            mnemonic_name(last)
-        )));
-    }
-    let mut lifter = Lifter::new(abi, symbols);
-    for ins in instructions {
-        lifter.step(ins)?;
-    }
-    lifter.finish(name, entry, instructions)
 }
 
 /// What a register or a stack slot holds.
@@ -409,6 +605,31 @@ impl Value {
         self.from.push(address);
         self
     }
+
+    /// Whether the value can be written as an expression: a node or a call
+    /// result. The stack pointer, an entry value and an unknown cannot.
+    fn is_expression(&self) -> bool {
+        matches!(self.sym, Sym::Node(_) | Sym::Temp(_))
+    }
+
+    /// Whether the value's expression reads the variable `name`.
+    fn reads_var(&self, name: &str) -> bool {
+        matches!(&self.sym, Sym::Node(node) if node.reads_var(name))
+    }
+}
+
+/// Whether two values are the same: the same expression at the same width,
+/// the producing instructions aside. Two unknowns are the same unknown.
+fn same(a: &Value, b: &Value) -> bool {
+    a.bits == b.bits
+        && match (&a.sym, &b.sym) {
+            (Sym::Node(x), Sym::Node(y)) => x == y,
+            (Sym::Stack(x), Sym::Stack(y)) => x == y,
+            (Sym::Entry(x), Sym::Entry(y)) => x == y,
+            (Sym::Temp(x), Sym::Temp(y)) => x == y,
+            (Sym::Unknown(_), Sym::Unknown(_)) => true,
+            _ => false,
+        }
 }
 
 /// A stack slot: what it holds and how wide it is.
@@ -416,6 +637,111 @@ impl Value {
 struct Slot {
     bits: u32,
     value: Value,
+}
+
+/// What set the flags last.
+#[derive(Debug, Clone)]
+enum Producer {
+    /// `cmp lhs, rhs`.
+    Cmp(Value, Value),
+    /// `test lhs, rhs`.
+    Test(Value, Value),
+    /// An arithmetic instruction, by its result.
+    Result(Value),
+}
+
+/// The flags: what set them, at what width, and where.
+#[derive(Debug, Clone)]
+struct Flags {
+    producer: Producer,
+    bits: u32,
+    /// The producing instruction.
+    at: u64,
+    /// Its mnemonic, for the refusal.
+    mnemonic: String,
+}
+
+/// The symbolic machine state at one point of the function.
+#[derive(Debug, Clone)]
+struct State {
+    /// What each general register holds, by GPR index.
+    regs: BTreeMap<u32, Value>,
+    /// The stack slots, by offset from the entry stack pointer.
+    stack: BTreeMap<i64, Slot>,
+    /// What set the flags, if anything tracked did.
+    flags: Option<Flags>,
+}
+
+impl State {
+    /// The state at entry: the stack pointer is the entry stack pointer.
+    fn initial() -> Self {
+        let mut regs = BTreeMap::new();
+        regs.insert(RSP, Value::new(Sym::Stack(0), 64, Vec::new()));
+        Self {
+            regs,
+            stack: BTreeMap::new(),
+            flags: None,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            regs: BTreeMap::new(),
+            stack: BTreeMap::new(),
+            flags: None,
+        }
+    }
+
+    fn get(&self, key: Key) -> Option<&Value> {
+        match key {
+            Key::Reg(index) => self.regs.get(&index),
+            Key::Slot(offset) => self.stack.get(&offset).map(|slot| &slot.value),
+        }
+    }
+
+    /// Whether a slot other than one starting at `offset` with `bits`
+    /// overlaps the `bits` bits at `offset`.
+    fn overlaps(&self, offset: i64, bits: u32) -> bool {
+        let end = offset + i64::from(bits / 8);
+        self.stack.iter().any(|(&start, slot)| {
+            let slot_end = start + i64::from(slot.bits / 8);
+            start < end && offset < slot_end && !(start == offset && slot.bits == bits)
+        })
+    }
+
+    /// The keys the state holds.
+    fn keys(&self) -> impl Iterator<Item = Key> + '_ {
+        self.regs
+            .keys()
+            .map(|&index| Key::Reg(index))
+            .chain(self.stack.keys().map(|&offset| Key::Slot(offset)))
+    }
+}
+
+/// A register or a stack slot, as a key of the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Reg(u32),
+    Slot(i64),
+}
+
+/// What a key that differs between paths becomes.
+#[derive(Debug, Clone, PartialEq)]
+enum Forced {
+    /// A declared variable of `bits` bits, assigned on each path.
+    Var { bits: u32 },
+    /// Unknown, refused if read.
+    Unknown { reason: String, bits: u32 },
+}
+
+/// How a key merges across paths.
+enum Resolution {
+    /// The same on every path.
+    Same(Value),
+    /// Different, and a variable.
+    Var { bits: u32 },
+    /// Different, and not something a variable could hold.
+    Unknown { reason: String, bits: u32 },
 }
 
 /// A call result, named `v1`, `v2`… once it is used.
@@ -442,6 +768,12 @@ enum Stmt {
         value: Value,
         addresses: Vec<u64>,
     },
+    /// `lhs = value`: a store through a pointer, or a variable's assignment.
+    Assign {
+        lhs: AstNode,
+        value: Value,
+        addresses: Vec<u64>,
+    },
     /// The return.
     Return {
         value: Option<Value>,
@@ -449,13 +781,21 @@ enum Stmt {
     },
 }
 
+/// The statements each path into a join appends, by the path's node.
+type Assignments = Vec<(usize, Vec<Stmt>)>;
+
+/// A register two paths left different, declared as a variable.
+#[derive(Debug, Clone)]
+struct Merged {
+    name: String,
+    bits: u32,
+}
+
 struct Lifter<'a> {
     abi: Abi,
     symbols: &'a dyn Symbols,
-    /// What each general register holds, by GPR index.
-    regs: BTreeMap<u32, Value>,
-    /// The stack slots, by offset from the entry stack pointer.
-    stack: BTreeMap<i64, Slot>,
+    /// The state at the instruction being lifted.
+    state: State,
     /// The slots whose address was taken.
     address_taken: BTreeSet<i64>,
     /// The slots that are variables, with their width.
@@ -463,27 +803,557 @@ struct Lifter<'a> {
     /// The parameters read so far: position to width.
     params: BTreeMap<usize, u32>,
     temps: Vec<Temp>,
+    /// The values saved into a temporary before the variable they were
+    /// computed from changed.
+    saved: Vec<Variable>,
+    /// The registers that became variables at a join, by the join's address
+    /// and the register.
+    merged: BTreeMap<(u64, u32), Merged>,
+    /// The names of the global data the body reads or writes.
+    globals: BTreeSet<String>,
+    /// The statements of the chain being lifted.
     statements: Vec<Stmt>,
-    /// The width of the return value, once `ret` is seen.
-    return_bits: Option<u32>,
+    /// The width of the return value, once a `ret` is seen: `Some(None)`
+    /// for a `ret` with `rax` never written.
+    returns: Option<Option<u32>>,
+    /// The temporaries declared, once the statements are resolved.
+    declared: Vec<Variable>,
 }
 
 impl<'a> Lifter<'a> {
     fn new(abi: Abi, symbols: &'a dyn Symbols) -> Self {
-        let mut regs = BTreeMap::new();
-        regs.insert(RSP, Value::new(Sym::Stack(0), 64, Vec::new()));
         Self {
             abi,
             symbols,
-            regs,
-            stack: BTreeMap::new(),
+            state: State::initial(),
             address_taken: BTreeSet::new(),
             locals: BTreeMap::new(),
             params: BTreeMap::new(),
             temps: Vec::new(),
+            saved: Vec::new(),
+            merged: BTreeMap::new(),
+            globals: BTreeSet::new(),
             statements: Vec::new(),
-            return_bits: None,
+            returns: None,
+            declared: Vec::new(),
         }
+    }
+
+    /// Forget what one pass over the function found, keeping what holds
+    /// across passes: the slots whose address is taken, and the names of
+    /// the registers that became variables.
+    fn reset(&mut self) {
+        self.state = State::initial();
+        self.locals.clear();
+        self.params.clear();
+        self.temps.clear();
+        self.saved.clear();
+        self.globals.clear();
+        self.statements.clear();
+        self.returns = None;
+    }
+
+    // ---- the graph --------------------------------------------------------
+
+    /// Lift every chain, in reverse post-order, merging the state at each
+    /// join and lifting the loops again until they settle.
+    fn lift_chains(
+        &mut self,
+        chains: &[Chain],
+        analysis: &Analysis,
+    ) -> Result<Vec<(Vec<Stmt>, Terminator)>, NotLifted> {
+        let count = chains.len();
+        let mut forced: Vec<BTreeMap<Key, Forced>> = vec![BTreeMap::new(); count];
+        for _ in 0..PASSES {
+            self.reset();
+            for keys in &forced {
+                for (key, what) in keys {
+                    if let (Key::Slot(offset), Forced::Var { bits }) = (key, what) {
+                        self.locals.insert(*offset, *bits);
+                    }
+                }
+            }
+            let mut ins: Vec<Option<State>> = vec![None; count];
+            let mut outs: Vec<Option<State>> = vec![None; count];
+            let mut lifted: Vec<Option<(Vec<Stmt>, Terminator)>> = vec![None; count];
+            let mut appended: Vec<Vec<Stmt>> = vec![Vec::new(); count];
+
+            for &node in &analysis.rpo {
+                let at = chains[node].address;
+                let state = if node == 0 {
+                    State::initial()
+                } else {
+                    let inputs: Vec<(usize, State)> = analysis.preds[node]
+                        .iter()
+                        .filter(|&&pred| !analysis.is_back_edge(pred, node))
+                        .map(|&pred| {
+                            (
+                                pred,
+                                outs[pred]
+                                    .clone()
+                                    .expect("a forward predecessor is lifted first"),
+                            )
+                        })
+                        .collect();
+                    let (mut state, assignments) = self.merge(at, &inputs)?;
+                    for (pred, statements) in assignments {
+                        appended[pred].extend(statements);
+                    }
+                    self.force(&mut state, at, &forced[node], &inputs, &mut appended)?;
+                    state
+                };
+                ins[node] = Some(state.clone());
+                self.state = state;
+                self.statements.clear();
+                let terminator = self.lift_chain(&chains[node])?;
+                // A latch assigns the registers its loop made variables,
+                // and holds the variables from there on.
+                for (&header, lp) in &analysis.loops {
+                    if !lp.latches.contains(&node) {
+                        continue;
+                    }
+                    let at = chains[header].address;
+                    for (key, what) in &forced[header] {
+                        let (Key::Reg(index), Forced::Var { bits }) = (key, what) else {
+                            continue;
+                        };
+                        let name = self.merged_variable(at, *index, *bits);
+                        let state = self.state.clone();
+                        if let Some(statement) =
+                            self.assignment(&name, *index, *bits, &state, at)?
+                        {
+                            if let Stmt::Assign { value, .. } = &statement {
+                                self.variable_changed(&name, value, chains[node].address);
+                            }
+                            self.state
+                                .regs
+                                .insert(*index, Value::node(AstNode::var(name), *bits, Vec::new()));
+                            appended[node].push(statement);
+                        }
+                    }
+                }
+                outs[node] = Some(self.state.clone());
+                lifted[node] = Some((std::mem::take(&mut self.statements), terminator));
+            }
+
+            // Compare each loop's latches with its header: what differs is
+            // made a variable, and the function is lifted again.
+            let mut changed = false;
+            for (&header, lp) in &analysis.loops {
+                let head = ins[header].as_ref().expect("every node is lifted");
+                for &latch in &lp.latches {
+                    let out = outs[latch].as_ref().expect("every node is lifted");
+                    for (key, what) in self.compare(chains[header].address, head, out)? {
+                        if forced[header].get(&key) != Some(&what) {
+                            forced[header].insert(key, what);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                continue;
+            }
+            return Ok(lifted
+                .into_iter()
+                .zip(appended)
+                .map(|(lifted, appended)| {
+                    let (mut statements, mut terminator) = lifted.expect("every node is lifted");
+                    // A condition computed before the path assigned a
+                    // variable reads the variable: `(edi - 1) != 0` after
+                    // `edi = edi - 1` is `edi != 0`.
+                    if let Terminator::Branch { cond, .. } = &mut terminator {
+                        for statement in &appended {
+                            if let Stmt::Assign {
+                                lhs,
+                                value:
+                                    Value {
+                                        sym: Sym::Node(expression),
+                                        ..
+                                    },
+                                ..
+                            } = statement
+                            {
+                                *cond = cond.clone().replace(expression, lhs);
+                            }
+                        }
+                    }
+                    statements.extend(appended);
+                    (statements, terminator)
+                })
+                .collect());
+        }
+        Err(NotLifted::new("the loops do not settle"))
+    }
+
+    /// Lift one chain from the current state, and say how it leaves.
+    fn lift_chain(&mut self, chain: &Chain) -> Result<Terminator, NotLifted> {
+        let (last, body) = chain
+            .instructions
+            .split_last()
+            .expect("a chain has an instruction");
+        for ins in body {
+            self.step(ins)?;
+        }
+        match chain.end {
+            End::Return => {
+                self.step(last)?;
+                Ok(Terminator::Return)
+            }
+            End::Fall(target) => {
+                self.step(last)?;
+                Ok(Terminator::Goto {
+                    target,
+                    addresses: Vec::new(),
+                })
+            }
+            End::Jump(target) => Ok(Terminator::Goto {
+                target,
+                addresses: vec![last.address],
+            }),
+            End::Branch { taken, next } => {
+                let (cond, addresses) = self.condition(last)?;
+                Ok(Terminator::Branch {
+                    cond,
+                    taken,
+                    next,
+                    addresses,
+                })
+            }
+        }
+    }
+
+    /// Merge the states of the paths into the node at `at`.
+    ///
+    /// Returns the merged state and, per path, the assignments that path
+    /// makes to the registers that became variables.
+    fn merge(
+        &mut self,
+        at: u64,
+        inputs: &[(usize, State)],
+    ) -> Result<(State, Assignments), NotLifted> {
+        if let [(_, only)] = inputs {
+            return Ok((only.clone(), Vec::new()));
+        }
+        let states: Vec<&State> = inputs.iter().map(|(_, state)| state).collect();
+        let keys: BTreeSet<Key> = states.iter().flat_map(|state| state.keys()).collect();
+        let mut out = State::empty();
+        let mut assignments: Assignments =
+            inputs.iter().map(|(pred, _)| (*pred, Vec::new())).collect();
+        let mut named: Vec<String> = Vec::new();
+
+        for key in keys {
+            match self.resolve_key(key, &states, at)? {
+                Resolution::Same(value) => match key {
+                    Key::Reg(index) => {
+                        out.regs.insert(index, value);
+                    }
+                    Key::Slot(offset) => {
+                        let bits = value.bits;
+                        out.stack.insert(offset, Slot { bits, value });
+                    }
+                },
+                Resolution::Var { bits } => match key {
+                    Key::Slot(offset) => {
+                        self.locals.entry(offset).or_insert(bits);
+                        out.stack.insert(
+                            offset,
+                            Slot {
+                                bits,
+                                value: Value::node(
+                                    AstNode::var(local_name(offset)),
+                                    bits,
+                                    Vec::new(),
+                                ),
+                            },
+                        );
+                    }
+                    Key::Reg(index) => {
+                        let name = self.merged_variable(at, index, bits);
+                        out.regs.insert(
+                            index,
+                            Value::node(AstNode::var(name.clone()), bits, Vec::new()),
+                        );
+                        for (i, (_, state)) in inputs.iter().enumerate() {
+                            if let Some(statement) =
+                                self.assignment(&name, index, bits, state, at)?
+                            {
+                                assignments[i].1.push(statement);
+                            }
+                        }
+                        named.push(name);
+                    }
+                },
+                Resolution::Unknown { reason, bits } => match key {
+                    Key::Reg(index) => {
+                        out.regs.insert(index, Value::unknown(reason, bits));
+                    }
+                    Key::Slot(offset) => {
+                        out.stack.insert(
+                            offset,
+                            Slot {
+                                bits,
+                                value: Value::unknown(reason, bits),
+                            },
+                        );
+                    }
+                },
+            }
+        }
+
+        // A value computed from a register variable before the paths
+        // assigned it is stale now.
+        for name in &named {
+            for (index, value) in out.regs.iter_mut() {
+                if value.reads_var(name)
+                    && !matches!(&value.sym, Sym::Node(AstNode::Var { name: n }) if n == name)
+                {
+                    *value = Value::unknown(
+                        format!(
+                            "{} was computed from {name} before the join at {at:#x}",
+                            gpr_name(*index, value.bits)
+                        ),
+                        value.bits,
+                    );
+                }
+            }
+            for (offset, slot) in out.stack.iter_mut() {
+                if slot.value.reads_var(name) {
+                    slot.value = Value::unknown(
+                        format!(
+                            "{} was computed from {name} before the join at {at:#x}",
+                            local_name(*offset)
+                        ),
+                        slot.bits,
+                    );
+                }
+            }
+        }
+
+        // The flags survive a join only when every path set them the same
+        // way.
+        let first = states[0].flags.as_ref();
+        if let Some(flags) = first {
+            if states.iter().all(|state| {
+                state
+                    .flags
+                    .as_ref()
+                    .is_some_and(|other| other.at == flags.at)
+            }) {
+                out.flags = Some(flags.clone());
+            }
+        }
+        Ok((out, assignments))
+    }
+
+    /// How `key` merges across `states`, at the join `at`.
+    fn resolve_key(
+        &mut self,
+        key: Key,
+        states: &[&State],
+        at: u64,
+    ) -> Result<Resolution, NotLifted> {
+        let values: Vec<Option<&Value>> = states.iter().map(|state| state.get(key)).collect();
+        let present: Vec<&Value> = values.iter().flatten().copied().collect();
+        let all_present = present.len() == values.len();
+        if all_present && present.windows(2).all(|pair| same(pair[0], pair[1])) {
+            return Ok(Resolution::Same(present[0].clone()));
+        }
+        if key == Key::Reg(RSP) {
+            return Err(NotLifted::new(format!(
+                "the stack pointer differs at {at:#x}"
+            )));
+        }
+        let bits_of = |value: &Value| match value.sym {
+            Sym::Temp(temp) => self.temps[temp].bits.unwrap_or(value.bits),
+            _ => value.bits,
+        };
+        let bits = present
+            .iter()
+            .map(|value| bits_of(value))
+            .max()
+            .unwrap_or(64);
+        let agree = present.iter().all(|value| bits_of(value) == bits);
+        let expressions = present.iter().all(|value| value.is_expression());
+        match key {
+            Key::Reg(index) => {
+                // An argument register a path never wrote still holds its
+                // parameter there.
+                let known = all_present || self.parameter_of(index, bits).is_some();
+                if known && expressions && agree {
+                    Ok(Resolution::Var { bits })
+                } else {
+                    Ok(Resolution::Unknown {
+                        reason: format!("{} differs at {at:#x}", gpr_name(index, 64)),
+                        bits: 64,
+                    })
+                }
+            }
+            Key::Slot(offset) => {
+                let in_parts = states
+                    .iter()
+                    .zip(&values)
+                    .any(|(state, value)| value.is_none() && state.overlaps(offset, bits));
+                if expressions && agree && !in_parts {
+                    Ok(Resolution::Var { bits })
+                } else {
+                    Ok(Resolution::Unknown {
+                        reason: format!("{} differs at {at:#x}", local_name(offset)),
+                        bits,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Make the keys of `forced` what the loop's latches made them, in the
+    /// state of its header at `at`; the paths into the header assign the
+    /// registers that became variables.
+    fn force(
+        &mut self,
+        state: &mut State,
+        at: u64,
+        forced: &BTreeMap<Key, Forced>,
+        inputs: &[(usize, State)],
+        appended: &mut [Vec<Stmt>],
+    ) -> Result<(), NotLifted> {
+        for (key, what) in forced {
+            match (key, what) {
+                (Key::Slot(offset), Forced::Var { bits }) => {
+                    state.stack.insert(
+                        *offset,
+                        Slot {
+                            bits: *bits,
+                            value: Value::node(
+                                AstNode::var(local_name(*offset)),
+                                *bits,
+                                Vec::new(),
+                            ),
+                        },
+                    );
+                }
+                (Key::Slot(offset), Forced::Unknown { reason, bits }) => {
+                    state.stack.insert(
+                        *offset,
+                        Slot {
+                            bits: *bits,
+                            value: Value::unknown(reason.clone(), *bits),
+                        },
+                    );
+                }
+                (Key::Reg(index), Forced::Var { bits }) => {
+                    let name = self.merged_variable(at, *index, *bits);
+                    state.regs.insert(
+                        *index,
+                        Value::node(AstNode::var(name.clone()), *bits, Vec::new()),
+                    );
+                    for (pred, input) in inputs {
+                        if let Some(statement) = self.assignment(&name, *index, *bits, input, at)? {
+                            appended[*pred].push(statement);
+                        }
+                    }
+                }
+                (Key::Reg(index), Forced::Unknown { reason, .. }) => {
+                    state
+                        .regs
+                        .insert(*index, Value::unknown(reason.clone(), 64));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What the latch's state makes of the header's: the keys that differ,
+    /// and what they become.
+    fn compare(
+        &mut self,
+        at: u64,
+        head: &State,
+        latch: &State,
+    ) -> Result<Vec<(Key, Forced)>, NotLifted> {
+        let keys: BTreeSet<Key> = head.keys().chain(latch.keys()).collect();
+        let mut forced = Vec::new();
+        for key in keys {
+            match self.resolve_key(key, &[head, latch], at)? {
+                Resolution::Same(_) => {}
+                Resolution::Var { bits } => forced.push((key, Forced::Var { bits })),
+                Resolution::Unknown { reason, bits } => {
+                    forced.push((key, Forced::Unknown { reason, bits }))
+                }
+            }
+        }
+        Ok(forced)
+    }
+
+    /// The parameter the argument register `index` holds at entry, read at
+    /// `bits`; `None` for a register that is not an argument register.
+    fn parameter_of(&mut self, index: u32, bits: u32) -> Option<Value> {
+        let position = self
+            .abi
+            .argument_registers()
+            .iter()
+            .position(|&register| register == index)?;
+        let width = *self.params.entry(position).or_insert(bits);
+        Some(Value::node(
+            AstNode::var(parameter_name(position)),
+            width,
+            Vec::new(),
+        ))
+    }
+
+    /// The assignment `name = <the register's value in state>`, when the
+    /// state does not already hold the variable.
+    fn assignment(
+        &mut self,
+        name: &str,
+        index: u32,
+        bits: u32,
+        state: &State,
+        at: u64,
+    ) -> Result<Option<Stmt>, NotLifted> {
+        let held = match state.regs.get(&index) {
+            Some(value) => Some(value.clone()),
+            None => self.parameter_of(index, bits),
+        };
+        let Some(value) = held.as_ref() else {
+            return Ok(None);
+        };
+        if matches!(&value.sym, Sym::Node(AstNode::Var { name: n }) if n == name) {
+            return Ok(None);
+        }
+        if !value.is_expression() {
+            return Ok(None);
+        }
+        let value = self.at_width(value.clone(), bits, index, at)?;
+        let addresses = sorted(value.from.iter().copied());
+        Ok(Some(Stmt::Assign {
+            lhs: AstNode::var(name),
+            value,
+            addresses,
+        }))
+    }
+
+    /// The variable the register `index` is at the join `at`, named after
+    /// the register at its width, with a suffix if the name is taken.
+    fn merged_variable(&mut self, at: u64, index: u32, bits: u32) -> String {
+        if let Some(merged) = self.merged.get(&(at, index)) {
+            return merged.name.clone();
+        }
+        let base = gpr_name(index, bits);
+        let mut name = base.clone();
+        let mut n = 1;
+        while self.merged.values().any(|merged| merged.name == name) {
+            n += 1;
+            name = format!("{base}_{n}");
+        }
+        self.merged.insert(
+            (at, index),
+            Merged {
+                name: name.clone(),
+                bits,
+            },
+        );
+        name
     }
 
     // ---- registers --------------------------------------------------------
@@ -506,7 +1376,7 @@ impl<'a> Lifter<'a> {
     fn read(&mut self, reg: RegisterId, at: u64) -> Result<Value, NotLifted> {
         let index = self.gpr(reg)?;
         let bits = reg.bit_size;
-        let held = match self.regs.get(&index) {
+        let held = match self.state.regs.get(&index) {
             Some(value) => value.clone(),
             None => self.entry_value(index, bits),
         };
@@ -528,7 +1398,7 @@ impl<'a> Lifter<'a> {
             }
             None => Value::new(Sym::Entry(index), 64, Vec::new()),
         };
-        self.regs.insert(index, value.clone());
+        self.state.regs.insert(index, value.clone());
         value
     }
 
@@ -596,20 +1466,21 @@ impl<'a> Lifter<'a> {
     /// Write a register at its operand width.
     fn write(&mut self, reg: RegisterId, value: Value) -> Result<(), NotLifted> {
         let index = self.gpr(reg)?;
-        self.regs.insert(index, value);
+        self.state.regs.insert(index, value);
         Ok(())
     }
 
     /// The stack pointer, as an offset from its value at entry.
     fn stack_pointer(&self) -> Result<i64, NotLifted> {
-        match self.regs.get(&RSP).map(|value| &value.sym) {
+        match self.state.regs.get(&RSP).map(|value| &value.sym) {
             Some(Sym::Stack(offset)) => Ok(*offset),
             _ => Err(NotLifted::new("the stack pointer is not tracked")),
         }
     }
 
     fn set_stack_pointer(&mut self, offset: i64, at: u64) {
-        self.regs
+        self.state
+            .regs
             .insert(RSP, Value::new(Sym::Stack(offset), 64, vec![at]));
     }
 
@@ -621,31 +1492,20 @@ impl<'a> Lifter<'a> {
         if index.class != RC_NONE || base.class != RC_GPR {
             return None;
         }
-        match self.regs.get(&base.index).map(|value| &value.sym) {
+        match self.state.regs.get(&base.index).map(|value| &value.sym) {
             Some(Sym::Stack(offset)) => Some(offset + disp),
             _ => None,
         }
     }
 
-    /// Why a memory operand is not a stack slot.
-    fn not_a_slot(&self, what: &str, base: RegisterId, ins: &DecodedInsn) -> NotLifted {
-        match ins.memory_address() {
-            Some(address) => NotLifted::new(format!("{what} memory at {address:#x}")),
-            None if base.class == RC_GPR => {
-                NotLifted::new(format!("{what} {}", gpr_name(base.index, base.bit_size)))
-            }
-            None => NotLifted::new(format!("{what} memory")),
-        }
-    }
-
     /// Load `bits` bits from the slot at `offset`.
     fn load(&mut self, offset: i64, bits: u32, at: u64) -> Value {
-        if let Some(slot) = self.stack.get(&offset) {
+        if let Some(slot) = self.state.stack.get(&offset) {
             if slot.bits == bits {
                 return slot.value.clone().also_from(at);
             }
         }
-        if self.overlaps(offset, bits) {
+        if self.state.overlaps(offset, bits) {
             return Value::unknown(
                 format!(
                     "the {bits} bits at {} were written in parts",
@@ -657,7 +1517,7 @@ impl<'a> Lifter<'a> {
         // Never written here: the slot is a variable, read as it is.
         self.locals.entry(offset).or_insert(bits);
         let value = Value::node(AstNode::var(local_name(offset)), bits, vec![at]);
-        self.stack.insert(
+        self.state.stack.insert(
             offset,
             Slot {
                 bits,
@@ -672,7 +1532,29 @@ impl<'a> Lifter<'a> {
         let addresses = sorted(value.from.iter().copied().chain([at]));
         let value = value.also_from(at);
         self.kill(offset, bits);
-        self.stack.insert(
+        if self.locals.contains_key(&offset) {
+            // The slot is a variable: what was computed from it before this
+            // store is the old value, saved into a temporary if it is in
+            // memory and forgotten if it is in a register; what equals the
+            // stored expression is the variable now.
+            let name = local_name(offset);
+            self.variable_changed(&name, &value, at);
+            self.statements.push(Stmt::Store {
+                offset,
+                bits,
+                value,
+                addresses,
+            });
+            self.state.stack.insert(
+                offset,
+                Slot {
+                    bits,
+                    value: Value::node(AstNode::var(name), bits, vec![at]),
+                },
+            );
+            return;
+        }
+        self.state.stack.insert(
             offset,
             Slot {
                 bits,
@@ -687,20 +1569,79 @@ impl<'a> Lifter<'a> {
         });
     }
 
-    /// Whether any slot overlaps the `bits` bits at `offset`, other than one
-    /// that starts there with that width.
-    fn overlaps(&self, offset: i64, bits: u32) -> bool {
-        let end = offset + i64::from(bits / 8);
-        self.stack.iter().any(|(&start, slot)| {
-            let slot_end = start + i64::from(slot.bits / 8);
-            start < end && offset < slot_end && !(start == offset && slot.bits == bits)
-        })
+    /// The variable `name` is assigned `value` at `at`. What was computed
+    /// from the variable before is the old value now: a register that holds
+    /// the very expression assigned (`eax` after `add eax, 1; mov [x], eax`)
+    /// holds the variable; another register computed from it is forgotten;
+    /// a slot computed from it is saved into a temporary first. What does
+    /// not read the variable is unaffected.
+    fn variable_changed(&mut self, name: &str, value: &Value, at: u64) {
+        let stored = match &value.sym {
+            Sym::Node(node) if node.reads_var(name) => Some(node),
+            _ => None,
+        };
+        for (&index, held) in self.state.regs.iter_mut() {
+            let Sym::Node(node) = &held.sym else {
+                continue;
+            };
+            if Some(node) == stored {
+                *held = Value::node(AstNode::var(name), held.bits, held.from.clone());
+            } else if node.reads_var(name) {
+                *held = Value::unknown(
+                    format!(
+                        "{} was computed from {name} before it changed at {at:#x}",
+                        gpr_name(index, held.bits)
+                    ),
+                    held.bits,
+                );
+            }
+        }
+        let mut stale: Vec<i64> = Vec::new();
+        for (&offset, slot) in self.state.stack.iter_mut() {
+            let Sym::Node(node) = &slot.value.sym else {
+                continue;
+            };
+            if Some(node) == stored {
+                slot.value = Value::node(AstNode::var(name), slot.bits, slot.value.from.clone());
+            } else if node.reads_var(name) {
+                stale.push(offset);
+            }
+        }
+        for offset in stale {
+            let slot = self.state.stack.get(&offset).expect("found above").clone();
+            let temp = format!("v{}", self.temps.len() + self.saved.len() + 1);
+            self.saved.push(Variable {
+                ty: type_name(slot.bits).to_string(),
+                name: temp.clone(),
+            });
+            self.statements.push(Stmt::Assign {
+                lhs: AstNode::var(temp.clone()),
+                value: slot.value.clone(),
+                addresses: sorted(slot.value.from.iter().copied()),
+            });
+            self.state.stack.insert(
+                offset,
+                Slot {
+                    bits: slot.bits,
+                    value: Value::node(AstNode::var(temp), slot.bits, slot.value.from),
+                },
+            );
+        }
+        if self.state.flags.as_ref().is_some_and(|flags| {
+            let reads = |value: &Value| value.reads_var(name);
+            match &flags.producer {
+                Producer::Cmp(lhs, rhs) | Producer::Test(lhs, rhs) => reads(lhs) || reads(rhs),
+                Producer::Result(value) => reads(value),
+            }
+        }) {
+            self.state.flags = None;
+        }
     }
 
     /// Forget every slot that overlaps the `bits` bits at `offset`.
     fn kill(&mut self, offset: i64, bits: u32) {
         let end = offset + i64::from(bits / 8);
-        self.stack.retain(|&start, slot| {
+        self.state.stack.retain(|&start, slot| {
             let slot_end = start + i64::from(slot.bits / 8);
             !(start < end && offset < slot_end)
         });
@@ -709,10 +1650,55 @@ impl<'a> Lifter<'a> {
     /// Make the slot at `offset` a variable whose address is taken.
     fn take_address(&mut self, offset: i64) -> AstNode {
         self.address_taken.insert(offset);
-        let bits = self.stack.get(&offset).map_or(64, |slot| slot.bits);
+        let bits = self.state.stack.get(&offset).map_or(64, |slot| slot.bits);
         self.locals.entry(offset).or_insert(bits);
         AstNode::AddressOf {
             target: Box::new(AstNode::var(local_name(offset))),
+        }
+    }
+
+    /// Memory the lifter does not track was written, by a call or a store
+    /// through a pointer: the slots whose address is taken are whatever is
+    /// in them now, and every value read from memory is stale.
+    fn memory_written(&mut self, what: &str, at: u64) {
+        for &offset in &self.address_taken {
+            if let Some(slot) = self.state.stack.get_mut(&offset) {
+                slot.value = Value::node(AstNode::var(local_name(offset)), slot.bits, vec![at]);
+            }
+        }
+        let globals = &self.globals;
+        let from_memory = |value: &Value| match &value.sym {
+            Sym::Node(node) => node.any(&|n| match n {
+                AstNode::Deref { .. } => true,
+                AstNode::Var { name } => globals.contains(name),
+                _ => false,
+            }),
+            _ => false,
+        };
+        for (&index, held) in self.state.regs.iter_mut() {
+            if from_memory(held) {
+                *held = Value::unknown(
+                    format!(
+                        "{} was read from memory before {what} at {at:#x}",
+                        gpr_name(index, held.bits)
+                    ),
+                    held.bits,
+                );
+            }
+        }
+        for (&offset, slot) in self.state.stack.iter_mut() {
+            if self.address_taken.contains(&offset) {
+                continue;
+            }
+            if from_memory(&slot.value) {
+                slot.value = Value::unknown(
+                    format!(
+                        "{} was read from memory before {what} at {at:#x}",
+                        local_name(offset)
+                    ),
+                    slot.bits,
+                );
+            }
         }
     }
 
@@ -724,10 +1710,14 @@ impl<'a> Lifter<'a> {
             Operand::Register(reg) => self.read(reg, ins.address),
             Operand::Imm(imm) => Ok(Value::node(constant(imm, bits), bits, vec![ins.address])),
             Operand::Mem {
-                base, index, disp, ..
+                base,
+                index,
+                scale,
+                disp,
+                ..
             } => match self.slot_of(base, index, disp) {
                 Some(offset) => Ok(self.load(offset, bits, ins.address)),
-                None => Err(self.not_a_slot("a load from", base, ins)),
+                None => self.load_through(base, index, scale, disp, bits, ins),
             },
         }
     }
@@ -743,16 +1733,159 @@ impl<'a> Lifter<'a> {
         match *op {
             Operand::Register(reg) => self.write(reg, value),
             Operand::Mem {
-                base, index, disp, ..
+                base,
+                index,
+                scale,
+                disp,
+                ..
             } => match self.slot_of(base, index, disp) {
                 Some(offset) => {
                     self.store(offset, bits, value, ins.address);
                     Ok(())
                 }
-                None => Err(self.not_a_slot("a store to", base, ins)),
+                None => self.store_through(base, index, scale, disp, bits, value, ins),
             },
             Operand::Imm(_) => Err(NotLifted::new("a write to an immediate")),
         }
+    }
+
+    /// The address a memory operand names, computed at `bits` bits: the
+    /// constant of an absolute or instruction-relative operand, else the
+    /// base plus the scaled index plus the displacement.
+    fn address_of(
+        &mut self,
+        base: RegisterId,
+        index: RegisterId,
+        scale: u32,
+        disp: i64,
+        bits: u32,
+        ins: &DecodedInsn,
+    ) -> Result<Value, NotLifted> {
+        let at = ins.address;
+        if base.class == RC_IP || (base.class == RC_NONE && index.class == RC_NONE) {
+            let target = ins.memory_address().unwrap_or(disp as u64);
+            return Ok(Value::node(
+                AstNode::constant(target & mask(bits), bits / 8),
+                bits,
+                vec![at],
+            ));
+        }
+        let mut address = if base.class == RC_GPR {
+            self.read(RegisterId::new(RC_GPR, base.index, bits), at)?
+        } else if base.class == RC_NONE {
+            Value::node(constant(0, bits), bits, vec![at])
+        } else {
+            return Err(NotLifted::new("a memory operand with a segment base"));
+        };
+        if index.class != RC_NONE {
+            if index.class != RC_GPR {
+                return Err(NotLifted::new(
+                    "a memory operand with an index that is not a general register",
+                ));
+            }
+            let mut scaled = self.read(RegisterId::new(RC_GPR, index.index, bits), at)?;
+            if scale > 1 {
+                let factor = Value::node(constant(i128::from(scale), bits), bits, vec![at]);
+                scaled = self.arith(BinaryOp::Mul, scaled, factor, bits, at)?;
+            }
+            address = self.arith(BinaryOp::Add, address, scaled, bits, at)?;
+        }
+        if disp != 0 {
+            let offset = Value::node(constant(i128::from(disp), bits), bits, vec![at]);
+            address = self.arith(BinaryOp::Add, address, offset, bits, at)?;
+        }
+        Ok(address)
+    }
+
+    /// The place a memory operand that is not a stack slot names: the
+    /// global the image names at a constant address, else `*(T *)address`.
+    fn place(&mut self, address: &Value, bits: u32) -> Result<Option<AstNode>, NotLifted> {
+        if let Sym::Node(AstNode::Constant { value: target, .. }) = &address.sym {
+            if let Some(Pointee::Data(name)) = self.symbols.pointee(*target) {
+                if !name.is_empty() {
+                    self.globals.insert(name.clone());
+                    return Ok(Some(AstNode::var(name)));
+                }
+            }
+        }
+        let pointer = match &address.sym {
+            Sym::Node(node) => node.clone(),
+            Sym::Temp(_) => {
+                let value = self.at_width(address.clone(), 64, RAX, 0)?;
+                self.node_of(&value)?
+            }
+            Sym::Unknown(_) | Sym::Stack(_) | Sym::Entry(_) => return Ok(None),
+        };
+        Ok(Some(AstNode::Deref {
+            target: Box::new(AstNode::Cast {
+                ty: format!("{} *", type_name(bits)),
+                target: Box::new(pointer),
+            }),
+        }))
+    }
+
+    /// A load through a pointer or from an address.
+    fn load_through(
+        &mut self,
+        base: RegisterId,
+        index: RegisterId,
+        scale: u32,
+        disp: i64,
+        bits: u32,
+        ins: &DecodedInsn,
+    ) -> Result<Value, NotLifted> {
+        let address = self.address_of(base, index, scale, disp, 64, ins)?;
+        let from = sorted(address.from.iter().copied().chain([ins.address]));
+        match self.place(&address, bits)? {
+            Some(node) => Ok(Value::node(node, bits, from)),
+            None => Ok(Value::unknown(
+                match &address.sym {
+                    Sym::Unknown(reason) => reason.clone(),
+                    Sym::Entry(index) => {
+                        format!("{} is read before it is written", gpr_name(*index, 64))
+                    }
+                    _ => format!("a load relative to the stack pointer at {:#x}", ins.address),
+                },
+                bits,
+            )),
+        }
+    }
+
+    /// A store through a pointer or to an address.
+    #[allow(clippy::too_many_arguments)]
+    fn store_through(
+        &mut self,
+        base: RegisterId,
+        index: RegisterId,
+        scale: u32,
+        disp: i64,
+        bits: u32,
+        value: Value,
+        ins: &DecodedInsn,
+    ) -> Result<(), NotLifted> {
+        let at = ins.address;
+        let address = self.address_of(base, index, scale, disp, 64, ins)?;
+        let Some(lhs) = self.place(&address, bits)? else {
+            return Err(match &address.sym {
+                Sym::Unknown(reason) => NotLifted::new(reason.clone()),
+                Sym::Entry(index) => NotLifted::new(format!(
+                    "{} is read before it is written",
+                    gpr_name(*index, 64)
+                )),
+                _ => NotLifted::new(format!("a store relative to the stack pointer at {at:#x}")),
+            });
+        };
+        let addresses = sorted(value.from.iter().chain(&address.from).copied().chain([at]));
+        let value = value.also_from(at);
+        // The stored value must be known now: it is in memory from here on.
+        self.node_of(&value)?;
+        self.statements.push(Stmt::Assign {
+            lhs,
+            value,
+            addresses,
+        });
+        self.memory_written("the store", at);
+        Ok(())
     }
 
     /// The expression a value stands for, when it is known.
@@ -817,19 +1950,36 @@ impl<'a> Lifter<'a> {
         Ok(Value::node(binary(op, lhs, rhs, bits), bits, from))
     }
 
+    /// Record what set the flags.
+    fn set_flags(&mut self, producer: Producer, bits: u32, ins: &DecodedInsn) {
+        self.state.flags = Some(Flags {
+            producer,
+            bits,
+            at: ins.address,
+            mnemonic: mnemonic_name(ins),
+        });
+    }
+
     // ---- instructions -----------------------------------------------------
 
     fn step(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
         match mnemonic {
-            // No-ops, and flag-setters with no consumer in one block.
-            Mnemonic::Nop | Mnemonic::Endbr64 | Mnemonic::Cmp | Mnemonic::Test => Ok(()),
+            Mnemonic::Nop | Mnemonic::Endbr64 => Ok(()),
+            Mnemonic::Cmp => self.compare_op(false, ins),
+            Mnemonic::Test => self.compare_op(true, ins),
             Mnemonic::Mov => self.mov(ins),
+            Mnemonic::Movsx | Mnemonic::Movsxd => self.extend(true, ins),
+            Mnemonic::Movzx => self.extend(false, ins),
+            Mnemonic::Cdqe => self.cdqe(ins),
             Mnemonic::Add => self.binary_op(BinaryOp::Add, ins),
             Mnemonic::Sub => self.binary_op(BinaryOp::Sub, ins),
             Mnemonic::And => self.binary_op(BinaryOp::And, ins),
             Mnemonic::Or => self.binary_op(BinaryOp::Or, ins),
             Mnemonic::Xor => self.binary_op(BinaryOp::Xor, ins),
+            Mnemonic::Imul => self.imul(ins),
+            Mnemonic::Inc => self.step_by(BinaryOp::Add, ins),
+            Mnemonic::Dec => self.step_by(BinaryOp::Sub, ins),
             Mnemonic::Lea => self.lea(ins),
             Mnemonic::Push => self.push(ins),
             Mnemonic::Pop => self.pop(ins),
@@ -861,17 +2011,217 @@ impl<'a> Lifter<'a> {
         self.assign(dest, bits, value, ins)
     }
 
+    /// `movsx`, `movsxd` and `movzx`: the source at its own width, widened
+    /// with its sign or with zeros to the destination's.
+    fn extend(&mut self, sign: bool, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, to) = self.two(ins)?;
+        let from = width_of(src).ok_or_else(|| {
+            NotLifted::new(format!("{} with no source width", mnemonic_name(ins)))
+        })?;
+        let value = self.value_of(src, from, ins)?;
+        let widened = self.widen(value, from, to, sign, ins.address)?;
+        self.assign(dest, to, widened, ins)
+    }
+
+    /// `cdqe`: `rax` is `eax` with its sign.
+    fn cdqe(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let value = self.read(RegisterId::new(RC_GPR, RAX, 32), ins.address)?;
+        let widened = self.widen(value, 32, 64, true, ins.address)?;
+        self.state.regs.insert(RAX, widened);
+        Ok(())
+    }
+
+    /// `value`, `from` bits wide, widened to `to` bits with its sign or with
+    /// zeros: a cast through the signed or the unsigned narrow type.
+    fn widen(
+        &mut self,
+        value: Value,
+        from: u32,
+        to: u32,
+        sign: bool,
+        at: u64,
+    ) -> Result<Value, NotLifted> {
+        let addresses = sorted(value.from.iter().copied().chain([at]));
+        if let Sym::Unknown(reason) = &value.sym {
+            return Ok(Value::unknown(reason.clone(), to));
+        }
+        let node = self.node_of(&value)?;
+        let node = match node {
+            AstNode::Constant { value, .. } => {
+                let widened = if sign {
+                    (signed(value, from) as u64) & mask(to)
+                } else {
+                    value & mask(from)
+                };
+                AstNode::constant(widened, to / 8)
+            }
+            node if sign => AstNode::Cast {
+                ty: type_name(to).to_string(),
+                target: Box::new(node),
+            },
+            node => cast(node, from, to),
+        };
+        Ok(Value::node(node, to, addresses))
+    }
+
     fn binary_op(&mut self, op: BinaryOp, ins: &DecodedInsn) -> Result<(), NotLifted> {
         let (dest, src, bits) = self.two(ins)?;
         // `xor eax, eax` and `sub eax, eax` are how a register is zeroed.
         if matches!(op, BinaryOp::Xor | BinaryOp::Sub) && dest == src {
             let zero = Value::node(AstNode::constant(0, bits / 8), bits, vec![ins.address]);
+            self.set_flags(Producer::Result(zero.clone()), bits, ins);
             return self.assign(dest, bits, zero, ins);
         }
         let lhs = self.value_of(dest, bits, ins)?;
         let rhs = self.value_of(src, bits, ins)?;
         let result = self.arith(op, lhs, rhs, bits, ins.address)?;
+        self.set_flags(Producer::Result(result.clone()), bits, ins);
         self.assign(dest, bits, result, ins)
+    }
+
+    /// `inc` and `dec`: the operand plus or minus one.
+    fn step_by(&mut self, op: BinaryOp, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let [dest] = ins.operands.as_slice() else {
+            return Err(NotLifted::new(format!(
+                "{} with no operand",
+                mnemonic_name(ins)
+            )));
+        };
+        let bits = width_of(dest)
+            .ok_or_else(|| NotLifted::new(format!("{} with no width", mnemonic_name(ins))))?;
+        let lhs = self.value_of(dest, bits, ins)?;
+        let one = Value::node(constant(1, bits), bits, vec![ins.address]);
+        let result = self.arith(op, lhs, one, bits, ins.address)?;
+        self.set_flags(Producer::Result(result.clone()), bits, ins);
+        self.assign(dest, bits, result, ins)
+    }
+
+    /// `imul dest, src` and `imul dest, src, imm`. The flags it sets say
+    /// only whether the product overflowed, which no condition here reads.
+    fn imul(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, lhs, rhs) = match ins.operands.as_slice() {
+            [dest, src] => (dest, dest, src),
+            [dest, lhs, rhs] => (dest, lhs, rhs),
+            _ => {
+                return Err(NotLifted::new(format!(
+                    "imul with {} operands",
+                    ins.operands.len()
+                )))
+            }
+        };
+        let bits = width_of(dest).ok_or_else(|| NotLifted::new("imul with no width"))?;
+        let lhs = self.value_of(lhs, bits, ins)?;
+        let rhs = self.value_of(rhs, bits, ins)?;
+        let result = self.arith(BinaryOp::Mul, lhs, rhs, bits, ins.address)?;
+        self.state.flags = None;
+        self.assign(dest, bits, result, ins)
+    }
+
+    /// `cmp` and `test`: nothing is written, the flags remember the
+    /// operands.
+    fn compare_op(&mut self, test: bool, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, bits) = self.two(ins)?;
+        let lhs = self.value_of(dest, bits, ins)?.also_from(ins.address);
+        let rhs = self.value_of(src, bits, ins)?.also_from(ins.address);
+        let producer = if test {
+            Producer::Test(lhs, rhs)
+        } else {
+            Producer::Cmp(lhs, rhs)
+        };
+        self.set_flags(producer, bits, ins);
+        Ok(())
+    }
+
+    /// The condition under which the conditional jump `ins` is taken, and
+    /// the addresses it and its flags came from.
+    fn condition(&mut self, ins: &DecodedInsn) -> Result<(AstNode, Vec<u64>), NotLifted> {
+        let at = ins.address;
+        let jcc = mnemonic_name(ins);
+        let Some(flags) = self.state.flags.clone() else {
+            return Err(NotLifted::new(format!(
+                "the {jcc} at {at:#x} reads flags that nothing tracked set"
+            )));
+        };
+        let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
+        let cc = match mnemonic {
+            Mnemonic::Je => Cc::E,
+            Mnemonic::Jne => Cc::Ne,
+            Mnemonic::Jl => Cc::L,
+            Mnemonic::Jge => Cc::Ge,
+            Mnemonic::Jle => Cc::Le,
+            Mnemonic::Jg => Cc::G,
+            Mnemonic::Jb => Cc::B,
+            Mnemonic::Jae => Cc::Ae,
+            Mnemonic::Jbe => Cc::Be,
+            Mnemonic::Ja => Cc::A,
+            Mnemonic::Js => Cc::S,
+            Mnemonic::Jns => Cc::Ns,
+            _ => return Err(NotLifted::new(jcc.clone())),
+        };
+        let bits = flags.bits;
+        let zero = AstNode::constant(0, bits / 8);
+        let unfit = || NotLifted::new(format!("{jcc} after {} at {:#x}", flags.mnemonic, flags.at));
+        let mut addresses = vec![at, flags.at];
+        let node = match &flags.producer {
+            Producer::Cmp(lhs, rhs) => {
+                addresses.extend(lhs.from.iter().chain(&rhs.from).copied());
+                let l = self.node_of(lhs)?;
+                let r = self.node_of(rhs)?;
+                let signed_op = |op| AstNode::binary(l.clone(), op, r.clone());
+                let unsigned_op =
+                    |op| AstNode::binary(unsigned(l.clone(), bits), op, unsigned(r.clone(), bits));
+                match cc {
+                    Cc::E => signed_op(BinaryOp::Equal),
+                    Cc::Ne => signed_op(BinaryOp::NotEqual),
+                    Cc::L => signed_op(BinaryOp::Less),
+                    Cc::Ge => signed_op(BinaryOp::GreaterEqual),
+                    Cc::Le => signed_op(BinaryOp::LessEqual),
+                    Cc::G => signed_op(BinaryOp::Greater),
+                    Cc::B => unsigned_op(BinaryOp::Less),
+                    Cc::Ae => unsigned_op(BinaryOp::GreaterEqual),
+                    Cc::Be => unsigned_op(BinaryOp::LessEqual),
+                    Cc::A => unsigned_op(BinaryOp::Greater),
+                    Cc::S | Cc::Ns => return Err(unfit()),
+                }
+            }
+            Producer::Test(lhs, rhs) => {
+                addresses.extend(lhs.from.iter().chain(&rhs.from).copied());
+                let l = self.node_of(lhs)?;
+                let r = self.node_of(rhs)?;
+                if l == r {
+                    let op = match cc {
+                        Cc::E => BinaryOp::Equal,
+                        Cc::Ne => BinaryOp::NotEqual,
+                        Cc::S | Cc::L => BinaryOp::Less,
+                        Cc::Ns | Cc::Ge => BinaryOp::GreaterEqual,
+                        Cc::Le => BinaryOp::LessEqual,
+                        Cc::G => BinaryOp::Greater,
+                        Cc::B | Cc::Ae | Cc::Be | Cc::A => return Err(unfit()),
+                    };
+                    AstNode::binary(l, op, zero)
+                } else {
+                    let op = match cc {
+                        Cc::E => BinaryOp::Equal,
+                        Cc::Ne => BinaryOp::NotEqual,
+                        _ => return Err(unfit()),
+                    };
+                    AstNode::binary(AstNode::binary(l, BinaryOp::And, r), op, zero)
+                }
+            }
+            Producer::Result(value) => {
+                addresses.extend(value.from.iter().copied());
+                let result = self.node_of(value)?;
+                let op = match cc {
+                    Cc::E => BinaryOp::Equal,
+                    Cc::Ne => BinaryOp::NotEqual,
+                    Cc::S => BinaryOp::Less,
+                    Cc::Ns => BinaryOp::GreaterEqual,
+                    _ => return Err(unfit()),
+                };
+                AstNode::binary(result, op, zero)
+            }
+        };
+        Ok((node, sorted(addresses)))
     }
 
     fn lea(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
@@ -887,41 +2237,25 @@ impl<'a> Lifter<'a> {
             return Err(NotLifted::new("lea of a register"));
         };
         let at = ins.address;
-        let mut address = if base.class == RC_IP {
+        let address = if base.class == RC_IP {
             // The address is the instruction's: what it names is data, and
             // the image may know what.
             let target = ins.memory_address().unwrap_or(disp as u64);
             let node = match self.symbols.pointee(target) {
                 Some(Pointee::String(text)) => AstNode::StringLiteral { text },
-                Some(Pointee::Data(name)) => AstNode::AddressOf {
+                Some(Pointee::Data(name)) if !name.is_empty() => AstNode::AddressOf {
                     target: Box::new(AstNode::var(name)),
                 },
                 Some(Pointee::Function(name)) => AstNode::FunctionName {
                     name,
                     address: target,
                 },
-                None => AstNode::constant(target, bits / 8),
+                Some(Pointee::Data(_)) | None => AstNode::constant(target, bits / 8),
             };
             Value::node(node, bits, vec![at])
-        } else if base.class == RC_GPR {
-            self.read(RegisterId::new(RC_GPR, base.index, bits), at)?
-        } else if base.class == RC_NONE {
-            Value::node(constant(0, bits), bits, vec![at])
         } else {
-            return Err(NotLifted::new("lea with a segment base"));
+            self.address_of(base, index, scale, disp, bits, ins)?
         };
-        if index.class != RC_NONE {
-            let mut scaled = self.read(RegisterId::new(RC_GPR, index.index, bits), at)?;
-            if scale > 1 {
-                let factor = Value::node(constant(i128::from(scale), bits), bits, vec![at]);
-                scaled = self.arith(BinaryOp::Mul, scaled, factor, bits, at)?;
-            }
-            address = self.arith(BinaryOp::Add, address, scaled, bits, at)?;
-        }
-        if disp != 0 && base.class != RC_IP {
-            let offset = Value::node(constant(i128::from(disp), bits), bits, vec![at]);
-            address = self.arith(BinaryOp::Add, address, offset, bits, at)?;
-        }
         self.assign(dest, bits, address.also_from(at), ins)
     }
 
@@ -955,11 +2289,11 @@ impl<'a> Lifter<'a> {
     fn leave(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         // `leave` is `mov rsp, rbp; pop rbp`.
         let frame = self.read(RegisterId::new(RC_GPR, RBP, 64), ins.address)?;
-        self.regs.insert(RSP, frame);
+        self.state.regs.insert(RSP, frame);
         let offset = self.stack_pointer()?;
         let value = self.load(offset, 64, ins.address);
         self.set_stack_pointer(offset + 8, ins.address);
-        self.regs.insert(RBP, value);
+        self.state.regs.insert(RBP, value);
         Ok(())
     }
 
@@ -973,7 +2307,7 @@ impl<'a> Lifter<'a> {
         for &register in self.abi.argument_registers() {
             // An argument register not written in the block is not known to
             // be an argument: the list stops there.
-            let Some(value) = self.regs.get(&register).cloned() else {
+            let Some(value) = self.state.regs.get(&register).cloned() else {
                 break;
             };
             if matches!(value.sym, Sym::Unknown(_)) {
@@ -994,11 +2328,11 @@ impl<'a> Lifter<'a> {
             }),
             args,
         };
-        // The call clobbers the caller-saved registers and anything on the
-        // stack a pointer was taken to.
+        // The call clobbers the caller-saved registers, the flags, and
+        // anything in memory it can reach.
         for index in 0..16 {
             if !self.abi.is_callee_saved(index) {
-                self.regs.insert(
+                self.state.regs.insert(
                     index,
                     Value::unknown(
                         format!("{} after the call at {at:#x}", gpr_name(index, 64)),
@@ -1007,18 +2341,17 @@ impl<'a> Lifter<'a> {
                 );
             }
         }
-        let temp = self.temps.len();
+        self.state.flags = None;
+        let temp = self.temps.len() + self.saved.len();
         self.temps.push(Temp {
             name: format!("v{}", temp + 1),
             bits: None,
         });
-        self.regs
+        let temp = self.temps.len() - 1;
+        self.state
+            .regs
             .insert(RAX, Value::new(Sym::Temp(temp), 64, vec![at]));
-        for &offset in &self.address_taken {
-            if let Some(slot) = self.stack.get_mut(&offset) {
-                slot.value = Value::node(AstNode::var(local_name(offset)), slot.bits, vec![at]);
-            }
-        }
+        self.memory_written("the call", at);
         self.statements.push(Stmt::Call {
             temp,
             node,
@@ -1032,7 +2365,7 @@ impl<'a> Lifter<'a> {
             return Err(NotLifted::new("the stack is not balanced at ret"));
         }
         let at = ins.address;
-        let value = match self.regs.get(&RAX).cloned() {
+        let value = match self.state.regs.get(&RAX).cloned() {
             None => None,
             Some(value) => {
                 let bits = match value.sym {
@@ -1045,7 +2378,22 @@ impl<'a> Lifter<'a> {
         let mut addresses = vec![at];
         if let Some(value) = &value {
             addresses.extend(value.from.iter().copied());
-            self.return_bits = Some(value.bits);
+        }
+        let bits = value.as_ref().map(|value| value.bits);
+        match self.returns {
+            None => self.returns = Some(bits),
+            Some(known) if known == bits => {}
+            Some(Some(known)) => {
+                return Err(NotLifted::new(match bits {
+                    Some(bits) => format!("returns {known} bits at one ret and {bits} at another"),
+                    None => "returns a value at one ret and nothing at another".to_string(),
+                }))
+            }
+            Some(None) => {
+                return Err(NotLifted::new(
+                    "returns a value at one ret and nothing at another",
+                ))
+            }
         }
         self.statements.push(Stmt::Return {
             value,
@@ -1056,80 +2404,101 @@ impl<'a> Lifter<'a> {
 
     // ---- the function -----------------------------------------------------
 
-    fn finish(
-        mut self,
-        name: &str,
-        entry: u64,
-        instructions: &[DecodedInsn],
-    ) -> Result<LiftedFunction, NotLifted> {
-        // Resolve every statement to a node, keeping the stores to the slots
-        // that became variables. Resolving a statement can take the address
-        // of a slot — a pointer into the frame reaching a call or the return
-        // — which makes earlier stores to it statements too, so this runs
-        // until no more addresses are taken.
-        let statements = std::mem::take(&mut self.statements);
-        let resolved = loop {
+    /// Resolve the statements of every chain to nodes: the stores to the
+    /// slots that are variables kept, the call results inlined where they
+    /// are used once by the next statement and declared where they are
+    /// used more.
+    fn resolve_all(
+        &mut self,
+        chains: &[Chain],
+        lifted: Vec<(Vec<Stmt>, Terminator)>,
+    ) -> Result<Vec<Node>, NotLifted> {
+        // Resolving a statement can take the address of a slot — a pointer
+        // into the frame reaching a call or the return — which makes the
+        // stores to it statements too, so this runs until no more
+        // addresses are taken.
+        let resolved: Vec<Vec<Resolved>> = loop {
             let taken = self.address_taken.len();
-            let resolved = self.resolve(&statements)?;
+            let resolved = lifted
+                .iter()
+                .map(|(statements, _)| self.resolve(statements))
+                .collect::<Result<Vec<_>, _>>()?;
             if self.address_taken.len() == taken {
                 break resolved;
             }
         };
 
-        // A call result used once, by the very next statement, is inlined
-        // there; one used elsewhere becomes a declared temporary; one never
-        // used leaves the call as a statement of its own.
-        let mut body: Vec<Statement> = Vec::new();
-        let mut temps: Vec<Variable> = Vec::new();
-        let mut pending: Option<(usize, AstNode, Vec<u64>)> = None;
-        for (i, (temp, node, addresses)) in resolved.iter().enumerate() {
-            let mut node = node.clone();
-            let mut addresses = addresses.clone();
-            if let Some((temp, call, call_addresses)) = pending.take() {
-                let name = self.temps[temp].name.clone();
-                if node.reads_var(&name) {
-                    node = node.substitute(&name, &call);
-                    addresses.extend(call_addresses);
-                    addresses = sorted(addresses);
-                } else {
-                    unreachable!("a pending call is only kept when the next statement reads it");
-                }
-            }
-            match temp {
-                Some(temp) => {
-                    let temp = *temp;
+        let all: Vec<&Resolved> = resolved.iter().flatten().collect();
+        let mut declared: Vec<Variable> = Vec::new();
+        let mut nodes = Vec::new();
+        for ((chain, statements), (_, terminator)) in chains.iter().zip(&resolved).zip(&lifted) {
+            let mut body: Vec<Statement> = Vec::new();
+            let mut pending: Option<(usize, AstNode, Vec<u64>)> = None;
+            for (i, (temp, node, addresses)) in statements.iter().enumerate() {
+                let mut node = node.clone();
+                let mut addresses = addresses.clone();
+                if let Some((temp, call, call_addresses)) = pending.take() {
                     let name = self.temps[temp].name.clone();
-                    let uses = resolved
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, (_, other, _))| *j != i && other.reads_var(&name))
-                        .count();
-                    let next_reads = resolved
-                        .get(i + 1)
-                        .is_some_and(|(_, next, _)| next.reads_var(&name));
-                    if uses == 0 {
-                        body.push(Statement { node, addresses });
-                    } else if uses == 1 && next_reads {
-                        pending = Some((temp, node, addresses));
+                    if node.reads_var(&name) {
+                        node = node.substitute(&name, &call);
+                        addresses.extend(call_addresses);
+                        addresses = sorted(addresses);
                     } else {
-                        let bits = self.temps[temp].bits.unwrap_or(64);
-                        temps.push(Variable {
-                            ty: type_name(bits).to_string(),
-                            name: name.clone(),
-                        });
-                        body.push(Statement {
-                            node: AstNode::Assign {
-                                lhs: Box::new(AstNode::var(name)),
-                                rhs: Box::new(node),
-                            },
-                            addresses,
-                        });
+                        unreachable!(
+                            "a pending call is only kept when the next statement reads it"
+                        );
                     }
                 }
-                None => body.push(Statement { node, addresses }),
+                match temp {
+                    Some(temp) => {
+                        let temp = *temp;
+                        let name = self.temps[temp].name.clone();
+                        let uses = all
+                            .iter()
+                            .filter(|(_, other, _)| other.reads_var(&name))
+                            .count();
+                        let next_reads = statements
+                            .get(i + 1)
+                            .is_some_and(|(_, next, _)| next.reads_var(&name));
+                        if uses == 0 {
+                            body.push(Statement::plain(node, addresses));
+                        } else if uses == 1 && next_reads {
+                            pending = Some((temp, node, addresses));
+                        } else {
+                            let bits = self.temps[temp].bits.unwrap_or(64);
+                            declared.push(Variable {
+                                ty: type_name(bits).to_string(),
+                                name: name.clone(),
+                            });
+                            body.push(Statement::plain(
+                                AstNode::Assign {
+                                    lhs: Box::new(AstNode::var(name)),
+                                    rhs: Box::new(node),
+                                },
+                                addresses,
+                            ));
+                        }
+                    }
+                    None => body.push(Statement::plain(node, addresses)),
+                }
             }
+            nodes.push(Node {
+                address: chain.address,
+                statements: body,
+                terminator: terminator.clone(),
+            });
         }
+        self.declared = declared;
+        Ok(nodes)
+    }
 
+    fn finish(
+        self,
+        name: &str,
+        entry: u64,
+        chains: &[Chain],
+        body: Vec<Statement>,
+    ) -> Result<LiftedFunction, NotLifted> {
         let params = (0..self.params.keys().next_back().map_or(0, |last| last + 1))
             .map(|position| Variable {
                 ty: self
@@ -1141,7 +2510,9 @@ impl<'a> Lifter<'a> {
             })
             .collect();
 
-        // The locals nearest the frame first, then the temporaries.
+        // The locals nearest the frame first, then the registers that
+        // became variables, then the temporaries.
+        let mentioned = |name: &str| body.iter().any(|statement| statement.mentions(name));
         let mut locals: Vec<Variable> = self
             .locals
             .iter()
@@ -1151,28 +2522,61 @@ impl<'a> Lifter<'a> {
                 name: local_name(offset),
             })
             .collect();
-        locals.extend(temps);
+        let mut merged: Vec<&Merged> = self.merged.values().collect();
+        merged.sort_by(|a, b| a.name.cmp(&b.name));
+        locals.extend(
+            merged
+                .into_iter()
+                .filter(|merged| mentioned(&merged.name))
+                .map(|merged| Variable {
+                    ty: type_name(merged.bits).to_string(),
+                    name: merged.name.clone(),
+                }),
+        );
+        let mut temporaries: Vec<Variable> = self.declared.clone();
+        temporaries.extend(self.saved.iter().cloned());
+        temporaries
+            .sort_by_key(|variable| variable.name[1..].parse::<usize>().unwrap_or(usize::MAX));
+        locals.extend(temporaries);
 
-        let claimed: BTreeSet<u64> = body
-            .iter()
-            .flat_map(|s| s.addresses.iter().copied())
-            .collect();
-        let frame = instructions
-            .iter()
-            .map(|ins| ins.address)
-            .filter(|address| !claimed.contains(address))
-            .collect();
+        let mut claimed: BTreeSet<u64> = BTreeSet::new();
+        for statement in &body {
+            statement.claimed(&mut claimed);
+        }
+        let frame = sorted(
+            chains
+                .iter()
+                .flat_map(|chain| chain.instructions.iter().map(|ins| ins.address))
+                .filter(|address| !claimed.contains(address)),
+        );
 
         Ok(LiftedFunction {
             name: name.to_string(),
             address: entry,
-            return_type: self.return_bits.map_or("void", type_name).to_string(),
+            return_type: self.returns.flatten().map_or("void", type_name).to_string(),
             params,
             locals,
             body,
             frame,
         })
     }
+}
+
+/// A condition code, as the conditional jumps spell it.
+#[derive(Debug, Clone, Copy)]
+enum Cc {
+    E,
+    Ne,
+    L,
+    Ge,
+    Le,
+    G,
+    B,
+    Ae,
+    Be,
+    A,
+    S,
+    Ns,
 }
 
 /// A statement resolved to a node: the temporary it defines, if it is a
@@ -1197,10 +2601,10 @@ impl Lifter<'_> {
                     value,
                     addresses,
                 } => {
-                    if !self.address_taken.contains(offset) {
-                        if self.address_taken.iter().any(|&taken| {
-                            taken < offset + i64::from(bits / 8)
-                                && *offset < taken + i64::from(self.locals[&taken] / 8)
+                    if !self.locals.contains_key(offset) {
+                        if self.locals.iter().any(|(&local, &width)| {
+                            local < offset + i64::from(bits / 8)
+                                && *offset < local + i64::from(width / 8)
                         }) {
                             return Err(NotLifted::new(format!(
                                 "a partial write to {}",
@@ -1209,10 +2613,21 @@ impl Lifter<'_> {
                         }
                         continue;
                     }
-                    self.locals.entry(*offset).or_insert(*bits);
                     let rhs = self.node_of(value)?;
                     let node = AstNode::Assign {
                         lhs: Box::new(AstNode::var(local_name(*offset))),
+                        rhs: Box::new(rhs),
+                    };
+                    resolved.push((None, node, addresses.clone()));
+                }
+                Stmt::Assign {
+                    lhs,
+                    value,
+                    addresses,
+                } => {
+                    let rhs = self.node_of(value)?;
+                    let node = AstNode::Assign {
+                        lhs: Box::new(lhs.clone()),
                         rhs: Box::new(rhs),
                     };
                     resolved.push((None, node, addresses.clone()));
@@ -1269,6 +2684,18 @@ fn cast(node: AstNode, from: u32, to: u32) -> AstNode {
             ty: unsigned_type_name(from).to_string(),
             target: Box::new(node),
         }),
+    }
+}
+
+/// `node` as the unsigned type of `bits`, for an unsigned comparison; a
+/// constant is left as it is.
+fn unsigned(node: AstNode, bits: u32) -> AstNode {
+    if matches!(node, AstNode::Constant { .. }) {
+        return node;
+    }
+    AstNode::Cast {
+        ty: unsigned_type_name(bits).to_string(),
+        target: Box::new(node),
     }
 }
 
@@ -1511,6 +2938,49 @@ mod tests {
     }
 
     #[test]
+    fn inc_dec_and_imul_are_arithmetic_too() {
+        // mov eax, edi; inc eax; ret
+        assert_eq!(
+            c(&[0x89, 0xf8, 0xff, 0xc0, 0xc3]),
+            "int f(int a)\n{\n  return a + 1;\n}"
+        );
+        // mov eax, edi; dec eax; ret
+        assert_eq!(
+            c(&[0x89, 0xf8, 0xff, 0xc8, 0xc3]),
+            "int f(int a)\n{\n  return a - 1;\n}"
+        );
+        // mov eax, edi; imul eax, esi; ret
+        assert_eq!(
+            c(&[0x89, 0xf8, 0x0f, 0xaf, 0xc6, 0xc3]),
+            "int f(int a, int b)\n{\n  return a * b;\n}"
+        );
+        // imul eax, edi, 3; ret
+        assert_eq!(
+            c(&[0x6b, 0xc7, 0x03, 0xc3]),
+            "int f(int a)\n{\n  return a * 3;\n}"
+        );
+    }
+
+    #[test]
+    fn sign_and_zero_extensions_are_casts() {
+        // mov eax, edi; cdqe; ret
+        assert_eq!(
+            c(&[0x89, 0xf8, 0x48, 0x98, 0xc3]),
+            "long f(int a)\n{\n  return (long)a;\n}"
+        );
+        // movsx eax, byte [rdi]; ret
+        assert_eq!(
+            c(&[0x0f, 0xbe, 0x07, 0xc3]),
+            "int f(long a)\n{\n  return (int)*(char *)a;\n}"
+        );
+        // movzx eax, byte [rdi]; ret
+        assert_eq!(
+            c(&[0x0f, 0xb6, 0x07, 0xc3]),
+            "int f(long a)\n{\n  return (unsigned int)(unsigned char)*(char *)a;\n}"
+        );
+    }
+
+    #[test]
     fn lea_of_two_registers_is_their_sum_and_a_displacement_is_added() {
         // lea eax, [rdi+rsi]; ret
         assert_eq!(
@@ -1601,6 +3071,21 @@ mod tests {
     }
 
     #[test]
+    fn a_value_copied_from_a_variable_before_it_changes_is_saved() {
+        // mov eax, [rsp-8]; mov [rsp-16], eax; mov dword [rsp-8], 5;
+        // mov eax, [rsp-16]; ret: the copy in the second slot is the old
+        // value, which the store to the first would otherwise rewrite.
+        let code = [
+            0x8b, 0x44, 0x24, 0xf8, 0x89, 0x44, 0x24, 0xf0, 0xc7, 0x44, 0x24, 0xf8, 5, 0, 0, 0,
+            0x8b, 0x44, 0x24, 0xf0, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "int f(void)\n{\n  int local_8;\n  int v1;\n\n  v1 = local_8;\n  local_8 = 5;\n  return v1;\n}"
+        );
+    }
+
+    #[test]
     fn a_push_and_a_pop_move_a_value_through_the_stack() {
         // push rdi; pop rax; ret
         assert_eq!(c(&[0x57, 0x58, 0xc3]), "long f(long a)\n{\n  return a;\n}");
@@ -1680,6 +3165,17 @@ mod tests {
     }
 
     #[test]
+    fn a_value_read_from_memory_is_forgotten_across_a_call() {
+        // mov ebx, [rdi]; call f; mov eax, ebx; ret: rbx survives the call,
+        // but what it was loaded from may not.
+        let code = [0x8b, 0x1f, 0xe8, 0xf9, 0x0f, 0x00, 0x00, 0x89, 0xd8, 0xc3];
+        assert_eq!(
+            refused(&code),
+            "not lifted yet: ebx was read from memory before the call at 0x1002"
+        );
+    }
+
+    #[test]
     fn a_function_that_never_writes_rax_returns_void() {
         // nop; ret
         assert_eq!(c(&[0x90, 0xc3]), "void f(void)\n{\n  return;\n}");
@@ -1714,12 +3210,12 @@ mod tests {
     }
 
     #[test]
-    fn flag_setters_with_no_consumer_are_dropped() {
+    fn flag_setters_with_no_consumer_leave_no_statement() {
         // mov eax, edi; cmp eax, esi; test eax, eax; ret. The cmp reads esi,
-        // but a dropped instruction makes no parameter.
+        // which makes `b` a parameter even though nothing reads the flags.
         assert_eq!(
             c(&[0x89, 0xf8, 0x39, 0xf0, 0x85, 0xc0, 0xc3]),
-            "int f(int a)\n{\n  return a;\n}"
+            "int f(int a, int b)\n{\n  return a;\n}"
         );
     }
 
@@ -1734,13 +3230,10 @@ mod tests {
 
     #[test]
     fn an_instruction_outside_the_set_is_refused_by_name() {
-        // mov eax, edi; cdqe; ret
-        assert_eq!(
-            refused(&[0x89, 0xf8, 0x48, 0x98, 0xc3]),
-            "not lifted yet: cdqe"
-        );
-        // imul eax, esi
-        assert_eq!(refused(&[0x0f, 0xaf, 0xc6, 0xc3]), "not lifted yet: imul");
+        // mov eax, edi; cwde; ret
+        assert_eq!(refused(&[0x89, 0xf8, 0x98, 0xc3]), "not lifted yet: cwde");
+        // div esi; ret
+        assert_eq!(refused(&[0xf7, 0xf6, 0xc3]), "not lifted yet: div");
     }
 
     #[test]
@@ -1754,16 +3247,30 @@ mod tests {
     }
 
     #[test]
-    fn a_load_through_a_pointer_register_is_refused() {
+    fn a_load_through_a_pointer_is_a_typed_dereference() {
         // mov eax, [rdi]; ret
         assert_eq!(
-            refused(&[0x8b, 0x07, 0xc3]),
-            "not lifted yet: a load from rdi"
+            c(&[0x8b, 0x07, 0xc3]),
+            "int f(long a)\n{\n  return *(int *)a;\n}"
         );
-        // mov eax, [rip+0x10]; ret
+        // mov eax, [rip+0x10]; ret: an address the image does not name.
         assert_eq!(
-            refused(&[0x8b, 0x05, 0x10, 0, 0, 0, 0xc3]),
-            "not lifted yet: a load from memory at 0x1016"
+            c(&[0x8b, 0x05, 0x10, 0, 0, 0, 0xc3]),
+            "int f(void)\n{\n  return *(int *)0x1016;\n}"
+        );
+        // mov eax, [rdi+rsi*4+8]; ret
+        assert_eq!(
+            c(&[0x8b, 0x44, 0xb7, 0x08, 0xc3]),
+            "int f(long a, long b)\n{\n  return *(int *)((a + (b * 4)) + 8);\n}"
+        );
+    }
+
+    #[test]
+    fn a_store_through_a_pointer_is_a_statement() {
+        // mov [rdi], esi; ret
+        assert_eq!(
+            c(&[0x89, 0x37, 0xc3]),
+            "void f(long a, int b)\n{\n  *(int *)a = b;\n  return;\n}"
         );
     }
 
@@ -1865,12 +3372,12 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_ends_the_chain_and_is_refused_at_its_address() {
-        // The sample's sum_to, which has a loop: endbr64; push rbp;
-        // mov rbp, rsp; mov [rbp-0x14], edi; mov qword [rbp-8], 0;
-        // mov dword [rbp-0xc], 1; jmp +0xd; <the body>; <the test>;
-        // jle <the body>; mov rax, [rbp-8]; pop rbp; ret. The entry block
-        // ends in the jmp, at 0x101a.
+    fn the_samples_sum_to_is_a_counted_loop() {
+        // The sample's sum_to: endbr64; push rbp; mov rbp, rsp;
+        // mov [rbp-0x14], edi; mov qword [rbp-8], 0; mov dword [rbp-0xc], 1;
+        // jmp .test; .body: mov eax, [rbp-0xc]; cdqe; add [rbp-8], rax;
+        // add dword [rbp-0xc], 1; .test: mov eax, [rbp-0xc]; cmp eax,
+        // [rbp-0x14]; jle .body; mov rax, [rbp-8]; pop rbp; ret.
         let sum_to = [
             0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xec, 0x48, 0xc7, 0x45,
             0xf8, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x45, 0xf4, 0x01, 0x00, 0x00, 0x00, 0xeb, 0x0d,
@@ -1879,39 +3386,176 @@ mod tests {
         ];
         let (cfg, lifted) = lift_cfg(&sum_to, Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 4);
+        let function = lifted.expect("the loop lifts");
         assert_eq!(
-            lifted.expect_err("a loop is refused").to_string(),
-            "not lifted yet: branches at 0x101a"
+            emit_function(&function).text(),
+            "long f(int a)\n\
+             {\n\
+             \x20 long local_10;\n\
+             \x20 int local_14;\n\
+             \n\
+             \x20 local_10 = 0;\n\
+             \x20 for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n\
+             \x20   local_10 = local_10 + (long)local_14;\n\
+             \x20 }\n\
+             \x20 return local_10;\n\
+             }"
         );
-
-        // A conditional branch is a branch: mov eax, edi; test eax, eax;
-        // jz +0 (to the next instruction); ret.
-        let code = [0x89, 0xf8, 0x85, 0xc0, 0x74, 0x00, 0xc3];
-        let (_, lifted) = lift_cfg(&code, Bitness::Bits64);
+        let lp = &function.body[1];
+        assert!(matches!(lp.kind, StatementKind::For { .. }));
         assert_eq!(
-            lifted.expect_err("a branch is refused").to_string(),
-            "not lifted yet: branches at 0x1004"
+            lp.addresses,
+            vec![0x1008, 0x1013, 0x101a, 0x1025, 0x1029, 0x102c, 0x102f],
+            "the for line came from the init, the jump in, the step, the compare and the branch"
         );
-
-        // So is a jump to the next instruction: jmp +0; ret.
-        let (cfg, lifted) = lift_cfg(&[0xeb, 0x00, 0xc3], Bitness::Bits64);
-        assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(
-            lifted.expect_err("a jump is refused").to_string(),
-            "not lifted yet: branches at 0x1000"
+            function.frame,
+            vec![0x1000, 0x1004, 0x1005, 0x1035],
+            "endbr64, the push, the mov rbp and the pop belong to no statement"
         );
     }
 
     #[test]
-    fn a_block_another_block_also_reaches_is_a_join_and_is_refused() {
-        // call f; jmp -2 (to itself). The entry block falls through into the
-        // second, which also reaches itself: two predecessors, a join.
-        let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xeb, 0xfe];
-        let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
+    fn a_jump_or_a_branch_to_the_next_instruction_is_straight_line_code() {
+        // mov eax, edi; test eax, eax; jz +0; ret
+        let (_, lifted) = lift_cfg(&[0x89, 0xf8, 0x85, 0xc0, 0x74, 0x00, 0xc3], Bitness::Bits64);
+        assert_eq!(
+            emit_function(&lifted.expect("lifts")).text(),
+            "int f(int a)\n{\n  return a;\n}"
+        );
+        // jmp +0; ret
+        let (cfg, lifted) = lift_cfg(&[0xeb, 0x00, 0xc3], Bitness::Bits64);
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(
-            lifted.expect_err("a join is refused").to_string(),
-            "not lifted yet: joins at 0x1005"
+            emit_function(&lifted.expect("lifts")).text(),
+            "void f(void)\n{\n  return;\n}"
+        );
+    }
+
+    #[test]
+    fn a_diamond_merges_a_register_into_a_variable_named_after_it() {
+        // cmp edi, 0; jle .else; mov eax, 1; jmp .join; .else: mov eax, 2;
+        // .join: ret. The register differs where the paths join, so it is
+        // declared and assigned on each.
+        let code = [
+            0x83, 0xff, 0x00, 0x7e, 0x07, 0xb8, 1, 0, 0, 0, 0xeb, 0x05, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let function = lift(&code).expect("lifts");
+        assert_eq!(
+            emit_function(&function).text(),
+            "int f(int a)\n\
+             {\n\
+             \x20 int eax;\n\
+             \n\
+             \x20 if (a <= 0) {\n\
+             \x20   eax = 2;\n\
+             \x20 } else {\n\
+             \x20   eax = 1;\n\
+             \x20 }\n\
+             \x20 return eax;\n\
+             }"
+        );
+        let branch = &function.body[0];
+        assert_eq!(
+            branch.addresses,
+            vec![0x1000, 0x1003],
+            "the cmp and the jle"
+        );
+        let StatementKind::If { then_part, .. } = &branch.kind else {
+            panic!("an if");
+        };
+        assert_eq!(then_part[0].addresses, vec![0x100c], "the mov eax, 2");
+
+        // The same with an unsigned condition: cmp edi, esi; jb .else.
+        let code = [
+            0x39, 0xf7, 0x72, 0x07, 0xb8, 1, 0, 0, 0, 0xeb, 0x05, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        assert!(
+            c(&code).contains("if ((unsigned int)a < (unsigned int)b) {"),
+            "{}",
+            c(&code)
+        );
+    }
+
+    #[test]
+    fn an_early_return_is_a_guard() {
+        // test edi, edi; jne .rest; mov eax, 0; ret; .rest: mov eax, edi;
+        // add eax, 1; ret
+        let code = [
+            0x85, 0xff, 0x75, 0x06, 0xb8, 0, 0, 0, 0, 0xc3, 0x89, 0xf8, 0x83, 0xc0, 0x01, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "int f(int a)\n{\n  if (a != 0) {\n    return a + 1;\n  }\n  return 0;\n}"
+        );
+    }
+
+    #[test]
+    fn a_loop_in_registers_is_a_do_while_over_variables() {
+        // xor eax, eax; .top: add eax, edi; sub edi, 1; jne .top; ret.
+        // Both registers change round the loop, so both are variables;
+        // the one the entry never wrote is the parameter there; the branch
+        // reads the flags of the sub, which is the variable's new value.
+        let code = [0x31, 0xc0, 0x01, 0xf8, 0x83, 0xef, 0x01, 0x75, 0xf9, 0xc3];
+        assert_eq!(
+            c(&code),
+            "int f(int a)\n\
+             {\n\
+             \x20 int eax;\n\
+             \x20 int edi;\n\
+             \n\
+             \x20 eax = 0;\n\
+             \x20 edi = a;\n\
+             \x20 do {\n\
+             \x20   eax = eax + edi;\n\
+             \x20   edi = edi - 1;\n\
+             \x20 } while (edi != 0);\n\
+             \x20 return eax;\n\
+             }"
+        );
+    }
+
+    #[test]
+    fn a_loop_with_two_entries_is_irreducible_and_refused() {
+        // test edi, edi; je .b; .a: jmp .b; .b: test esi, esi; jne .a; ret.
+        // .a and .b each reach the other and both are entered from the top.
+        let code = [
+            0x85, 0xff, 0x74, 0x02, 0xeb, 0x00, 0x85, 0xf6, 0x75, 0xfa, 0xc3,
+        ];
+        assert_eq!(
+            refused(&code),
+            "not lifted yet: irreducible control flow at 0x1006"
+        );
+    }
+
+    #[test]
+    fn a_function_that_never_returns_is_an_endless_loop() {
+        // call f; .top: jmp .top
+        let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xeb, 0xfe];
+        assert_eq!(c(&code), "void f(void)\n{\n  f();\n  while (1) {\n  }\n}");
+    }
+
+    #[test]
+    fn a_stack_pointer_that_differs_between_paths_is_refused() {
+        // test edi, edi; je .ret; push rbp; .ret: ret
+        assert_eq!(
+            refused(&[0x85, 0xff, 0x74, 0x01, 0x55, 0xc3]),
+            "not lifted yet: the stack pointer differs at 0x1005"
+        );
+    }
+
+    #[test]
+    fn a_branch_whose_flags_are_not_tracked_is_refused() {
+        // mov eax, edi; je .ret; mov eax, 1; .ret: ret
+        assert_eq!(
+            refused(&[0x89, 0xf8, 0x74, 0x05, 0xb8, 1, 0, 0, 0, 0xc3]),
+            "not lifted yet: the je at 0x1002 reads flags that nothing tracked set"
+        );
+        // cmp edi, 0; js .ret; mov eax, 1; .ret: ret: the sign of a
+        // subtraction is not a relation between the operands.
+        assert_eq!(
+            refused(&[0x83, 0xff, 0x00, 0x78, 0x05, 0xb8, 1, 0, 0, 0, 0xc3]),
+            "not lifted yet: js after cmp at 0x1000"
         );
     }
 
@@ -1980,6 +3624,16 @@ mod tests {
         assert_eq!(
             c(&[0x48, 0x8d, 0x05, 0x00, 0x10, 0x00, 0x00, 0xc3]),
             "long f(void)\n{\n  return 0x2007;\n}"
+        );
+    }
+
+    #[test]
+    fn a_load_from_named_data_is_the_name() {
+        // mov eax, [rip+0x2001]; ret: the next instruction is at 0x1006, so
+        // this loads 0x3007, the data `counter`.
+        assert_eq!(
+            c_with_image(&[0x8b, 0x05, 0x01, 0x20, 0x00, 0x00, 0xc3]),
+            "int f(void)\n{\n  return counter;\n}"
         );
     }
 

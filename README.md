@@ -4,7 +4,7 @@
 
 AdmiralGrace is an open-source disassembler and decompiler utility written in Rust. It is named in honor of Admiral Grace Hopper, a pioneer of computer programming and compiler development.
 
-The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool that reads decompilation output, and the beginnings of a native disassembly and decompilation engine. Today the workbench and the CLI read two kinds of analysis: an indexed decompilation corpus, and a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler. The native binary-to-pseudocode pipeline has its first slices: a function of straight-line x86-64 code — blocks joined only by fall-through, so one that calls but does not branch — is lifted and printed as C.
+The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool that reads decompilation output, and the beginnings of a native disassembly and decompilation engine. Today the workbench and the CLI read two kinds of analysis: an indexed decompilation corpus, and a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler. The native binary-to-pseudocode pipeline has its first slices: a function of x86-64 code — its calls, branches and loops — is lifted and printed as C, with `if`/`else`, `while`, `for` and early `return`.
 
 ## Screenshots
 
@@ -32,7 +32,7 @@ The Strings tab lists the text the image holds, with the functions that use it, 
 
 - `ag-corpus` reads an indexed decompilation corpus and a kuna project export, and overlays Objective-C method names.
 - `ag-cli` builds the `ag` command-line tool: it reports on either source and carries its own manual and an agent skill.
-- `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86 decoder (32-bit and 64-bit, the width read from the image's language), the control-flow graph builder, the first slices of the lifter (straight-line x86-64 code, calls included, to the AST), and the C emitter.
+- `ag-engine` holds the program image loader (ELF, PE, COFF and Mach-O, through the kuna-analysis crate), the native x86 decoder (32-bit and 64-bit, the width read from the image's language), the control-flow graph builder, the first slices of the lifter (x86-64 code with calls, branches and loops, to the AST, structured with dominators and back edges), and the C emitter.
 - `ag-image` reads a program image through the engine: its sections, its symbols, the bytes of the file, the disassembly of a function, its pseudocode, the calls between the functions, and the strings of the data sections.
 - `ag-ui` builds the `ag-ui` desktop analysis workbench, an [Iced](https://iced.rs) application that reads both sources through the same data layer the CLI uses and asks the kuna CLI for what an export does not carry.
 
@@ -84,7 +84,7 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
-# The pseudocode of one function, when it is straight-line code
+# The pseudocode of one function, as C
 cargo run --bin ag -- image ./sample.elf pseudocode main
 
 # The control-flow graph of one function
@@ -107,7 +107,7 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
 
-`pseudocode` lifts one function to C, when it is straight-line x86-64 code: blocks joined only by fall-through, which is what a function that calls but does not branch is, since the control-flow walk ends a block at every call. The sample's `add` reads `int add(int a, int b) { return b + a; }`, with the parameters named by position, and its `main` reads as C with its three calls — `add`, `sum_to` and `printf` — the pointer to the format string printed as the literal `"%ld\n"`, the string the image knows there. A function the lifter refuses — one that branches or loops, or with an instruction it does not know yet — prints `not lifted yet` and the reason, with exit code 1.
+`pseudocode` lifts one function to C through its whole control-flow graph: blocks joined by fall-through are one node, and the graph is structured with its dominators and back edges into `if`/`else`, `while`, `do`/`while`, `for`, `break`, `continue` and early `return`, with `goto` only where nothing fits. The symbolic state is split at a branch and merged at a join — a slot or register that differs between the paths becomes a declared variable assigned on each — and a condition comes from the `cmp` or `test` that set the flags the branch reads. The sample's `add` reads `int add(int a, int b) { return b + a; }`, with the parameters named by position; its `main` reads as C with its three calls — `add`, `sum_to` and `printf` — the pointer to the format string printed as the literal `"%ld\n"`, the string the image knows there; and its `sum_to` reads as `for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) { local_10 = local_10 + (long)local_14; }` with its accumulator returned. A function the lifter refuses — one with an instruction it does not know yet, a branch whose flags it did not see set, or a loop with two entries — prints `not lifted yet` and the reason, with exit code 1.
 
 `cfg` reports the control-flow graph of a function: its blocks, and the edges between them, each edge marked fall-through or taken. `calls` reports who calls whom: with a function, what it calls and who calls it; without one, the whole call graph.
 
@@ -173,7 +173,7 @@ The workbench opens a program image as well:
 cargo run --bin ag-ui -- --binary ./sample.elf
 ```
 
-That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's language says. The Pseudocode tab holds the engine's own lifting of the selected function when it is straight-line x86-64 code — the sample's `add` reads as C, and so does its `main` with its three calls, and the lines are numbered and clickable like the kuna provider's, so a click on `return b + a;` moves the listing to the add and a click on the `printf` line to the call. A function the lifter refuses — one that branches, such as the sample's `sum_to` — leaves the tab empty, and the Problems panel says why.
+That is the native path: the image is parsed by the engine's own loader, the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's language says. The Pseudocode tab holds the engine's own lifting of the selected function — the sample's `add` reads as C, so does its `main` with its three calls, and its `sum_to` reads as a `for` loop — and the lines are numbered and clickable like the kuna provider's, so a click on `return b + a;` moves the listing to the add, a click on the `printf` line to the call, and a click on the `for` line to the loop's compare. A function the lifter refuses — such as the sample's `_init`, which calls through a register — leaves the tab empty, and the Problems panel says why.
 
 Who calls what is only known once the whole program has been read, so that is worked out in the background when the image opens: the References tab says `indexing…` until the callers are known.
 
@@ -185,7 +185,7 @@ The Graph tab draws the control-flow graph of the selected function: one box for
 
 ## Development status
 
-The engine is under active development. The x86 decoder (32-bit and 64-bit) and the control-flow graph builder are in place with tests; the lifter and the C emitter have their first two slices — one block of straight-line x86-64 code, then the chain of blocks a function that calls is cut into — and the structuring passes, which would read a branch, are still scaffolding. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. The x86 decoder (32-bit and 64-bit) and the control-flow graph builder are in place with tests; the lifter and the C emitter have their first three slices — one block of straight-line x86-64 code, the chain of blocks a function that calls is cut into, and the structuring of branches and loops into `if`/`else`, `while` and `for` with the state merged at every join — and what the lifter cannot read it refuses with a reason rather than guessing. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
 ## License
 

@@ -9,13 +9,14 @@ pub mod lift;
 pub mod pipeline;
 pub mod procedure;
 pub mod register;
+pub mod structure;
 
 pub use arch::Bitness;
 pub use ast::AstNode;
 pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg};
 pub use emit::{Line, Pseudocode};
 pub use image::{Image, Section};
-pub use lift::{Abi, LiftedFunction, NotLifted};
+pub use lift::{Abi, LiftedFunction, NotLifted, Statement, StatementKind};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use procedure::FunctionSignature;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};

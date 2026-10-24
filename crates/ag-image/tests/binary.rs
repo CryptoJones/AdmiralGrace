@@ -1083,31 +1083,90 @@ fn the_main_of_the_sample_elf_lifts_through_its_calls() {
 }
 
 #[test]
-fn sum_to_is_not_lifted_because_it_branches() {
+fn sum_to_lifts_as_a_counted_loop() {
     let binary = sample();
 
-    // The entry block of sum_to ends in the jump into its loop.
-    let error = binary.pseudocode(0x1161).expect_err("sum_to is refused");
-    assert_eq!(error.to_string(), "not lifted yet: branches at 0x117b");
+    // The loop's counter and accumulator are the slots the loop changes,
+    // so they are the function's variables; the counter's init, test and
+    // step fold into a for.
+    let pseudocode = binary.pseudocode(0x1161).expect("sum_to lifts");
+    assert_eq!(
+        pseudocode.text(),
+        "long sum_to(int a)\n\
+         {\n\
+         \x20 long local_10;\n\
+         \x20 int local_14;\n\
+         \n\
+         \x20 local_10 = 0;\n\
+         \x20 for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n\
+         \x20   local_10 = local_10 + (long)local_14;\n\
+         \x20 }\n\
+         \x20 return local_10;\n\
+         }"
+    );
 
-    // The refusal is kept too.
-    let again = binary
-        .pseudocode(0x1161)
-        .expect_err("sum_to is still refused");
-    assert_eq!(again, error);
+    // The for line came from the counter's store, the jump into the loop,
+    // the step, the load, the compare and the branch.
+    assert_eq!(
+        pseudocode.lines[6].addresses,
+        vec![0x1169, 0x1174, 0x117b, 0x1186, 0x118a, 0x118d, 0x1190]
+    );
+
+    // The answer is kept.
+    let again = binary.pseudocode(0x1161).expect("sum_to still lifts");
+    assert!(Arc::ptr_eq(&pseudocode, &again));
 }
 
 #[test]
-fn the_main_of_the_pe_and_the_macho_is_refused_at_the_head_of_its_loop() {
+fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
     // The entry block falls through into the loop's head, which the loop's
-    // body also jumps back to: a join.
-    let error = pe().pseudocode(0x140001020).expect_err("main is refused");
-    assert_eq!(error.to_string(), "not lifted yet: joins at 0x14000103c");
+    // body also jumps back to. The globals the return reads have no symbol
+    // in either image, so they are typed dereferences of their addresses.
+    let pseudocode = pe().pseudocode(0x140001020).expect("main lifts");
+    assert_eq!(
+        pseudocode.text(),
+        "int main(void)\n\
+         {\n\
+         \x20 int local_8;\n\
+         \x20 int local_c;\n\
+         \n\
+         \x20 local_8 = 0;\n\
+         \x20 for (local_c = 0; local_c < 3; local_c = local_c + 1) {\n\
+         \x20   local_8 = add(local_8, local_c);\n\
+         \x20 }\n\
+         \x20 return (local_8 + *(int *)0x140003000) + (int)*(char *)*(long *)0x140003008;\n\
+         }"
+    );
 
-    let error = macho()
-        .pseudocode(0x100000440)
-        .expect_err("_main is refused");
-    assert_eq!(error.to_string(), "not lifted yet: joins at 0x10000045d");
+    let pseudocode = macho().pseudocode(0x100000440).expect("_main lifts");
+    assert_eq!(
+        pseudocode.text(),
+        "int _main(void)\n\
+         {\n\
+         \x20 int local_10;\n\
+         \x20 int local_14;\n\
+         \n\
+         \x20 local_10 = 0;\n\
+         \x20 for (local_14 = 0; local_14 < 3; local_14 = local_14 + 1) {\n\
+         \x20   local_10 = _add(local_10, local_14);\n\
+         \x20 }\n\
+         \x20 return (local_10 + *(int *)0x100002000) + (int)*(char *)*(long *)0x100002008;\n\
+         }"
+    );
+}
+
+#[test]
+fn a_function_the_lifter_refuses_says_why_and_the_refusal_is_kept() {
+    let binary = sample();
+
+    // _init calls through a register.
+    let error = binary.pseudocode(0x1000).expect_err("_init is refused");
+    assert_eq!(error.to_string(), "not lifted yet: an indirect call");
+
+    let again = binary
+        .pseudocode(0x1000)
+        .expect_err("_init is still refused");
+    assert_eq!(again, error);
 }
 
 #[test]

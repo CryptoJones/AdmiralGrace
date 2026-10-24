@@ -97,7 +97,7 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
-# The pseudocode of one function, when it is straight-line code
+# The pseudocode of one function, as C
 cargo run --bin ag -- image ./sample.elf pseudocode main
 
 # The control-flow graph of one function
@@ -124,7 +124,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
-| `pseudocode TARGET` | The function as C, when it is straight-line x86-64 code — blocks joined only by fall-through, calls included: a `// name at 0x…` header, then the signature, the locals and the statements. Otherwise the header with `not lifted yet` and the reason, and exit code 1. |
+| `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then the signature, the locals and the statements. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
@@ -154,23 +154,37 @@ it refuses an image of another architecture rather than printing nonsense. In 32
 there is no `rip`, so the strings and the data a function refers to are found through the
 absolute memory operands it names them with.
 
-`pseudocode` lifts one function to C with the engine's own lifter, which reads straight-line
-x86-64 code: integer `mov`, `add`, `sub`, `and`, `or`, `xor`, `lea`, `push`, `pop`,
-`leave`, a direct `call`, and `ret`. The control-flow walk ends a block at every call, so
-the lifter follows the chain of blocks joined by fall-through: from the entry block, while
-the block's last instruction is not a branch, its one successor starts where the block ends,
-and nothing else reaches that successor, the lifter continues into it with the same state.
-Registers are temporaries and stack slots are locals, so a value copied through the frame
-comes back as the expression it was; the argument registers read before they are written
-are the parameters, named by position (`a`, `b`, …), with `rdi, rsi, rdx, rcx, r8, r9`
-under System V and `rcx, rdx, r8, r9` for a Windows image; a call passes the argument
-registers written before it, and its result is a temporary (`v1`, `v2`, …) that is inlined
-where it is used once and declared where it is used more; the return is `rax` at the width
-of its last write, and a width is a type: 32 bits is `int`, 64 is `long`. A pointer taken
-through `lea` is asked of the image: one that lands on a string prints as the string's
-literal, one that lands on named data as `&name`, and one on a function as its name. The
-sample's `add` reads `int add(int a, int b) { return b + a; }`, the operands in the order
-the `add` instruction names them, and its `main` reads
+`pseudocode` lifts one function to C with the engine's own lifter, which reads the whole
+control-flow graph of x86-64 code: integer `mov`, `movsx`, `movzx`, `cdqe`, `add`, `sub`,
+`and`, `or`, `xor`, `inc`, `dec`, `imul`, `lea`, `push`, `pop`, `leave`, a direct `call`,
+`cmp`, `test`, `jmp`, the conditional jumps and `ret`. Blocks joined only by fall-through
+are one node of the graph; the graph is structured with its dominators and the back edges
+that make its loops. A node that branches is an `if`, and its join is the nearest node both
+arms reach that the branch dominates; an arm that returns is an early `return` and the other
+arm follows it unnested. A loop whose header branches out is a `while`, one whose latch
+branches back is a `do`/`while`, and any other is `while (1)` with a `break` at its exit;
+inside a loop an edge to the header is `continue`. A `for` is folded from
+`init; while (cond) { …; step }` when the init and the step assign the variable the condition
+reads. A node reached twice that neither arm dominates is a `goto` to a label on it, and a
+loop with two entries is refused as irreducible. Registers are temporaries and stack slots
+are locals, so a value copied through the frame comes back as the expression it was; the
+state is split at a branch and merged at a join, where a slot or register that differs
+between the paths becomes a declared variable assigned on each — a slot keeps its
+`local_<hex>` name, a register is named after itself, `eax` — and a loop is lifted again with
+everything it changes made a variable, until it settles. A condition comes from the
+instruction that set the flags: `cmp a, b; jl` is `a < b`, `jb` is the unsigned
+`(unsigned int)a < (unsigned int)b`, and `test x, x; je` is `x == 0`. The argument registers
+read before they are written are the parameters, named by position (`a`, `b`, …), with
+`rdi, rsi, rdx, rcx, r8, r9` under System V and `rcx, rdx, r8, r9` for a Windows image; a
+call passes the argument registers written before it, and its result is a temporary (`v1`,
+`v2`, …) that is inlined where it is used once and declared where it is used more; the
+return is `rax` at the width of its last write, and a width is a type: 32 bits is `int`, 64
+is `long`. A pointer taken through `lea` is asked of the image: one that lands on a string
+prints as the string's literal, one that lands on named data as `&name`, and one on a
+function as its name; a load through a pointer is `*(int *)p`, and one from an address the
+image does not name is `*(int *)0x…`. The sample's `add` reads
+`int add(int a, int b) { return b + a; }`, the operands in the order the `add` instruction
+names them; its `main` reads
 
 ```c
 long main(int a, long b)
@@ -183,12 +197,31 @@ long main(int a, long b)
 }
 ```
 
-A function that branches (`branches at 0x…`) or whose blocks join (`joins at 0x…`, the head
-of a loop), one with an instruction outside that set, a 32-bit function, or a value the
-lifter cannot follow prints `not lifted yet` and the reason instead, with exit code 1 — the
-sample's `sum_to`, which loops, says `not lifted yet: branches at 0x117b`; `--json` reports
-the same as `lifted: false` and a `reason`. Every line of C carries the addresses of the
-instructions it came from, which is what the workbench's Pseudocode tab clicks through.
+and its `sum_to`, a counted loop, reads
+
+```c
+long sum_to(int a)
+{
+  long local_10;
+  int local_14;
+
+  local_10 = 0;
+  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {
+    local_10 = local_10 + (long)local_14;
+  }
+  return local_10;
+}
+```
+
+A function with an instruction outside that set, a 32-bit function, an indirect call or
+jump, a branch whose flags no tracked instruction set (`the je at 0x… reads flags that
+nothing tracked set`), a loop with two entries (`irreducible control flow at 0x…`), a stack
+pointer that differs between two paths, `ret`s that disagree, or a value the lifter cannot
+follow prints `not lifted yet` and the reason instead, with exit code 1 — the sample's
+`_init`, which calls through a register, says `not lifted yet: an indirect call`; `--json`
+reports the same as `lifted: false` and a `reason`. Every line of C carries the addresses of
+the instructions it came from — a `for` line those of its init, its compare, its branch and
+its step — which is what the workbench's Pseudocode tab clicks through.
 
 `strings` reads the sections that are not code, and reports every run of text that ends
 in a NUL. A tab, a newline and a carriage return are part of the text, and they are

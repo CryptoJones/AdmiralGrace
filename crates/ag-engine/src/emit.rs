@@ -2,16 +2,18 @@
 //!
 //! [`emit_function`] prints a lifted function as C, one line at a time, and
 //! every line remembers the addresses of the instructions it came from, so a
-//! reader can move from a line to the listing and back. [`emit_procedure`]
-//! and [`emit_node`] are the older entry points over the structured
-//! procedure, kept for the structuring passes to grow into.
+//! reader can move from a line to the listing and back; the statements it
+//! prints are the tree [`crate::structure`] builds, so an `if` or a loop
+//! opens on a line that carries its condition's addresses and closes on a
+//! brace that carries none. [`emit_procedure`] and [`emit_node`] are the
+//! older entry points over the [`HighLevelProcedure`] scaffolding.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
-use crate::lift::{signed, LiftedFunction};
+use crate::lift::{signed, LiftedFunction, Statement, StatementKind};
 
 /// One line of pseudocode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +65,9 @@ const INDENT: &str = "  ";
 /// The signature line stands for the function's entry and for the
 /// instructions no statement came from — the frame setup and teardown — so
 /// a click on it lands on the entry. Locals are declared first, then the
-/// statements, each on a line that carries its instruction addresses.
+/// statements, each on a line that carries its instruction addresses; a
+/// control statement's opening line carries its condition's, and its braces
+/// carry none.
 pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
     let mut lines = Vec::new();
 
@@ -103,16 +107,7 @@ pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
         });
     }
 
-    for statement in &function.body {
-        let mut text = String::new();
-        emit_into(&statement.node, &mut text, 0);
-        for line in text.lines() {
-            lines.push(Line {
-                text: format!("{INDENT}{line}"),
-                addresses: statement.addresses.clone(),
-            });
-        }
-    }
+    emit_statements(&function.body, 1, &mut lines);
 
     lines.push(Line {
         text: "}".to_string(),
@@ -120,6 +115,117 @@ pub fn emit_function(function: &LiftedFunction) -> Pseudocode {
     });
 
     Pseudocode { lines }
+}
+
+/// Print statements at `depth` levels of indentation.
+fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>) {
+    let pad = INDENT.repeat(depth);
+    for statement in statements {
+        match &statement.kind {
+            StatementKind::Plain => match &statement.node {
+                // A label sits one level out from the statements it names.
+                AstNode::Label { name, .. } => {
+                    push(lines, format!("{}{name}:", INDENT.repeat(depth - 1)), &[]);
+                }
+                AstNode::Goto { label, .. } => {
+                    push(lines, format!("{pad}goto {label};"), &statement.addresses);
+                }
+                AstNode::Break => push(lines, format!("{pad}break;"), &statement.addresses),
+                AstNode::Continue => push(lines, format!("{pad}continue;"), &statement.addresses),
+                node => {
+                    let mut text = String::new();
+                    emit_into(node, &mut text, 0);
+                    for part in text.lines() {
+                        push(lines, format!("{pad}{part}"), &statement.addresses);
+                    }
+                }
+            },
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => {
+                push(
+                    lines,
+                    format!("{pad}if ({}) {{", condition(&statement.node)),
+                    &statement.addresses,
+                );
+                emit_statements(then_part, depth + 1, lines);
+                if !else_part.is_empty() {
+                    lines.push(Line {
+                        text: format!("{pad}}} else {{"),
+                        addresses: Vec::new(),
+                    });
+                    emit_statements(else_part, depth + 1, lines);
+                }
+                lines.push(Line {
+                    text: format!("{pad}}}"),
+                    addresses: Vec::new(),
+                });
+            }
+            StatementKind::While { body } => {
+                lines.push(Line {
+                    text: format!("{pad}while ({}) {{", condition(&statement.node)),
+                    addresses: statement.addresses.clone(),
+                });
+                emit_statements(body, depth + 1, lines);
+                lines.push(Line {
+                    text: format!("{pad}}}"),
+                    addresses: Vec::new(),
+                });
+            }
+            StatementKind::DoWhile { body } => {
+                lines.push(Line {
+                    text: format!("{pad}do {{"),
+                    addresses: Vec::new(),
+                });
+                emit_statements(body, depth + 1, lines);
+                lines.push(Line {
+                    text: format!("{pad}}} while ({});", condition(&statement.node)),
+                    addresses: statement.addresses.clone(),
+                });
+            }
+            StatementKind::For { init, step, body } => {
+                lines.push(Line {
+                    text: format!(
+                        "{pad}for ({}; {}; {}) {{",
+                        expression(&init.node),
+                        condition(&statement.node),
+                        expression(&step.node)
+                    ),
+                    addresses: statement.addresses.clone(),
+                });
+                emit_statements(body, depth + 1, lines);
+                lines.push(Line {
+                    text: format!("{pad}}}"),
+                    addresses: Vec::new(),
+                });
+            }
+        }
+    }
+}
+
+/// Push one line.
+fn push(lines: &mut Vec<Line>, text: String, addresses: &[u64]) {
+    lines.push(Line {
+        text,
+        addresses: addresses.to_vec(),
+    });
+}
+
+/// A condition as it reads between the parentheses: `1` for always.
+fn condition(node: &AstNode) -> String {
+    match node {
+        AstNode::ConditionTrue => "1".to_string(),
+        AstNode::ConditionFalse => "0".to_string(),
+        other => expression(other),
+    }
+}
+
+/// An expression on its own, without a terminating semicolon.
+fn expression(node: &AstNode) -> String {
+    let mut text = String::new();
+    expr(node, &mut text, false);
+    text
 }
 
 pub fn emit_procedure(
@@ -310,6 +416,8 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
         }
         AstNode::ConditionTrue => out.push_str("true"),
         AstNode::ConditionFalse => out.push_str("false"),
+        AstNode::Break => out.push_str("break"),
+        AstNode::Continue => out.push_str("continue"),
         AstNode::Label { name, address } => {
             let _ = write!(out, "label {name} /* {address:#x} */");
         }

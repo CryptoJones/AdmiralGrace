@@ -1704,15 +1704,32 @@ mod tests {
             "the signature stands for the entry and the frame"
         );
 
-        // A function the lifter refuses has no body, and the problem says
-        // why: sum_to has a loop.
+        // A loop reads as a for, with the for line mapped to its compare.
         let _ = app.update(Message::FunctionSelected(0x1161));
+        let body = app.work.pseudocode.as_deref().expect("sum_to lifts");
+        assert!(
+            body.contains("for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {"),
+            "{body}"
+        );
+        assert!(
+            app.work
+                .line_addresses
+                .get(&6)
+                .is_some_and(|addresses| addresses.contains(&0x118d)),
+            "{:?}",
+            app.work.line_addresses
+        );
+
+        // A function the lifter refuses has no body, and the problem says
+        // why: _init calls through a register.
+        let _ = app.update(Message::FunctionSelected(0x1000));
         assert_eq!(app.work.pseudocode, None);
         assert!(app.work.line_addresses.is_empty());
         assert!(
-            app.bottom.problems.iter().any(|problem| problem
-                .message
-                .contains("not lifted yet: branches at 0x117b")),
+            app.bottom
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("not lifted yet: an indirect call")),
             "{:?}",
             app.bottom.problems
         );
