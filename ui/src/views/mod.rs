@@ -2,6 +2,7 @@
 
 pub mod about;
 pub mod bottom_panel;
+pub mod graph;
 pub mod inspector;
 pub mod menu_bar;
 pub mod navigator;

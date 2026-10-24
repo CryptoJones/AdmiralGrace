@@ -16,8 +16,8 @@ use crate::data::kuna_json::{
 };
 use crate::data::sample::SampleProvider;
 use crate::data::{
-    AnalysisState, ByteLine, FunctionDetail, FunctionRow, ListingLine, Problem, Provider,
-    Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
+    AnalysisState, ByteLine, FunctionDetail, FunctionRow, GraphBlock, ListingLine, Problem,
+    Provider, Reference, ReferenceKind, SearchHit, SectionCounts, StringEntry,
 };
 use crate::model::{Capabilities, History, Project, Selection};
 use crate::views::bottom_panel::BottomTab;
@@ -208,6 +208,8 @@ pub struct WorkSurface {
     pub detail: Option<FunctionDetail>,
     /// Listing lines of the selected function.
     pub listing: Vec<ListingLine>,
+    /// The blocks of the selected function's control-flow graph.
+    pub graph: Vec<GraphBlock>,
     /// Pseudocode of the selected function.
     pub pseudocode: Option<String>,
     /// The addresses each line of the pseudocode came from.
@@ -511,6 +513,7 @@ impl App {
 
         self.work.detail = self.provider.function_detail(address);
         self.work.listing = self.provider.listing(address).unwrap_or_default();
+        self.work.graph = self.provider.graph(address).unwrap_or_default();
         self.work.pseudocode = self.provider.pseudocode(address);
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
