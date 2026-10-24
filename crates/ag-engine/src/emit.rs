@@ -300,6 +300,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool) {
             arguments(args, out);
         }
         AstNode::FunctionName { name, .. } => out.push_str(name),
+        AstNode::StringLiteral { text } => out.push_str(&string_literal(text)),
         AstNode::Return { value } => {
             out.push_str("return");
             if let Some(value) = value {
@@ -383,6 +384,29 @@ fn constant_text(value: u64, width_bytes: u32) -> String {
     }
 }
 
+/// A string as a C literal: in double quotes, with the quote, the backslash
+/// and the control characters escaped, and any other byte outside printable
+/// ASCII written as `\xNN` in octets.
+fn string_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for byte in text.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(out, "\\x{byte:02x}");
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn binop(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Add => "+",
@@ -453,6 +477,32 @@ mod tests {
             target: Box::new(AstNode::var("local_8")),
         };
         assert_eq!(emit_node(&address).trim_end(), "&local_8;");
+    }
+
+    #[test]
+    fn a_string_literal_is_quoted_and_escaped() {
+        let literal = AstNode::StringLiteral {
+            text: "%ld\n".into(),
+        };
+        assert_eq!(emit_node(&literal).trim_end(), "\"%ld\\n\";");
+
+        let awkward = AstNode::StringLiteral {
+            text: "say \"hi\"\\\t\u{e9}".into(),
+        };
+        assert_eq!(
+            emit_node(&awkward).trim_end(),
+            "\"say \\\"hi\\\"\\\\\\t\\xc3\\xa9\";"
+        );
+
+        // A literal is an atom: it needs no parentheses as an argument.
+        let call = AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: "printf".into(),
+                address: 0x1050,
+            }),
+            args: vec![literal, AstNode::var("v2")],
+        };
+        assert_eq!(emit_node(&call).trim_end(), "printf(\"%ld\\n\", v2);");
     }
 
     #[test]

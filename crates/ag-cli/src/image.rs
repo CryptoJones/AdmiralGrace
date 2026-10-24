@@ -1669,13 +1669,38 @@ mod tests {
     }
 
     #[test]
-    fn the_pseudocode_of_main_says_why_it_was_not_lifted() {
+    fn the_pseudocode_of_main_is_c_with_its_calls() {
         let image = sample();
 
         let report = pseudocode_json(&image, 0x1198);
 
+        assert!(report.lifted, "{report:?}");
+        assert_eq!(report.name.as_deref(), Some("main"));
+        let text = report.text.as_deref().expect("the text");
+        assert!(text.contains("sum_to(add(a, 3))"), "{text}");
+        assert!(text.contains("printf(\"%ld\\n\", v2);"), "{text}");
+        assert!(text.contains("return v2;"), "{text}");
+        assert_eq!(report.lines.len(), 8);
+        assert_eq!(report.lines[5].text, "  printf(\"%ld\\n\", v2);");
+        assert!(
+            report.lines[5]
+                .addresses_hex
+                .contains(&"0x11e1".to_string()),
+            "the call"
+        );
+    }
+
+    #[test]
+    fn the_pseudocode_of_sum_to_says_why_it_was_not_lifted() {
+        let image = sample();
+
+        let report = pseudocode_json(&image, 0x1161);
+
         assert!(!report.lifted);
-        assert_eq!(report.reason.as_deref(), Some("not lifted yet: 4 blocks"));
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("not lifted yet: branches at 0x117b")
+        );
         assert!(report.lines.is_empty());
         assert_eq!(report.text, None);
     }

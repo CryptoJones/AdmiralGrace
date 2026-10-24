@@ -68,9 +68,12 @@ That is the native path: the image is parsed by the engine's own loader, the nav
 lists its symbols, the inspector shows its sections and entry point, and the Listing tab
 holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
 language says. The Pseudocode tab holds the engine's own lifting of the selected function
-when it is one block of straight-line x86-64 code — the sample's `add` reads as C, and its
-lines are numbered and clickable like the kuna provider's, so a click on `return b + a;`
-moves the listing to the add. A function the lifter refuses leaves the tab empty, and the
+when it is straight-line x86-64 code — blocks joined only by fall-through, so calls are
+in: the sample's `add` reads as C, and its `main` reads as C with its three calls, the
+format string printed as the literal `"%ld\n"`. The lines are numbered and clickable like
+the kuna provider's, so a click on `return b + a;` moves the listing to the add, and a
+click on the `printf` line moves it to the call. A function the lifter refuses — one that
+branches, such as the sample's `sum_to` with its loop — leaves the tab empty, and the
 Problems panel says why.
 
 Who calls what is only known once the whole program has been read, so that is worked out

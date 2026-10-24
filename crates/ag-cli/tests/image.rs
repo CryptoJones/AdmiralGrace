@@ -296,9 +296,30 @@ fn the_data_of_a_32_bit_elf_is_found_through_absolute_operands() {
 
 // ---- Pseudocode -----------------------------------------------------------
 //
-// The lifter reads one block of straight-line x86-64 code, and the `add` of
-// every fixture is one. The PE passes its arguments the Windows way, in rcx
-// and rdx, and the lifter reads that from the image's language.
+// The lifter reads straight-line x86-64 code — blocks joined only by
+// fall-through — and the `add` of every fixture is one block. The PE passes
+// its arguments the Windows way, in rcx and rdx, and the lifter reads that
+// from the image's language. The sample ELF's `main` is a chain of blocks cut
+// at its calls, and reads as C with them; a function that branches is
+// refused at the branch.
+
+#[test]
+fn the_pseudocode_of_the_sample_elf_main_is_c_with_its_calls() {
+    let report = image("sample.elf", &["pseudocode", "main"]);
+
+    assert_eq!(
+        report,
+        "// main at 0x1198\n\
+         long main(int a, long b)\n\
+         {\n\
+         \x20 long v2;\n\
+         \n\
+         \x20 v2 = sum_to(add(a, 3));\n\
+         \x20 printf(\"%ld\\n\", v2);\n\
+         \x20 return v2;\n\
+         }\n"
+    );
+}
 
 #[test]
 fn the_pseudocode_of_the_sample_elf_add_is_c() {
@@ -354,21 +375,25 @@ fn the_pseudocode_is_reported_as_json_with_the_addresses_of_each_line() {
 
 #[test]
 fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
+    // sum_to has a loop: its entry block ends in the jump into it.
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "main"])
+        .args(["pseudocode", "sum_to"])
         .output()
         .expect("the ag binary runs");
 
     assert_eq!(output.status.code(), Some(1), "nothing was lifted");
     let report = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(report, "// main at 0x1198: not lifted yet: 4 blocks\n");
+    assert_eq!(
+        report,
+        "// sum_to at 0x1161: not lifted yet: branches at 0x117b\n"
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "main", "--json"])
+        .args(["pseudocode", "sum_to", "--json"])
         .output()
         .expect("the ag binary runs");
 
@@ -378,7 +403,22 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     assert_eq!(report["lifted"], serde_json::json!(false));
     assert_eq!(
         report["reason"],
-        serde_json::json!("not lifted yet: 4 blocks")
+        serde_json::json!("not lifted yet: branches at 0x117b")
+    );
+
+    // The main of the PE falls through into the head of its loop, which the
+    // loop also jumps back to: a join.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.exe"))
+        .args(["pseudocode", "main"])
+        .output()
+        .expect("the ag binary runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "// main at 0x140001020: not lifted yet: joins at 0x14000103c\n"
     );
 }
 
@@ -603,12 +643,12 @@ fn a_function_of_an_export_names_itself_and_holds_the_four_reports() {
     assert_eq!(add["pseudocode"]["lifted"], serde_json::json!(true));
 
     // A function the lifter refuses carries the reason instead.
-    let main = dir.json("functions/0x1198.json");
-    assert_eq!(main["name"], serde_json::json!("main"));
-    assert_eq!(main["pseudocode"]["lifted"], serde_json::json!(false));
+    let sum_to = dir.json("functions/0x1161.json");
+    assert_eq!(sum_to["name"], serde_json::json!("sum_to"));
+    assert_eq!(sum_to["pseudocode"]["lifted"], serde_json::json!(false));
     assert_eq!(
-        main["pseudocode"]["reason"],
-        serde_json::json!("not lifted yet: 4 blocks")
+        sum_to["pseudocode"]["reason"],
+        serde_json::json!("not lifted yet: branches at 0x117b")
     );
 
     // The listing is what `disasm` prints.

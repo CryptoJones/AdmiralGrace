@@ -3,9 +3,10 @@
 //! This is the native path: the file is parsed by the engine's own loader,
 //! its code sections are decoded by the native decoder, and its control-flow
 //! graph is walked by the engine, and its pseudocode is the engine's lifter's:
-//! one block of straight-line x86-64 code reads as C, with every line mapped
-//! to the instructions it came from. A function the lifter refuses has no
-//! body, and the Problems panel says why.
+//! straight-line x86-64 code — blocks joined only by fall-through, calls
+//! included — reads as C, with every line mapped to the instructions it came
+//! from. A function the lifter refuses has no body, and the Problems panel
+//! says why.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -544,7 +545,9 @@ impl Provider for BinaryProvider {
             Err(error) => vec![Problem {
                 message: format!("No pseudocode: {error}."),
                 address: Some(address),
-                action: Some("The lifter reads one block of straight-line x86-64 code".into()),
+                action: Some(
+                    "The lifter reads straight-line x86-64 code, with calls but no branches".into(),
+                ),
             }],
         }
     }
@@ -600,6 +603,9 @@ mod tests {
 
     /// The address of `main` in the sample.
     const MAIN: u64 = 0x1198;
+
+    /// The address of `sum_to` in the sample, which has a loop.
+    const SUM_TO: u64 = 0x1161;
 
     /// The sample ELF the engine's own tests read.
     fn sample_path() -> PathBuf {
@@ -661,19 +667,48 @@ mod tests {
     }
 
     #[test]
+    fn the_pseudocode_of_main_is_c_with_its_calls() {
+        let provider = sample();
+
+        let body = provider.pseudocode(MAIN).expect("main lifts");
+        assert_eq!(
+            body,
+            "long main(int a, long b)\n\
+             {\n\
+             \x20 long v2;\n\
+             \n\
+             \x20 v2 = sum_to(add(a, 3));\n\
+             \x20 printf(\"%ld\\n\", v2);\n\
+             \x20 return v2;\n\
+             }"
+        );
+
+        // The printf line is mapped to the call, so a click on it lands there.
+        let lines = provider.line_addresses(MAIN);
+        assert!(
+            lines
+                .get(&5)
+                .is_some_and(|addresses| addresses.contains(&0x11e1)),
+            "the printf came from the call: {lines:?}"
+        );
+        assert!(provider.function_problems(MAIN).is_empty());
+    }
+
+    #[test]
     fn a_function_the_lifter_refuses_has_no_body_and_a_problem_that_says_why() {
         let provider = sample();
 
-        assert_eq!(provider.pseudocode(MAIN), None);
-        assert!(provider.line_addresses(MAIN).is_empty());
+        // sum_to has a loop: its entry block ends in the jump into it.
+        assert_eq!(provider.pseudocode(SUM_TO), None);
+        assert!(provider.line_addresses(SUM_TO).is_empty());
 
-        let problems = provider.function_problems(MAIN);
+        let problems = provider.function_problems(SUM_TO);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(
             problems[0].message,
-            "No pseudocode: not lifted yet: 4 blocks."
+            "No pseudocode: not lifted yet: branches at 0x117b."
         );
-        assert_eq!(problems[0].address, Some(MAIN));
+        assert_eq!(problems[0].address, Some(SUM_TO));
     }
 
     #[test]

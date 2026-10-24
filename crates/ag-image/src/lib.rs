@@ -17,7 +17,10 @@
 //! through [`lift_function`] and [`emit_function`], and what comes back is C
 //! with every line mapped to the instructions it came from, or the reason
 //! the lifter refused. The calling convention is read from the image's
-//! language, so a Windows image passes its arguments the Microsoft way.
+//! language, so a Windows image passes its arguments the Microsoft way, and
+//! the lifter asks the image what a pointer lands on ([`Symbols`]), so a
+//! string the image knows is printed as its literal and named data as
+//! `&name`.
 //!
 //! The image itself is read once and dropped: it holds a reference-counted
 //! address space, so it cannot be shared between threads. What is kept is
@@ -32,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ag_engine::cfgwalk::resolve_branches;
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
-use ag_engine::lift::lift_function;
+use ag_engine::lift::{lift_function, Pointee, Symbols};
 use ag_engine::pipeline::Disasm;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
@@ -722,9 +725,11 @@ impl Binary {
 
     /// The pseudocode of the function at `address`, or why it was not lifted.
     ///
-    /// The lifter reads one block of straight-line x86-64 code; a function of
-    /// more blocks, or one with an instruction it does not know, is refused
-    /// with a reason. Both answers are kept, the way the disassembly is.
+    /// The lifter reads straight-line x86-64 code: blocks joined only by
+    /// fall-through, so a function that calls reads as C, but one that
+    /// branches, or one with an instruction the lifter does not know, is
+    /// refused with a reason. Both answers are kept, the way the disassembly
+    /// is.
     pub fn pseudocode(&self, address: u64) -> Result<Arc<Pseudocode>, NotLifted> {
         if !self.supports_pseudocode() {
             return Err(NotLifted {
@@ -767,7 +772,6 @@ impl Binary {
             .function_name(address)
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
-        let names = |target: u64| self.function_name(target).map(str::to_string);
 
         let function = lift_function(
             &decoded.disasm,
@@ -776,7 +780,7 @@ impl Binary {
             &name,
             code.bitness,
             self.abi(),
-            &names,
+            &ImageSymbols(self),
         )?;
         Ok(emit_function(&function))
     }
@@ -1017,6 +1021,46 @@ impl Binary {
             calls,
             pointers,
         })
+    }
+}
+
+/// The image, as the lifter asks it: the names of its functions, and what a
+/// pointer lands on.
+struct ImageSymbols<'a>(&'a Binary);
+
+impl Symbols for ImageSymbols<'_> {
+    fn function_name(&self, address: u64) -> Option<String> {
+        self.0.function_name(address).map(str::to_string)
+    }
+
+    /// A pointer into a string is that string from the pointer to its NUL,
+    /// so one into the middle of a string is the string's tail. A pointer to
+    /// the start of a data symbol is that symbol; one into the middle of it
+    /// is not named, since the offset would need a type to be read. A pointer
+    /// to a function is the function.
+    fn pointee(&self, address: u64) -> Option<Pointee> {
+        if let Some(string) = self.0.string_at(address) {
+            let end = string.address + string.length - 1;
+            let length = usize::try_from(end - address).ok()?;
+            let bytes = if length == 0 {
+                Vec::new()
+            } else {
+                self.0.bytes_at(address, length)?
+            };
+            return Some(Pointee::String(
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+        if let Some(symbol) = self
+            .0
+            .data_symbol_of(address)
+            .filter(|symbol| symbol.address == address)
+        {
+            return Some(Pointee::Data(symbol.name.clone()));
+        }
+        self.0
+            .function_name(address)
+            .map(|name| Pointee::Function(name.to_string()))
     }
 }
 

@@ -1001,11 +1001,14 @@ fn the_data_of_the_32_bit_elf_fixture_is_found_through_absolute_operands() {
 
 // ---- Pseudocode -----------------------------------------------------------
 //
-// The lifter reads one block of straight-line x86-64 code. The `add` of every
-// fixture is one: it reads as C, with the parameters named by position. Each
-// fixture spells it differently — gcc through a frame pointer, MSVC through
-// `rsp` with the Windows argument registers, clang with a memory operand on
-// the add — and all three come out as `int add(int a, int b)`.
+// The lifter reads straight-line x86-64 code: blocks joined only by
+// fall-through. The `add` of every fixture is one block: it reads as C, with
+// the parameters named by position. Each fixture spells it differently — gcc
+// through a frame pointer, MSVC through `rsp` with the Windows argument
+// registers, clang with a memory operand on the add — and all three come out
+// as `int add(int a, int b)`. The sample ELF's `main` is a chain of four
+// blocks cut at its three calls, and reads as C with the calls; the `main` of
+// the PE and the Mach-O has a loop, and is refused at the loop's head.
 
 #[test]
 fn the_add_of_the_sample_elf_lifts_to_c() {
@@ -1045,17 +1048,66 @@ fn the_pseudocode_is_built_once_and_kept() {
 }
 
 #[test]
-fn main_is_not_lifted_because_it_has_more_than_one_block() {
+fn the_main_of_the_sample_elf_lifts_through_its_calls() {
     let binary = sample();
 
-    let error = binary.pseudocode(0x1198).expect_err("main is refused");
-    assert_eq!(error.to_string(), "not lifted yet: 4 blocks");
+    let pseudocode = binary.pseudocode(MAIN).expect("main lifts");
+
+    // The result of add goes straight into sum_to; the result of sum_to is
+    // printed and returned, so it is a declared temporary. The pointer to
+    // the format string is the string's literal, and gcc returns the long
+    // as it is, so that is the return type.
+    assert_eq!(
+        pseudocode.text(),
+        "long main(int a, long b)\n\
+         {\n\
+         \x20 long v2;\n\
+         \n\
+         \x20 v2 = sum_to(add(a, 3));\n\
+         \x20 printf(\"%ld\\n\", v2);\n\
+         \x20 return v2;\n\
+         }"
+    );
+
+    // The printf line came from the lea that takes the string's address,
+    // the moves into the argument registers, and the call; the return from
+    // the load of the saved result and the ret.
+    assert_eq!(
+        pseudocode.lines[5].addresses,
+        vec![0x11c2, 0x11c7, 0x11cb, 0x11cf, 0x11d2, 0x11d9, 0x11e1]
+    );
+    assert_eq!(
+        pseudocode.lines[6].addresses,
+        vec![0x11c2, 0x11c7, 0x11e6, 0x11eb]
+    );
+}
+
+#[test]
+fn sum_to_is_not_lifted_because_it_branches() {
+    let binary = sample();
+
+    // The entry block of sum_to ends in the jump into its loop.
+    let error = binary.pseudocode(0x1161).expect_err("sum_to is refused");
+    assert_eq!(error.to_string(), "not lifted yet: branches at 0x117b");
 
     // The refusal is kept too.
     let again = binary
-        .pseudocode(0x1198)
-        .expect_err("main is still refused");
+        .pseudocode(0x1161)
+        .expect_err("sum_to is still refused");
     assert_eq!(again, error);
+}
+
+#[test]
+fn the_main_of_the_pe_and_the_macho_is_refused_at_the_head_of_its_loop() {
+    // The entry block falls through into the loop's head, which the loop's
+    // body also jumps back to: a join.
+    let error = pe().pseudocode(0x140001020).expect_err("main is refused");
+    assert_eq!(error.to_string(), "not lifted yet: joins at 0x14000103c");
+
+    let error = macho()
+        .pseudocode(0x100000440)
+        .expect_err("_main is refused");
+    assert_eq!(error.to_string(), "not lifted yet: joins at 0x10000045d");
 }
 
 #[test]
