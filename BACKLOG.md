@@ -51,7 +51,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] ag image: cfg and calls subcommands, so the CLI reports what the Graph and References tabs show — [#62](https://github.com/CryptoJones/AdmiralGrace/issues/62)
 - [x] README screenshots: add the bytes pane, the strings tab and the graph tab of a program image — [#63](https://github.com/CryptoJones/AdmiralGrace/issues/63)
 - [x] One rule for fall-through and taken edges: the Graph tab takes its edges from ag-image — [#67](https://github.com/CryptoJones/AdmiralGrace/issues/67)
-- [ ] References tab for a program image: data references, from the instructions that point at named data — [#70](https://github.com/CryptoJones/AdmiralGrace/issues/70)
+- [x] References tab for a program image: data references, from the instructions that point at named data — [#70](https://github.com/CryptoJones/AdmiralGrace/issues/70)
 - [ ] Fixtures and tests for a PE and a Mach-O image — [#71](https://github.com/CryptoJones/AdmiralGrace/issues/71)
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
 - [x] Strings for a program image: scan the data sections and link each string to the code that uses it — [#51](https://github.com/CryptoJones/AdmiralGrace/issues/51)
