@@ -1,5 +1,7 @@
 # AdmiralGrace
 
+> **Sibling projects:** [GayHydra](https://github.com/CryptoJones/GayHydra) — security-hardened Ghidra fork · [Scylla](https://github.com/CryptoJones/Scylla) — RE platform with a Rust core over GayHydra's engine · **AdmiralGrace** (this repo) — disassembler and decompiler written in Rust
+
 <img src="images/headshot.jpg" alt="Admiral Grace Hopper" width="220">
 
 AdmiralGrace is an open-source disassembler and decompiler utility written in Rust. It is named in honor of Admiral Grace Hopper, a pioneer of computer programming and compiler development.
