@@ -53,7 +53,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] One rule for fall-through and taken edges: the Graph tab takes its edges from ag-image — [#67](https://github.com/CryptoJones/AdmiralGrace/issues/67)
 - [x] References tab for a program image: data references, from the instructions that point at named data — [#70](https://github.com/CryptoJones/AdmiralGrace/issues/70)
 - [x] Fixtures and tests for a PE and a Mach-O image — [#71](https://github.com/CryptoJones/AdmiralGrace/issues/71)
-- [ ] Decode 32-bit x86: take the bitness from the image's language — [#76](https://github.com/CryptoJones/AdmiralGrace/issues/76)
+- [x] Decode 32-bit x86: take the bitness from the image's language — [#76](https://github.com/CryptoJones/AdmiralGrace/issues/76)
 - [ ] Lifter, first milestone: pseudocode for straight-line x86-64 functions — [#77](https://github.com/CryptoJones/AdmiralGrace/issues/77)
 - [ ] ag image export: the whole analysis of an image as a directory of JSON and text — [#78](https://github.com/CryptoJones/AdmiralGrace/issues/78)
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
