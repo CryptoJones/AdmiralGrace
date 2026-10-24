@@ -115,6 +115,32 @@ pub struct GraphBlock {
     pub instructions: Vec<ListingLine>,
 }
 
+/// The control-flow graph of a function.
+///
+/// The blocks come from the provider, and so do the edges between them:
+/// the kind of an edge is worked out by the rule the CLI reports by, so
+/// the workbench and the command line name an edge the same way.
+#[derive(Debug, Clone, Default)]
+pub struct Graph {
+    /// The blocks of the function, in the order the walk found them.
+    pub blocks: Vec<GraphBlock>,
+    /// The edges between the blocks, each with its kind.
+    pub edges: Vec<ag_image::Edge>,
+}
+
+impl Graph {
+    /// The edges that leave a block, worked out by the shared rule.
+    ///
+    /// A provider whose blocks did not come with their edges derives them
+    /// here, so every graph names an edge the same way.
+    pub fn edges_of_blocks(blocks: &[GraphBlock]) -> Vec<ag_image::Edge> {
+        blocks
+            .iter()
+            .flat_map(|block| ag_image::edges_of(block.from, block.to, &block.successors))
+            .collect()
+    }
+}
+
 /// The kind of a cross reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceKind {
@@ -314,9 +340,10 @@ pub trait Provider: Send + Sync {
 
     /// The control-flow graph of a function, when the provider has one.
     ///
-    /// The blocks come back in the order the walk found them; the graph
-    /// view lays them out itself.
-    fn graph(&self, _address: u64) -> Option<Vec<GraphBlock>> {
+    /// The blocks come back in the order the walk found them, and the edges
+    /// between them carry the kind each edge has; the graph view lays them
+    /// out itself.
+    fn graph(&self, _address: u64) -> Option<Graph> {
         None
     }
 

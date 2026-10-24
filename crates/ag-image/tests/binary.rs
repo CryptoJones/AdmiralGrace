@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ag_image::{Binary, EdgeKind};
+use ag_image::{Binary, Edge, EdgeKind};
 
 /// The sample ELF the engine's own tests read.
 fn sample_path() -> PathBuf {
@@ -442,4 +442,66 @@ fn a_function_that_cannot_be_walked_has_no_graph() {
 
     // 0xdead_0000 names no function, so there is nothing to walk.
     assert!(binary.control_flow(0xdead_0000).is_none());
+}
+
+#[test]
+fn the_edges_of_a_block_follow_the_one_rule() {
+    // The block ends at 0x1014, so the way into 0x1014 is the fall-through
+    // and the way into 0x1016 is the branch that is taken.
+    let edges = ag_image::edges_of(0x1000, 0x1014, &[0x1016, 0x1014]);
+
+    assert_eq!(
+        edges,
+        vec![
+            Edge {
+                from: 0x1000,
+                to: 0x1016,
+                kind: EdgeKind::Taken,
+            },
+            Edge {
+                from: 0x1000,
+                to: 0x1014,
+                kind: EdgeKind::Fallthrough,
+            },
+        ]
+    );
+}
+
+#[test]
+fn every_edge_of_a_graph_carries_the_kind_the_rule_gives_it() {
+    let binary = sample();
+
+    let graph = binary.control_flow(0x1000).expect("_init walks");
+
+    for edge in &graph.edges {
+        let block = graph
+            .blocks
+            .iter()
+            .find(|block| block.from == edge.from)
+            .expect("the block the edge leaves");
+
+        let expected = if edge.to == block.to {
+            EdgeKind::Fallthrough
+        } else {
+            EdgeKind::Taken
+        };
+
+        assert_eq!(edge.kind, expected, "the edge {edge:?}");
+    }
+}
+
+#[test]
+fn the_edges_of_a_graph_are_the_edges_of_its_blocks() {
+    let binary = sample();
+
+    let graph = binary.control_flow(0x1000).expect("_init walks");
+
+    for block in &graph.blocks {
+        for edge in block.edges() {
+            assert!(
+                graph.edges.contains(&edge),
+                "the graph holds the edge {edge:?}"
+            );
+        }
+    }
 }

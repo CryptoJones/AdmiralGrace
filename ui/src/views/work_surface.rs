@@ -426,7 +426,7 @@ fn graph_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    if app.work.graph.is_empty() {
+    if app.work.graph.blocks.is_empty() {
         return empty_state(
             "This function has no control flow to draw",
             "Select a function that the analysis has walked to see its blocks.",

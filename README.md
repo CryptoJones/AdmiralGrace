@@ -166,7 +166,7 @@ The Bytes tab shows the bytes of the file around the selection, sixteen to a row
 
 The Strings tab lists the text the image holds, with the functions that use it. The list filters as you type, and picking a string moves the selection to it.
 
-The Graph tab draws the control-flow graph of the selected function: one box for each block the walk found, with the instructions in it, and an arrow for each way the code goes on. The arrow that leaves the end of a block is the fall-through, and the other one is the branch that is taken. An arrow that skips a row goes around the blocks in between rather than through them. The graph can be dragged and zoomed, and clicking a box moves the selection to it.
+The Graph tab draws the control-flow graph of the selected function: one box for each block the walk found, with the instructions in it, and an arrow for each way the code goes on. The arrow that leaves the end of a block is the fall-through, and the other one is the branch that is taken. That is the same rule `ag image cfg` reports by, so the workbench and the command line name an edge the same way. An arrow that skips a row goes around the blocks in between rather than through them. The graph can be dragged and zoomed, and clicking a box moves the selection to it.
 
 ## Development status
 

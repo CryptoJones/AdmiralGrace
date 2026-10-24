@@ -6,7 +6,7 @@
 //! show. It is never presented as real analysis.
 
 use crate::data::{
-    AnalysisState, ByteLine, FunctionDetail, FunctionRow, GraphBlock, HitKind, ListingLine,
+    AnalysisState, ByteLine, FunctionDetail, FunctionRow, Graph, GraphBlock, HitKind, ListingLine,
     Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
@@ -122,9 +122,18 @@ impl Provider for SampleProvider {
         Some(self.functions[index].body.listing.clone())
     }
 
-    fn graph(&self, address: u64) -> Option<Vec<GraphBlock>> {
+    /// The control-flow graph of a function.
+    ///
+    /// The blocks are cut out of the listing here, so the edges between
+    /// them are worked out by the shared rule, the one the CLI reports by.
+    fn graph(&self, address: u64) -> Option<Graph> {
         let index = self.index_of(address)?;
-        Some(blocks_of(&self.functions[index].body.listing))
+        let blocks = blocks_of(&self.functions[index].body.listing);
+
+        Some(Graph {
+            edges: Graph::edges_of_blocks(&blocks),
+            blocks,
+        })
     }
 
     fn pseudocode(&self, address: u64) -> Option<String> {
@@ -614,15 +623,54 @@ mod tests {
     fn the_sample_function_has_a_graph_to_draw() {
         let provider = SampleProvider::new();
 
-        let blocks = provider.graph(0x100084A20).expect("the sample has a graph");
+        let graph = provider.graph(0x100084A20).expect("the sample has a graph");
 
-        assert_eq!(blocks.len(), 5, "the sample function has five blocks");
+        assert_eq!(graph.blocks.len(), 5, "the sample function has five blocks");
 
         // The branch at the top of the function goes two ways.
-        let first = &blocks[0];
+        let first = &graph.blocks[0];
         assert_eq!(first.from, 0x100084A20);
         assert_eq!(first.successors.len(), 2);
         assert!(first.successors.contains(&0x100084A50), "the error path");
         assert!(first.successors.contains(&0x100084A4C), "the way on");
+    }
+
+    #[test]
+    fn the_edges_of_the_sample_follow_the_same_rule_as_the_binary() {
+        let provider = SampleProvider::new();
+
+        let graph = provider.graph(0x100084A20).expect("the sample has a graph");
+
+        assert!(!graph.edges.is_empty(), "the graph has edges");
+
+        for edge in &graph.edges {
+            let block = graph
+                .blocks
+                .iter()
+                .find(|block| block.from == edge.from)
+                .expect("the block the edge leaves");
+
+            let expected = if edge.to == block.to {
+                ag_image::EdgeKind::Fallthrough
+            } else {
+                ag_image::EdgeKind::Taken
+            };
+
+            assert_eq!(edge.kind, expected, "the edge {edge:?}");
+        }
+
+        // The branch at the top of the function goes two ways: one of them
+        // falls off the end of the block, and the other one is taken.
+        let first = &graph.blocks[0];
+        let kinds: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == first.from)
+            .map(|edge| edge.kind)
+            .collect();
+
+        assert_eq!(kinds.len(), 2, "the branch goes two ways");
+        assert!(kinds.contains(&ag_image::EdgeKind::Fallthrough));
+        assert!(kinds.contains(&ag_image::EdgeKind::Taken));
     }
 }
