@@ -56,7 +56,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] Decode 32-bit x86: take the bitness from the image's language — [#76](https://github.com/CryptoJones/AdmiralGrace/issues/76)
 - [x] Lifter, first milestone: pseudocode for straight-line x86-64 functions — [#77](https://github.com/CryptoJones/AdmiralGrace/issues/77)
 - [ ] Lifter, second milestone: straight-line functions that call, by lifting the fall-through chain of blocks — [#83](https://github.com/CryptoJones/AdmiralGrace/issues/83)
-- [ ] ag image export: the whole analysis of an image as a directory of JSON and text — [#78](https://github.com/CryptoJones/AdmiralGrace/issues/78)
+- [x] ag image export: the whole analysis of an image as a directory of JSON and text — [#78](https://github.com/CryptoJones/AdmiralGrace/issues/78)
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
 - [x] Strings for a program image: scan the data sections and link each string to the code that uses it — [#51](https://github.com/CryptoJones/AdmiralGrace/issues/51)
 - [x] Open a raw binary in the workbench through ag-engine::Image — [#42](https://github.com/CryptoJones/AdmiralGrace/issues/42)
