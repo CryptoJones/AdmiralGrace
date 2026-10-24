@@ -143,6 +143,51 @@ pub struct Call {
     pub name: Option<String>,
 }
 
+/// What an edge of a control-flow graph means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// The code falls off the end of the block into this edge.
+    Fallthrough,
+    /// The code branches into this edge.
+    Taken,
+}
+
+impl EdgeKind {
+    /// The name of the kind, as it is reported.
+    pub fn name(&self) -> &'static str {
+        match self {
+            EdgeKind::Fallthrough => "fall-through",
+            EdgeKind::Taken => "taken",
+        }
+    }
+}
+
+/// One edge of a control-flow graph.
+#[derive(Debug, Clone)]
+pub struct Edge {
+    /// The block the edge leaves.
+    pub from: u64,
+    /// The block the edge arrives at.
+    pub to: u64,
+    /// What the edge means.
+    pub kind: EdgeKind,
+}
+
+/// The control-flow graph of one function.
+#[derive(Debug, Clone)]
+pub struct ControlFlowGraph {
+    /// The function the graph belongs to.
+    pub function: u64,
+    /// The name of the function, when it has one.
+    pub name: Option<String>,
+    /// The name of the section the function sits in.
+    pub section: String,
+    /// The blocks of the function, in the order the walk found them.
+    pub blocks: Vec<Block>,
+    /// The edges between the blocks.
+    pub edges: Vec<Edge>,
+}
+
 /// The disassembly of one function.
 #[derive(Debug, Clone)]
 pub struct Disassembly {
@@ -486,6 +531,40 @@ impl Binary {
         let built = Arc::new(self.build_disassembly(address)?);
         cache.insert(address, Arc::clone(&built));
         Some(built)
+    }
+
+    /// The control-flow graph of the function at `address`.
+    ///
+    /// The blocks are the ones the walk found, and the edges are the ways
+    /// the code goes from one block to the next. An edge that leaves the end
+    /// of a block is the fall-through; every other edge is a branch that is
+    /// taken.
+    pub fn control_flow(&self, address: u64) -> Option<Arc<ControlFlowGraph>> {
+        let disassembly = self.disassembly(address)?;
+
+        let edges = disassembly
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                block.successors.iter().map(move |&successor| Edge {
+                    from: block.from,
+                    to: successor,
+                    kind: if successor == block.to {
+                        EdgeKind::Fallthrough
+                    } else {
+                        EdgeKind::Taken
+                    },
+                })
+            })
+            .collect();
+
+        Some(Arc::new(ControlFlowGraph {
+            function: address,
+            name: self.function_name(address).map(str::to_string),
+            section: disassembly.section.clone(),
+            blocks: disassembly.blocks.clone(),
+            edges,
+        }))
     }
 
     /// The direct calls the function at `address` makes.

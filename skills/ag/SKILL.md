@@ -103,18 +103,23 @@ and `ag docs workbench` explains how.
 ag image ./sample.elf info
 ag image ./sample.elf symbols --filter 'main|add'
 ag image ./sample.elf disasm main
+ag image ./sample.elf cfg main
+ag image ./sample.elf calls
 ag image ./sample.elf strings
 ```
 
 `info` gives the language, the entry point and the sections. `symbols` gives the function
 and data symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per
 block, then the address, the bytes, the mnemonic and the operands of every instruction. A
-call shows the name of the function it calls. `strings` gives the text the image holds,
-with the functions that use it. `--json` reports the same thing as JSON, with every
-address as both a number and a hex string.
+call shows the name of the function it calls. `cfg` gives the control-flow graph of a
+function: its blocks and the edges between them, each edge marked fall-through or taken.
+`calls` gives who calls whom: with a function, what it calls and who calls it; without
+one, the whole call graph. `strings` gives the text the image holds, with the functions
+that use it. `--json` reports the same thing as JSON, with every address as both a number
+and a hex string.
 
-`info` and `symbols` read any format the loader reads. `disasm` decodes x86-64 only, so
-it refuses another architecture rather than guessing.
+`info` and `symbols` read any format the loader reads. `disasm`, `cfg` and `calls` decode
+x86-64 only, so they refuse another architecture rather than guessing.
 
 Reach for this when there is no corpus yet: the symbols say what the program has, and the
 disassembly says what one function does.

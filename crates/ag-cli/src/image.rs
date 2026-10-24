@@ -51,6 +51,24 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The control-flow graph of one function.
+    Cfg {
+        /// The function: an address such as `0x1198`, or a name.
+        target: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The calls between the functions of the image.
+    Calls {
+        /// The function: an address such as `0x1198`, or a name.
+        ///
+        /// Without one, the whole call graph is reported.
+        target: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -219,6 +237,84 @@ struct StringsJson {
     strings: Vec<StringJson>,
 }
 
+/// One edge of a control-flow graph, as JSON.
+#[derive(Debug, Serialize)]
+struct EdgeJson {
+    /// The block the edge leaves.
+    from: u64,
+    /// The address, as a hex string.
+    from_hex: String,
+    /// The block the edge arrives at.
+    to: u64,
+    /// The address, as a hex string.
+    to_hex: String,
+    /// Whether the edge is the fall-through or a branch that is taken.
+    kind: String,
+}
+
+/// The control-flow graph of a function, as JSON.
+#[derive(Debug, Serialize)]
+struct CfgJson {
+    /// The function's entry address.
+    function: u64,
+    /// The address, as a hex string.
+    function_hex: String,
+    /// The function's name, when it has one.
+    name: Option<String>,
+    /// The section the function sits in.
+    section: String,
+    /// The blocks of the function.
+    blocks: Vec<BlockJson>,
+    /// The edges between the blocks.
+    edges: Vec<EdgeJson>,
+}
+
+/// One function of the call graph, as JSON.
+#[derive(Debug, Serialize)]
+struct CallFunctionJson {
+    /// The function's entry address.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// The function's name.
+    name: String,
+    /// The calls the function makes.
+    calls: Vec<CallJson>,
+    /// The functions that call it.
+    callers: Vec<FunctionJson>,
+}
+
+/// The calls of one function, as JSON.
+#[derive(Debug, Serialize)]
+struct FunctionCallsJson {
+    /// The function's entry address.
+    function: u64,
+    /// The address, as a hex string.
+    function_hex: String,
+    /// The function's name, when it has one.
+    name: Option<String>,
+    /// The calls the function makes.
+    calls: Vec<CallJson>,
+    /// The functions that call it.
+    callers: Vec<FunctionJson>,
+}
+
+/// The call graph of the image, as JSON.
+#[derive(Debug, Serialize)]
+struct CallsJson {
+    /// The entry point of the image.
+    entry: Option<u64>,
+    /// The entry point, as a hex string.
+    entry_hex: Option<String>,
+    /// The functions of the image, with the calls they make and the calls
+    /// they get.
+    functions: Vec<CallFunctionJson>,
+    /// The functions reachable from the entry point.
+    reachable: Vec<FunctionJson>,
+    /// The functions nothing calls.
+    without_callers: Vec<FunctionJson>,
+}
+
 /// Report on a program image.
 pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     let image = Binary::open(binary).with_context(|| format!("reading {}", binary.display()))?;
@@ -232,6 +328,8 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
             utf16,
             json,
         } => strings(&image, filter.as_deref(), utf16, json),
+        ImageCmd::Cfg { target, json } => cfg(&image, &target, json),
+        ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
     }
 }
 
@@ -516,6 +614,266 @@ fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<S
         .collect())
 }
 
+/// Report the control-flow graph of one function.
+fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86-64 and this image is {}",
+        image.language()
+    );
+
+    let address = resolve(image, target)?;
+    let graph = image
+        .control_flow(address)
+        .with_context(|| format!("walking the control flow of {target}"))?;
+
+    if json {
+        let report = CfgJson {
+            function: graph.function,
+            function_hex: format!("{:#x}", graph.function),
+            name: graph.name.clone(),
+            section: graph.section.clone(),
+            blocks: graph.blocks.iter().map(block_json).collect(),
+            edges: graph.edges.iter().map(edge_json).collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    let name = graph.name.as_deref().unwrap_or("entry");
+    println!("{name} at {:#x} in {}", graph.function, graph.section);
+    println!("blocks: {}", graph.blocks.len());
+    println!("edges: {}", graph.edges.len());
+
+    for block in &graph.blocks {
+        let successors: Vec<String> = block
+            .successors
+            .iter()
+            .map(|successor| format!("{successor:#x}"))
+            .collect();
+
+        println!("block {:#x} - {:#x}", block.from, block.to);
+        println!(
+            "  successors: {}",
+            if successors.is_empty() {
+                "-".to_string()
+            } else {
+                successors.join(", ")
+            }
+        );
+
+        let instructions: Vec<String> = block
+            .instructions
+            .iter()
+            .map(|instruction| format!("{:#x}", instruction.address))
+            .collect();
+        println!("  instructions: {}", instructions.join(" "));
+    }
+
+    println!("edges:");
+    for edge in &graph.edges {
+        println!("  {:#x} -> {:#x} {}", edge.from, edge.to, edge.kind.name());
+    }
+
+    Ok(0)
+}
+
+/// Report the calls of one function, or of the whole image.
+fn calls(image: &Binary, target: Option<&str>, json: bool) -> Result<i32> {
+    match target {
+        Some(target) => calls_of(image, target, json),
+        None => every_call(image, json),
+    }
+}
+
+/// Report what one function calls, and who calls it.
+fn calls_of(image: &Binary, target: &str, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86-64 and this image is {}",
+        image.language()
+    );
+
+    let address = resolve(image, target)?;
+    let calls = image.calls(address);
+    let callers: Vec<FunctionJson> = image.called_by(address).iter().map(function_json).collect();
+
+    if json {
+        let report = FunctionCallsJson {
+            function: address,
+            function_hex: format!("{address:#x}"),
+            name: image.function_name(address).map(str::to_string),
+            calls: calls.iter().map(call_json).collect(),
+            callers,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    let name = image.function_name(address).unwrap_or("entry");
+    println!("{name} at {address:#x}");
+
+    println!("calls:");
+    if calls.is_empty() {
+        println!("  -");
+    }
+    for call in &calls {
+        println!(
+            "  {:#x} -> {:#x} {}",
+            call.site,
+            call.target,
+            call.name.as_deref().unwrap_or("-")
+        );
+    }
+
+    println!("called by:");
+    if callers.is_empty() {
+        println!("  -");
+    }
+    for caller in &callers {
+        println!("  {} {}", caller.address_hex, caller.name);
+    }
+
+    Ok(0)
+}
+
+/// Report the calls of the whole image.
+///
+/// Who calls whom needs the whole program read, so that is what this call
+/// costs.
+fn every_call(image: &Binary, json: bool) -> Result<i32> {
+    let functions: Vec<CallFunctionJson> = image
+        .functions()
+        .iter()
+        .map(|function| CallFunctionJson {
+            address: function.address,
+            address_hex: format!("{:#x}", function.address),
+            name: function.name.clone(),
+            calls: image
+                .calls(function.address)
+                .iter()
+                .map(call_json)
+                .collect(),
+            callers: image
+                .called_by(function.address)
+                .iter()
+                .map(function_json)
+                .collect(),
+        })
+        .collect();
+
+    let reachable: Vec<FunctionJson> = image
+        .reachable_from_entry()
+        .iter()
+        .map(function_json)
+        .collect();
+
+    let without_callers: Vec<FunctionJson> = image
+        .functions_without_callers()
+        .iter()
+        .map(function_json)
+        .collect();
+
+    if json {
+        let report = CallsJson {
+            entry: image.entry(),
+            entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
+            functions,
+            reachable,
+            without_callers,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    match image.entry() {
+        Some(entry) => println!("entry: {entry:#x}"),
+        None => println!("entry: none"),
+    }
+    println!("functions: {}", functions.len());
+
+    let sites: usize = functions.iter().map(|function| function.calls.len()).sum();
+    println!("calls: {sites}");
+
+    println!("reachable from the entry: {}", reachable.len());
+    if reachable.is_empty() {
+        println!("  -");
+    }
+    for function in &reachable {
+        println!("  {} {}", function.address_hex, function.name);
+    }
+
+    println!("without callers: {}", without_callers.len());
+    if without_callers.is_empty() {
+        println!("  -");
+    }
+    for function in &without_callers {
+        println!("  {} {}", function.address_hex, function.name);
+    }
+
+    println!("the calls:");
+    for function in &functions {
+        for call in &function.calls {
+            println!(
+                "  {} {} -> {} {}",
+                function.address_hex,
+                function.name,
+                call.target_hex,
+                call.name.as_deref().unwrap_or("-")
+            );
+        }
+    }
+
+    Ok(0)
+}
+
+/// One block of a control-flow graph, as JSON.
+fn block_json(block: &ag_image::Block) -> BlockJson {
+    BlockJson {
+        from: block.from,
+        from_hex: format!("{:#x}", block.from),
+        to: block.to,
+        to_hex: format!("{:#x}", block.to),
+        successors: block.successors.clone(),
+        instructions: block
+            .instructions
+            .iter()
+            .map(|instruction| InstructionJson {
+                address: instruction.address,
+                address_hex: format!("{:#x}", instruction.address),
+                bytes: instruction
+                    .bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                mnemonic: instruction.mnemonic.clone(),
+                operands: operands_of(instruction),
+                call: instruction.call.as_ref().map(call_json),
+            })
+            .collect(),
+    }
+}
+
+/// One edge of a control-flow graph, as JSON.
+fn edge_json(edge: &ag_image::Edge) -> EdgeJson {
+    EdgeJson {
+        from: edge.from,
+        from_hex: format!("{:#x}", edge.from),
+        to: edge.to,
+        to_hex: format!("{:#x}", edge.to),
+        kind: edge.kind.name().to_string(),
+    }
+}
+
+/// One function of the image, as JSON.
+fn function_json(function: &ag_image::Function) -> FunctionJson {
+    FunctionJson {
+        address: function.address,
+        address_hex: format!("{:#x}", function.address),
+        name: function.name.clone(),
+    }
+}
+
 /// The operands of an instruction, with a call's target named.
 fn operands_of(instruction: &ag_image::Instruction) -> String {
     match instruction
@@ -681,5 +1039,83 @@ mod tests {
         let strings = strings_of(&image, Some("nonesuch"), false).expect("the strings are listed");
 
         assert!(strings.is_empty(), "{strings:?}");
+    }
+
+    #[test]
+    fn the_graph_of_a_function_is_reported_with_its_edges() {
+        let image = sample();
+
+        let graph = image.control_flow(0x1000).expect("_init walks");
+
+        let blocks: Vec<BlockJson> = graph.blocks.iter().map(block_json).collect();
+        assert_eq!(blocks.len(), 3, "the three blocks of _init");
+        assert_eq!(blocks[0].from_hex, "0x1000");
+        assert_eq!(blocks[0].to_hex, "0x1014");
+        assert_eq!(blocks[0].instructions[0].address_hex, "0x1000");
+
+        let edges: Vec<EdgeJson> = graph.edges.iter().map(edge_json).collect();
+        let kinds: Vec<&str> = edges.iter().map(|edge| edge.kind.as_str()).collect();
+
+        assert!(kinds.contains(&"taken"), "{kinds:?}");
+        assert!(kinds.contains(&"fall-through"), "{kinds:?}");
+    }
+
+    #[test]
+    fn the_calls_of_a_function_are_the_calls_it_makes() {
+        let image = sample();
+
+        let calls = image.calls(0x1198);
+        let names: Vec<&str> = calls
+            .iter()
+            .filter_map(|call| call.name.as_deref())
+            .collect();
+
+        assert_eq!(names, vec!["add", "sum_to", "printf"], "{names:?}");
+
+        let callers = image.called_by(0x1198);
+        assert!(callers.is_empty(), "nothing calls main: {callers:?}");
+    }
+
+    #[test]
+    fn the_whole_call_graph_holds_every_function_of_the_image() {
+        let image = sample();
+
+        let functions: Vec<CallFunctionJson> = image
+            .functions()
+            .iter()
+            .map(|function| CallFunctionJson {
+                address: function.address,
+                address_hex: format!("{:#x}", function.address),
+                name: function.name.clone(),
+                calls: image
+                    .calls(function.address)
+                    .iter()
+                    .map(call_json)
+                    .collect(),
+                callers: image
+                    .called_by(function.address)
+                    .iter()
+                    .map(function_json)
+                    .collect(),
+            })
+            .collect();
+
+        assert_eq!(functions.len(), image.functions().len());
+
+        let main = functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main is in the graph");
+
+        assert_eq!(main.calls.len(), 3, "main calls three functions");
+        assert!(main.callers.is_empty(), "nothing calls main");
+
+        let add = functions
+            .iter()
+            .find(|function| function.name == "add")
+            .expect("add is in the graph");
+
+        assert_eq!(add.callers.len(), 1, "main calls add");
+        assert_eq!(add.callers[0].name, "main");
     }
 }
