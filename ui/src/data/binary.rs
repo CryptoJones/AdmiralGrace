@@ -1181,8 +1181,9 @@ mod tests {
     fn the_references_of_a_function_name_the_data_it_uses() {
         let provider = sample();
 
-        // `_start` reads the flag the C runtime sets when it is done.
-        let references = provider.references(0x1060);
+        // `deregister_tm_clones` reads the flag the C runtime sets when it
+        // is done.
+        let references = provider.references(0x1090);
 
         let data: Vec<&str> = references
             .iter()
@@ -1220,10 +1221,12 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
 
-        // Four: frame_dummy's read of the flag was register_tm_clones',
-        // which it tail-calls, and the walk stops at the jump.
-        assert_eq!(users.len(), 4, "{users:?}");
-        assert!(users.contains(&"_start"), "{users:?}");
+        // Three: frame_dummy's read of the flag was register_tm_clones',
+        // which it tail-calls, and the walk stops at the jump; _start ends
+        // in hlt before deregister_tm_clones, and the walk stops there too.
+        assert_eq!(users.len(), 3, "{users:?}");
+        assert!(users.contains(&"deregister_tm_clones"), "{users:?}");
+        assert!(!users.contains(&"_start"), "{users:?}");
         assert!(!users.contains(&"frame_dummy"), "{users:?}");
     }
 

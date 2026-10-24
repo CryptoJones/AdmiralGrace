@@ -56,6 +56,19 @@ fn ud2_is_a_trap_and_decoding_continues_past_it() {
 }
 
 #[test]
+fn hlt_is_a_halt_and_decoding_continues_past_it() {
+    // hlt ; nop — the C runtime's _start ends in hlt, and padding follows.
+    let bytes = [0xf4, 0x90];
+    let mut ctx = X86IcedContext::default();
+    let dys = ag_engine::pipeline::Disasm::decode(&mut ctx, &bytes, 0x1000)
+        .expect("a halt must not abort the segment");
+    assert_eq!(dys.instructions.len(), 2);
+    assert_eq!(dys.instructions[0].flow, Flow::Halt);
+    assert_eq!(dys.instructions[0].length, 1);
+    assert_eq!(dys.instructions[1].flow, Flow::Next);
+}
+
+#[test]
 fn syscall_and_sysenter_have_their_own_flow() {
     let mut ctx = X86IcedContext::default();
     let syscall = ctx.decode(&[0x0f, 0x05], 0x1000).expect("syscall");

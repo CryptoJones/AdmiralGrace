@@ -1815,10 +1815,11 @@ mod tests {
     #[test]
     fn the_start_up_glue_the_lifter_still_refuses_says_why() {
         let binary = sample();
-        // _start aligns the stack with `and rsp, -16` and then pushes.
+        // _start ends in hlt after its call through __libc_start_main,
+        // which the lifter has no reading of.
         assert_eq!(
             binary.pseudocode(0x1060).unwrap_err().to_string(),
-            "not lifted yet: the stack pointer is not tracked"
+            "not lifted yet: the block ends in hlt"
         );
         // register_tm_clones shifts, which the lifter does not read yet.
         assert_eq!(

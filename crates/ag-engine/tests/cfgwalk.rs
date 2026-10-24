@@ -61,6 +61,20 @@ fn a_trap_ends_its_block_and_a_syscall_does_not() {
 }
 
 #[test]
+fn a_halt_ends_its_block_with_no_successor() {
+    use ag_engine::cpu_context::X86IcedContext;
+    // hlt ; nop ; ret  — the code after hlt is unreachable by fall-through.
+    let bytes = [0xf4, 0x90, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let dys = ag_engine::pipeline::Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let cfg = ag_engine::cfgwalk::resolve_branches(&dys, 0x1000);
+    assert_eq!(cfg.blocks.len(), 1, "hlt ends the block: {:?}", cfg.blocks);
+    assert_eq!(cfg.blocks[0].from, 0x1000);
+    assert_eq!(cfg.blocks[0].to, 0x1001);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+}
+
+#[test]
 fn xbegin_forks_to_its_abort_handler_and_the_transaction() {
     use ag_engine::cpu_context::X86IcedContext;
     // xbegin +1 ; nop ; ret  — abort handler is the ret at 0x1007.
