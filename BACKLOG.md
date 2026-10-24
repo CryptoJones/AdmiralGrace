@@ -46,7 +46,8 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 
 ### data layer and workbench
 
-- [ ] Graph tab: draw the control-flow graph of the selected function for a program image — [#49](https://github.com/CryptoJones/AdmiralGrace/issues/49)
+- [x] Graph tab: draw the control-flow graph of the selected function for a program image — [#49](https://github.com/CryptoJones/AdmiralGrace/issues/49)
+- [ ] Graph tab: route an edge that skips a rank around the blocks in between, and keep the edge labels apart — [#59](https://github.com/CryptoJones/AdmiralGrace/issues/59)
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
 - [x] Strings for a program image: scan the data sections and link each string to the code that uses it — [#51](https://github.com/CryptoJones/AdmiralGrace/issues/51)
 - [x] Open a raw binary in the workbench through ag-engine::Image — [#42](https://github.com/CryptoJones/AdmiralGrace/issues/42)
