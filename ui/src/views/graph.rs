@@ -29,6 +29,9 @@ pub const PADDING: f32 = 8.0;
 pub const GAP_X: f32 = 56.0;
 /// The gap between two rows of blocks.
 pub const GAP_Y: f32 = 44.0;
+
+/// The room a route takes to the side of a row of blocks.
+const LANE: f32 = 28.0;
 /// The smallest zoom the reader can choose.
 pub const MIN_ZOOM: f32 = 0.2;
 /// The largest zoom the reader can choose.
@@ -129,6 +132,31 @@ pub struct GraphEdge {
     pub to: u64,
     /// What the edge means.
     pub kind: EdgeKind,
+    /// The points the edge is drawn through, in graph units.
+    pub route: Vec<Point>,
+}
+
+impl GraphEdge {
+    /// The point the label of the edge sits at, in graph units.
+    ///
+    /// The label sits at the last bend of the route, so every edge that
+    /// leaves a block names itself by the block it goes to.
+    pub fn label_point(&self) -> Option<Point> {
+        if self.route.len() < 2 {
+            return None;
+        }
+
+        Some(self.route[self.route.len() - 2])
+    }
+}
+
+/// A row of blocks in the graph.
+#[derive(Debug, Clone, Copy)]
+pub struct GraphRow {
+    /// The top of the row.
+    pub y: f32,
+    /// The bottom of the row.
+    pub bottom: f32,
 }
 
 /// The graph of a function, laid out.
@@ -191,6 +219,7 @@ pub fn layout(blocks: &[GraphBlock]) -> GraphLayout {
     }
 
     let mut y = 0.0_f32;
+    let mut graph_rows: Vec<GraphRow> = Vec::new();
 
     for row in &rows {
         let mut row_height = 0.0_f32;
@@ -202,19 +231,73 @@ pub fn layout(blocks: &[GraphBlock]) -> GraphLayout {
             row_height = row_height.max(node.height);
         }
 
+        graph_rows.push(GraphRow {
+            y,
+            bottom: y + row_height,
+        });
+
         y += row_height + GAP_Y;
     }
 
-    let width = rows
+    let mut edges = edges_of(blocks);
+
+    // Every edge is routed around the blocks it does not connect.
+    for edge in &mut edges {
+        let source = nodes.iter().find(|node| node.from == edge.from);
+        let target = nodes.iter().find(|node| node.from == edge.to);
+
+        if let (Some(source), Some(target)) = (source, target) {
+            edge.route = route(&nodes, &graph_rows, source, target);
+        }
+    }
+
+    // The routes run to the side of the blocks, so the graph is moved
+    // until everything is inside it.
+    let left = nodes
         .iter()
-        .map(|row| row.len() as f32 * (NODE_WIDTH + GAP_X) - GAP_X)
+        .map(|node| node.x)
+        .chain(
+            edges
+                .iter()
+                .flat_map(|edge| edge.route.iter().map(|point| point.x)),
+        )
+        .fold(f32::INFINITY, f32::min);
+
+    if left.is_finite() && left != 0.0 {
+        for node in &mut nodes {
+            node.x -= left;
+        }
+
+        for edge in &mut edges {
+            for point in &mut edge.route {
+                point.x -= left;
+            }
+        }
+    }
+
+    let width = nodes
+        .iter()
+        .map(|node| node.x + node.width)
+        .chain(
+            edges
+                .iter()
+                .flat_map(|edge| edge.route.iter().map(|point| point.x)),
+        )
         .fold(0.0_f32, f32::max);
 
-    let height = if rows.is_empty() { 0.0 } else { y - GAP_Y };
+    let height = nodes
+        .iter()
+        .map(|node| node.y + node.height)
+        .chain(
+            edges
+                .iter()
+                .flat_map(|edge| edge.route.iter().map(|point| point.y)),
+        )
+        .fold(0.0_f32, f32::max);
 
     GraphLayout {
         nodes,
-        edges: edges_of(blocks),
+        edges,
         width,
         height,
     }
@@ -242,6 +325,7 @@ fn edges_of(blocks: &[GraphBlock]) -> Vec<GraphEdge> {
                 from: block.from,
                 to: successor,
                 kind,
+                route: Vec::new(),
             });
         }
     }
@@ -600,14 +684,11 @@ impl GraphProgram {
 
     /// Draw one edge, with the arrow that points at the next block.
     fn draw_edge(&self, frame: &mut canvas::Frame, edge: &GraphEdge, view: View) {
-        let (Some(source), Some(target)) = (
-            self.layout.nodes.iter().find(|node| node.from == edge.from),
-            self.layout.nodes.iter().find(|node| node.from == edge.to),
-        ) else {
+        let Some(source) = self.layout.nodes.iter().find(|node| node.from == edge.from) else {
             return;
         };
 
-        let points = edge_points(source, target, view);
+        let points = edge_points(&edge.route, view);
 
         if points.len() < 2 {
             return;
@@ -653,43 +734,141 @@ impl GraphProgram {
             EdgeKind::Taken => "taken",
         };
 
-        let middle = points[points.len() / 2];
+        // The label sits at the last bend of the edge, so the edges that
+        // leave a block name themselves by the block they go to.
+        let Some(anchor) = edge.label_point() else {
+            return;
+        };
+
+        let anchor = Point::new(
+            view.offset.x + anchor.x * view.scale,
+            view.offset.y + anchor.y * view.scale,
+        );
 
         frame.fill_text(text(
             label,
-            Point::new(middle.x + 4.0, middle.y - 12.0),
+            Point::new(anchor.x + 4.0, anchor.y + 1.0),
             color::DIM,
             (10.0 * view.scale).max(1.0),
         ));
     }
 }
 
-/// The points an edge is drawn through.
-fn edge_points(source: &GraphNode, target: &GraphNode, view: View) -> Vec<Point> {
-    let scale = view.scale;
-    let place = |x: f32, y: f32| Point::new(view.offset.x + x * scale, view.offset.y + y * scale);
+/// The points an edge is drawn through, in graph units.
+///
+/// The route leaves the source, travels in the gap between the rows, and
+/// comes into the target. It never crosses a block it does not connect:
+/// the horizontal runs are in the gaps between the rows, where no block
+/// sits, and the vertical runs are either in a column of their own or to
+/// the side of the blocks they pass.
+fn route(
+    nodes: &[GraphNode],
+    rows: &[GraphRow],
+    source: &GraphNode,
+    target: &GraphNode,
+) -> Vec<Point> {
+    let source_x = source.x + source.width / 2.0;
+    let target_x = target.x + target.width / 2.0;
 
-    if target.rank > source.rank {
+    let below = band_below(rows, source.rank);
+    let above = band_above(rows, target.rank);
+
+    if target.rank == source.rank + 1 {
         // Down the side of the source, across, and down into the target.
-        let middle = source.y + source.height + GAP_Y / 2.0;
+        vec![
+            Point::new(source_x, source.y + source.height),
+            Point::new(source_x, below),
+            Point::new(target_x, below),
+            Point::new(target_x, target.y),
+        ]
+    } else if target.rank > source.rank {
+        // The target is more than one row down, so the blocks in between
+        // are in the way: go around them, to the side.
+        let lane = lane_beside(nodes, source.rank + 1, target.rank - 1, target_x);
 
         vec![
-            place(source.x + source.width / 2.0, source.y + source.height),
-            place(source.x + source.width / 2.0, middle),
-            place(target.x + target.width / 2.0, middle),
-            place(target.x + target.width / 2.0, target.y),
+            Point::new(source_x, source.y + source.height),
+            Point::new(source_x, below),
+            Point::new(lane, below),
+            Point::new(lane, above),
+            Point::new(target_x, above),
+            Point::new(target_x, target.y),
         ]
     } else {
-        // A loop back: out to the right, along, and in again.
-        let side = source.x + source.width + 28.0;
+        // A loop back: out to the side of the whole graph, along, and in
+        // again from below.
+        let lane = lane_beside(nodes, 0, rows.len().saturating_sub(1), target_x);
+        let under = band_below(rows, target.rank);
 
         vec![
-            place(source.x + source.width, source.y + source.height / 2.0),
-            place(side, source.y + source.height / 2.0),
-            place(side, target.y + target.height / 2.0),
-            place(target.x + target.width, target.y + target.height / 2.0),
+            Point::new(source_x, source.y + source.height),
+            Point::new(source_x, below),
+            Point::new(lane, below),
+            Point::new(lane, under),
+            Point::new(target_x, under),
+            Point::new(target_x, target.y + target.height),
         ]
     }
+}
+
+/// The middle of the gap under a row.
+fn band_below(rows: &[GraphRow], rank: usize) -> f32 {
+    match rows.get(rank) {
+        Some(row) => row.bottom + GAP_Y / 2.0,
+        None => 0.0,
+    }
+}
+
+/// The middle of the gap over a row.
+fn band_above(rows: &[GraphRow], rank: usize) -> f32 {
+    match rows.get(rank) {
+        Some(row) => row.y - GAP_Y / 2.0,
+        None => 0.0,
+    }
+}
+
+/// The lane to the side of the blocks in the given rows.
+///
+/// The lane is clear of every block in those rows, so an edge that runs
+/// along it crosses none of them. The side that keeps the edge nearest to
+/// where it is going is the one it takes.
+fn lane_beside(nodes: &[GraphNode], first: usize, last: usize, prefer: f32) -> f32 {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+
+    for node in nodes {
+        if node.rank >= first && node.rank <= last {
+            left = left.min(node.x);
+            right = right.max(node.x + node.width);
+        }
+    }
+
+    if !left.is_finite() {
+        // Nothing is in the way, so the edge goes straight down.
+        return prefer;
+    }
+
+    let left = left - LANE;
+    let right = right + LANE;
+
+    if (prefer - left).abs() < (right - prefer).abs() {
+        left
+    } else {
+        right
+    }
+}
+
+/// The points of a route, as they are drawn.
+fn edge_points(route: &[Point], view: View) -> Vec<Point> {
+    route
+        .iter()
+        .map(|point| {
+            Point::new(
+                view.offset.x + point.x * view.scale,
+                view.offset.y + point.y * view.scale,
+            )
+        })
+        .collect()
 }
 
 /// The arrow that points at the next block.
@@ -1138,5 +1317,156 @@ mod tests {
             short_bytes("48 8D 05 2B 0E 00 00 01 02 03"),
             "48 8D 05 2B 0E 00 00 01\u{2026}"
         );
+    }
+
+    /// The blocks of _init in the sample image.
+    ///
+    /// The block at 0x1000 goes on in two ways: it falls through to the
+    /// block at 0x1014 and takes the branch to 0x1016, which is a row
+    /// further down and behind the block at 0x1014.
+    fn init_blocks() -> Vec<GraphBlock> {
+        vec![
+            block(0x1000, 0x1014, vec![0x1016, 0x1014], 5),
+            block(0x1014, 0x1016, vec![0x1016], 1),
+            block(0x1016, 0x101b, vec![], 2),
+        ]
+    }
+
+    /// Whether a straight run from one point to another crosses a block.
+    ///
+    /// The test is Liang and Barsky's: the run is clipped against the
+    /// four sides of the block, and it crosses when what is left of it
+    /// is not empty.
+    fn segment_hits_rectangle(from: Point, to: Point, node: &GraphNode) -> bool {
+        let (left, top, right, bottom) =
+            (node.x, node.y, node.x + node.width, node.y + node.height);
+
+        // Each side of the block, with the run that pushes out of it.
+        let directions = [
+            -(to.x - from.x),
+            to.x - from.x,
+            -(to.y - from.y),
+            to.y - from.y,
+        ];
+        let distances = [from.x - left, right - from.x, from.y - top, bottom - from.y];
+
+        let mut start = 0.0_f32;
+        let mut end = 1.0_f32;
+
+        for index in 0..4 {
+            if directions[index] == 0.0 {
+                // The run is parallel to this side, so it either misses
+                // the block or lies outside it.
+                if distances[index] < 0.0 {
+                    return false;
+                }
+
+                continue;
+            }
+
+            let crossing = distances[index] / directions[index];
+
+            if directions[index] < 0.0 {
+                end = end.min(crossing);
+            } else {
+                start = start.max(crossing);
+            }
+
+            if start > end {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Whether the route of an edge runs through a block.
+    fn route_hits_block(route: &[Point], node: &GraphNode) -> bool {
+        route
+            .iter()
+            .zip(route.iter().skip(1))
+            .any(|(from, to)| segment_hits_rectangle(*from, *to, node))
+    }
+
+    #[test]
+    fn the_route_of_an_edge_avoids_the_blocks_it_does_not_connect() {
+        let layout = layout(&init_blocks());
+
+        for edge in &layout.edges {
+            for node in &layout.nodes {
+                if node.from == edge.from || node.from == edge.to {
+                    continue;
+                }
+
+                assert!(
+                    !route_hits_block(&edge.route, node),
+                    "the edge from {:#x} to {:#x} runs through the block at {:#x}",
+                    edge.from,
+                    edge.to,
+                    node.from
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_edge_that_skips_a_row_goes_around_the_block_in_between() {
+        let layout = layout(&init_blocks());
+
+        let edge = layout
+            .edges
+            .iter()
+            .find(|edge| edge.from == 0x1000 && edge.to == 0x1016)
+            .expect("the branch of _init");
+
+        let between = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == 0x1014)
+            .expect("the block in between");
+
+        // The route leaves the column of the block and comes back to it.
+        assert!(
+            edge.route
+                .iter()
+                .any(|point| point.x < between.x || point.x > between.x + between.width),
+            "the edge does not go around the block at {:#x}",
+            between.from
+        );
+
+        assert!(!route_hits_block(&edge.route, between));
+    }
+
+    #[test]
+    fn the_labels_of_the_edges_leaving_a_block_are_apart() {
+        let layout = layout(&init_blocks());
+
+        let anchors: Vec<Point> = layout
+            .edges
+            .iter()
+            .filter(|edge| edge.from == 0x1000)
+            .filter_map(|edge| edge.label_point())
+            .collect();
+
+        assert_eq!(anchors.len(), 2, "both ways out of the block are named");
+
+        let apart =
+            ((anchors[0].x - anchors[1].x).powi(2) + (anchors[0].y - anchors[1].y).powi(2)).sqrt();
+
+        assert!(
+            apart >= 16.0,
+            "the labels of the two ways out of the block are {apart} apart"
+        );
+
+        // And neither of them is painted over a block.
+        for anchor in &anchors {
+            for node in &layout.nodes {
+                assert!(
+                    !segment_hits_rectangle(*anchor, *anchor, node),
+                    "a label sits on the block at {:#x}",
+                    node.from
+                );
+            }
+        }
     }
 }

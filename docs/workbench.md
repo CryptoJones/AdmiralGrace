@@ -92,6 +92,11 @@ block that reaches it — and the graph is drawn to fit the pane. It can be drag
 mouse and zoomed with the wheel, and clicking a box moves the selection to the start of
 that block.
 
+An arrow that skips a row goes around the blocks in between rather than through them: it
+runs along a lane to the side of them and comes back in above the block it goes to. Every
+arrow names itself at its last bend, so the names of two arrows that leave the same block
+are never painted over one another.
+
 The layout of the graph is worked out by pure functions that take the blocks of a
 function and say where every box is drawn, so it is tested without a window. The canvas on
 top of it draws the boxes, the arrows and the text, and takes the mouse.
