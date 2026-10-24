@@ -1,14 +1,26 @@
-//! The lifter: from the decoded x86-64 instructions of one basic block to a
-//! C function.
+//! The lifter: from the decoded x86-64 instructions of a straight-line
+//! function to a C function.
 //!
-//! This is the first slice of the decompiler, and it is deliberately small.
-//! It reads one block of straight-line code — a function of exactly one basic
-//! block, ending in `ret` — and anything it does not understand is refused
-//! with a reason ([`NotLifted`]) rather than guessed.
+//! This is the second slice of the decompiler, and it is deliberately small.
+//! It reads straight-line code — a function whose blocks are joined only by
+//! fall-through, ending in `ret` — and anything it does not understand is
+//! refused with a reason ([`NotLifted`]) rather than guessed.
+//!
+//! # The chain
+//!
+//! The control-flow walk ends a block at every call, so a function that
+//! calls is several blocks even when nothing in it branches. The lifter
+//! starts at the entry block and, while the block falls through — its last
+//! instruction is not a branch, its one successor starts where the block
+//! ends, and that successor has no other predecessor — continues into the
+//! successor with the same symbolic state. The chain stops at the first
+//! block that does not fall through, and that block must end in `ret`. A
+//! branch (`branches at 0x…`) or a block that another block also reaches
+//! (`joins at 0x…`) is refused.
 //!
 //! # How it works
 //!
-//! The block is walked once, instruction by instruction, with a symbolic
+//! The chain is walked once, instruction by instruction, with a symbolic
 //! machine state:
 //!
 //! * **Registers are temporaries, not variables.** Each general register maps
@@ -38,9 +50,14 @@
 //!   and the caller-saved registers are forgotten. A call is a statement of
 //!   its own; its result is a temporary (`v1`) that is inlined into the next
 //!   statement when that is its only use.
+//! * **Pointers** the code takes through `lea` off the instruction pointer
+//!   are asked of the image ([`Symbols::pointee`]): one that lands on a
+//!   string is that string's literal, one that lands on a named piece of
+//!   data is `&name`, one that lands on a function is its name, and one the
+//!   image does not know stays the address it is.
 //! * **`ret`** returns `rax` with the width of its last write, or nothing if
 //!   `rax` was never written.
-//! * **Flags** have no consumer in one straight-line block, so a pure
+//! * **Flags** have no consumer in straight-line code, so a pure
 //!   flag-setter (`cmp`, `test`) is dropped, and `endbr64` and `nop` with it.
 //!
 //! # The type rule
@@ -53,7 +70,7 @@
 //!
 //! # What is refused
 //!
-//! More than one block; 32-bit or 16-bit code; a block that does not end in
+//! A branch or a join; 32-bit or 16-bit code; a chain that does not end in
 //! `ret`; any mnemonic outside `mov`, `add`, `sub`, `and`, `or`, `xor`,
 //! `lea`, `push`, `pop`, `leave`, `call`, `ret`, `cmp`, `test`, `nop` and
 //! `endbr64`; a memory operand that is not a stack slot; an indirect call;
@@ -68,10 +85,42 @@ use iced_x86::Mnemonic;
 
 use crate::arch::Bitness;
 use crate::ast::{AstNode, BinaryOp};
-use crate::cfg::ProcedureCfg;
+use crate::cfg::{BasicBlock, ProcedureCfg};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
+
+/// What the lifter asks the image: the name of a function it calls, and what
+/// a pointer it takes lands on.
+///
+/// A plain function from an address to a function name is a `Symbols` that
+/// knows no data, which is what the tests of the lifter use.
+pub trait Symbols {
+    /// The name of the function at `address`, when it has one.
+    fn function_name(&self, address: u64) -> Option<String>;
+
+    /// What the pointer to `address` lands on, when the image knows.
+    fn pointee(&self, _address: u64) -> Option<Pointee> {
+        None
+    }
+}
+
+impl<F: Fn(u64) -> Option<String>> Symbols for F {
+    fn function_name(&self, address: u64) -> Option<String> {
+        self(address)
+    }
+}
+
+/// What a pointer lands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pointee {
+    /// A string, from the pointer to its NUL: the text itself, unescaped.
+    String(String),
+    /// A named piece of data, which the pointer points at the start of.
+    Data(String),
+    /// A function, by its name.
+    Function(String),
+}
 
 /// Why a function was not lifted.
 ///
@@ -197,10 +246,12 @@ const RDI: u32 = 7;
 const R8: u32 = 8;
 const R9: u32 = 9;
 
-/// Lift the function at `entry`, when it is one block of straight-line code.
+/// Lift the function at `entry`, when it is straight-line code: a chain of
+/// blocks joined only by fall-through, ending in `ret`.
 ///
-/// `names` gives the name of the function at an address, for the calls the
-/// body makes; a call to an address with no name is `sub_<hex>`.
+/// `symbols` gives the name of the function at an address, for the calls the
+/// body makes — a call to an address with no name is `sub_<hex>` — and what
+/// a pointer the body takes lands on.
 pub fn lift_function(
     disasm: &Disasm,
     cfg: &ProcedureCfg,
@@ -208,32 +259,98 @@ pub fn lift_function(
     name: &str,
     bitness: Bitness,
     abi: Abi,
-    names: &dyn Fn(u64) -> Option<String>,
+    symbols: &dyn Symbols,
 ) -> Result<LiftedFunction, NotLifted> {
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
     }
-    let block = match cfg.blocks.len() {
-        0 => return Err(NotLifted::new(format!("no code at {entry:#x}"))),
-        1 => &cfg.blocks[0],
-        n => return Err(NotLifted::new(format!("{n} blocks"))),
-    };
-    let instructions: Vec<DecodedInsn> = disasm
-        .instructions
-        .iter()
-        .filter(|ins| block.contains(ins.address))
-        .cloned()
+    let instructions: Vec<DecodedInsn> = fall_through_chain(disasm, cfg, entry)?
+        .into_iter()
+        .flat_map(|block| {
+            disasm
+                .instructions
+                .iter()
+                .filter(|ins| block.contains(ins.address))
+                .cloned()
+        })
         .collect();
-    lift_block(&instructions, entry, name, abi, names)
+    lift_block(&instructions, entry, name, abi, symbols)
 }
 
-/// Lift one block of instructions, which must end in `ret`.
+/// The blocks from `entry` that are joined only by fall-through, in order.
+///
+/// A block is followed into its successor when its last instruction is not
+/// a branch, its one successor starts where the block ends, and no other
+/// block has that successor. The chain ends at a block with no successor;
+/// what that block ends in is for [`lift_block`] to judge. A block whose
+/// last instruction branches is refused as `branches at <its address>`, and
+/// a successor another block also reaches as `joins at <its address>`.
+fn fall_through_chain<'c>(
+    disasm: &Disasm,
+    cfg: &'c ProcedureCfg,
+    entry: u64,
+) -> Result<Vec<&'c BasicBlock>, NotLifted> {
+    let block_at = |address: u64| cfg.blocks.iter().find(|block| block.from == address);
+    let Some(entry_block) = block_at(entry) else {
+        return Err(NotLifted::new(format!("no code at {entry:#x}")));
+    };
+    let mut chain = vec![entry_block];
+    loop {
+        let block = *chain.last().expect("the chain starts at the entry");
+        let last = disasm
+            .instructions
+            .iter()
+            .rfind(|ins| block.contains(ins.address));
+        if last.is_some_and(branches) {
+            let at = last.map_or(block.from, |ins| ins.address);
+            return Err(NotLifted::new(format!("branches at {at:#x}")));
+        }
+        let next = match block.successor_addresses.as_slice() {
+            [] => break,
+            [next] if *next == block.to => *next,
+            _ => {
+                let at = last.map_or(block.from, |ins| ins.address);
+                return Err(NotLifted::new(format!("branches at {at:#x}")));
+            }
+        };
+        let predecessors = cfg
+            .blocks
+            .iter()
+            .filter(|other| other.successor_addresses.contains(&next))
+            .count();
+        if predecessors != 1 {
+            return Err(NotLifted::new(format!("joins at {next:#x}")));
+        }
+        let Some(successor) = block_at(next) else {
+            return Err(NotLifted::new(format!("no code at {next:#x}")));
+        };
+        // Each block starts where the one before ends, so the chain climbs
+        // through memory and cannot come round.
+        chain.push(successor);
+    }
+    Ok(chain)
+}
+
+/// Whether the instruction is a branch of any kind: it may go somewhere
+/// other than the next instruction, and not by calling or returning.
+fn branches(ins: &DecodedInsn) -> bool {
+    matches!(
+        ins.flow,
+        Flow::UnconditionalBranch(_)
+            | Flow::ConditionalBranch(_)
+            | Flow::Xbegin(_)
+            | Flow::IndirectBranch
+    )
+}
+
+/// Lift a run of straight-line instructions — one block, or a chain of
+/// blocks joined by fall-through — which must end in `ret`.
 pub fn lift_block(
     instructions: &[DecodedInsn],
     entry: u64,
     name: &str,
     abi: Abi,
-    names: &dyn Fn(u64) -> Option<String>,
+    symbols: &dyn Symbols,
 ) -> Result<LiftedFunction, NotLifted> {
     let Some(last) = instructions.last() else {
         return Err(NotLifted::new(format!("no code at {entry:#x}")));
@@ -244,7 +361,7 @@ pub fn lift_block(
             mnemonic_name(last)
         )));
     }
-    let mut lifter = Lifter::new(abi, names);
+    let mut lifter = Lifter::new(abi, symbols);
     for ins in instructions {
         lifter.step(ins)?;
     }
@@ -334,7 +451,7 @@ enum Stmt {
 
 struct Lifter<'a> {
     abi: Abi,
-    names: &'a dyn Fn(u64) -> Option<String>,
+    symbols: &'a dyn Symbols,
     /// What each general register holds, by GPR index.
     regs: BTreeMap<u32, Value>,
     /// The stack slots, by offset from the entry stack pointer.
@@ -352,12 +469,12 @@ struct Lifter<'a> {
 }
 
 impl<'a> Lifter<'a> {
-    fn new(abi: Abi, names: &'a dyn Fn(u64) -> Option<String>) -> Self {
+    fn new(abi: Abi, symbols: &'a dyn Symbols) -> Self {
         let mut regs = BTreeMap::new();
         regs.insert(RSP, Value::new(Sym::Stack(0), 64, Vec::new()));
         Self {
             abi,
-            names,
+            symbols,
             regs,
             stack: BTreeMap::new(),
             address_taken: BTreeSet::new(),
@@ -771,9 +888,21 @@ impl<'a> Lifter<'a> {
         };
         let at = ins.address;
         let mut address = if base.class == RC_IP {
-            // The address is the instruction's: what it names is data.
+            // The address is the instruction's: what it names is data, and
+            // the image may know what.
             let target = ins.memory_address().unwrap_or(disp as u64);
-            Value::node(AstNode::constant(target, bits / 8), bits, vec![at])
+            let node = match self.symbols.pointee(target) {
+                Some(Pointee::String(text)) => AstNode::StringLiteral { text },
+                Some(Pointee::Data(name)) => AstNode::AddressOf {
+                    target: Box::new(AstNode::var(name)),
+                },
+                Some(Pointee::Function(name)) => AstNode::FunctionName {
+                    name,
+                    address: target,
+                },
+                None => AstNode::constant(target, bits / 8),
+            };
+            Value::node(node, bits, vec![at])
         } else if base.class == RC_GPR {
             self.read(RegisterId::new(RC_GPR, base.index, bits), at)?
         } else if base.class == RC_NONE {
@@ -854,7 +983,10 @@ impl<'a> Lifter<'a> {
             addresses.extend(value.from.iter().copied());
             args.push(self.node_of(&value)?);
         }
-        let name = (self.names)(target).unwrap_or_else(|| format!("sub_{target:x}"));
+        let name = self
+            .symbols
+            .function_name(target)
+            .unwrap_or_else(|| format!("sub_{target:x}"));
         let node = AstNode::Call {
             callee: Box::new(AstNode::FunctionName {
                 name,
@@ -1686,39 +1818,169 @@ mod tests {
         assert_eq!(Abi::of_language("x86:LE:32:default:gcc"), Abi::SystemV);
     }
 
-    #[test]
-    fn only_a_function_of_one_block_is_lifted() {
-        // jmp +0 (to the next instruction, a leader); ret
-        let instructions = decode(&[0xeb, 0x00, 0xc3]);
+    /// Lift `bytes` as the function `f` through its control-flow graph, the
+    /// way an image does, and return the graph with the answer.
+    fn lift_cfg(
+        bytes: &[u8],
+        bitness: Bitness,
+    ) -> (ProcedureCfg, Result<LiftedFunction, NotLifted>) {
         let disasm = Disasm {
             file_offset_of_segment: 0,
-            instructions,
+            instructions: decode(bytes),
         };
         let cfg = crate::cfgwalk::resolve_branches(&disasm, BASE);
-        assert_eq!(cfg.blocks.len(), 2);
-        let error = lift_function(
-            &disasm,
-            &cfg,
-            BASE,
-            "f",
-            Bitness::Bits64,
-            Abi::SystemV,
-            &names,
-        )
-        .expect_err("two blocks are refused");
-        assert_eq!(error.to_string(), "not lifted yet: 2 blocks");
+        let lifted = lift_function(&disasm, &cfg, BASE, "f", bitness, Abi::SystemV, &names);
+        (cfg, lifted)
+    }
 
-        let error = lift_function(
-            &disasm,
-            &cfg,
-            BASE,
-            "f",
-            Bitness::Bits32,
-            Abi::SystemV,
-            &names,
-        )
-        .expect_err("32-bit code is refused");
-        assert_eq!(error.to_string(), "not lifted yet: 32-bit code");
+    #[test]
+    fn a_chain_of_blocks_joined_by_fall_through_is_lifted_as_one() {
+        // mov edi, 1; call f; mov eax, eax; ret. The walk ends a block at
+        // the call, so this is two blocks, the second starting where the
+        // first ends, and the state carries across: rdi was written before
+        // the call, and rax is read after it.
+        let code = [
+            0xbf, 1, 0, 0, 0, 0xe8, 0xf6, 0x0f, 0x00, 0x00, 0x89, 0xc0, 0xc3,
+        ];
+        let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
+        assert_eq!(cfg.blocks.len(), 2);
+        assert_eq!(cfg.blocks[0].successor_addresses, vec![0x100a]);
+        let function = lifted.expect("the chain lifts");
+        assert_eq!(
+            emit_function(&function).text(),
+            "int f(void)\n{\n  return f(1);\n}"
+        );
+
+        // call f; call g; ret: three blocks, two calls, the second's
+        // result returned.
+        let code = [
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xe8, 0xf6, 0x1f, 0x00, 0x00, 0xc3,
+        ];
+        let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
+        assert_eq!(cfg.blocks.len(), 3);
+        assert_eq!(
+            emit_function(&lifted.expect("the chain lifts")).text(),
+            "long f(void)\n{\n  f();\n  return g();\n}"
+        );
+    }
+
+    #[test]
+    fn a_branch_ends_the_chain_and_is_refused_at_its_address() {
+        // The sample's sum_to, which has a loop: endbr64; push rbp;
+        // mov rbp, rsp; mov [rbp-0x14], edi; mov qword [rbp-8], 0;
+        // mov dword [rbp-0xc], 1; jmp +0xd; <the body>; <the test>;
+        // jle <the body>; mov rax, [rbp-8]; pop rbp; ret. The entry block
+        // ends in the jmp, at 0x101a.
+        let sum_to = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xec, 0x48, 0xc7, 0x45,
+            0xf8, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x45, 0xf4, 0x01, 0x00, 0x00, 0x00, 0xeb, 0x0d,
+            0x8b, 0x45, 0xf4, 0x48, 0x98, 0x48, 0x01, 0x45, 0xf8, 0x83, 0x45, 0xf4, 0x01, 0x8b,
+            0x45, 0xf4, 0x3b, 0x45, 0xec, 0x7e, 0xeb, 0x48, 0x8b, 0x45, 0xf8, 0x5d, 0xc3,
+        ];
+        let (cfg, lifted) = lift_cfg(&sum_to, Bitness::Bits64);
+        assert_eq!(cfg.blocks.len(), 4);
+        assert_eq!(
+            lifted.expect_err("a loop is refused").to_string(),
+            "not lifted yet: branches at 0x101a"
+        );
+
+        // A conditional branch is a branch: mov eax, edi; test eax, eax;
+        // jz +0 (to the next instruction); ret.
+        let code = [0x89, 0xf8, 0x85, 0xc0, 0x74, 0x00, 0xc3];
+        let (_, lifted) = lift_cfg(&code, Bitness::Bits64);
+        assert_eq!(
+            lifted.expect_err("a branch is refused").to_string(),
+            "not lifted yet: branches at 0x1004"
+        );
+
+        // So is a jump to the next instruction: jmp +0; ret.
+        let (cfg, lifted) = lift_cfg(&[0xeb, 0x00, 0xc3], Bitness::Bits64);
+        assert_eq!(cfg.blocks.len(), 2);
+        assert_eq!(
+            lifted.expect_err("a jump is refused").to_string(),
+            "not lifted yet: branches at 0x1000"
+        );
+    }
+
+    #[test]
+    fn a_block_another_block_also_reaches_is_a_join_and_is_refused() {
+        // call f; jmp -2 (to itself). The entry block falls through into the
+        // second, which also reaches itself: two predecessors, a join.
+        let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xeb, 0xfe];
+        let (cfg, lifted) = lift_cfg(&code, Bitness::Bits64);
+        assert_eq!(cfg.blocks.len(), 2);
+        assert_eq!(
+            lifted.expect_err("a join is refused").to_string(),
+            "not lifted yet: joins at 0x1005"
+        );
+    }
+
+    #[test]
+    fn a_32_bit_function_is_refused_before_the_walk() {
+        let (_, lifted) = lift_cfg(&[0x89, 0xf8, 0xc3], Bitness::Bits32);
+        assert_eq!(
+            lifted.expect_err("32-bit code is refused").to_string(),
+            "not lifted yet: 32-bit code"
+        );
+    }
+
+    /// An image that knows a string, a piece of data and a function.
+    struct Image;
+
+    impl Symbols for Image {
+        fn function_name(&self, address: u64) -> Option<String> {
+            names(address)
+        }
+
+        fn pointee(&self, address: u64) -> Option<Pointee> {
+            match address {
+                0x2007 => Some(Pointee::String("%ld\n".into())),
+                0x3007 => Some(Pointee::Data("counter".into())),
+                0x2000 => Some(Pointee::Function("f".into())),
+                _ => None,
+            }
+        }
+    }
+
+    /// The C of `bytes` lifted against [`Image`].
+    fn c_with_image(bytes: &[u8]) -> String {
+        match lift_block(&decode(bytes), BASE, "f", Abi::SystemV, &Image) {
+            Ok(function) => emit_function(&function).text(),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_pointer_to_a_string_the_image_knows_is_its_literal() {
+        // lea rdi, [rip+0x1000]; call f; ret: the lea is at 0x1000 and 7
+        // bytes long, so it names 0x2007, which the image says is "%ld\n".
+        let code = [
+            0x48, 0x8d, 0x3d, 0x00, 0x10, 0x00, 0x00, 0xe8, 0xf4, 0x0f, 0x00, 0x00, 0xc3,
+        ];
+        assert_eq!(
+            c_with_image(&code),
+            "long f(void)\n{\n  return f(\"%ld\\n\");\n}"
+        );
+    }
+
+    #[test]
+    fn a_pointer_to_named_data_is_its_address_and_one_to_a_function_is_its_name() {
+        // lea rax, [rip+0x2000]; ret: names 0x3007, the data `counter`.
+        assert_eq!(
+            c_with_image(&[0x48, 0x8d, 0x05, 0x00, 0x20, 0x00, 0x00, 0xc3]),
+            "long f(void)\n{\n  return &counter;\n}"
+        );
+        // lea rax, [rip+0xff9]; ret: names 0x2000, the function `f`.
+        assert_eq!(
+            c_with_image(&[0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, 0xc3]),
+            "long f(void)\n{\n  return f;\n}"
+        );
+        // lea rax, [rip+0x1000]; ret: names 0x2007, which the plain names
+        // know nothing about, so it stays the address.
+        assert_eq!(
+            c(&[0x48, 0x8d, 0x05, 0x00, 0x10, 0x00, 0x00, 0xc3]),
+            "long f(void)\n{\n  return 0x2007;\n}"
+        );
     }
 
     #[test]

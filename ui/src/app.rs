@@ -1704,15 +1704,59 @@ mod tests {
             "the signature stands for the entry and the frame"
         );
 
-        // A function the lifter refuses has no body, and the problem says why.
-        let _ = app.update(Message::FunctionSelected(0x1198));
+        // A function the lifter refuses has no body, and the problem says
+        // why: sum_to has a loop.
+        let _ = app.update(Message::FunctionSelected(0x1161));
         assert_eq!(app.work.pseudocode, None);
         assert!(app.work.line_addresses.is_empty());
         assert!(
-            app.bottom
+            app.bottom.problems.iter().any(|problem| problem
+                .message
+                .contains("not lifted yet: branches at 0x117b")),
+            "{:?}",
+            app.bottom.problems
+        );
+    }
+
+    #[test]
+    fn booting_with_a_binary_fills_the_pseudocode_tab_for_main() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        // main is a chain of blocks cut at its three calls, and reads as C
+        // with them; the format string is printed as its literal.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+
+        assert_eq!(
+            app.work.pseudocode.as_deref(),
+            Some(
+                "long main(int a, long b)\n\
+                 {\n\
+                 \x20 long v2;\n\
+                 \n\
+                 \x20 v2 = sum_to(add(a, 3));\n\
+                 \x20 printf(\"%ld\\n\", v2);\n\
+                 \x20 return v2;\n\
+                 }"
+            )
+        );
+
+        // A click on the printf line lands on the call.
+        let addresses = app
+            .work
+            .line_addresses
+            .get(&5)
+            .expect("the printf line is mapped");
+        assert!(addresses.contains(&0x11e1), "{addresses:?}");
+        assert!(
+            !app.bottom
                 .problems
                 .iter()
-                .any(|problem| problem.message.contains("not lifted yet: 4 blocks")),
+                .any(|problem| problem.message.starts_with("No pseudocode")),
             "{:?}",
             app.bottom.problems
         );

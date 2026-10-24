@@ -80,6 +80,13 @@ pub enum AstNode {
         name: String,
         address: u64,
     },
+    /// A string literal: `"text"`.
+    ///
+    /// The lifter uses it where a pointer lands on a string the image knows.
+    /// The text is the string's own, unescaped; the emitter spells it as C.
+    StringLiteral {
+        text: String,
+    },
     ConditionTrue,
     ConditionFalse,
 }
@@ -117,6 +124,7 @@ impl AstNode {
                 | Self::Constant { .. }
                 | Self::Register { .. }
                 | Self::FunctionName { .. }
+                | Self::StringLiteral { .. }
         )
     }
 
@@ -144,6 +152,7 @@ impl AstNode {
             | Self::Register { .. }
             | Self::Constant { .. }
             | Self::FunctionName { .. }
+            | Self::StringLiteral { .. }
             | Self::ConditionTrue
             | Self::ConditionFalse => false,
         }

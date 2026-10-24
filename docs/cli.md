@@ -97,8 +97,8 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
-# The pseudocode of one function, when it is one block of straight-line code
-cargo run --bin ag -- image ./sample.elf pseudocode add
+# The pseudocode of one function, when it is straight-line code
+cargo run --bin ag -- image ./sample.elf pseudocode main
 
 # The control-flow graph of one function
 cargo run --bin ag -- image ./sample.elf cfg main
@@ -124,7 +124,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
-| `pseudocode TARGET` | The function as C, when it is one block of straight-line x86-64 code: a `// name at 0x…` header, then the signature, the locals and the statements. Otherwise the header with `not lifted yet` and the reason, and exit code 1. |
+| `pseudocode TARGET` | The function as C, when it is straight-line x86-64 code — blocks joined only by fall-through, calls included: a `// name at 0x…` header, then the signature, the locals and the statements. Otherwise the header with `not lifted yet` and the reason, and exit code 1. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
@@ -154,18 +154,39 @@ it refuses an image of another architecture rather than printing nonsense. In 32
 there is no `rip`, so the strings and the data a function refers to are found through the
 absolute memory operands it names them with.
 
-`pseudocode` lifts one function to C with the engine's own lifter, which reads one block
-of straight-line x86-64 code: integer `mov`, `add`, `sub`, `and`, `or`, `xor`, `lea`,
-`push`, `pop`, `leave`, a direct `call`, and `ret`. Registers are temporaries and stack
-slots are locals, so a value copied through the frame comes back as the expression it was;
-the argument registers read before they are written are the parameters, named by position
-(`a`, `b`, …), with `rdi, rsi, rdx, rcx, r8, r9` under System V and `rcx, rdx, r8, r9` for
-a Windows image; the return is `rax` at the width of its last write, and a width is a type:
-32 bits is `int`, 64 is `long`. The sample's `add` reads
-`int add(int a, int b) { return b + a; }`, the operands in the order the `add` instruction
-names them. A function of several blocks,
-one with an instruction outside that set, a 32-bit function, or a value the lifter cannot
-follow prints `not lifted yet` and the reason instead, with exit code 1; `--json` reports
+`pseudocode` lifts one function to C with the engine's own lifter, which reads straight-line
+x86-64 code: integer `mov`, `add`, `sub`, `and`, `or`, `xor`, `lea`, `push`, `pop`,
+`leave`, a direct `call`, and `ret`. The control-flow walk ends a block at every call, so
+the lifter follows the chain of blocks joined by fall-through: from the entry block, while
+the block's last instruction is not a branch, its one successor starts where the block ends,
+and nothing else reaches that successor, the lifter continues into it with the same state.
+Registers are temporaries and stack slots are locals, so a value copied through the frame
+comes back as the expression it was; the argument registers read before they are written
+are the parameters, named by position (`a`, `b`, …), with `rdi, rsi, rdx, rcx, r8, r9`
+under System V and `rcx, rdx, r8, r9` for a Windows image; a call passes the argument
+registers written before it, and its result is a temporary (`v1`, `v2`, …) that is inlined
+where it is used once and declared where it is used more; the return is `rax` at the width
+of its last write, and a width is a type: 32 bits is `int`, 64 is `long`. A pointer taken
+through `lea` is asked of the image: one that lands on a string prints as the string's
+literal, one that lands on named data as `&name`, and one on a function as its name. The
+sample's `add` reads `int add(int a, int b) { return b + a; }`, the operands in the order
+the `add` instruction names them, and its `main` reads
+
+```c
+long main(int a, long b)
+{
+  long v2;
+
+  v2 = sum_to(add(a, 3));
+  printf("%ld\n", v2);
+  return v2;
+}
+```
+
+A function that branches (`branches at 0x…`) or whose blocks join (`joins at 0x…`, the head
+of a loop), one with an instruction outside that set, a 32-bit function, or a value the
+lifter cannot follow prints `not lifted yet` and the reason instead, with exit code 1 — the
+sample's `sum_to`, which loops, says `not lifted yet: branches at 0x117b`; `--json` reports
 the same as `lifted: false` and a `reason`. Every line of C carries the addresses of the
 instructions it came from, which is what the workbench's Pseudocode tab clicks through.
 
