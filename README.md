@@ -191,6 +191,19 @@ The Graph tab draws the control-flow graph of the selected function: one box for
 
 The engine is under active development. The x86 decoder (32-bit and 64-bit) and the control-flow graph builder are in place with tests; the lifter and the C emitter have their first three slices — one block of straight-line x86-64 code, the chain of blocks a function that calls is cut into, and the structuring of branches and loops into `if`/`else`, `while` and `for` with the state merged at every join — and what the lifter cannot read it refuses with a reason rather than guessing. The judgment calls the lifter, the structurer and the emitter make are named in one option registry, set per run with `--option` and documented by symptom in the generated `docs/options.md`. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
 
+## Releases
+
+Each [release](https://github.com/CryptoJones/AdmiralGrace/releases) carries `ag` and `ag-ui` for Linux x86_64 and macOS arm64. Every file is signed with [Sigstore cosign](https://docs.sigstore.dev/) keyless signing: there is no private key, and the signature is bound to this repository's release workflow and recorded in the public Rekor log. Each archive also has a GitHub build-provenance attestation. To verify a download, for example `v0.1.0`:
+
+```sh
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.cosign.bundle \
+  --certificate-identity "https://github.com/CryptoJones/AdmiralGrace/.github/workflows/release.yml@refs/tags/v0.1.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c SHA256SUMS --ignore-missing
+
+gh attestation verify admiralgrace-v0.1.0-linux-x86_64.tar.gz -R CryptoJones/AdmiralGrace
+```
+
 ## License
 
 The workspace declares the MIT license in `Cargo.toml`; the text is in `LICENSE`. The kuna crates it depends on are Apache-2.0, and `NOTICE` carries their attribution and Ghidra's.
