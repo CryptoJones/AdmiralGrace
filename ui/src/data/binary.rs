@@ -1011,4 +1011,119 @@ mod tests {
         assert!(provider.capabilities().strings);
         assert_eq!(provider.counts().strings, provider.strings().len());
     }
+
+    /// The PE fixture the image tests read.
+    fn pe_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample.exe")
+    }
+
+    /// The Mach-O fixture the image tests read.
+    fn macho_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample.macho")
+    }
+
+    /// The PE fixture, opened.
+    fn pe() -> BinaryProvider {
+        BinaryProvider::load(&pe_path()).expect("the PE fixture loads")
+    }
+
+    /// The Mach-O fixture, opened.
+    fn macho() -> BinaryProvider {
+        BinaryProvider::load(&macho_path()).expect("the Mach-O fixture loads")
+    }
+
+    #[test]
+    fn the_pe_opens_as_a_binary_project() {
+        let provider = pe();
+
+        let project = provider.project();
+        assert_eq!(project.kind, ProjectKind::Binary);
+        assert_eq!(project.name, "sample.exe");
+        assert_eq!(
+            project.architecture.as_deref(),
+            Some("x86:LE:64:default:windows"),
+            "the language id is the project's architecture"
+        );
+    }
+
+    #[test]
+    fn the_functions_of_the_pe_are_listed() {
+        let provider = pe();
+
+        let functions = provider.functions();
+        let names: Vec<&str> = functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+        assert!(names.contains(&"add"), "{names:?}");
+        assert!(names.contains(&"main"), "{names:?}");
+    }
+
+    #[test]
+    fn the_listing_of_a_pe_function_is_read() {
+        let provider = pe();
+
+        let listing = provider.listing(0x140001020).expect("main is listed");
+        assert!(!listing.is_empty(), "the listing is not empty");
+    }
+
+    #[test]
+    fn the_strings_of_the_pe_are_listed() {
+        let provider = pe();
+
+        let strings = provider.strings();
+        let hello = strings
+            .iter()
+            .find(|string| string.text == "hello")
+            .expect("the greeting is in the image");
+        assert_eq!(hello.section.as_deref(), Some(".rdata"));
+    }
+
+    #[test]
+    fn the_macho_opens_as_a_binary_project() {
+        let provider = macho();
+
+        let project = provider.project();
+        assert_eq!(project.kind, ProjectKind::Binary);
+        assert_eq!(project.name, "sample.macho");
+        assert_eq!(
+            project.architecture.as_deref(),
+            Some("x86:LE:64:default:gcc"),
+            "the language id is the project's architecture"
+        );
+    }
+
+    #[test]
+    fn the_functions_of_the_macho_are_listed() {
+        let provider = macho();
+
+        let functions = provider.functions();
+        let names: Vec<&str> = functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+        // A Mach-O names its symbols with a leading underscore.
+        assert!(names.contains(&"_add"), "{names:?}");
+        assert!(names.contains(&"_main"), "{names:?}");
+    }
+
+    #[test]
+    fn the_listing_of_a_macho_function_is_read() {
+        let provider = macho();
+
+        let listing = provider.listing(0x100000440).expect("main is listed");
+        assert!(!listing.is_empty(), "the listing is not empty");
+    }
+
+    #[test]
+    fn the_strings_of_the_macho_are_listed() {
+        let provider = macho();
+
+        let strings = provider.strings();
+        let hello = strings
+            .iter()
+            .find(|string| string.text == "hello")
+            .expect("the greeting is in the image");
+        assert_eq!(hello.section.as_deref(), Some("__cstring"));
+    }
 }
