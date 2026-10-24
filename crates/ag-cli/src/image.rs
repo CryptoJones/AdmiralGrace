@@ -5,7 +5,7 @@
 //! subcommand has a `--json` surface as well, so an agent can read the
 //! numbers without scraping the text.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ag_image::Binary;
 use anyhow::{Context, Result};
@@ -87,6 +87,17 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The whole analysis, written as a directory of JSON and text.
+    Export {
+        /// The directory to write. It is made when it is not there.
+        dir: PathBuf,
+        /// Only the functions whose name matches the regular expression.
+        #[arg(long)]
+        functions: Option<String>,
+        /// Write into a directory that is not empty.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -134,7 +145,7 @@ struct DataJson {
 
 /// The image, as JSON.
 #[derive(Debug, Serialize)]
-struct InfoJson {
+pub(crate) struct InfoJson {
     /// The SLEIGH language id the loader resolved.
     language: String,
     /// The container's declared entry point.
@@ -147,7 +158,7 @@ struct InfoJson {
 
 /// The symbols of the image, as JSON.
 #[derive(Debug, Serialize)]
-struct SymbolsJson {
+pub(crate) struct SymbolsJson {
     /// The function symbols.
     functions: Vec<FunctionJson>,
     /// The data symbols.
@@ -250,7 +261,7 @@ struct StringFunctionJson {
 
 /// The strings of the image, as JSON.
 #[derive(Debug, Serialize)]
-struct StringsJson {
+pub(crate) struct StringsJson {
     /// The strings.
     strings: Vec<StringJson>,
 }
@@ -272,7 +283,7 @@ struct EdgeJson {
 
 /// The control-flow graph of a function, as JSON.
 #[derive(Debug, Serialize)]
-struct CfgJson {
+pub(crate) struct CfgJson {
     /// The function's entry address.
     function: u64,
     /// The address, as a hex string.
@@ -285,6 +296,13 @@ struct CfgJson {
     blocks: Vec<BlockJson>,
     /// The edges between the blocks.
     edges: Vec<EdgeJson>,
+}
+
+impl CfgJson {
+    /// How many blocks the walk found.
+    pub(crate) fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
 }
 
 /// One function of the call graph, as JSON.
@@ -304,7 +322,7 @@ struct CallFunctionJson {
 
 /// The calls of one function, as JSON.
 #[derive(Debug, Serialize)]
-struct FunctionCallsJson {
+pub(crate) struct FunctionCallsJson {
     /// The function's entry address.
     function: u64,
     /// The address, as a hex string.
@@ -319,7 +337,7 @@ struct FunctionCallsJson {
 
 /// The call graph of the image, as JSON.
 #[derive(Debug, Serialize)]
-struct CallsJson {
+pub(crate) struct CallsJson {
     /// The entry point of the image.
     entry: Option<u64>,
     /// The entry point, as a hex string.
@@ -350,7 +368,7 @@ struct DataUseJson {
 
 /// The data of the image, as JSON.
 #[derive(Debug, Serialize)]
-struct DataReportJson {
+pub(crate) struct DataReportJson {
     /// The data.
     data: Vec<DataUseJson>,
 }
@@ -374,7 +392,7 @@ struct DataReferenceJson {
 
 /// The data one function refers to, as JSON.
 #[derive(Debug, Serialize)]
-struct FunctionDataJson {
+pub(crate) struct FunctionDataJson {
     /// The function's entry address.
     function: u64,
     /// The address, as a hex string.
@@ -400,7 +418,7 @@ struct LineJson {
 
 /// The pseudocode of a function, as JSON.
 #[derive(Debug, Serialize)]
-struct PseudocodeJson {
+pub(crate) struct PseudocodeJson {
     /// The function's entry address.
     function: u64,
     /// The address, as a hex string.
@@ -408,7 +426,7 @@ struct PseudocodeJson {
     /// The function's name, when it has one.
     name: Option<String>,
     /// Whether the function was lifted.
-    lifted: bool,
+    pub(crate) lifted: bool,
     /// Why it was not, when it was not.
     reason: Option<String>,
     /// The whole text, when it was.
@@ -434,44 +452,31 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
         ImageCmd::Pseudocode { target, json } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
+        ImageCmd::Export {
+            dir,
+            functions,
+            force,
+        } => crate::export::run(&image, binary, &dir, functions.as_deref(), force),
     }
 }
 
 /// Report the language, the entry point and the sections.
 fn info(image: &Binary, json: bool) -> Result<i32> {
-    let sections: Vec<SectionJson> = image
-        .sections()
-        .iter()
-        .map(|section| SectionJson {
-            name: section.name.clone(),
-            vma: section.vma,
-            vma_hex: format!("{:#x}", section.vma),
-            size: section.size,
-            executable: section.executable,
-            file_offset: section.file_offset,
-            file_size: section.file_size,
-        })
-        .collect();
+    let report = info_json(image);
 
     if json {
-        let report = InfoJson {
-            language: image.language().to_string(),
-            entry: image.entry(),
-            entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
-            sections,
-        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
-    println!("language: {}", image.language());
-    match image.entry() {
+    println!("language: {}", report.language);
+    match report.entry {
         Some(entry) => println!("entry: {entry:#x}"),
         None => println!("entry: none"),
     }
-    println!("sections: {}", sections.len());
+    println!("sections: {}", report.sections.len());
 
-    for section in &sections {
+    for section in &report.sections {
         let file = match (section.file_offset, section.file_size) {
             (Some(offset), Some(size)) => format!("{offset:#x}-{:#x}", offset + size),
             (Some(offset), None) => format!("{offset:#x}-"),
@@ -490,8 +495,55 @@ fn info(image: &Binary, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The language, the entry point and the sections, as JSON.
+pub(crate) fn info_json(image: &Binary) -> InfoJson {
+    InfoJson {
+        language: image.language().to_string(),
+        entry: image.entry(),
+        entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
+        sections: image
+            .sections()
+            .iter()
+            .map(|section| SectionJson {
+                name: section.name.clone(),
+                vma: section.vma,
+                vma_hex: format!("{:#x}", section.vma),
+                size: section.size,
+                executable: section.executable,
+                file_offset: section.file_offset,
+                file_size: section.file_size,
+            })
+            .collect(),
+    }
+}
+
 /// Report the symbols of the image.
 fn symbols(image: &Binary, filter: Option<&str>, json: bool) -> Result<i32> {
+    let report = symbols_json(image, filter)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    println!("functions:");
+    for function in &report.functions {
+        println!("{} {}", function.address_hex, function.name);
+    }
+
+    println!("data:");
+    for symbol in &report.data {
+        println!(
+            "{} {} size={}",
+            symbol.address_hex, symbol.name, symbol.size
+        );
+    }
+
+    Ok(0)
+}
+
+/// The symbols of the image whose name matches the filter, as JSON.
+pub(crate) fn symbols_json(image: &Binary, filter: Option<&str>) -> Result<SymbolsJson> {
     let pattern = filter.map(Regex::new).transpose()?;
 
     let matches = |name: &str| match &pattern {
@@ -522,26 +574,7 @@ fn symbols(image: &Binary, filter: Option<&str>, json: bool) -> Result<i32> {
         })
         .collect();
 
-    if json {
-        let report = SymbolsJson { functions, data };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(0);
-    }
-
-    println!("functions:");
-    for function in &functions {
-        println!("{} {}", function.address_hex, function.name);
-    }
-
-    println!("data:");
-    for symbol in &data {
-        println!(
-            "{} {} size={}",
-            symbol.address_hex, symbol.name, symbol.size
-        );
-    }
-
-    Ok(0)
+    Ok(SymbolsJson { functions, data })
 }
 
 /// Report the disassembly of one function.
@@ -596,8 +629,26 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
         return Ok(0);
     }
 
+    print!("{}", listing_text(image, address, &disassembly));
+
+    Ok(0)
+}
+
+/// The listing of a function, as `disasm` prints it.
+///
+/// A `; name at 0x… in section` header, then a `; block 0x…` header per
+/// block with its successors, then `address bytes mnemonic operands` for
+/// each instruction. Every line ends in a newline.
+pub(crate) fn listing_text(
+    image: &Binary,
+    address: u64,
+    disassembly: &ag_image::Disassembly,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::new();
     let name = image.function_name(address).unwrap_or("entry");
-    println!("; {name} at {address:#x} in {}", disassembly.section);
+    let _ = writeln!(text, "; {name} at {address:#x} in {}", disassembly.section);
 
     for block in &disassembly.blocks {
         let successors: Vec<String> = block
@@ -607,9 +658,14 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
             .collect();
 
         if successors.is_empty() {
-            println!("; block {:#x}", block.from);
+            let _ = writeln!(text, "; block {:#x}", block.from);
         } else {
-            println!("; block {:#x} -> {}", block.from, successors.join(", "));
+            let _ = writeln!(
+                text,
+                "; block {:#x} -> {}",
+                block.from,
+                successors.join(", ")
+            );
         }
 
         for instruction in &block.instructions {
@@ -626,11 +682,11 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
                 instruction.mnemonic,
                 operands_of(instruction)
             );
-            println!("{}", line.trim_end());
+            let _ = writeln!(text, "{}", line.trim_end());
         }
     }
 
-    Ok(0)
+    text
 }
 
 /// Report the strings the image holds.
@@ -668,6 +724,13 @@ fn strings(image: &Binary, filter: Option<&str>, utf16: bool, json: bool) -> Res
     }
 
     Ok(0)
+}
+
+/// Every string of the image, with the functions that use it, as JSON.
+pub(crate) fn strings_json(image: &Binary) -> Result<StringsJson> {
+    Ok(StringsJson {
+        strings: strings_of(image, None, false)?,
+    })
 }
 
 /// The strings of the image that match the filter.
@@ -732,15 +795,7 @@ fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
         .with_context(|| format!("walking the control flow of {target}"))?;
 
     if json {
-        let report = CfgJson {
-            function: graph.function,
-            function_hex: format!("{:#x}", graph.function),
-            name: graph.name.clone(),
-            section: graph.section.clone(),
-            blocks: graph.blocks.iter().map(block_json).collect(),
-            edges: graph.edges.iter().map(edge_json).collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(&cfg_json(&graph))?);
         return Ok(0);
     }
 
@@ -782,6 +837,18 @@ fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The control-flow graph of a function, as JSON.
+pub(crate) fn cfg_json(graph: &ag_image::ControlFlowGraph) -> CfgJson {
+    CfgJson {
+        function: graph.function,
+        function_hex: format!("{:#x}", graph.function),
+        name: graph.name.clone(),
+        section: graph.section.clone(),
+        blocks: graph.blocks.iter().map(block_json).collect(),
+        edges: graph.edges.iter().map(edge_json).collect(),
+    }
+}
+
 /// Report the pseudocode of one function.
 ///
 /// A function the lifter refuses is reported with the reason: as a comment
@@ -819,7 +886,7 @@ fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
 }
 
 /// The pseudocode of one function, or the reason it has none.
-fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
+pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
     let name = image.function_name(address).map(str::to_string);
     match image.pseudocode(address) {
         Ok(pseudocode) => PseudocodeJson {
@@ -874,46 +941,49 @@ fn calls_of(image: &Binary, target: &str, json: bool) -> Result<i32> {
     );
 
     let address = resolve(image, target)?;
-    let calls = image.calls(address);
-    let callers: Vec<FunctionJson> = image.called_by(address).iter().map(function_json).collect();
+    let report = function_calls_json(image, address);
 
     if json {
-        let report = FunctionCallsJson {
-            function: address,
-            function_hex: format!("{address:#x}"),
-            name: image.function_name(address).map(str::to_string),
-            calls: calls.iter().map(call_json).collect(),
-            callers,
-        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
-    let name = image.function_name(address).unwrap_or("entry");
+    let name = report.name.as_deref().unwrap_or("entry");
     println!("{name} at {address:#x}");
 
     println!("calls:");
-    if calls.is_empty() {
+    if report.calls.is_empty() {
         println!("  -");
     }
-    for call in &calls {
+    for call in &report.calls {
         println!(
-            "  {:#x} -> {:#x} {}",
-            call.site,
-            call.target,
+            "  {} -> {} {}",
+            call.site_hex,
+            call.target_hex,
             call.name.as_deref().unwrap_or("-")
         );
     }
 
     println!("called by:");
-    if callers.is_empty() {
+    if report.callers.is_empty() {
         println!("  -");
     }
-    for caller in &callers {
+    for caller in &report.callers {
         println!("  {} {}", caller.address_hex, caller.name);
     }
 
     Ok(0)
+}
+
+/// What one function calls, and who calls it, as JSON.
+pub(crate) fn function_calls_json(image: &Binary, address: u64) -> FunctionCallsJson {
+    FunctionCallsJson {
+        function: address,
+        function_hex: format!("{address:#x}"),
+        name: image.function_name(address).map(str::to_string),
+        calls: image.calls(address).iter().map(call_json).collect(),
+        callers: image.called_by(address).iter().map(function_json).collect(),
+    }
 }
 
 /// Report the calls of the whole image.
@@ -921,51 +991,22 @@ fn calls_of(image: &Binary, target: &str, json: bool) -> Result<i32> {
 /// Who calls whom needs the whole program read, so that is what this call
 /// costs.
 fn every_call(image: &Binary, json: bool) -> Result<i32> {
-    let functions: Vec<CallFunctionJson> = image
-        .functions()
-        .iter()
-        .map(|function| CallFunctionJson {
-            address: function.address,
-            address_hex: format!("{:#x}", function.address),
-            name: function.name.clone(),
-            calls: image
-                .calls(function.address)
-                .iter()
-                .map(call_json)
-                .collect(),
-            callers: image
-                .called_by(function.address)
-                .iter()
-                .map(function_json)
-                .collect(),
-        })
-        .collect();
-
-    let reachable: Vec<FunctionJson> = image
-        .reachable_from_entry()
-        .iter()
-        .map(function_json)
-        .collect();
-
-    let without_callers: Vec<FunctionJson> = image
-        .functions_without_callers()
-        .iter()
-        .map(function_json)
-        .collect();
+    let report = calls_json(image);
 
     if json {
-        let report = CallsJson {
-            entry: image.entry(),
-            entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
-            functions,
-            reachable,
-            without_callers,
-        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
-    match image.entry() {
+    let CallsJson {
+        entry,
+        functions,
+        reachable,
+        without_callers,
+        ..
+    } = report;
+
+    match entry {
         Some(entry) => println!("entry: {entry:#x}"),
         None => println!("entry: none"),
     }
@@ -1004,6 +1045,43 @@ fn every_call(image: &Binary, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+/// The call graph of the whole image, as JSON.
+pub(crate) fn calls_json(image: &Binary) -> CallsJson {
+    CallsJson {
+        entry: image.entry(),
+        entry_hex: image.entry().map(|entry| format!("{entry:#x}")),
+        functions: image
+            .functions()
+            .iter()
+            .map(|function| CallFunctionJson {
+                address: function.address,
+                address_hex: format!("{:#x}", function.address),
+                name: function.name.clone(),
+                calls: image
+                    .calls(function.address)
+                    .iter()
+                    .map(call_json)
+                    .collect(),
+                callers: image
+                    .called_by(function.address)
+                    .iter()
+                    .map(function_json)
+                    .collect(),
+            })
+            .collect(),
+        reachable: image
+            .reachable_from_entry()
+            .iter()
+            .map(function_json)
+            .collect(),
+        without_callers: image
+            .functions_without_callers()
+            .iter()
+            .map(function_json)
+            .collect(),
+    }
 }
 
 /// Report the data of the image, of one function, or the users of one piece
@@ -1058,24 +1136,18 @@ fn every_data(image: &Binary, json: bool) -> Result<i32> {
 
 /// Report the data one function refers to.
 fn data_of_function(image: &Binary, address: u64, json: bool) -> Result<i32> {
-    let entries = data_of_function_entries(image, address);
+    let report = function_data_json(image, address);
 
     if json {
-        let report = FunctionDataJson {
-            function: address,
-            function_hex: format!("{address:#x}"),
-            name: image.function_name(address).map(str::to_string),
-            data: entries,
-        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
-    let name = image.function_name(address).unwrap_or("entry");
+    let name = report.name.as_deref().unwrap_or("entry");
     println!("{name} at {address:#x}");
-    println!("data: {}", entries.len());
+    println!("data: {}", report.data.len());
 
-    for entry in &entries {
+    for entry in &report.data {
         println!(
             "  {} {} {} at {}",
             entry.address_hex,
@@ -1086,6 +1158,16 @@ fn data_of_function(image: &Binary, address: u64, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+/// The data one function refers to, as JSON.
+pub(crate) fn function_data_json(image: &Binary, address: u64) -> FunctionDataJson {
+    FunctionDataJson {
+        function: address,
+        function_hex: format!("{address:#x}"),
+        name: image.function_name(address).map(str::to_string),
+        data: data_of_function_entries(image, address),
+    }
 }
 
 /// Report the functions that use one piece of data.
@@ -1113,6 +1195,13 @@ fn data_at(image: &Binary, target: &str, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+/// The data of the whole image, with the functions that use it, as JSON.
+pub(crate) fn data_json(image: &Binary) -> DataReportJson {
+    DataReportJson {
+        data: every_data_entries(image),
+    }
 }
 
 /// The data of the whole image, with the functions that use it.
@@ -1595,25 +1684,7 @@ mod tests {
     fn the_whole_call_graph_holds_every_function_of_the_image() {
         let image = sample();
 
-        let functions: Vec<CallFunctionJson> = image
-            .functions()
-            .iter()
-            .map(|function| CallFunctionJson {
-                address: function.address,
-                address_hex: format!("{:#x}", function.address),
-                name: function.name.clone(),
-                calls: image
-                    .calls(function.address)
-                    .iter()
-                    .map(call_json)
-                    .collect(),
-                callers: image
-                    .called_by(function.address)
-                    .iter()
-                    .map(function_json)
-                    .collect(),
-            })
-            .collect();
+        let functions = calls_json(&image).functions;
 
         assert_eq!(functions.len(), image.functions().len());
 

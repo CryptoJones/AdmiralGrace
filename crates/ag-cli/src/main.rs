@@ -7,6 +7,7 @@ use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
 mod docs;
+mod export;
 mod image;
 mod skill;
 
