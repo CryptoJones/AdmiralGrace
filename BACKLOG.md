@@ -60,7 +60,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] Lifter: tail jumps and thunks (PLT stubs, tail calls) — [#91](https://github.com/CryptoJones/AdmiralGrace/issues/91)
 - [x] Lifter: a comparison of two computed addresses prints as rax != rax — [#97](https://github.com/CryptoJones/AdmiralGrace/issues/97)
 - [x] CFG walk: stop at a jmp to another function's entry (tail-call edge) — [#98](https://github.com/CryptoJones/AdmiralGrace/issues/98)
-- [ ] CFG walk: hlt does not fall through — [#104](https://github.com/CryptoJones/AdmiralGrace/issues/104)
+- [x] CFG walk: hlt does not fall through — [#104](https://github.com/CryptoJones/AdmiralGrace/issues/104)
 - [x] Lifter: return-value liveness from the callers — [#92](https://github.com/CryptoJones/AdmiralGrace/issues/92)
 - [x] ag image export: the whole analysis of an image as a directory of JSON and text — [#78](https://github.com/CryptoJones/AdmiralGrace/issues/78)
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
