@@ -1,0 +1,113 @@
+name: release
+
+# Signed releases. On a version tag: run the tests, build `ag` and `ag-ui` for Linux x86_64 and
+# macOS arm64, and sign every file with Sigstore keyless cosign. There is no private key: each
+# signature is bound to this workflow's GitHub Actions OIDC identity and logged publicly in Rekor.
+# Each archive also gets a GitHub build-provenance attestation (SLSA). Verification steps are in
+# the README and in the release notes.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test (locked)
+        run: cargo test --workspace --locked
+
+      - name: Build ag and ag-ui (release)
+        run: cargo build --release --locked --bin ag --bin ag-ui
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="admiralgrace-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "pkg/$name" dist
+          cp target/release/ag target/release/ag-ui LICENSE NOTICE README.md "pkg/$name/"
+          tar -C pkg -czf "dist/$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sign-and-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and attach the files
+      id-token: write      # OIDC token for keyless signing and attestations
+      attestations: write  # GitHub build-provenance attestations
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Keyless-sign every file (Sigstore, no key)
+        working-directory: dist
+        run: |
+          for f in *.tar.gz SHA256SUMS; do
+            cosign sign-blob --yes "$f" --bundle "$f.cosign.bundle"
+          done
+
+      - name: Build-provenance attestation (SLSA)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Release notes
+        run: |
+          cat > notes.md <<EOF
+          Signed release of AdmiralGrace ${GITHUB_REF_NAME}: \`ag\` (the CLI) and \`ag-ui\` (the desktop workbench) for Linux x86_64 and macOS arm64.
+
+          Every file is signed with [Sigstore cosign](https://docs.sigstore.dev/) keyless signing. There is no private key: the signature is bound to this repository's release workflow and recorded in the public Rekor log. Each archive also has a GitHub build-provenance attestation.
+
+          ### Verify
+
+          \`\`\`sh
+          # the checksums, then the archives against them
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.cosign.bundle \\
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum -c SHA256SUMS --ignore-missing
+
+          # or the build provenance of one archive
+          gh attestation verify admiralgrace-${GITHUB_REF_NAME}-linux-x86_64.tar.gz -R ${GITHUB_REPOSITORY}
+          \`\`\`
+          EOF
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/*.cosign.bundle
