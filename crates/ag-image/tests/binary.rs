@@ -1019,17 +1019,19 @@ fn the_add_of_the_sample_elf_lifts_to_c() {
     // gcc adds edx (a) into eax (b), so the sum reads b + a.
     assert_eq!(
         pseudocode.text(),
-        "int add(int a, int b)\n{\n  return b + a;\n}"
+        "// returns int: main reads eax after the call\nint add(int a, int b)\n{\n  return b + a;\n}"
     );
 
-    // The signature stands for the entry and the frame; the return came from
-    // the stores, the loads, the add and the ret.
+    // The reason comment came from no instruction; the signature stands for
+    // the entry and the frame; the return came from the stores, the loads,
+    // the add and the ret.
+    assert!(pseudocode.lines[0].addresses.is_empty());
     assert_eq!(
-        pseudocode.lines[0].addresses,
+        pseudocode.lines[1].addresses,
         vec![0x1149, 0x114d, 0x114e, 0x115f]
     );
     assert_eq!(
-        pseudocode.lines[2].addresses,
+        pseudocode.lines[3].addresses,
         vec![0x1151, 0x1154, 0x1157, 0x115a, 0x115d, 0x1160]
     );
 }
@@ -1059,7 +1061,8 @@ fn the_main_of_the_sample_elf_lifts_through_its_calls() {
     // as it is, so that is the return type.
     assert_eq!(
         pseudocode.text(),
-        "long main(int a, long b)\n\
+        "// returns long: no caller in the image, and the function writes rax itself before the ret\n\
+         long main(int a, long b)\n\
          {\n\
          \x20 long v2;\n\
          \n\
@@ -1073,11 +1076,11 @@ fn the_main_of_the_sample_elf_lifts_through_its_calls() {
     // the moves into the argument registers, and the call; the return from
     // the load of the saved result and the ret.
     assert_eq!(
-        pseudocode.lines[5].addresses,
+        pseudocode.lines[6].addresses,
         vec![0x11c2, 0x11c7, 0x11cb, 0x11cf, 0x11d2, 0x11d9, 0x11e1]
     );
     assert_eq!(
-        pseudocode.lines[6].addresses,
+        pseudocode.lines[7].addresses,
         vec![0x11c2, 0x11c7, 0x11e6, 0x11eb]
     );
 }
@@ -1092,7 +1095,8 @@ fn sum_to_lifts_as_a_counted_loop() {
     let pseudocode = binary.pseudocode(0x1161).expect("sum_to lifts");
     assert_eq!(
         pseudocode.text(),
-        "long sum_to(int a)\n\
+        "// returns long: main reads rax after the call\n\
+         long sum_to(int a)\n\
          {\n\
          \x20 long local_10;\n\
          \x20 int local_14;\n\
@@ -1108,7 +1112,7 @@ fn sum_to_lifts_as_a_counted_loop() {
     // The for line came from the counter's store, the jump into the loop,
     // the step, the load, the compare and the branch.
     assert_eq!(
-        pseudocode.lines[6].addresses,
+        pseudocode.lines[7].addresses,
         vec![0x1169, 0x1174, 0x117b, 0x1186, 0x118a, 0x118d, 0x1190]
     );
 
@@ -1125,7 +1129,8 @@ fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
     let pseudocode = pe().pseudocode(0x140001020).expect("main lifts");
     assert_eq!(
         pseudocode.text(),
-        "int main(void)\n\
+        "// returns int: no caller in the image, and the function writes rax itself before the ret\n\
+         int main(void)\n\
          {\n\
          \x20 int local_8;\n\
          \x20 int local_c;\n\
@@ -1141,7 +1146,8 @@ fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
     let pseudocode = macho().pseudocode(0x100000440).expect("_main lifts");
     assert_eq!(
         pseudocode.text(),
-        "int _main(void)\n\
+        "// returns int: no caller in the image, and the function writes rax itself before the ret\n\
+         int _main(void)\n\
          {\n\
          \x20 int local_10;\n\
          \x20 int local_14;\n\
@@ -1177,7 +1183,7 @@ fn the_add_of_the_pe_lifts_with_the_windows_argument_registers() {
     let pseudocode = binary.pseudocode(0x140001000).expect("add lifts");
     assert_eq!(
         pseudocode.text(),
-        "int add(int a, int b)\n{\n  return a + b;\n}"
+        "// returns int: main reads eax after the call\nint add(int a, int b)\n{\n  return a + b;\n}"
     );
 }
 
@@ -1188,7 +1194,7 @@ fn the_add_of_the_macho_lifts_to_c() {
     let pseudocode = binary.pseudocode(0x100000420).expect("_add lifts");
     assert_eq!(
         pseudocode.text(),
-        "int _add(int a, int b)\n{\n  return a + b;\n}"
+        "// returns int: _main reads eax after the call\nint _add(int a, int b)\n{\n  return a + b;\n}"
     );
 }
 

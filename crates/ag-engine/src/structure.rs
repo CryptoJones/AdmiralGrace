@@ -844,6 +844,7 @@ mod tests {
             body,
             frame: Vec::new(),
             thunk: None,
+            return_reason: None,
         };
         Ok(emit_function(&function, options).text())
     }

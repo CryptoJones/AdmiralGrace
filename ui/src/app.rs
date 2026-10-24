@@ -1691,20 +1691,27 @@ mod tests {
 
         let _ = app.update(Message::FunctionSelected(0x1149));
 
+        // The function opens with the comment that says what decided its
+        // return type: main reads eax after the call.
         assert_eq!(
             app.work.pseudocode.as_deref(),
-            Some("int add(int a, int b)\n{\n  return b + a;\n}")
+            Some(
+                "// returns int: main reads eax after the call\n\
+                 int add(int a, int b)\n{\n  return b + a;\n}"
+            )
         );
 
-        // The lines are mapped, so a click on the return lands on the add.
+        // The lines are mapped, so a click on the return lands on the add;
+        // the comment came from no instruction.
         let addresses = app
             .work
             .line_addresses
-            .get(&2)
+            .get(&3)
             .expect("the return line is mapped");
         assert!(addresses.contains(&0x115d), "{addresses:?}");
+        assert_eq!(app.work.line_addresses.get(&0), None);
         assert_eq!(
-            app.work.line_addresses.get(&0),
+            app.work.line_addresses.get(&1),
             Some(&vec![0x1149, 0x114d, 0x114e, 0x115f]),
             "the signature stands for the entry and the frame"
         );
@@ -1719,7 +1726,7 @@ mod tests {
         assert!(
             app.work
                 .line_addresses
-                .get(&6)
+                .get(&7)
                 .is_some_and(|addresses| addresses.contains(&0x118d)),
             "{:?}",
             app.work.line_addresses
@@ -1752,6 +1759,42 @@ mod tests {
             "{:?}",
             app.bottom.problems
         );
+
+        // The start-up glue __do_global_dtors_aux leaves a callee's result
+        // in rax on one path and nothing on the other: nothing reads it, so
+        // the function is void, with the comment saying so, and no problem.
+        let _ = app.update(Message::FunctionSelected(0x1100));
+        let body = app.work.pseudocode.as_deref().expect("the glue lifts");
+        assert!(
+            body.starts_with(
+                "// void: no caller in the image, and rax at the ret holds only \
+                 deregister_tm_clones's result, which nothing reads\n\
+                 void __do_global_dtors_aux(void)\n"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("  deregister_tm_clones();\n"), "{body}");
+        assert_eq!(
+            app.work.line_addresses.get(&0),
+            None,
+            "the comment is unmapped"
+        );
+        assert!(
+            app.work
+                .line_addresses
+                .get(&1)
+                .is_some_and(|addresses| addresses.contains(&0x1100)),
+            "the signature stands for the entry: {:?}",
+            app.work.line_addresses
+        );
+        assert!(
+            !app.bottom
+                .problems
+                .iter()
+                .any(|problem| problem.address == Some(0x1100)),
+            "{:?}",
+            app.bottom.problems
+        );
     }
 
     #[test]
@@ -1770,7 +1813,9 @@ mod tests {
         assert_eq!(
             app.work.pseudocode.as_deref(),
             Some(
-                "long main(int a, long b)\n\
+                "// returns long: no caller in the image, and the function writes rax itself \
+                 before the ret\n\
+                 long main(int a, long b)\n\
                  {\n\
                  \x20 long v2;\n\
                  \n\
@@ -1785,7 +1830,7 @@ mod tests {
         let addresses = app
             .work
             .line_addresses
-            .get(&5)
+            .get(&6)
             .expect("the printf line is mapped");
         assert!(addresses.contains(&0x11e1), "{addresses:?}");
         assert!(

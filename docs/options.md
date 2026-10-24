@@ -24,6 +24,9 @@ a `cmp` in the listing that the C says nothing about | `--option dead-compares k
 `__cmp(a, b);` statements that do nothing | `--option dead-compares drop`
 `return printf(a);` where the listing ends in `jmp`, and you want the functions that jump rather than call to stand out as refusals | `--option tail-calls refuse`
 `not lifted yet: a tail call to printf at 0x…` on a function that ends in `jmp printf` | `--option tail-calls return`
+`void f(…)` with `// void: no caller reads the result` on a function you know returns a value, whose callers in the image all discard it | `--option return-liveness presence`
+`long f(void)` and `return g();` on a function whose source is `void`, the value only what the callee left in `rax` | `--option return-liveness callers`
+`not lifted yet: returns a value at one ret and nothing at another` on glue such as `__do_global_dtors_aux` | `--option return-liveness callers`
 a `for` whose step is not the increment you expected, or whose init is a statement that belongs before the loop | `--option loop-form while`
 `i = 0; while (i < n) { …; i = i + 1; }` where a `for` would read better | `--option loop-form for`
 `goto label_…;` to a `return` a few lines up | `--option shared-tail duplicate`
@@ -50,6 +53,7 @@ Option | Tier | Takes | Default | What it decides
 `unsigned-compare` | rendering | `cast` \| `bare` | `cast` | A comparison whose condition code is unsigned (`jb`, `ja`, `jbe`, `jae`): both sides cast, `(unsigned int)a < (unsigned int)b`, or written bare, `a < b`.
 `dead-compares` | transform | `drop` \| `keep` | `drop` | A `cmp` or `test` whose flags no branch reads: dropped, or kept as the statement `__cmp(a, b);` or `__test(a, b);`.
 `tail-calls` | transform | `return` \| `refuse` | `return` | A `jmp` to another function with the stack as it was at entry: lifted as the call and the return it stands for, `return callee(args);` — a function that is only the jump is a thunk, printed as `// thunk for callee` — or refused, naming the callee.
+`return-liveness` | analysis | `callers` \| `presence` | `callers` | Whether a function returns a value, and at what width: from use — a caller that reads `eax`/`rax` after the call decides it, and with no caller in the image only a value the function wrote itself counts, not a callee's leftover — or from presence, `rax` written on the way to a `ret`, whatever reads it.
 
 ## Structure
 

@@ -50,6 +50,46 @@ pub enum Flow {
     Invalid,
 }
 
+/// How an instruction touches a register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Read, and not written.
+    Read,
+    /// Written, and not read: the old value is gone.
+    Write,
+    /// Read and then written.
+    ReadWrite,
+    /// Written only under a condition (`cmovcc`, `cmpxchg`): the old value
+    /// may survive.
+    CondWrite,
+}
+
+impl Access {
+    /// Whether the register's old value is read.
+    pub fn reads(self) -> bool {
+        matches!(self, Access::Read | Access::ReadWrite)
+    }
+
+    /// Whether the register's old value is certainly gone.
+    pub fn kills(self) -> bool {
+        matches!(self, Access::Write | Access::ReadWrite)
+    }
+}
+
+/// One register an instruction touches, with how.
+///
+/// The register is the slice the instruction names — `eax`, not `rax`, for
+/// `mov [rbp-0xc], eax` — so the width of a read is known. The registers a
+/// memory operand is addressed through are read; the ones an instruction
+/// uses implicitly (`cdqe` reads `eax` and writes `rax`, `push` reads and
+/// writes `rsp`) are listed too. `xor r, r` and `sub r, r` write their
+/// register without reading it: they are the idiom for zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterUse {
+    pub register: RegisterId,
+    pub access: Access,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedInsn {
     pub address: u64,
@@ -57,6 +97,9 @@ pub struct DecodedInsn {
     pub mnemonic: u32,
     pub flow: Flow,
     pub operands: Vec<Operand>,
+    /// The registers the instruction reads and writes, explicit and
+    /// implicit, by the slice it names. Empty for bytes that do not decode.
+    pub register_uses: Vec<RegisterUse>,
     /// The address a RIP-relative memory operand names: `[rip+disp]` resolved
     /// against the next instruction. That is how 64-bit code names its data;
     /// 32-bit code has no such operand, so this is `None` there.
@@ -201,6 +244,7 @@ impl CpuContext for X86IcedContext {
                 mnemonic: iced_x86::Mnemonic::INVALID as u32,
                 flow: Flow::Invalid,
                 operands: Vec::new(),
+                register_uses: Vec::new(),
                 rip_relative_address: None,
                 absolute_address: None,
                 switch_indices: false,
@@ -280,6 +324,7 @@ impl CpuContext for X86IcedContext {
             mnemonic,
             flow,
             operands,
+            register_uses: register_uses(&ins),
             rip_relative_address,
             absolute_address,
             switch_indices: false,
@@ -289,6 +334,35 @@ impl CpuContext for X86IcedContext {
     fn byte_size(&self) -> u64 {
         self.bitness.byte_size()
     }
+}
+
+/// The registers `ins` reads and writes, as iced's instruction information
+/// reports them: one entry per register and role, by the slice the
+/// instruction touches. A 32-bit write zero-extends, so iced reports
+/// `add eax, 1` as a read of `eax` and a write of `rax`, and the zeroing
+/// idioms `xor r, r` and `sub r, r` as a write alone.
+fn register_uses(ins: &iced_x86::Instruction) -> Vec<RegisterUse> {
+    use iced_x86::OpAccess;
+    let mut factory = iced_x86::InstructionInfoFactory::new();
+    let mut uses: Vec<RegisterUse> = Vec::new();
+    for used in factory.info(ins).used_registers() {
+        let access = match used.access() {
+            OpAccess::Read | OpAccess::CondRead | OpAccess::ReadCondWrite => Access::Read,
+            OpAccess::Write => Access::Write,
+            OpAccess::CondWrite => Access::CondWrite,
+            OpAccess::ReadWrite => Access::ReadWrite,
+            OpAccess::None | OpAccess::NoMemAccess => continue,
+        };
+        let use_ = RegisterUse {
+            register: reg_id(used.register()),
+            access,
+        };
+        // `test eax, eax` names the register twice; one entry says it.
+        if !uses.contains(&use_) {
+            uses.push(use_);
+        }
+    }
+    uses
 }
 
 /// The address an absolute memory operand of `ins` names, when it has one.
@@ -311,4 +385,109 @@ fn absolute_address(ins: &iced_x86::Instruction) -> Option<u64> {
         return None;
     }
     Some(ins.memory_displacement64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decode one 64-bit instruction at 0x1000.
+    fn one(bytes: &[u8]) -> DecodedInsn {
+        X86IcedContext::default()
+            .decode(bytes, 0x1000)
+            .expect("the bytes decode")
+    }
+
+    /// How the instruction touches GPR 0 — `rax` or a slice of it — as
+    /// `(bits, access)`.
+    fn rax_use(bytes: &[u8]) -> Vec<(u32, Access)> {
+        one(bytes)
+            .register_uses
+            .iter()
+            .filter(|use_| use_.register.class == RC_GPR && use_.register.index == 0)
+            .map(|use_| {
+                (
+                    use_.register.bit_size + use_.register.bit_offset,
+                    use_.access,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_store_of_eax_reads_it_and_a_load_into_eax_writes_it() {
+        // mov [rbp-0xc], eax
+        assert_eq!(rax_use(&[0x89, 0x45, 0xf4]), vec![(32, Access::Read)]);
+        // mov rax, [rbp-8]
+        assert_eq!(
+            rax_use(&[0x48, 0x8b, 0x45, 0xf8]),
+            vec![(64, Access::Write)]
+        );
+        // mov edi, eax
+        assert_eq!(rax_use(&[0x89, 0xc7]), vec![(32, Access::Read)]);
+    }
+
+    #[test]
+    fn compares_read_and_arithmetic_reads_and_writes() {
+        // test eax, eax
+        assert_eq!(rax_use(&[0x85, 0xc0]), vec![(32, Access::Read)]);
+        // cmp rax, 1
+        assert_eq!(rax_use(&[0x48, 0x83, 0xf8, 0x01]), vec![(64, Access::Read)]);
+        // add eax, 1: a 32-bit write zero-extends into rax, so the old
+        // value is read as eax and the whole register is written.
+        assert_eq!(
+            rax_use(&[0x83, 0xc0, 0x01]),
+            vec![(32, Access::Read), (64, Access::Write)]
+        );
+        // mul rcx reads and writes rax whole.
+        assert_eq!(rax_use(&[0x48, 0xf7, 0xe1]), vec![(64, Access::ReadWrite)]);
+    }
+
+    #[test]
+    fn the_zeroing_idioms_only_write() {
+        // xor eax, eax; sub rax, rax; xor eax, ecx
+        assert_eq!(rax_use(&[0x31, 0xc0]), vec![(64, Access::Write)]);
+        assert_eq!(rax_use(&[0x48, 0x29, 0xc0]), vec![(64, Access::Write)]);
+        assert_eq!(
+            rax_use(&[0x31, 0xc8]),
+            vec![(32, Access::Read), (64, Access::Write)]
+        );
+    }
+
+    #[test]
+    fn the_implicit_registers_are_listed_by_slice() {
+        // cdqe reads eax and writes rax
+        let uses = rax_use(&[0x48, 0x98]);
+        assert!(uses.contains(&(32, Access::Read)), "{uses:?}");
+        assert!(uses.contains(&(64, Access::Write)), "{uses:?}");
+        // a memory operand through rax reads it: mov [rax], 1
+        assert_eq!(
+            rax_use(&[0xc7, 0x00, 0x01, 0x00, 0x00, 0x00]),
+            vec![(64, Access::Read)]
+        );
+        // cmovne rax, rcx may leave rax as it was; the 32-bit form always
+        // zero-extends, so its old eax is read and rax written.
+        assert_eq!(
+            rax_use(&[0x48, 0x0f, 0x45, 0xc1]),
+            vec![(64, Access::CondWrite)]
+        );
+        assert_eq!(
+            rax_use(&[0x0f, 0x45, 0xc1]),
+            vec![(32, Access::Read), (64, Access::Write)]
+        );
+        // mov al, 1 writes only the low byte
+        assert_eq!(rax_use(&[0xb0, 0x01]), vec![(8, Access::Write)]);
+        // call rax and jmp rax read it
+        assert_eq!(rax_use(&[0xff, 0xd0]), vec![(64, Access::Read)]);
+        assert_eq!(rax_use(&[0xff, 0xe0]), vec![(64, Access::Read)]);
+        // a direct call touches rsp, and says nothing of rax: the clobber
+        // is the convention's, not the instruction's
+        let call = one(&[0xe8, 0, 0, 0, 0]);
+        assert!(call
+            .register_uses
+            .iter()
+            .all(|use_| use_.register.index != 0 || use_.register.class != RC_GPR));
+        // bytes that do not decode touch nothing
+        assert!(one(&[0x06]).register_uses.is_empty());
+    }
 }

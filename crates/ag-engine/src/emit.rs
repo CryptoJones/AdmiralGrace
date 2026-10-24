@@ -37,6 +37,13 @@ pub struct Line {
 pub struct Pseudocode {
     /// The lines, in order.
     pub lines: Vec<Line>,
+    /// The C return type of the function, when it has one of its own: a
+    /// thunk's is its callee's, and the scaffolding's is not decided.
+    pub return_type: Option<String>,
+    /// Why the return type is what it is — `no caller reads the result`,
+    /// `main reads eax after the call` — when the lifter recorded it. The
+    /// leading comment of the function says the same.
+    pub return_reason: Option<String>,
 }
 
 impl Pseudocode {
@@ -112,7 +119,26 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
             text: format!("// thunk for {callee}"),
             addresses: signature_addresses,
         });
-        return Pseudocode { lines };
+        return Pseudocode {
+            lines,
+            return_type: None,
+            return_reason: None,
+        };
+    }
+
+    // The return type is a decision, and the comment says what decided it:
+    // `// void: no caller reads the result`, `// returns int: main reads
+    // eax after the call`. It came from no instruction.
+    if let Some(reason) = &function.return_reason {
+        let verdict = if function.return_type == "void" {
+            "void".to_string()
+        } else {
+            format!("returns {}", function.return_type)
+        };
+        lines.push(Line {
+            text: format!("// {verdict}: {reason}"),
+            addresses: Vec::new(),
+        });
     }
 
     let params = if function.params.is_empty() {
@@ -154,7 +180,11 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
         addresses: Vec::new(),
     });
 
-    Pseudocode { lines }
+    Pseudocode {
+        lines,
+        return_type: Some(function.return_type.clone()),
+        return_reason: function.return_reason.clone(),
+    }
 }
 
 /// Print statements at `depth` levels of indentation.
@@ -660,6 +690,7 @@ mod tests {
             }],
             frame: Vec::new(),
             thunk: None,
+            return_reason: None,
         };
         let options =
             Options::from_pairs([("indent", "4"), ("constant-style", "decimal")]).unwrap();

@@ -40,6 +40,7 @@ use ag_engine::cfgwalk::resolve_branches;
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
 use ag_engine::lift::{lift_function, Pointee, Symbols};
+use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
@@ -817,17 +818,9 @@ impl Binary {
 
     /// Lift the function at `address` and print it.
     fn build_pseudocode(&self, address: u64) -> Result<Pseudocode, NotLifted> {
-        let code = self
-            .file
-            .iter()
-            .find(|code| {
-                code.section.executable
-                    && code.section.vma <= address
-                    && address < code.section.vma + code.section.size
-            })
-            .ok_or_else(|| NotLifted {
-                reason: format!("no code at {address:#x}"),
-            })?;
+        let code = self.code_at(address).ok_or_else(|| NotLifted {
+            reason: format!("no code at {address:#x}"),
+        })?;
 
         let decoded = code.decoded();
         let cfg = resolve_branches(&decoded.disasm, address);
@@ -987,13 +980,58 @@ impl Binary {
         })
     }
 
-    /// Walk the function at `address` and gather its blocks.
-    fn build_disassembly(&self, address: u64) -> Option<Disassembly> {
-        let code = self.file.iter().find(|code| {
+    /// The code section that holds `address`, when one does.
+    fn code_at(&self, address: u64) -> Option<&FileSection> {
+        self.file.iter().find(|code| {
             code.section.executable
                 && code.section.vma <= address
                 && address < code.section.vma + code.section.size
-        })?;
+        })
+    }
+
+    /// What the callers of the function at `address` do with its result:
+    /// one entry per call site the call graph knows. A direct call is
+    /// decided by walking the caller's code after it; a tail call hands the
+    /// result to the caller's own caller, and says so.
+    fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
+        let mut uses = Vec::new();
+        for &caller in self.call_graph().callers(address) {
+            let Some(disassembly) = self.disassembly(caller) else {
+                continue;
+            };
+            let Some(code) = self.code_at(caller) else {
+                continue;
+            };
+            let decoded = code.decoded();
+            let cfg = resolve_branches(&decoded.disasm, caller);
+            let caller_name = self
+                .function_name(caller)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("sub_{caller:x}"));
+            for call in disassembly
+                .calls
+                .iter()
+                .filter(|call| call.target == address)
+            {
+                let result = if call.tail {
+                    ResultUse::Returned
+                } else {
+                    result_use_after(&decoded.disasm, &cfg, call.site)
+                };
+                uses.push(CallSiteUse {
+                    caller,
+                    caller_name: caller_name.clone(),
+                    site: call.site,
+                    result,
+                });
+            }
+        }
+        uses
+    }
+
+    /// Walk the function at `address` and gather its blocks.
+    fn build_disassembly(&self, address: u64) -> Option<Disassembly> {
+        let code = self.code_at(address)?;
 
         let decoded = code.decoded();
         let cfg = resolve_branches(&decoded.disasm, address);
@@ -1141,6 +1179,12 @@ struct ImageSymbols<'a>(&'a Binary);
 impl Symbols for ImageSymbols<'_> {
     fn function_name(&self, address: u64) -> Option<String> {
         self.0.function_name(address).map(str::to_string)
+    }
+
+    /// The call graph's callers of the function, each call site decided by
+    /// the engine's walk of the caller's code after the call.
+    fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
+        self.0.result_uses(address)
     }
 
     /// A pointer into a string is that string from the pointer to its NUL,
@@ -1674,11 +1718,15 @@ mod tests {
         // jmp rax; .ret: ret. The two leas name the same address, which the
         // image knows as completed.0; the paths into the ret leave rax
         // different, so it is a variable there; the jump through rax is the
-        // tail call to the import the slot holds.
-        let text = sample().pseudocode(0x1090).expect("lifts").text();
+        // tail call to the import the slot holds. Its one caller,
+        // __do_global_dtors_aux, carries the result untouched to its own
+        // ret, which nothing calls: nobody reads it, so it is void, and the
+        // tail call is a call followed by a return.
+        let pseudocode = sample().pseudocode(0x1090).expect("lifts");
         assert_eq!(
-            text,
-            "long deregister_tm_clones(void)\n\
+            pseudocode.text(),
+            "// void: no caller reads the result\n\
+             void deregister_tm_clones(void)\n\
              {\n\
              \x20 long rax;\n\
              \n\
@@ -1686,11 +1734,17 @@ mod tests {
              \x20 if (rax != rax) {\n\
              \x20   rax = _ITM_deregisterTMCloneTable;\n\
              \x20   if (rax != 0) {\n\
-             \x20     return _ITM_deregisterTMCloneTable(&completed.0);\n\
+             \x20     _ITM_deregisterTMCloneTable(&completed.0);\n\
+             \x20     return;\n\
              \x20   }\n\
              \x20 }\n\
-             \x20 return rax;\n\
+             \x20 return;\n\
              }"
+        );
+        assert_eq!(pseudocode.return_type.as_deref(), Some("void"));
+        assert_eq!(
+            pseudocode.return_reason.as_deref(),
+            Some("no caller reads the result")
         );
         // The jump through a register is the lifter's to read: the calls of
         // the disassembly do not claim it.
@@ -1710,11 +1764,72 @@ mod tests {
             binary.pseudocode(0x10c0).unwrap_err().to_string(),
             "not lifted yet: shr"
         );
-        // __do_global_dtors_aux returns a call's result on one path and
-        // nothing on the other.
+    }
+
+    #[test]
+    fn do_global_dtors_aux_is_void_because_nothing_reads_what_it_leaves_in_rax() {
+        // One path returns after `call deregister_tm_clones` with the result
+        // sitting unread in rax, the other with rax untouched; nothing in
+        // the image calls it. The value is a callee's leftover, so the
+        // function is void, and the comment says so.
+        let pseudocode = sample().pseudocode(0x1100).expect("lifts");
+        assert_eq!(
+            pseudocode.text(),
+            "// void: no caller in the image, and rax at the ret holds only deregister_tm_clones's result, which nothing reads\n\
+             void __do_global_dtors_aux(void)\n\
+             {\n\
+             \x20 if (completed.0 != 0) {\n\
+             \x20   return;\n\
+             \x20 }\n\
+             \x20 if (__cxa_finalize != 0) {\n\
+             \x20   __cxa_finalize(*(long *)0x4008);\n\
+             \x20 }\n\
+             \x20 deregister_tm_clones();\n\
+             \x20 completed.0 = 1;\n\
+             \x20 return;\n\
+             }"
+        );
+        assert_eq!(pseudocode.return_type.as_deref(), Some("void"));
+        assert_eq!(
+            pseudocode.return_reason.as_deref(),
+            Some("no caller in the image, and rax at the ret holds only deregister_tm_clones's result, which nothing reads")
+        );
+        // The comment comes from no instruction; the signature stands for
+        // the entry.
+        assert!(pseudocode.lines[0].addresses.is_empty());
+        assert!(pseudocode.lines[1].addresses.contains(&0x1100));
+
+        // add is int because main reads eax after the call, and sum_to long
+        // because main reads rax; the reason names the reader.
+        let add = sample().pseudocode(0x1149).expect("add lifts");
+        assert_eq!(add.return_type.as_deref(), Some("int"));
+        assert_eq!(
+            add.return_reason.as_deref(),
+            Some("main reads eax after the call")
+        );
+        assert_eq!(
+            add.lines[0].text,
+            "// returns int: main reads eax after the call"
+        );
+        let sum_to = sample().pseudocode(0x1161).expect("sum_to lifts");
+        assert_eq!(sum_to.return_type.as_deref(), Some("long"));
+        assert_eq!(
+            sum_to.return_reason.as_deref(),
+            Some("main reads rax after the call")
+        );
+
+        // Under `return-liveness presence` the value in rax decides, and
+        // the paths disagree as they always did.
+        let binary =
+            sample().with_options(Options::from_pairs([("return-liveness", "presence")]).unwrap());
         assert_eq!(
             binary.pseudocode(0x1100).unwrap_err().to_string(),
             "not lifted yet: returns a value at one ret and nothing at another"
+        );
+        let add = binary.pseudocode(0x1149).expect("add lifts");
+        assert_eq!(
+            add.return_reason.as_deref(),
+            Some("rax holds a value at the ret")
         );
     }
 

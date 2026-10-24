@@ -310,6 +310,7 @@ fn the_pseudocode_of_the_sample_elf_main_is_c_with_its_calls() {
     assert_eq!(
         report,
         "// main at 0x1198\n\
+         // returns long: no caller in the image, and the function writes rax itself before the ret\n\
          long main(int a, long b)\n\
          {\n\
          \x20 long v2;\n\
@@ -327,7 +328,9 @@ fn the_pseudocode_of_the_sample_elf_add_is_c() {
 
     assert_eq!(
         report,
-        "// add at 0x1149\nint add(int a, int b)\n{\n  return b + a;\n}\n"
+        "// add at 0x1149\n\
+         // returns int: main reads eax after the call\n\
+         int add(int a, int b)\n{\n  return b + a;\n}\n"
     );
 }
 
@@ -389,7 +392,8 @@ fn a_conditional_tail_call_through_a_register_is_lifted() {
     assert_eq!(
         report,
         "// deregister_tm_clones at 0x1090\n\
-         long deregister_tm_clones(void)\n\
+         // void: no caller reads the result\n\
+         void deregister_tm_clones(void)\n\
          {\n\
          \x20 long rax;\n\
          \n\
@@ -397,10 +401,11 @@ fn a_conditional_tail_call_through_a_register_is_lifted() {
          \x20 if (rax != rax) {\n\
          \x20   rax = _ITM_deregisterTMCloneTable;\n\
          \x20   if (rax != 0) {\n\
-         \x20     return _ITM_deregisterTMCloneTable(&completed.0);\n\
+         \x20     _ITM_deregisterTMCloneTable(&completed.0);\n\
+         \x20     return;\n\
          \x20   }\n\
          \x20 }\n\
-         \x20 return rax;\n\
+         \x20 return;\n\
          }\n"
     );
 
@@ -424,7 +429,9 @@ fn the_pseudocode_of_the_pe_add_is_c() {
 
     assert_eq!(
         report,
-        "// add at 0x140001000\nint add(int a, int b)\n{\n  return a + b;\n}\n"
+        "// add at 0x140001000\n\
+         // returns int: main reads eax after the call\n\
+         int add(int a, int b)\n{\n  return a + b;\n}\n"
     );
 }
 
@@ -434,7 +441,9 @@ fn the_pseudocode_of_the_macho_add_is_c() {
 
     assert_eq!(
         report,
-        "// _add at 0x100000420\nint _add(int a, int b)\n{\n  return a + b;\n}\n"
+        "// _add at 0x100000420\n\
+         // returns int: _main reads eax after the call\n\
+         int _add(int a, int b)\n{\n  return a + b;\n}\n"
     );
 }
 
@@ -446,17 +455,68 @@ fn the_pseudocode_is_reported_as_json_with_the_addresses_of_each_line() {
     assert_eq!(report["lifted"], serde_json::json!(true));
     assert_eq!(
         report["text"],
-        serde_json::json!("int add(int a, int b)\n{\n  return b + a;\n}")
+        serde_json::json!(
+            "// returns int: main reads eax after the call\nint add(int a, int b)\n{\n  return b + a;\n}"
+        )
+    );
+    assert_eq!(report["return_type"], serde_json::json!("int"));
+    assert_eq!(
+        report["return_reason"],
+        serde_json::json!("main reads eax after the call")
     );
 
     let lines = report["lines"].as_array().expect("the lines");
-    assert_eq!(lines.len(), 4);
-    assert_eq!(lines[2]["line"], serde_json::json!(3));
-    assert_eq!(lines[2]["text"], serde_json::json!("  return b + a;"));
-    let addresses = lines[2]["addresses_hex"].as_array().expect("the addresses");
+    assert_eq!(lines.len(), 5);
+    assert_eq!(lines[0]["addresses"], serde_json::json!([]));
+    assert_eq!(lines[3]["line"], serde_json::json!(4));
+    assert_eq!(lines[3]["text"], serde_json::json!("  return b + a;"));
+    let addresses = lines[3]["addresses_hex"].as_array().expect("the addresses");
     assert!(
         addresses.contains(&serde_json::json!("0x115d")),
         "the add is one of them: {addresses:?}"
+    );
+}
+
+#[test]
+fn the_start_up_glue_is_void_by_use_and_the_option_restores_the_refusal() {
+    let report = image("sample.elf", &["pseudocode", "__do_global_dtors_aux"]);
+    assert_eq!(
+        report,
+        "// __do_global_dtors_aux at 0x1100\n\
+         // void: no caller in the image, and rax at the ret holds only deregister_tm_clones's result, which nothing reads\n\
+         void __do_global_dtors_aux(void)\n\
+         {\n\
+         \x20 if (completed.0 != 0) {\n\
+         \x20   return;\n\
+         \x20 }\n\
+         \x20 if (__cxa_finalize != 0) {\n\
+         \x20   __cxa_finalize(*(long *)0x4008);\n\
+         \x20 }\n\
+         \x20 deregister_tm_clones();\n\
+         \x20 completed.0 = 1;\n\
+         \x20 return;\n\
+         }\n"
+    );
+
+    // `return-liveness presence` decides from the value in rax alone, and
+    // the two paths disagree, as they always did.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args([
+            "pseudocode",
+            "__do_global_dtors_aux",
+            "--option",
+            "return-liveness",
+            "presence",
+        ])
+        .output()
+        .expect("the ag binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "// __do_global_dtors_aux at 0x1100: not lifted yet: returns a value at one ret and \
+         nothing at another\n"
     );
 }
 
@@ -510,6 +570,7 @@ fn a_loop_is_lifted_as_a_for() {
     assert_eq!(
         report,
         "// sum_to at 0x1161\n\
+         // returns long: main reads rax after the call\n\
          long sum_to(int a)\n\
          {\n\
          \x20 long local_10;\n\
