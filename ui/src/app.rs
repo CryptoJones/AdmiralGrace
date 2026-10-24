@@ -1566,6 +1566,56 @@ mod tests {
         assert_eq!(app.selection, Selection::Address(0x4010));
     }
 
+    /// The PE fixture the image tests read.
+    fn pe_image() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample.exe")
+    }
+
+    /// The Mach-O fixture the image tests read.
+    fn macho_image() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-image/tests/fixtures/sample.macho")
+    }
+
+    #[test]
+    fn booting_with_a_pe_shows_its_functions() {
+        let config = Config {
+            binary: Some(pe_image()),
+            ..Config::default()
+        };
+
+        let app = App::boot(config).0;
+
+        assert_eq!(app.project.kind, crate::model::ProjectKind::Binary);
+        assert!(!app.navigator.rows.is_empty(), "the symbols are listed");
+        assert!(app.capabilities.listing, "the listing is on");
+
+        // The first function is selected, and its listing is loaded.
+        let selected = app.navigator.selected.expect("a function is selected");
+        assert!(!app.work.listing.is_empty(), "the listing is shown");
+        assert_eq!(app.work.listing[0].address, selected);
+    }
+
+    #[test]
+    fn booting_with_a_macho_shows_its_functions() {
+        let config = Config {
+            binary: Some(macho_image()),
+            ..Config::default()
+        };
+
+        let mut app = App::boot(config).0;
+
+        assert_eq!(app.project.kind, crate::model::ProjectKind::Binary);
+        assert!(!app.navigator.rows.is_empty(), "the symbols are listed");
+        assert!(app.capabilities.listing, "the listing is on");
+
+        // The first function of a Mach-O is its header, which holds no code,
+        // so the listing of a function is asked for by name.
+        let _ = app.update(Message::FunctionSelected(0x100000440));
+
+        assert!(!app.work.listing.is_empty(), "the listing is shown");
+        assert_eq!(app.work.listing[0].address, 0x100000440);
+    }
+
     #[test]
     fn booting_with_a_binary_shows_its_functions() {
         let config = Config {

@@ -624,3 +624,156 @@ fn the_data_of_a_section_that_is_not_mapped_is_left_out() {
         "an address that is in no section holds no data"
     );
 }
+
+/// The PE fixture the image tests read.
+fn pe_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.exe")
+}
+
+/// The Mach-O fixture the image tests read.
+fn macho_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.macho")
+}
+
+/// The PE fixture, read.
+fn pe() -> Binary {
+    Binary::open(&pe_path()).expect("the PE fixture loads")
+}
+
+/// The Mach-O fixture, read.
+fn macho() -> Binary {
+    Binary::open(&macho_path()).expect("the Mach-O fixture loads")
+}
+
+#[test]
+fn the_pe_fixture_is_read() {
+    let binary = pe();
+
+    assert!(
+        binary.language().starts_with("x86:LE:64:default:windows"),
+        "{}",
+        binary.language()
+    );
+    assert_eq!(binary.entry(), Some(0x140001020));
+
+    let text = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect("a .text section");
+    assert!(text.executable);
+    assert_eq!(text.vma, 0x140001000);
+
+    let rdata = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".rdata")
+        .expect("a .rdata section");
+    assert!(!rdata.executable);
+}
+
+#[test]
+fn the_functions_of_the_pe_fixture_are_named() {
+    let binary = pe();
+
+    // A Windows image without a symbol table names its functions through its
+    // export table.
+    assert_eq!(binary.function_name(0x140001000), Some("add"));
+    assert_eq!(binary.function_name(0x140001020), Some("main"));
+
+    let names: Vec<&str> = binary
+        .functions()
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    assert!(names.contains(&"main"), "{names:?}");
+}
+
+#[test]
+fn the_pe_fixture_decodes() {
+    let binary = pe();
+
+    let disassembly = binary.disassembly(0x140001020).expect("main decodes");
+    assert!(!disassembly.blocks.is_empty(), "the function has blocks");
+
+    let calls: Vec<u64> = disassembly.calls.iter().map(|call| call.target).collect();
+    assert!(calls.contains(&0x140001000), "main calls add: {calls:?}");
+}
+
+#[test]
+fn the_strings_of_the_pe_fixture_are_found() {
+    let binary = pe();
+
+    let hello = binary
+        .strings()
+        .iter()
+        .find(|string| string.text == "hello")
+        .expect("the greeting is in the image");
+    assert_eq!(hello.section, ".rdata");
+}
+
+#[test]
+fn the_macho_fixture_is_read() {
+    let binary = macho();
+
+    assert!(
+        binary.language().starts_with("x86:LE:64:default:gcc"),
+        "{}",
+        binary.language()
+    );
+    assert_eq!(binary.entry(), Some(0x100000440));
+
+    let text = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == "__text")
+        .expect("a __text section");
+    assert!(text.executable);
+    assert_eq!(text.vma, 0x100000420);
+
+    let cstring = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == "__cstring")
+        .expect("a __cstring section");
+    assert!(!cstring.executable);
+}
+
+#[test]
+fn the_functions_of_the_macho_fixture_are_named() {
+    let binary = macho();
+
+    // A Mach-O names its symbols with a leading underscore.
+    assert_eq!(binary.function_name(0x100000420), Some("_add"));
+    assert_eq!(binary.function_name(0x100000440), Some("_main"));
+
+    let names: Vec<&str> = binary
+        .functions()
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    assert!(names.contains(&"_main"), "{names:?}");
+}
+
+#[test]
+fn the_macho_fixture_decodes() {
+    let binary = macho();
+
+    let disassembly = binary.disassembly(0x100000440).expect("main decodes");
+    assert!(!disassembly.blocks.is_empty(), "the function has blocks");
+
+    let calls: Vec<u64> = disassembly.calls.iter().map(|call| call.target).collect();
+    assert!(calls.contains(&0x100000420), "main calls add: {calls:?}");
+}
+
+#[test]
+fn the_strings_of_the_macho_fixture_are_found() {
+    let binary = macho();
+
+    let hello = binary
+        .strings()
+        .iter()
+        .find(|string| string.text == "hello")
+        .expect("the greeting is in the image");
+    assert_eq!(hello.section, "__cstring");
+}
