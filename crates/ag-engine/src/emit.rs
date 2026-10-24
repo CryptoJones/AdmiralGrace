@@ -100,6 +100,21 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
     let style = Style::of(options);
     let mut lines = Vec::new();
 
+    let mut signature_addresses = vec![function.address];
+    signature_addresses.extend(function.frame.iter().copied());
+    signature_addresses.sort_unstable();
+    signature_addresses.dedup();
+
+    // A thunk has no body of its own: its signature is the callee's, so the
+    // one line says what it stands for, and carries every instruction.
+    if let Some(callee) = &function.thunk {
+        lines.push(Line {
+            text: format!("// thunk for {callee}"),
+            addresses: signature_addresses,
+        });
+        return Pseudocode { lines };
+    }
+
     let params = if function.params.is_empty() {
         "void".to_string()
     } else {
@@ -110,10 +125,6 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut signature_addresses = vec![function.address];
-    signature_addresses.extend(function.frame.iter().copied());
-    signature_addresses.sort_unstable();
-    signature_addresses.dedup();
     lines.push(Line {
         text: format!("{} {}({params})", function.return_type, function.name),
         addresses: signature_addresses,
@@ -648,6 +659,7 @@ mod tests {
                 },
             }],
             frame: Vec::new(),
+            thunk: None,
         };
         let options =
             Options::from_pairs([("indent", "4"), ("constant-style", "decimal")]).unwrap();

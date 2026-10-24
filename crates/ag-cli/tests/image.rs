@@ -332,6 +332,93 @@ fn the_pseudocode_of_the_sample_elf_add_is_c() {
 }
 
 #[test]
+fn the_pseudocode_of_a_plt_stub_is_a_thunk_line_and_its_call_is_a_tail_call() {
+    let report = image("sample.elf", &["pseudocode", "printf"]);
+    assert_eq!(report, "// printf at 0x1050\n// thunk for printf\n");
+
+    let report = image("sample.elf", &["pseudocode", "frame_dummy"]);
+    assert_eq!(
+        report,
+        "// frame_dummy at 0x1140\n// thunk for register_tm_clones\n"
+    );
+
+    let report = image_json("sample.elf", &["pseudocode", "__cxa_finalize"]);
+    assert_eq!(report["lifted"], serde_json::json!(true));
+    assert_eq!(
+        report["text"],
+        serde_json::json!("// thunk for __cxa_finalize")
+    );
+    let lines = report["lines"].as_array().expect("the lines");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        lines[0]["addresses_hex"],
+        serde_json::json!(["0x1040", "0x1044"])
+    );
+
+    let report = image("sample.elf", &["calls", "printf"]);
+    assert_eq!(
+        report,
+        "printf at 0x1050\n\
+         calls:\n\
+         \x20 0x1054 -> 0x3fd0 printf (tail call)\n\
+         called by:\n\
+         \x20 0x1198 main\n"
+    );
+
+    let report = image_json("sample.elf", &["calls", "frame_dummy"]);
+    let calls = report["calls"].as_array().expect("the calls");
+    assert_eq!(calls.len(), 1, "{report}");
+    assert_eq!(calls[0]["name"], serde_json::json!("register_tm_clones"));
+    assert_eq!(calls[0]["tail"], serde_json::json!(true));
+    assert_eq!(calls[0]["slot"], serde_json::Value::Null);
+
+    let report = image("sample.elf", &["calls"]);
+    assert!(
+        report.contains("  0x1050 printf -> 0x3fd0 printf (tail call)\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains("  0x1140 frame_dummy -> 0x10c0 register_tm_clones (tail call)\n"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_conditional_tail_call_through_a_register_is_lifted() {
+    let report = image("sample.elf", &["pseudocode", "deregister_tm_clones"]);
+    assert_eq!(
+        report,
+        "// deregister_tm_clones at 0x1090\n\
+         long deregister_tm_clones(void)\n\
+         {\n\
+         \x20 long rax;\n\
+         \n\
+         \x20 rax = &completed.0;\n\
+         \x20 if (rax != rax) {\n\
+         \x20   rax = _ITM_deregisterTMCloneTable;\n\
+         \x20   if (rax != 0) {\n\
+         \x20     return _ITM_deregisterTMCloneTable(&completed.0);\n\
+         \x20   }\n\
+         \x20 }\n\
+         \x20 return rax;\n\
+         }\n"
+    );
+
+    // The option refuses the jump, naming the callee.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "printf", "--option", "tail-calls", "refuse"])
+        .output()
+        .expect("the ag binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "// printf at 0x1050: not lifted yet: a tail call to printf at 0x1054\n"
+    );
+}
+
+#[test]
 fn the_pseudocode_of_the_pe_add_is_c() {
     let report = image("sample.exe", &["pseudocode", "add"]);
 

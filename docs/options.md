@@ -22,6 +22,8 @@ a function you know takes more arguments than its signature shows, because the t
 `a < b` where you need to know whether a negative `a` passes | `--option unsigned-compare cast`
 a `cmp` in the listing that the C says nothing about | `--option dead-compares keep`
 `__cmp(a, b);` statements that do nothing | `--option dead-compares drop`
+`return printf(a);` where the listing ends in `jmp`, and you want the functions that jump rather than call to stand out as refusals | `--option tail-calls refuse`
+`not lifted yet: a tail call to printf at 0x…` on a function that ends in `jmp printf` | `--option tail-calls return`
 a `for` whose step is not the increment you expected, or whose init is a statement that belongs before the loop | `--option loop-form while`
 `i = 0; while (i < n) { …; i = i + 1; }` where a `for` would read better | `--option loop-form for`
 `goto label_…;` to a `return` a few lines up | `--option shared-tail duplicate`
@@ -47,6 +49,7 @@ Option | Tier | Takes | Default | What it decides
 `operand-order` | rendering | `instruction` \| `canonical` | `instruction` | The operands of `+`, `*`, `&`, `|` and `^`: in the order the instruction names them (`b + a`), or canonical, variables alphabetical and constants last (`a + b`).
 `unsigned-compare` | rendering | `cast` \| `bare` | `cast` | A comparison whose condition code is unsigned (`jb`, `ja`, `jbe`, `jae`): both sides cast, `(unsigned int)a < (unsigned int)b`, or written bare, `a < b`.
 `dead-compares` | transform | `drop` \| `keep` | `drop` | A `cmp` or `test` whose flags no branch reads: dropped, or kept as the statement `__cmp(a, b);` or `__test(a, b);`.
+`tail-calls` | transform | `return` \| `refuse` | `return` | A `jmp` to another function with the stack as it was at entry: lifted as the call and the return it stands for, `return callee(args);` — a function that is only the jump is a thunk, printed as `// thunk for callee` — or refused, naming the callee.
 
 ## Structure
 

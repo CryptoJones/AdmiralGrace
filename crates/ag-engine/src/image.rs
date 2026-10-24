@@ -127,6 +127,66 @@ impl Image {
             .map(|(_, name)| name)
     }
 
+    /// The import slots of an x86 ELF as `(slot, name)`: the GOT entries the
+    /// run-time loader fills with the address of a named symbol, by a
+    /// `GLOB_DAT` or `JUMP_SLOT` dynamic relocation.
+    ///
+    /// A PLT stub is `jmp [rip+slot]`, and a call through the GOT is
+    /// `mov rax, [rip+slot]; call rax`; this is what names the function at
+    /// the other end. Only these two relocation kinds are read: a `COPY`
+    /// relocation fills its slot with the symbol's bytes, not its address,
+    /// and a `RELATIVE` one names no symbol. Empty for every other
+    /// container and architecture.
+    pub fn import_slots(&self) -> Vec<(u64, String)> {
+        use object::read::{Object, ObjectSymbol, ObjectSymbolTable};
+        use object::{Architecture, RelocationFlags, RelocationTarget};
+
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        if !matches!(
+            file.architecture(),
+            Architecture::X86_64 | Architecture::I386
+        ) {
+            return Vec::new();
+        }
+        let (Some(relocations), Some(symbols)) =
+            (file.dynamic_relocations(), file.dynamic_symbol_table())
+        else {
+            return Vec::new();
+        };
+
+        let mut slots = Vec::new();
+        for (slot, relocation) in relocations {
+            // R_X86_64_GLOB_DAT and R_X86_64_JUMP_SLOT; the i386 numbers are
+            // the same.
+            let RelocationFlags::Elf { r_type } = relocation.flags() else {
+                continue;
+            };
+            if r_type != object::elf::R_X86_64_GLOB_DAT && r_type != object::elf::R_X86_64_JUMP_SLOT
+            {
+                continue;
+            }
+            if relocation.addend() != 0 {
+                continue;
+            }
+            let RelocationTarget::Symbol(index) = relocation.target() else {
+                continue;
+            };
+            let Ok(symbol) = symbols.symbol_by_index(index) else {
+                continue;
+            };
+            let Ok(name) = symbol.name() else {
+                continue;
+            };
+            if !name.is_empty() {
+                slots.push((slot, name.to_string()));
+            }
+        }
+        slots.sort_by_key(|(slot, _)| *slot);
+        slots
+    }
+
     /// The file-backed bytes of the section containing `vma`, from `vma` to the
     /// end of what the file holds for it.
     ///

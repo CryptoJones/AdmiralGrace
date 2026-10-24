@@ -843,6 +843,7 @@ mod tests {
             locals: Vec::new(),
             body,
             frame: Vec::new(),
+            thunk: None,
         };
         Ok(emit_function(&function, options).text())
     }

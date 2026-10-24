@@ -121,10 +121,13 @@ impl BinaryProvider {
     ///
     /// A call to a function that has a symbol shows the symbol, the way a
     /// reader expects; a call to an address with no symbol shows the address.
+    /// A jump through a GOT slot keeps its operand: the slot is what the
+    /// instruction names, and the import it holds is the reference's.
     fn listing_line(instruction: &ag_image::Instruction) -> ListingLine {
         let operands = match instruction
             .call
             .as_ref()
+            .filter(|call| call.slot.is_none())
             .and_then(|call| call.name.as_deref())
         {
             Some(name) => name.to_string(),
@@ -346,12 +349,16 @@ impl Provider for BinaryProvider {
         let mut references = Vec::new();
 
         // What the function calls. This is known at once: it is the one
-        // function's own disassembly.
+        // function's own disassembly. A tail call — the `jmp` a PLT stub or
+        // a forwarding stub ends in — says so.
         for call in self.binary.calls(address) {
-            let label = call
+            let mut label = call
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("{:#x}", call.target));
+            if call.tail {
+                label.push_str(" (tail call)");
+            }
             references.push(Reference {
                 address: call.target,
                 label,
@@ -617,6 +624,9 @@ mod tests {
     /// The address of `_init` in the sample, which calls through a register.
     const INIT: u64 = 0x1000;
 
+    /// The address of the `printf` PLT stub in the sample: a thunk.
+    const PRINTF: u64 = 0x1050;
+
     /// The sample ELF the engine's own tests read.
     fn sample_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/sample.elf")
@@ -774,6 +784,52 @@ mod tests {
     }
 
     #[test]
+    fn a_plt_stub_is_a_thunk_line_and_its_reference_is_a_tail_call() {
+        let provider = sample();
+
+        // printf@plt is endbr64; jmp [rip+slot]: no body of its own, so the
+        // one line says what it stands for, and carries both instructions.
+        assert_eq!(
+            provider.pseudocode(PRINTF).as_deref(),
+            Some("// thunk for printf")
+        );
+        assert_eq!(
+            provider.line_addresses(PRINTF).get(&0),
+            Some(&vec![0x1050, 0x1054])
+        );
+        assert!(provider.function_problems(PRINTF).is_empty());
+
+        // The References tab names the import the stub jumps to, as a tail
+        // call; the listing keeps the slot the jump reads.
+        let references = provider.references(PRINTF);
+        let calls: Vec<&str> = references
+            .iter()
+            .filter(|reference| reference.kind == ReferenceKind::Calls)
+            .map(|reference| reference.label.as_str())
+            .collect();
+        assert_eq!(calls, vec!["printf (tail call)"]);
+        let listing = provider.listing(PRINTF).expect("the stub has a listing");
+        let jmp = listing
+            .iter()
+            .find(|line| line.address == 0x1054)
+            .expect("the jmp");
+        assert_eq!(jmp.operands, "jmp qword ptr [3FD0h]");
+
+        // frame_dummy jumps to register_tm_clones by address, and the
+        // listing names it.
+        let listing = provider.listing(0x1140).expect("frame_dummy has a listing");
+        let jmp = listing
+            .iter()
+            .find(|line| line.address == 0x1144)
+            .expect("the jmp");
+        assert_eq!(jmp.operands, "register_tm_clones");
+        assert_eq!(
+            provider.pseudocode(0x1140).as_deref(),
+            Some("// thunk for register_tm_clones")
+        );
+    }
+
+    #[test]
     fn the_functions_are_the_symbols_of_the_image() {
         let provider = sample();
 
@@ -916,8 +972,8 @@ mod tests {
         );
         assert_eq!(
             ready.no_callers,
-            Some(7),
-            "only five of the twelve are called"
+            Some(6),
+            "only six of the twelve are called: five by a call, and register_tm_clones by frame_dummy's tail jump"
         );
     }
 

@@ -19,8 +19,10 @@
 //! the lifter refused. The calling convention is read from the image's
 //! language, so a Windows image passes its arguments the Microsoft way, and
 //! the lifter asks the image what a pointer lands on ([`Symbols`]), so a
-//! string the image knows is printed as its literal and named data as
-//! `&name`. The engine's judgment calls — the options of
+//! string the image knows is printed as its literal, named data as
+//! `&name`, and a GOT slot the image relocates to an import as that import
+//! — which is how a PLT stub reads as a thunk for it, and a `jmp` through
+//! the slot as a tail call. The engine's judgment calls — the options of
 //! [`ag_engine::options`] — are fixed when the image is opened
 //! ([`Binary::with_options`]) and read by every lift after.
 //!
@@ -180,15 +182,25 @@ impl Block {
     }
 }
 
-/// A direct call a function makes.
+/// A call a function makes: a direct `call`, or a `jmp` that leaves the
+/// function — a tail call.
 #[derive(Debug, Clone)]
 pub struct Call {
     /// The address of the call instruction.
     pub site: u64,
-    /// The address the call goes to.
+    /// The address the call goes to: the callee's entry, or, for a tail
+    /// call through a GOT slot, the slot the jump reads.
     pub target: u64,
-    /// The name of the function at the target, when it has one.
+    /// The name of the function at the target, when it has one; for a tail
+    /// call through a GOT slot, the import the slot is relocated to.
     pub name: Option<String>,
+    /// Whether the call is a tail call: a `jmp` to another function, which
+    /// returns to this function's caller.
+    pub tail: bool,
+    /// The GOT slot a tail call jumps through, when it goes through one:
+    /// `jmp [rip+slot]`, the shape of a PLT stub. `target` is then the
+    /// slot's address.
+    pub slot: Option<u64>,
 }
 
 /// What an edge of a control-flow graph means.
@@ -265,7 +277,9 @@ pub struct Disassembly {
     pub section: String,
     /// The blocks of the function, in the order the walk found them.
     pub blocks: Vec<Block>,
-    /// The direct calls the function makes.
+    /// The calls the function makes: its direct calls, in order, then its
+    /// tail calls — a `jmp` to a function the image names, or through a GOT
+    /// slot it resolves to an import.
     pub calls: Vec<Call>,
     /// The addresses the instructions of the function point at.
     pub pointers: Vec<Pointer>,
@@ -323,6 +337,9 @@ pub struct Binary {
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
+    /// The GOT slots the loader fills with the address of an import, by
+    /// slot, with the import's name.
+    imports: BTreeMap<u64, String>,
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
@@ -409,6 +426,10 @@ impl Binary {
             })
             .collect();
 
+        // The import slots: what a PLT stub jumps through, and what a call
+        // through the GOT reads. They name the function at the other end.
+        let imports: BTreeMap<u64, String> = image.import_slots().into_iter().collect();
+
         // The bytes of every section the file holds are kept: the listing
         // decodes the code out of them, and the byte pane shows the rest.
         // They are read once here, because the file is read once. Each
@@ -439,6 +460,7 @@ impl Binary {
             sections,
             functions,
             data,
+            imports,
             file,
             strings,
             wide_strings,
@@ -500,6 +522,22 @@ impl Binary {
     /// The data symbols of the image.
     pub fn data_symbols(&self) -> &[DataSymbol] {
         &self.data
+    }
+
+    /// The import slots of the image: the GOT entries the run-time loader
+    /// fills with the address of a named import, by slot, with the name.
+    ///
+    /// A PLT stub is `jmp [rip+slot]`, so this is what names the function a
+    /// stub stands for; empty for an image with no dynamic relocations the
+    /// loader reads.
+    pub fn imports(&self) -> &BTreeMap<u64, String> {
+        &self.imports
+    }
+
+    /// The import whose address the GOT slot at `slot` holds, when the image
+    /// relocates one there.
+    pub fn import_at(&self, slot: u64) -> Option<&str> {
+        self.imports.get(&slot).map(String::as_str)
     }
 
     /// The section that holds an address, when one does.
@@ -835,7 +873,9 @@ impl Binary {
         }))
     }
 
-    /// The direct calls the function at `address` makes.
+    /// The calls the function at `address` makes: its direct calls, and the
+    /// tail calls it ends in — a `jmp` to a function the image names, or
+    /// through a GOT slot it resolves to an import.
     pub fn calls(&self, address: u64) -> Vec<Call> {
         self.disassembly(address)
             .map(|disassembly| disassembly.calls.clone())
@@ -975,9 +1015,53 @@ impl Binary {
                 site,
                 target,
                 name: self.function_name(target).map(str::to_string),
+                tail: false,
+                slot: None,
             };
             call_at.insert(site, call.clone());
             calls.push(call);
+        }
+
+        // Then the tail calls: a block that ends in a `jmp` to the entry of
+        // another function the image names, or through a GOT slot the image
+        // relocates to an import — the shape of a PLT stub. A `jmp` through
+        // a register is not resolved here; the lifter reads what the
+        // register holds.
+        for block in &cfg.blocks {
+            let Some(last) = decoded
+                .disasm
+                .instructions
+                .iter()
+                .rev()
+                .find(|instruction| block.contains(instruction.address))
+            else {
+                continue;
+            };
+            let call = match last.flow {
+                Flow::UnconditionalBranch(target) if target != address => {
+                    self.function_name(target).map(|name| Call {
+                        site: last.address,
+                        target,
+                        name: Some(name.to_string()),
+                        tail: true,
+                        slot: None,
+                    })
+                }
+                Flow::IndirectBranch => last.memory_address().and_then(|slot| {
+                    self.import_at(slot).map(|name| Call {
+                        site: last.address,
+                        target: slot,
+                        name: Some(name.to_string()),
+                        tail: true,
+                        slot: Some(slot),
+                    })
+                }),
+                _ => None,
+            };
+            if let Some(call) = call {
+                call_at.insert(call.site, call.clone());
+                calls.push(call);
+            }
         }
 
         let mut blocks = Vec::with_capacity(cfg.blocks.len());
@@ -1062,8 +1146,9 @@ impl Symbols for ImageSymbols<'_> {
     /// A pointer into a string is that string from the pointer to its NUL,
     /// so one into the middle of a string is the string's tail. A pointer to
     /// the start of a data symbol is that symbol; one into the middle of it
-    /// is not named, since the offset would need a type to be read. A pointer
-    /// to a function is the function.
+    /// is not named, since the offset would need a type to be read. A GOT
+    /// slot the image relocates to an import is that import. A pointer to a
+    /// function is the function.
     fn pointee(&self, address: u64) -> Option<Pointee> {
         if let Some(string) = self.0.string_at(address) {
             let end = string.address + string.length - 1;
@@ -1083,6 +1168,9 @@ impl Symbols for ImageSymbols<'_> {
             .filter(|symbol| symbol.address == address)
         {
             return Some(Pointee::Data(symbol.name.clone()));
+        }
+        if let Some(name) = self.0.import_at(address) {
+            return Some(Pointee::Import(name.to_string()));
         }
         self.0
             .function_name(address)
@@ -1507,6 +1595,141 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
         Binary::open(&path).expect("the sample ELF loads")
+    }
+
+    #[test]
+    fn the_import_slots_of_the_sample_name_its_imports() {
+        let binary = sample();
+        assert_eq!(binary.import_at(0x3fd0), Some("printf"));
+        assert_eq!(binary.import_at(0x3ff8), Some("__cxa_finalize"));
+        assert_eq!(
+            binary.import_at(0x3fe0),
+            Some("_ITM_deregisterTMCloneTable")
+        );
+        assert_eq!(binary.import_at(0x3fd8), Some("__libc_start_main"));
+        assert_eq!(binary.import_at(0x4010), None, "completed.0 is data");
+        assert_eq!(binary.imports().len(), 6, "{:?}", binary.imports());
+    }
+
+    #[test]
+    fn a_plt_stub_is_a_thunk_for_its_import_and_a_tail_call_to_it() {
+        let binary = sample();
+
+        // printf@plt: endbr64; bnd jmp [rip+0x2f75] through 0x3fd0.
+        let text = binary.pseudocode(0x1050).expect("the stub lifts");
+        assert_eq!(text.text(), "// thunk for printf");
+        assert_eq!(
+            text.lines[0].addresses,
+            vec![0x1050, 0x1054],
+            "the line stands for the endbr64 and the jmp"
+        );
+
+        // __cxa_finalize@plt, the same shape in .plt.got.
+        assert_eq!(
+            binary.pseudocode(0x1040).expect("lifts").text(),
+            "// thunk for __cxa_finalize"
+        );
+
+        // frame_dummy: endbr64; jmp register_tm_clones.
+        assert_eq!(
+            binary.pseudocode(0x1140).expect("lifts").text(),
+            "// thunk for register_tm_clones"
+        );
+
+        // The calls say the same: the stub tail-calls the import through the
+        // slot, and frame_dummy tail-calls register_tm_clones directly.
+        let calls = binary.calls(0x1050);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].site, 0x1054);
+        assert_eq!(calls[0].target, 0x3fd0);
+        assert_eq!(calls[0].name.as_deref(), Some("printf"));
+        assert!(calls[0].tail);
+        assert_eq!(calls[0].slot, Some(0x3fd0));
+
+        let calls = binary.calls(0x1140);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].site, 0x1144);
+        assert_eq!(calls[0].target, 0x10c0);
+        assert_eq!(calls[0].name.as_deref(), Some("register_tm_clones"));
+        assert!(calls[0].tail);
+        assert_eq!(calls[0].slot, None);
+
+        // The call graph has the edge: frame_dummy is a caller of
+        // register_tm_clones now.
+        let callers: Vec<String> = binary
+            .called_by(0x10c0)
+            .into_iter()
+            .map(|function| function.name)
+            .collect();
+        assert_eq!(callers, vec!["frame_dummy"]);
+
+        // main's three calls are direct ones still.
+        assert!(binary.calls(0x1198).iter().all(|call| !call.tail));
+    }
+
+    #[test]
+    fn deregister_tm_clones_is_a_conditional_tail_call_through_a_register() {
+        // lea rdi, [__TMC_END__]; lea rax, [__TMC_END__]; cmp rax, rdi; je .ret;
+        // mov rax, [_ITM_deregisterTMCloneTable@GOT]; test rax, rax; je .ret;
+        // jmp rax; .ret: ret. The two leas name the same address, which the
+        // image knows as completed.0; the paths into the ret leave rax
+        // different, so it is a variable there; the jump through rax is the
+        // tail call to the import the slot holds.
+        let text = sample().pseudocode(0x1090).expect("lifts").text();
+        assert_eq!(
+            text,
+            "long deregister_tm_clones(void)\n\
+             {\n\
+             \x20 long rax;\n\
+             \n\
+             \x20 rax = &completed.0;\n\
+             \x20 if (rax != rax) {\n\
+             \x20   rax = _ITM_deregisterTMCloneTable;\n\
+             \x20   if (rax != 0) {\n\
+             \x20     return _ITM_deregisterTMCloneTable(&completed.0);\n\
+             \x20   }\n\
+             \x20 }\n\
+             \x20 return rax;\n\
+             }"
+        );
+        // The jump through a register is the lifter's to read: the calls of
+        // the disassembly do not claim it.
+        assert!(sample().calls(0x1090).is_empty());
+    }
+
+    #[test]
+    fn the_start_up_glue_the_lifter_still_refuses_says_why() {
+        let binary = sample();
+        // _start aligns the stack with `and rsp, -16` and then pushes.
+        assert_eq!(
+            binary.pseudocode(0x1060).unwrap_err().to_string(),
+            "not lifted yet: the stack pointer is not tracked"
+        );
+        // register_tm_clones shifts, which the lifter does not read yet.
+        assert_eq!(
+            binary.pseudocode(0x10c0).unwrap_err().to_string(),
+            "not lifted yet: shr"
+        );
+        // __do_global_dtors_aux returns a call's result on one path and
+        // nothing on the other.
+        assert_eq!(
+            binary.pseudocode(0x1100).unwrap_err().to_string(),
+            "not lifted yet: returns a value at one ret and nothing at another"
+        );
+    }
+
+    #[test]
+    fn the_tail_calls_option_refuses_the_stubs_by_callee() {
+        let binary =
+            sample().with_options(Options::from_pairs([("tail-calls", "refuse")]).unwrap());
+        assert_eq!(
+            binary.pseudocode(0x1050).unwrap_err().to_string(),
+            "not lifted yet: a tail call to printf at 0x1054"
+        );
+        assert_eq!(
+            binary.pseudocode(0x1090).unwrap_err().to_string(),
+            "not lifted yet: a tail call to _ITM_deregisterTMCloneTable at 0x10af"
+        );
     }
 
     #[test]

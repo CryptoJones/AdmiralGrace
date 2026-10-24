@@ -102,18 +102,18 @@ ag image ./sample.elf export ./sample.ag
 symbols. `disasm` gives the blocks of one function: a `; block 0x…` header per block, then
 the address, bytes, mnemonic and operands of every instruction; a call names its callee.
 `pseudocode` gives one function as C — calls, `if`/`else`, `while` and `for`, early `return`,
-the parameters named `a`, `b`…; a function it cannot read prints `not lifted yet` and the
-reason, exit code 1. `cfg` gives the blocks and the edges between them, each marked
-fall-through or taken. `calls` gives who calls whom: with a function, what it calls and who
-calls it; without one, the whole call graph. `strings` gives the text the image holds and
-`data` the data, each with the functions that use it. `--json` reports the same as JSON, every
-address a number and a hex string. `export DIR` writes all of it in one pass: `info.json`,
-`symbols.json`, `strings.json`, `data.json`, `calls.json`, a `functions/<address>.json` (cfg,
-calls, data, pseudocode) and `.asm` per function, an `index.json`, and a `README.md` naming
-the binary, its SHA-256 and the `ag` version. `--functions REGEX` limits the functions; a
-non-empty directory needs `--force`. `info` and `symbols` read any format the loader reads;
-the rest decode x86 only and refuse another architecture. Reach for this when there is no
-corpus yet: the symbols say what the program has, and the disassembly what one function does.
+the parameters named `a`, `b`…; a `jmp` to another function is `return callee(args);`, a PLT
+stub the one line `// thunk for printf`; a function it cannot read prints `not lifted yet` and
+the reason, exit code 1. `cfg` gives the blocks and the edges between them, each marked
+fall-through or taken. `calls` gives who calls whom, a `jmp` out marked `(tail call)`: with a
+function, what it calls and who calls it; without one, the whole call graph. `strings` gives
+the text the image holds and `data` the data, each with the functions that use it. `--json`
+reports the same as JSON, every address a number and a hex string. `export DIR` writes all of
+it in one pass: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, a
+`functions/<address>.json` (cfg, calls, data, pseudocode) and `.asm` per function, an
+`index.json`, and a `README.md` naming the binary, its SHA-256 and the `ag` version.
+`--functions REGEX` limits the functions; a non-empty directory needs `--force`. `info` and
+`symbols` read any format; the rest decode x86 only. Reach for this when there is no corpus yet.
 
 ## When the C does not read right
 

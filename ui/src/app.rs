@@ -1738,6 +1738,20 @@ mod tests {
             "{:?}",
             app.bottom.problems
         );
+
+        // A PLT stub is a thunk: one line, standing for its two
+        // instructions, and no problem.
+        let _ = app.update(Message::FunctionSelected(0x1050));
+        assert_eq!(app.work.pseudocode.as_deref(), Some("// thunk for printf"));
+        assert_eq!(app.work.line_addresses.get(&0), Some(&vec![0x1050, 0x1054]));
+        assert!(
+            !app.bottom
+                .problems
+                .iter()
+                .any(|problem| problem.address == Some(0x1050)),
+            "{:?}",
+            app.bottom.problems
+        );
     }
 
     #[test]

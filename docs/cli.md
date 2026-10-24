@@ -127,10 +127,10 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
-| `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then the signature, the locals and the statements. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
+| `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);`, and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
 | `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
-| `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
+| `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. A `jmp` out of a function — to a function the image names, or through a GOT slot it resolves to an import — is a call marked `(tail call)`. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
@@ -187,7 +187,15 @@ return is `rax` at the width of its last write, and a width is a type: 32 bits i
 is `long`. A pointer taken through `lea` is asked of the image: one that lands on a string
 prints as the string's literal, one that lands on named data as `&name`, and one on a
 function as its name; a load through a pointer is `*(int *)p`, and one from an address the
-image does not name is `*(int *)0x…`. The sample's `add` reads
+image does not name is `*(int *)0x…`. A `jmp` out of the function is a tail call: a node that
+ends in a `jmp` to another function — direct, or through a GOT slot the image's dynamic
+relocations name as an import, or through a register that holds one — with the stack back
+where it was at entry is lifted as the `call` and the `ret` it stands for, `return callee(args);`,
+the arguments from the register state as a call's and the result `long`, since nothing reads
+it narrower; a function that is only the jump, behind at most `endbr64` and `nop`s — a PLT
+stub, a forwarding stub — is a thunk, and its whole pseudocode is the one line
+`// thunk for callee`, which carries every instruction of the stub. A `jmp` to an address inside
+the function is an edge of the graph. The sample's `add` reads
 `int add(int a, int b) { return b + a; }`, the operands in the order the `add` instruction
 names them; its `main` reads
 
@@ -218,18 +226,31 @@ long sum_to(int a)
 }
 ```
 
-A function with an instruction outside that set, a 32-bit function, an indirect call or
-jump, a branch whose flags no tracked instruction set (`the je at 0x… reads flags that
-nothing tracked set`), a loop with two entries (`irreducible control flow at 0x…`), a stack
-pointer that differs between two paths, `ret`s that disagree, or a value the lifter cannot
-follow prints `not lifted yet` and the reason instead, with exit code 1 — the sample's
-`_init`, which calls through a register, says `not lifted yet: an indirect call`; `--json`
+and its `printf` stub — `endbr64; bnd jmp [rip+0x2f75]`, through the GOT slot of `printf` —
+reads as the one line `// thunk for printf`, as `frame_dummy`, which is `endbr64; jmp
+register_tm_clones`, reads `// thunk for register_tm_clones`; its `deregister_tm_clones`
+ends in a `jmp rax` with `rax` loaded from the GOT slot of `_ITM_deregisterTMCloneTable`,
+and that path reads `return _ITM_deregisterTMCloneTable(&completed.0);` under the guard
+`if (rax != 0)`, the two `lea`s of the same address and the merged `rax` being what the
+bytes say.
+
+A function with an instruction outside that set, a 32-bit function, an indirect call, a
+`jmp` to an address outside the function that no symbol names (`jumps to 0x…`) or through a
+register or memory that holds no function the lifter can name (`an indirect jump at 0x…`),
+a `jmp` out with the stack not back at its entry value, a branch whose flags no tracked
+instruction set (`the je at 0x… reads flags that nothing tracked set`), a loop with two
+entries (`irreducible control flow at 0x…`), a stack pointer that differs between two paths,
+`ret`s that disagree, or a value the lifter cannot follow prints `not lifted yet` and the
+reason instead, with exit code 1 — the sample's `_init`, which calls through a register, says
+`not lifted yet: an indirect call`, its `_start`, which aligns the stack with `and rsp, -16`,
+says `the stack pointer is not tracked`, and its `register_tm_clones` says `shr`; `--json`
 reports the same as `lifted: false` and a `reason`. Every line of C carries the addresses of
 the instructions it came from — a `for` line those of its init, its compare, its branch and
 its step — which is what the workbench's Pseudocode tab clicks through.
 
 The judgment calls in all of that — whether the counted loop is a `for` or a `while`,
-whether a tail two paths share is a `goto` or a copy, how a merged register (`eax`, `eax_2`)
+whether a `jmp` to another function is lifted as its `return callee(args);` or refused
+(`tail-calls`), whether a tail two paths share is a `goto` or a copy, how a merged register (`eax`, `eax_2`)
 and a stack slot (`local_14`) are named, whether a load from named data prints as the name
 or as `*(int *)0x4010`, whether the operands of `b + a` keep the instruction's order, whether
 an unsigned comparison is cast, whether a `cmp` no branch reads is dropped, which argument
@@ -270,7 +291,14 @@ one.
 gives the calls that function makes, with the address of every call site, and the
 functions that call it. Without one it gives the whole call graph, and the two facts the
 summary of the workbench shows: the functions reachable from the entry point, and the
-functions that nothing calls.
+functions that nothing calls. A `jmp` that leaves a function is a call too — a tail call,
+marked `(tail call)` in the text and `tail: true` in the JSON: one to a function the image
+names goes to that function, and one through a GOT slot the dynamic relocations name — the
+`jmp [rip+slot]` of a PLT stub — names the import, with the slot as its target and in `slot`.
+So the sample's `printf` stub calls `0x3fd0 printf (tail call)`, and `frame_dummy` is a caller
+of `register_tm_clones`. A `jmp` through a register is not resolved here; the lifter reads
+what the register holds, and `pseudocode` shows it. In the listing a direct jump names the
+function it goes to, like a call, and a jump through a slot keeps its `[rip+…]` operand.
 
 `data` reports the data of the image. A function refers to data when one of its
 instructions points at it: the pointer lands in a section that holds no code. A pointer
