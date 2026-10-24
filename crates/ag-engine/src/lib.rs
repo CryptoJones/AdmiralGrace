@@ -15,7 +15,7 @@ pub mod structure;
 
 pub use arch::Bitness;
 pub use ast::AstNode;
-pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg};
+pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg, TailCall};
 pub use emit::{Line, Pseudocode};
 pub use image::{Image, Section};
 pub use lift::{Abi, LiftedFunction, NotLifted, Statement, StatementKind};

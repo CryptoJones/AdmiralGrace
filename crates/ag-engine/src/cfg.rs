@@ -39,6 +39,21 @@ pub struct ProcedureCfg {
     /// Targets of the direct calls, in call-site order, for the
     /// interprocedural phase; the walk never enters them.
     pub call_targets: Vec<u64>,
+    /// The tail calls the procedure ends in: a `jmp` to the entry of another
+    /// function, or through a GOT slot that holds an import. The walk stops
+    /// at the jump — the block it ends has no successor — and records it
+    /// here, in walk order.
+    pub tail_calls: Vec<TailCall>,
+}
+
+/// A `jmp` that leaves the procedure for another function: a tail call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailCall {
+    /// The address of the `jmp`.
+    pub site: u64,
+    /// Where it goes: the callee's entry, or, for a `jmp` through a GOT
+    /// slot, the slot the jump reads.
+    pub target: u64,
 }
 
 impl ProcedureCfg {

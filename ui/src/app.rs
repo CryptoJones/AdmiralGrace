@@ -1532,8 +1532,11 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
 
-        assert_eq!(users.len(), 5, "{users:?}");
+        // Four: frame_dummy's read of the flag was register_tm_clones',
+        // which it tail-calls, and the walk stops at the jump.
+        assert_eq!(users.len(), 4, "{users:?}");
         assert!(users.contains(&"_start"), "{users:?}");
+        assert!(!users.contains(&"frame_dummy"), "{users:?}");
     }
 
     #[test]

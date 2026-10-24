@@ -1,6 +1,7 @@
-use ag_engine::cfgwalk::resolve_branches;
+use ag_engine::cfgwalk::{resolve_branches, resolve_branches_among, Entries};
 use ag_engine::cpu_context::X86IcedContext;
 use ag_engine::pipeline::Disasm;
+use ag_engine::TailCall;
 
 // 0x1000: test eax,eax      ; 85 c0
 // 0x1002: je  x             ; 74 0c   -> 0x1010
@@ -269,4 +270,109 @@ fn the_walk_of_32_bit_code_finds_its_loop_and_its_call() {
         .filter_map(|i| i.memory_address())
         .collect();
     assert_eq!(pointers, vec![0x804b008, 0x804b00c]);
+}
+
+/// The functions and import slots an image would know.
+struct Known {
+    functions: &'static [u64],
+    slots: &'static [u64],
+}
+
+impl Entries for Known {
+    fn is_function(&self, address: u64) -> bool {
+        self.functions.contains(&address)
+    }
+
+    fn is_import_slot(&self, slot: u64) -> bool {
+        self.slots.contains(&slot)
+    }
+}
+
+// 0x1000: jmp 0x1010   ; eb 0e
+// 0x1002: ret          ; c3  (not reached)
+// 0x1010: ret          ; c3
+const JUMP_OUT: &[u8] = &[
+    0xeb, 0x0e, 0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0xc3,
+];
+
+#[test]
+fn a_jmp_to_the_entry_of_another_function_is_a_tail_call_and_not_an_edge() {
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, JUMP_OUT, 0x1000).unwrap();
+
+    // Told that 0x1010 is a function, the walk stops at the jump: one
+    // block, no successor, the tail call recorded.
+    let known = Known {
+        functions: &[0x1010],
+        slots: &[],
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &known);
+    assert_well_formed(&cfg);
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert_eq!((cfg.blocks[0].from, cfg.blocks[0].to), (0x1000, 0x1002));
+    assert!(cfg.blocks[0].successor_addresses.is_empty(), "{cfg:?}");
+    assert_eq!(
+        cfg.tail_calls,
+        vec![TailCall {
+            site: 0x1000,
+            target: 0x1010
+        }]
+    );
+    assert!(cfg.call_sites.is_empty(), "a tail call is not a call site");
+
+    // Told nothing, the walk follows the jump as before.
+    let cfg = resolve_branches(&d, 0x1000);
+    assert_well_formed(&cfg);
+    assert_eq!(cfg.blocks.len(), 2, "{cfg:?}");
+    assert_eq!(cfg.blocks[0].successor_addresses, vec![0x1010]);
+    assert!(cfg.tail_calls.is_empty());
+}
+
+#[test]
+fn a_jmp_to_the_procedure_s_own_entry_is_a_loop_even_when_the_entry_is_a_function() {
+    // 0x1000: jmp 0x1000 ; eb fe
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, &[0xeb, 0xfe], 0x1000).unwrap();
+    let known = Known {
+        functions: &[0x1000],
+        slots: &[],
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &known);
+    assert_well_formed(&cfg);
+    assert_eq!(cfg.blocks.len(), 1);
+    assert_eq!(cfg.blocks[0].successor_addresses, vec![0x1000]);
+    assert!(cfg.tail_calls.is_empty(), "{cfg:?}");
+}
+
+#[test]
+fn a_jmp_through_an_import_slot_is_a_tail_call_to_the_slot() {
+    // 0x1000: jmp [rip+0x2ffa] ; ff 25 fa 2f 00 00 -> slot 0x4000
+    // 0x1006: ret              ; c3  (not reached)
+    let bytes = [0xff, 0x25, 0xfa, 0x2f, 0x00, 0x00, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+
+    let known = Known {
+        functions: &[],
+        slots: &[0x4000],
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &known);
+    assert_well_formed(&cfg);
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(
+        cfg.tail_calls,
+        vec![TailCall {
+            site: 0x1000,
+            target: 0x4000
+        }]
+    );
+
+    // A slot the image does not name is an indirect jump as before: the
+    // block ends, and nothing is recorded.
+    let cfg = resolve_branches(&d, 0x1000);
+    assert_eq!(cfg.blocks.len(), 1);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert!(cfg.tail_calls.is_empty());
 }
