@@ -63,6 +63,24 @@ fn the_code_section_decodes_into_a_cfg_with_named_callees() {
 }
 
 #[test]
+fn the_import_slots_are_the_got_entries_the_dynamic_relocations_name() {
+    let image = sample();
+    let slots = image.import_slots();
+    assert_eq!(
+        slots,
+        vec![
+            (0x3fd0, "printf".to_string()),
+            (0x3fd8, "__libc_start_main".to_string()),
+            (0x3fe0, "_ITM_deregisterTMCloneTable".to_string()),
+            (0x3fe8, "__gmon_start__".to_string()),
+            (0x3ff0, "_ITM_registerTMCloneTable".to_string()),
+            (0x3ff8, "__cxa_finalize".to_string()),
+        ],
+        "the JUMP_SLOT of printf and the GLOB_DATs, by slot, the versions stripped"
+    );
+}
+
+#[test]
 fn bytes_outside_every_section_are_none() {
     let image = sample();
     assert!(image.bytes_from(0xdead_0000).is_none());

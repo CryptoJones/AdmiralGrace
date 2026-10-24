@@ -54,6 +54,7 @@ dependencies = [
  "anyhow",
  "iced-x86",
  "kuna-analysis",
+ "object",
 ]
 
 [[package]]

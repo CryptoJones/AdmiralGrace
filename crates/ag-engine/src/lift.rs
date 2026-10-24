@@ -83,6 +83,19 @@
 //!   name is `*(int *)0x…`.
 //! * **`ret`** returns `rax` with the width of its last write, or nothing if
 //!   `rax` was never written; every `ret` of the function must agree.
+//! * **A `jmp` out of the function is a tail call.** A node whose last
+//!   instruction is a `jmp` to another function — direct, or through a GOT
+//!   slot the image resolves to an import ([`Pointee::Import`]), or through
+//!   a register that holds such a function — with the stack pointer back at
+//!   its entry value is lifted as the `call` and the `ret` it stands for:
+//!   `return callee(args);`, the arguments from the register state exactly
+//!   as a call's, the result `long` since nothing reads it narrower. A
+//!   function that is only the jump, behind at most `endbr64` and `nop`s —
+//!   a PLT stub, a forwarding stub — is a *thunk*: it has no body of its
+//!   own, and prints as the one line `// thunk for callee`. A `jmp` whose
+//!   target is inside the function is an edge of the graph as before, and a
+//!   load from a GOT slot is the import's name, since the slot holds its
+//!   address. The `tail-calls` option refuses the jump instead.
 //!
 //! # The judgment calls
 //!
@@ -104,8 +117,11 @@
 //!
 //! # What is refused
 //!
-//! 32-bit or 16-bit code; irreducible control flow; a node that ends in an
-//! indirect jump or a trap; any mnemonic outside `mov`, `movsx`, `movsxd`,
+//! 32-bit or 16-bit code; irreducible control flow; a node that ends in a
+//! trap; a `jmp` to an address outside the function that names no function
+//! (`jumps to 0x…`), or through a register or memory that holds no function
+//! the lifter can name (`an indirect jump at 0x…`), or with the stack not
+//! back at its entry value; any mnemonic outside `mov`, `movsx`, `movsxd`,
 //! `movzx`, `cdqe`, `add`, `sub`, `and`, `or`, `xor`, `inc`, `dec`, `imul`,
 //! `lea`, `push`, `pop`, `leave`, `call`, `ret`, `cmp`, `test`, `jmp`, the
 //! conditional jumps, `nop` and `endbr64`; an indirect call; a branch whose
@@ -127,7 +143,7 @@ use crate::cfgwalk::resolve_branches;
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::options::{
     DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads, SlotNames,
-    UnsignedCompare,
+    TailCalls, UnsignedCompare,
 };
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
@@ -163,6 +179,10 @@ pub enum Pointee {
     Data(String),
     /// A function, by its name.
     Function(String),
+    /// A slot the run-time loader fills with the address of a named function
+    /// — a GOT entry — by the function's name. A load from the slot is that
+    /// function; a `jmp` through it is a tail call to it.
+    Import(String),
 }
 
 /// Why a function was not lifted.
@@ -370,6 +390,12 @@ pub struct LiftedFunction {
     /// The instructions no statement came from: the frame setup and
     /// teardown, and the no-ops. The signature line stands for them.
     pub frame: Vec<u64>,
+    /// The function this one is a thunk for, when it is one: a function
+    /// that is only a `jmp` to another, behind at most `endbr64` and `nop`s,
+    /// such as a PLT stub. A thunk has no body, parameters or return type
+    /// of its own — they are the callee's — and prints as the one line
+    /// `// thunk for callee`; `frame` holds every instruction.
+    pub thunk: Option<String>,
 }
 
 // The GPR indices iced numbers the registers by.
@@ -408,10 +434,26 @@ pub fn lift_function(
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
     }
-    let chains = chains(disasm, cfg, entry)?;
+    let chains = chains(disasm, cfg, entry, symbols)?;
+    let mut lifter = Lifter::new(abi, symbols, *options);
+    if let Some(callee) = lifter.thunk(&chains)? {
+        return Ok(LiftedFunction {
+            name: name.to_string(),
+            address: entry,
+            return_type: "void".to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: Vec::new(),
+            frame: chains[0]
+                .instructions
+                .iter()
+                .map(|ins| ins.address)
+                .collect(),
+            thunk: Some(callee),
+        });
+    }
     let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
-    let mut lifter = Lifter::new(abi, symbols, *options);
     let lifted = lifter.lift_chains(&chains, &analysis)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
     let body = structure::structure(&nodes, &analysis, 0, options);
@@ -452,6 +494,10 @@ enum End {
     Return,
     /// In a `jmp` to the chain.
     Jump(usize),
+    /// In a `jmp` that leaves the function: to another function by address,
+    /// or through a register or memory. A tail call when it is lifted, or
+    /// refused there.
+    Leave,
     /// In a `jcc`: to `taken` when it holds, else into `next`.
     Branch { taken: usize, next: usize },
     /// By falling into the chain, which other blocks also reach.
@@ -461,7 +507,7 @@ enum End {
 impl End {
     fn successors(&self) -> Vec<usize> {
         match self {
-            End::Return => Vec::new(),
+            End::Return | End::Leave => Vec::new(),
             End::Jump(target) | End::Fall(target) => vec![*target],
             End::Branch { taken, next } => vec![*taken, *next],
         }
@@ -485,10 +531,25 @@ struct Chain {
 /// a branch or a return, its one successor starts where the block ends, and
 /// no other block has that successor; the chain ends at the first block
 /// that does not. A chain whose last block has no successor must end in
-/// `ret`; one that ends in an indirect jump or a trap is refused as `the
-/// block ends in <mnemonic>`.
-fn chains(disasm: &Disasm, cfg: &ProcedureCfg, entry: u64) -> Result<Vec<Chain>, NotLifted> {
+/// `ret` or in a `jmp` that leaves the function — one to a function
+/// `symbols` names, which the control-flow walk may have followed into but
+/// this does not, or an indirect one; a chain that ends in a trap is
+/// refused as `the block ends in <mnemonic>`.
+fn chains(
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    entry: u64,
+    symbols: &dyn Symbols,
+) -> Result<Vec<Chain>, NotLifted> {
     let block_at = |address: u64| cfg.blocks.iter().find(|block| block.from == address);
+    // A `jmp` to the entry of another function leaves this one: a tail call.
+    let leaves = |ins: &DecodedInsn| match ins.flow {
+        Flow::UnconditionalBranch(target) => {
+            target != entry && symbols.function_name(target).is_some()
+        }
+        Flow::IndirectBranch => true,
+        _ => false,
+    };
     let mut predecessors: BTreeMap<u64, usize> = BTreeMap::new();
     for block in &cfg.blocks {
         for &successor in &block.successor_addresses {
@@ -527,9 +588,12 @@ fn chains(disasm: &Disasm, cfg: &ProcedureCfg, entry: u64) -> Result<Vec<Chain>,
             block = block_at(block.to)
                 .ok_or_else(|| NotLifted::new(format!("no code at {:#x}", block.to)))?;
         }
-        for &successor in &block.successor_addresses {
-            if seen.insert(successor) {
-                starts.push(successor);
+        let last_leaves = instructions.last().is_some_and(leaves);
+        if !last_leaves {
+            for &successor in &block.successor_addresses {
+                if seen.insert(successor) {
+                    starts.push(successor);
+                }
             }
         }
         raw.push((start, instructions, block.successor_addresses.clone()));
@@ -554,6 +618,7 @@ fn chains(disasm: &Disasm, cfg: &ProcedureCfg, entry: u64) -> Result<Vec<Chain>,
             let after = last.address + last.length as u64;
             let end = match last.flow {
                 Flow::Return => End::Return,
+                _ if leaves(last) => End::Leave,
                 Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
                 Flow::ConditionalBranch(target) if target == after => End::Jump(node_at(after)?),
                 Flow::ConditionalBranch(target) => End::Branch {
@@ -1042,6 +1107,10 @@ impl<'a> Lifter<'a> {
         match chain.end {
             End::Return => {
                 self.step(last)?;
+                Ok(Terminator::Return)
+            }
+            End::Leave => {
+                self.tail_jump(last)?;
                 Ok(Terminator::Return)
             }
             End::Fall(target) => {
@@ -1902,6 +1971,22 @@ impl<'a> Lifter<'a> {
     ) -> Result<Value, NotLifted> {
         let address = self.address_of(base, index, scale, disp, 64, ins)?;
         let from = sorted(address.from.iter().copied().chain([ins.address]));
+        // A GOT slot holds the address of the import it is relocated to, so
+        // a pointer-wide load from it is that function.
+        if let Sym::Node(AstNode::Constant { value: slot, .. }) = &address.sym {
+            if bits == 64 {
+                if let Some(Pointee::Import(name)) = self.symbols.pointee(*slot) {
+                    return Ok(Value::node(
+                        AstNode::FunctionName {
+                            name,
+                            address: *slot,
+                        },
+                        bits,
+                        from,
+                    ));
+                }
+            }
+        }
         match self.place(&address, bits)? {
             Some(node) => Ok(Value::node(node, bits, from)),
             None => Ok(Value::unknown(
@@ -2346,7 +2431,11 @@ impl<'a> Lifter<'a> {
                     name,
                     address: target,
                 },
-                Some(Pointee::Data(_)) | None => AstNode::constant(target, bits / 8),
+                // The address of a GOT slot is an address: the function is
+                // what the slot holds, not where it is.
+                Some(Pointee::Data(_)) | Some(Pointee::Import(_)) | None => {
+                    AstNode::constant(target, bits / 8)
+                }
             };
             Value::node(node, bits, vec![at])
         } else {
@@ -2397,7 +2486,100 @@ impl<'a> Lifter<'a> {
         let Flow::Call(target) = ins.flow else {
             return Err(NotLifted::new("an indirect call"));
         };
+        let name = self
+            .symbols
+            .function_name(target)
+            .unwrap_or_else(|| format!("sub_{target:x}"));
+        self.emit_call(name, target, ins.address)
+    }
+
+    /// The function a `jmp` that leaves the function goes to, by name and
+    /// address: the target of a direct jump when the image names it, or the
+    /// function a register or a memory operand holds — a GOT slot's import,
+    /// or a pointer loaded from one. Anything else is refused: a direct jump
+    /// to an address the image does not name as `jumps to 0x…`, and a jump
+    /// through a value that is not a function as `an indirect jump at 0x…`.
+    fn jump_target(&mut self, ins: &DecodedInsn) -> Result<(String, u64), NotLifted> {
         let at = ins.address;
+        let named = |this: &Self, target: u64| {
+            this.symbols
+                .function_name(target)
+                .map(|name| (name, target))
+                .ok_or_else(|| NotLifted::new(format!("jumps to {target:#x}")))
+        };
+        if let Flow::UnconditionalBranch(target) = ins.flow {
+            return named(self, target);
+        }
+        let [operand] = ins.operands.as_slice() else {
+            return Err(NotLifted::new(format!(
+                "jmp with {} operands",
+                ins.operands.len()
+            )));
+        };
+        let value = self.value_of(operand, 64, ins)?;
+        match &value.sym {
+            Sym::Node(AstNode::FunctionName { name, address }) => Ok((name.clone(), *address)),
+            Sym::Node(AstNode::Constant { value: target, .. }) => named(self, *target),
+            _ => Err(NotLifted::new(format!("an indirect jump at {at:#x}"))),
+        }
+    }
+
+    /// A `jmp` that leaves the function: the call and the return it stands
+    /// for, `return callee(args);`, when the stack pointer is back at its
+    /// entry value and the `tail-calls` option allows it.
+    fn tail_jump(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let at = ins.address;
+        let (name, address) = self.jump_target(ins)?;
+        if self.stack_pointer()? != 0 {
+            return Err(NotLifted::new(format!(
+                "the stack is not balanced at the jmp at {at:#x}"
+            )));
+        }
+        if self.options.tail_calls == TailCalls::Refuse {
+            return Err(NotLifted::new(format!("a tail call to {name} at {at:#x}")));
+        }
+        self.emit_call(name, address, at)?;
+        self.ret(ins)
+    }
+
+    /// The callee of a function that is only a `jmp` to another function —
+    /// behind at most `endbr64` and `nop`s — when `chains` are that; `None`
+    /// for a function with a body of its own. The jump is resolved as any
+    /// tail call's, so a jump the lifter cannot name, or one the
+    /// `tail-calls` option refuses, is refused here.
+    fn thunk(&mut self, chains: &[Chain]) -> Result<Option<String>, NotLifted> {
+        let [chain] = chains else {
+            return Ok(None);
+        };
+        if !matches!(chain.end, End::Leave) {
+            return Ok(None);
+        }
+        let (last, body) = chain
+            .instructions
+            .split_last()
+            .expect("a chain has an instruction");
+        let is_padding = |ins: &DecodedInsn| {
+            matches!(
+                Mnemonic::try_from(ins.mnemonic as usize),
+                Ok(Mnemonic::Nop | Mnemonic::Endbr64)
+            )
+        };
+        if !body.iter().all(is_padding) {
+            return Ok(None);
+        }
+        let (name, _) = self.jump_target(last)?;
+        if self.options.tail_calls == TailCalls::Refuse {
+            return Err(NotLifted::new(format!(
+                "a tail call to {name} at {:#x}",
+                last.address
+            )));
+        }
+        Ok(Some(name))
+    }
+
+    /// The call of `name` at `target` from `at`: the arguments from the
+    /// register state, the clobbers, and the result in `rax` as a temporary.
+    fn emit_call(&mut self, name: String, target: u64, at: u64) -> Result<(), NotLifted> {
         let mut args = Vec::new();
         let mut addresses = vec![at];
         for &register in self.abi.argument_registers() {
@@ -2413,10 +2595,6 @@ impl<'a> Lifter<'a> {
             addresses.extend(value.from.iter().copied());
             args.push(self.node_of(&value)?);
         }
-        let name = self
-            .symbols
-            .function_name(target)
-            .unwrap_or_else(|| format!("sub_{target:x}"));
         let node = AstNode::Call {
             callee: Box::new(AstNode::FunctionName {
                 name,
@@ -2658,6 +2836,7 @@ impl<'a> Lifter<'a> {
             locals,
             body,
             frame,
+            thunk: None,
         })
     }
 }
@@ -3406,12 +3585,191 @@ mod tests {
 
     #[test]
     fn a_block_that_does_not_end_in_ret_is_refused() {
-        // mov eax, edi; jmp rax
+        // mov eax, edi; jmp rax: rax holds a parameter, not a function.
         assert_eq!(
             refused(&[0x89, 0xf8, 0xff, 0xe0]),
-            "not lifted yet: the block ends in jmp"
+            "not lifted yet: an indirect jump at 0x1002"
+        );
+        // mov eax, edi; ud2
+        assert_eq!(
+            refused(&[0x89, 0xf8, 0x0f, 0x0b]),
+            "not lifted yet: the block ends in ud2"
         );
         assert_eq!(refused(&[]), "not lifted yet: no code at 0x1000");
+    }
+
+    // ---- tail calls and thunks ---------------------------------------------
+
+    #[test]
+    fn a_jmp_to_another_function_is_a_tail_call() {
+        // mov edi, 5; jmp g: the jmp is at 0x1005, so 0x3000 is 0x1ff6 on.
+        // The jump stands for `call g; ret`: g's result, which nothing reads
+        // narrower, is returned as a long.
+        assert_eq!(
+            c(&[0xbf, 5, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00]),
+            "long f(void)\n{\n  return g(5);\n}"
+        );
+        // mov edi, esi; jmp g: as at a call, every argument register the
+        // state holds is passed, and reading esi put the parameter there.
+        assert_eq!(
+            c(&[0x89, 0xf7, 0xe9, 0xf9, 0x1f, 0x00, 0x00]),
+            "long f(long a, int b)\n{\n  return g(b, b);\n}"
+        );
+        // push rbp; mov rbp, rsp; pop rbp; jmp g: the frame is torn down, so
+        // the stack is back where it was.
+        let function =
+            lift(&[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xe9, 0xf6, 0x1f, 0x00, 0x00]).expect("lifts");
+        assert_eq!(
+            emit_function(&function, &Options::default()).text(),
+            "long f(void)\n{\n  return g();\n}"
+        );
+        assert_eq!(function.thunk, None, "a frame is a body of its own");
+        let ret = function.body.last().expect("the return");
+        assert!(ret.addresses.contains(&0x1005), "the jmp is the return's");
+    }
+
+    #[test]
+    fn a_jmp_through_a_got_slot_is_a_tail_call_to_the_import() {
+        // mov edi, 7; jmp [rip+0x2ff5]: the jmp is at 0x1005 and 6 bytes
+        // long, so it reads 0x4000, the slot the image relocates to puts.
+        assert_eq!(
+            c_with_image(&[0xbf, 7, 0, 0, 0, 0xff, 0x25, 0xf5, 0x2f, 0x00, 0x00]),
+            "long f(void)\n{\n  return puts(7);\n}"
+        );
+        // The plain names know no slot: the jump goes through memory the
+        // lifter cannot name.
+        assert_eq!(
+            c(&[0xbf, 7, 0, 0, 0, 0xff, 0x25, 0xf5, 0x2f, 0x00, 0x00]),
+            "not lifted yet: an indirect jump at 0x1005"
+        );
+    }
+
+    #[test]
+    fn a_jmp_through_a_register_loaded_from_a_got_slot_is_a_tail_call() {
+        // mov rax, [rip+0x2ff9]; jmp rax: the mov is 7 bytes, so it loads
+        // 0x4000, the slot of puts; what rax holds is that function.
+        assert_eq!(
+            c_with_image(&[0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xff, 0xe0]),
+            "long f(void)\n{\n  return puts();\n}"
+        );
+    }
+
+    #[test]
+    fn a_conditional_tail_call_through_a_register_is_a_guard() {
+        // mov rax, [rip+0x2ff9]; test rax, rax; je .ret; jmp rax; .ret: ret —
+        // the shape of the glibc start-up glue: call the weak import if it
+        // is linked. The path that does not jump returns rax, which is the
+        // function it tested, by the rule that a written rax is returned;
+        // that arm never falls through, so it is the guard.
+        let code = [
+            0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x74, 0x02, 0xff, 0xe0,
+            0xc3,
+        ];
+        assert_eq!(
+            c_with_image(&code),
+            "long f(void)\n{\n  if (puts == 0) {\n    return puts;\n  }\n  return puts();\n}"
+        );
+    }
+
+    #[test]
+    fn a_load_from_a_got_slot_is_the_import_and_its_address_is_an_address() {
+        // mov rax, [rip+0x2ff9]; ret: the slot holds the address of puts.
+        assert_eq!(
+            c_with_image(&[0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xc3]),
+            "long f(void)\n{\n  return puts;\n}"
+        );
+        // mov eax, [rip+0x2ffa]; ret: half a pointer is not the function.
+        assert_eq!(
+            c_with_image(&[0x8b, 0x05, 0xfa, 0x2f, 0x00, 0x00, 0xc3]),
+            "int f(void)\n{\n  return *(int *)0x4000;\n}"
+        );
+        // lea rax, [rip+0x2ff9]; ret: the slot's own address.
+        assert_eq!(
+            c_with_image(&[0x48, 0x8d, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xc3]),
+            "long f(void)\n{\n  return 0x4000;\n}"
+        );
+    }
+
+    #[test]
+    fn a_function_that_is_only_a_jmp_is_a_thunk() {
+        // endbr64; jmp g: a forwarding stub.
+        let function =
+            lift(&[0xf3, 0x0f, 0x1e, 0xfa, 0xe9, 0xf7, 0x1f, 0x00, 0x00]).expect("lifts");
+        assert_eq!(function.thunk.as_deref(), Some("g"));
+        assert!(function.body.is_empty() && function.params.is_empty());
+        let pseudocode = emit_function(&function, &Options::default());
+        assert_eq!(pseudocode.text(), "// thunk for g");
+        assert_eq!(
+            pseudocode.lines[0].addresses,
+            vec![0x1000, 0x1004],
+            "the one line stands for every instruction"
+        );
+
+        // endbr64; bnd jmp [rip+0x2ff5]; nop: a PLT stub, through the slot
+        // of puts. The jmp is at 0x1004 and 7 bytes long with its prefix.
+        let code = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25, 0xf5, 0x2f, 0x00, 0x00, 0x90,
+        ];
+        assert_eq!(c_with_image(&code), "// thunk for puts");
+
+        // jmp g alone is a thunk too; mov edi, 1; jmp g is not.
+        assert_eq!(c(&[0xe9, 0xfb, 0x1f, 0x00, 0x00]), "// thunk for g");
+        assert_eq!(
+            c(&[0xbf, 1, 0, 0, 0, 0xe9, 0xf6, 0x1f, 0x00, 0x00]),
+            "long f(void)\n{\n  return g(1);\n}"
+        );
+    }
+
+    #[test]
+    fn a_jmp_that_leaves_with_the_stack_unbalanced_or_to_nowhere_is_refused() {
+        // push rdi; jmp g
+        assert_eq!(
+            refused(&[0x57, 0xe9, 0xfa, 0x1f, 0x00, 0x00]),
+            "not lifted yet: the stack is not balanced at the jmp at 0x1001"
+        );
+        // jmp 0x2500: no function the names know, and no code there.
+        assert_eq!(
+            refused(&[0xe9, 0xfb, 0x14, 0x00, 0x00]),
+            "not lifted yet: jumps to 0x2500"
+        );
+        // mov rax, [rip+0x2ff9]; jmp rax, with names that know no slot: rax
+        // holds a load from an address, not a function.
+        assert_eq!(
+            refused(&[0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xff, 0xe0]),
+            "not lifted yet: an indirect jump at 0x1007"
+        );
+    }
+
+    #[test]
+    fn a_jmp_within_the_function_is_still_an_edge() {
+        // jmp .ret; .ret: mov eax, edi; ret — a jump forward to code of the
+        // function's own, which no name claims.
+        assert_eq!(
+            c(&[0xeb, 0x00, 0x89, 0xf8, 0xc3]),
+            "int f(int a)\n{\n  return a;\n}"
+        );
+    }
+
+    #[test]
+    fn the_tail_calls_option_refuses_the_jump_by_callee() {
+        // mov edi, esi; jmp g
+        assert_eq!(
+            c_with(
+                &[0x89, 0xf7, 0xe9, 0xf9, 0x1f, 0x00, 0x00],
+                &names,
+                &[("tail-calls", "refuse")]
+            ),
+            "not lifted yet: a tail call to g at 0x1002"
+        );
+        // endbr64; jmp g: a thunk is a tail call too.
+        assert_eq!(
+            c_with(
+                &[0xf3, 0x0f, 0x1e, 0xfa, 0xe9, 0xf7, 0x1f, 0x00, 0x00],
+                &names,
+                &[("tail-calls", "refuse")]
+            ),
+            "not lifted yet: a tail call to g at 0x1004"
+        );
     }
 
     #[test]
@@ -3746,7 +4104,8 @@ mod tests {
         );
     }
 
-    /// An image that knows a string, a piece of data and a function.
+    /// An image that knows a string, a piece of data, a function and the
+    /// GOT slot of an import.
     struct Image;
 
     impl Symbols for Image {
@@ -3759,6 +4118,7 @@ mod tests {
                 0x2007 => Some(Pointee::String("%ld\n".into())),
                 0x3007 => Some(Pointee::Data("counter".into())),
                 0x2000 => Some(Pointee::Function("f".into())),
+                0x4000 => Some(Pointee::Import("puts".into())),
                 _ => None,
             }
         }

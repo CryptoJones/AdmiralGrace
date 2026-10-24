@@ -273,6 +273,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "tail-calls",
+        phase: Phase::Lift,
+        tier: Tier::Transform,
+        kind: Kind::Choice(&["return", "refuse"]),
+        default: "return",
+        description: "A `jmp` to another function with the stack as it was at entry: lifted as the call and the return it stands for, `return callee(args);` — a function that is only the jump is a thunk, printed as `// thunk for callee` — or refused, naming the callee.",
+        symptoms: &[
+            symptom(
+                "`return printf(a);` where the listing ends in `jmp`, and you want the functions that jump rather than call to stand out as refusals",
+                "refuse",
+            ),
+            symptom(
+                "`not lifted yet: a tail call to printf at 0x…` on a function that ends in `jmp printf`",
+                "return",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "loop-form",
         phase: Phase::Structure,
         tier: Tier::Transform,
@@ -461,6 +479,16 @@ pub enum DeadCompares {
     Keep,
 }
 
+/// What becomes of a `jmp` to another function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TailCalls {
+    /// The call and the return it stands for: `return callee(args);`.
+    #[default]
+    Return,
+    /// Refused, naming the callee.
+    Refuse,
+}
+
 /// The form of a counted loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoopForm {
@@ -504,6 +532,7 @@ pub struct Options {
     pub operand_order: OperandOrder,
     pub unsigned_compare: UnsignedCompare,
     pub dead_compares: DeadCompares,
+    pub tail_calls: TailCalls,
     pub loop_form: LoopForm,
     pub shared_tail: SharedTail,
     pub constant_style: ConstantStyle,
@@ -521,6 +550,7 @@ impl Default for Options {
             operand_order: OperandOrder::default(),
             unsigned_compare: UnsignedCompare::default(),
             dead_compares: DeadCompares::default(),
+            tail_calls: TailCalls::default(),
             loop_form: LoopForm::default(),
             shared_tail: SharedTail::default(),
             constant_style: ConstantStyle::default(),
@@ -657,6 +687,13 @@ impl Options {
                     &[("drop", DeadCompares::Drop), ("keep", DeadCompares::Keep)],
                 )?
             }
+            "tail-calls" => {
+                self.tail_calls = choose(
+                    spec,
+                    value,
+                    &[("return", TailCalls::Return), ("refuse", TailCalls::Refuse)],
+                )?
+            }
             "loop-form" => {
                 self.loop_form = choose(
                     spec,
@@ -742,6 +779,10 @@ impl Options {
                 "dead-compares" => match self.dead_compares {
                     DeadCompares::Drop => "drop",
                     DeadCompares::Keep => "keep",
+                },
+                "tail-calls" => match self.tail_calls {
+                    TailCalls::Return => "return",
+                    TailCalls::Refuse => "refuse",
                 },
                 "loop-form" => match self.loop_form {
                     LoopForm::For => "for",

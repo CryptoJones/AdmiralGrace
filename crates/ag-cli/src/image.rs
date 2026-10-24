@@ -181,12 +181,34 @@ struct CallJson {
     site: u64,
     /// The address, as a hex string.
     site_hex: String,
-    /// The address the call goes to.
+    /// The address the call goes to: the callee, or the GOT slot a tail call
+    /// jumps through.
     target: u64,
     /// The address, as a hex string.
     target_hex: String,
-    /// The name of the function at the target, when it has one.
+    /// The name of the function at the target, when it has one; for a tail
+    /// call through a GOT slot, the import the slot holds.
     name: Option<String>,
+    /// Whether the call is a tail call: a `jmp` to another function.
+    tail: bool,
+    /// The GOT slot a tail call jumps through, when it goes through one.
+    slot: Option<u64>,
+    /// The slot, as a hex string.
+    slot_hex: Option<String>,
+}
+
+impl CallJson {
+    /// The call as a line of text: `site -> target name`, with `(tail call)`
+    /// after a jump that leaves the function.
+    fn line(&self) -> String {
+        format!(
+            "{} -> {} {}{}",
+            self.site_hex,
+            self.target_hex,
+            self.name.as_deref().unwrap_or("-"),
+            if self.tail { " (tail call)" } else { "" }
+        )
+    }
 }
 
 /// One instruction, as JSON.
@@ -976,12 +998,7 @@ fn calls_of(image: &Binary, target: &str, json: bool) -> Result<i32> {
         println!("  -");
     }
     for call in &report.calls {
-        println!(
-            "  {} -> {} {}",
-            call.site_hex,
-            call.target_hex,
-            call.name.as_deref().unwrap_or("-")
-        );
+        println!("  {}", call.line());
     }
 
     println!("called by:");
@@ -1055,11 +1072,12 @@ fn every_call(image: &Binary, json: bool) -> Result<i32> {
     for function in &functions {
         for call in &function.calls {
             println!(
-                "  {} {} -> {} {}",
+                "  {} {} -> {} {}{}",
                 function.address_hex,
                 function.name,
                 call.target_hex,
-                call.name.as_deref().unwrap_or("-")
+                call.name.as_deref().unwrap_or("-"),
+                if call.tail { " (tail call)" } else { "" }
             );
         }
     }
@@ -1341,10 +1359,16 @@ fn function_json(function: &ag_image::Function) -> FunctionJson {
 }
 
 /// The operands of an instruction, with a call's target named.
+///
+/// A call or a jump written to an address shows the name of the function
+/// there; a jump through a GOT slot keeps its operand, `[rip+0x2f75]`, since
+/// the slot is what the instruction names, and the import it holds is the
+/// call's to report.
 fn operands_of(instruction: &ag_image::Instruction) -> String {
     match instruction
         .call
         .as_ref()
+        .filter(|call| call.slot.is_none())
         .and_then(|call| call.name.as_deref())
     {
         Some(name) => name.to_string(),
@@ -1360,6 +1384,9 @@ fn call_json(call: &ag_image::Call) -> CallJson {
         target: call.target,
         target_hex: format!("{:#x}", call.target),
         name: call.name.clone(),
+        tail: call.tail,
+        slot: call.slot,
+        slot_hex: call.slot.map(|slot| format!("{slot:#x}")),
     }
 }
 
@@ -1797,6 +1824,64 @@ mod tests {
         );
         assert!(report.lines.is_empty());
         assert_eq!(report.text, None);
+    }
+
+    #[test]
+    fn the_pseudocode_of_a_plt_stub_is_the_thunk_line() {
+        let image = sample();
+
+        let report = pseudocode_json(&image, 0x1050);
+
+        assert!(report.lifted, "{report:?}");
+        assert_eq!(report.name.as_deref(), Some("printf"));
+        assert_eq!(report.text.as_deref(), Some("// thunk for printf"));
+        assert_eq!(report.lines.len(), 1);
+        assert_eq!(report.lines[0].addresses_hex, vec!["0x1050", "0x1054"]);
+    }
+
+    #[test]
+    fn a_tail_call_is_reported_with_the_slot_it_goes_through() {
+        let image = sample();
+
+        let report = function_calls_json(&image, 0x1050);
+        assert_eq!(report.calls.len(), 1, "{:?}", report.calls);
+        let call = &report.calls[0];
+        assert!(call.tail);
+        assert_eq!(call.slot_hex.as_deref(), Some("0x3fd0"));
+        assert_eq!(call.line(), "0x1054 -> 0x3fd0 printf (tail call)");
+
+        // The listing keeps the slot the jump reads — iced spells the
+        // rip-relative operand as the address it names — where a direct jump
+        // shows the function it goes to.
+        let disassembly = image.disassembly(0x1050).expect("the stub disassembles");
+        let jmp = disassembly
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| instruction.address == 0x1054)
+            .expect("the jmp");
+        assert_eq!(operands_of(jmp), "jmp qword ptr [3FD0h]");
+
+        let disassembly = image.disassembly(0x1140).expect("frame_dummy disassembles");
+        let jmp = disassembly
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| instruction.address == 0x1144)
+            .expect("the jmp");
+        assert_eq!(operands_of(jmp), "register_tm_clones");
+        assert_eq!(
+            function_calls_json(&image, 0x1140).calls[0].line(),
+            "0x1144 -> 0x10c0 register_tm_clones (tail call)"
+        );
+
+        // A direct call is what it was.
+        let main = function_calls_json(&image, 0x1198);
+        assert!(main
+            .calls
+            .iter()
+            .all(|call| !call.tail && call.slot.is_none()));
+        assert_eq!(main.calls[2].line(), "0x11e1 -> 0x1050 printf");
     }
 
     #[test]

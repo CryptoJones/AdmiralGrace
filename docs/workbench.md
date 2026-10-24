@@ -74,9 +74,13 @@ format string printed as the literal `"%ld\n"`, and its `sum_to` reads as a `for
 its counter and accumulator. The lines are numbered and clickable like the kuna provider's,
 so a click on `return b + a;` moves the listing to the add, a click on the `printf` line
 moves it to the call, and a click on the `for` line moves it to the compare at the loop's
-head. A function the lifter refuses — one with an instruction it does not know, a branch
-whose condition it cannot read, or a loop with two entries, such as the sample's `_init`
-with its indirect call — leaves the tab empty, and the Problems panel says why.
+head. A function that ends in a `jmp` to another function reads as the call and the return
+it stands for, `return callee(args);`, and one that is only that jump — a PLT stub such as
+the sample's `printf`, or its `frame_dummy` — is a thunk, whose whole pseudocode is the one
+line `// thunk for printf`, standing for both of its instructions. A function the lifter
+refuses — one with an instruction it does not know, a branch whose condition it cannot
+read, or a loop with two entries, such as the sample's `_init` with its indirect call —
+leaves the tab empty, and the Problems panel says why.
 
 The engine's options — the judgment calls `ag catalog` lists, such as whether a counted
 loop is a `for` or a `while` — are read from the command line, `--option NAME VALUE`,
@@ -147,7 +151,7 @@ What the workbench reads:
 | The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
 | The blocks of the control-flow walk | The Graph tab: a box for every block, with the arrows that join them. |
 | The bytes of the file | The Bytes tab and the lower Bytes panel: the bytes around the selection. |
-| The direct calls of a function | The References tab and the inspector: what the function calls, and what calls it. |
+| The calls of a function | The References tab and the inspector: what the function calls, and what calls it. A `jmp` that leaves the function — a PLT stub's jump through its GOT slot, a forwarding stub's jump to another function — is in CALLS too, marked `(tail call)`, so the stub names the import it stands for. |
 | The strings of the data sections | The Strings tab: the text of the image, and the functions that use it. |
 | The data the instructions point at | The References tab: the DATA group of a function, and the USED BY group of a piece of data. |
 
