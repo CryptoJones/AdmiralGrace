@@ -97,6 +97,9 @@ cargo run --bin ag -- image ./sample.elf symbols --filter 'main|add'
 # The disassembly of one function, by name or by address
 cargo run --bin ag -- image ./sample.elf disasm main
 
+# The pseudocode of one function, when it is one block of straight-line code
+cargo run --bin ag -- image ./sample.elf pseudocode add
+
 # The control-flow graph of one function
 cargo run --bin ag -- image ./sample.elf cfg main
 
@@ -118,6 +121,7 @@ cargo run --bin ag -- image ./sample.elf data
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
+| `pseudocode TARGET` | The function as C, when it is one block of straight-line x86-64 code: a `// name at 0x…` header, then the signature, the locals and the statements. Otherwise the header with `not lifted yet` and the reason, and exit code 1. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
@@ -128,7 +132,8 @@ cargo run --bin ag -- image ./sample.elf data
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
 symbols; `disasm` gives the blocks, their instructions, and the calls the function makes;
-`cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
+`pseudocode` gives the text and the lines, each with the addresses it came from, or
+`lifted: false` and the `reason`; `cfg` gives the blocks and the edges between them; `calls` gives the calls of one function
 or of the whole image; `strings` gives the strings and the functions that use them; `data`
 gives the data and the functions that use it. Every address is reported twice, as a number
 and as a hex string.
@@ -142,6 +147,21 @@ the function it calls, when that function has one.
 it refuses an image of another architecture rather than printing nonsense. In 32-bit code
 there is no `rip`, so the strings and the data a function refers to are found through the
 absolute memory operands it names them with.
+
+`pseudocode` lifts one function to C with the engine's own lifter, which reads one block
+of straight-line x86-64 code: integer `mov`, `add`, `sub`, `and`, `or`, `xor`, `lea`,
+`push`, `pop`, `leave`, a direct `call`, and `ret`. Registers are temporaries and stack
+slots are locals, so a value copied through the frame comes back as the expression it was;
+the argument registers read before they are written are the parameters, named by position
+(`a`, `b`, …), with `rdi, rsi, rdx, rcx, r8, r9` under System V and `rcx, rdx, r8, r9` for
+a Windows image; the return is `rax` at the width of its last write, and a width is a type:
+32 bits is `int`, 64 is `long`. The sample's `add` reads
+`int add(int a, int b) { return b + a; }`, the operands in the order the `add` instruction
+names them. A function of several blocks,
+one with an instruction outside that set, a 32-bit function, or a value the lifter cannot
+follow prints `not lifted yet` and the reason instead, with exit code 1; `--json` reports
+the same as `lifted: false` and a `reason`. Every line of C carries the addresses of the
+instructions it came from, which is what the workbench's Pseudocode tab clicks through.
 
 `strings` reads the sections that are not code, and reports every run of text that ends
 in a NUL. A tab, a newline and a carriage return are part of the text, and they are
@@ -210,5 +230,5 @@ the workbench.
 | Code | Meaning |
 |---|---|
 | 0 | The command ran, or the skill was installed or already current. |
-| 1 | A write failed, or a differing skill copy was kept. |
+| 1 | A write failed, a differing skill copy was kept, or a function was not lifted. |
 | 2 | A usage error: an unknown option, an unknown topic, or no agent to install for. |

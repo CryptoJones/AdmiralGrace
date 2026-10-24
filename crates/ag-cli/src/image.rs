@@ -69,6 +69,14 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The pseudocode of one function.
+    Pseudocode {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The data the image holds, and the functions that use it.
     Data {
         /// The function or the data: an address such as `0x1198`, or a name.
@@ -377,6 +385,38 @@ struct FunctionDataJson {
     data: Vec<DataReferenceJson>,
 }
 
+/// One line of pseudocode, as JSON.
+#[derive(Debug, Serialize)]
+struct LineJson {
+    /// The line number, counted from one.
+    line: usize,
+    /// The text of the line.
+    text: String,
+    /// The addresses of the instructions the line came from.
+    addresses: Vec<u64>,
+    /// The addresses, as hex strings.
+    addresses_hex: Vec<String>,
+}
+
+/// The pseudocode of a function, as JSON.
+#[derive(Debug, Serialize)]
+struct PseudocodeJson {
+    /// The function's entry address.
+    function: u64,
+    /// The address, as a hex string.
+    function_hex: String,
+    /// The function's name, when it has one.
+    name: Option<String>,
+    /// Whether the function was lifted.
+    lifted: bool,
+    /// Why it was not, when it was not.
+    reason: Option<String>,
+    /// The whole text, when it was.
+    text: Option<String>,
+    /// The lines, each with the addresses it came from.
+    lines: Vec<LineJson>,
+}
+
 /// Report on a program image.
 pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     let image = Binary::open(binary).with_context(|| format!("reading {}", binary.display()))?;
@@ -392,6 +432,7 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         } => strings(&image, filter.as_deref(), utf16, json),
         ImageCmd::Cfg { target, json } => cfg(&image, &target, json),
         ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
+        ImageCmd::Pseudocode { target, json } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
     }
 }
@@ -739,6 +780,81 @@ fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+/// Report the pseudocode of one function.
+///
+/// A function the lifter refuses is reported with the reason: as a comment
+/// on stdout and exit code 1 as text, and as `lifted: false` with the
+/// `reason` as JSON, so an agent reading the JSON need not parse an error.
+fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
+        image.language()
+    );
+
+    let address = resolve(image, target)?;
+    let report = pseudocode_json(image, address);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(if report.lifted { 0 } else { 1 });
+    }
+
+    let name = report.name.as_deref().unwrap_or("entry");
+    match &report.reason {
+        Some(reason) => {
+            println!("// {name} at {address:#x}: {reason}");
+            Ok(1)
+        }
+        None => {
+            println!("// {name} at {address:#x}");
+            for line in &report.lines {
+                println!("{}", line.text);
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// The pseudocode of one function, or the reason it has none.
+fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
+    let name = image.function_name(address).map(str::to_string);
+    match image.pseudocode(address) {
+        Ok(pseudocode) => PseudocodeJson {
+            function: address,
+            function_hex: format!("{address:#x}"),
+            name,
+            lifted: true,
+            reason: None,
+            text: Some(pseudocode.text()),
+            lines: pseudocode
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| LineJson {
+                    line: index + 1,
+                    text: line.text.clone(),
+                    addresses: line.addresses.clone(),
+                    addresses_hex: line
+                        .addresses
+                        .iter()
+                        .map(|address| format!("{address:#x}"))
+                        .collect(),
+                })
+                .collect(),
+        },
+        Err(error) => PseudocodeJson {
+            function: address,
+            function_hex: format!("{address:#x}"),
+            name,
+            lifted: false,
+            reason: Some(error.to_string()),
+            text: None,
+            lines: Vec::new(),
+        },
+    }
 }
 
 /// Report the calls of one function, or of the whole image.
@@ -1438,6 +1554,41 @@ mod tests {
 
         let error = data_at_entry(&image, "nonesuch").expect_err("no data");
         assert!(error.to_string().contains("no data matching"), "{error}");
+    }
+
+    #[test]
+    fn the_pseudocode_of_add_is_c_with_its_lines_mapped() {
+        let image = sample();
+
+        let report = pseudocode_json(&image, 0x1149);
+
+        assert!(report.lifted, "{report:?}");
+        assert_eq!(report.name.as_deref(), Some("add"));
+        assert_eq!(
+            report.text.as_deref(),
+            Some("int add(int a, int b)\n{\n  return b + a;\n}")
+        );
+        assert_eq!(report.lines.len(), 4);
+        assert_eq!(report.lines[0].line, 1);
+        assert_eq!(report.lines[0].addresses_hex[0], "0x1149");
+        assert_eq!(report.lines[2].text, "  return b + a;");
+        assert!(report.lines[2].addresses.contains(&0x115d), "the add");
+        assert!(
+            report.lines[1].addresses.is_empty(),
+            "a brace comes from nothing"
+        );
+    }
+
+    #[test]
+    fn the_pseudocode_of_main_says_why_it_was_not_lifted() {
+        let image = sample();
+
+        let report = pseudocode_json(&image, 0x1198);
+
+        assert!(!report.lifted);
+        assert_eq!(report.reason.as_deref(), Some("not lifted yet: 4 blocks"));
+        assert!(report.lines.is_empty());
+        assert_eq!(report.text, None);
     }
 
     #[test]

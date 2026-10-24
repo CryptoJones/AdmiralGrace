@@ -3,16 +3,23 @@
 //! The fixtures are the PE, the Mach-O and the 32-bit ELF in
 //! `crates/ag-image/tests/fixtures`, so the commands are read against the
 //! containers the loader reads beside the 64-bit ELF, and against the other
-//! width of x86.
+//! width of x86; the 64-bit ELF itself is the engine's sample.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The fixture of the given name.
+///
+/// The 64-bit ELF is the engine's own sample; the other containers are the
+/// image crate's.
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../ag-image/tests/fixtures")
-        .join(name)
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let image = root.join("../ag-image/tests/fixtures").join(name);
+    if image.exists() {
+        image
+    } else {
+        root.join("../ag-engine/tests/fixtures").join(name)
+    }
 }
 
 /// Run `ag image <fixture> <args>` and return what it printed.
@@ -285,4 +292,106 @@ fn the_data_of_a_32_bit_elf_is_found_through_absolute_operands() {
         .expect("the users of counter");
     assert_eq!(users.len(), 1, "{report}");
     assert_eq!(users[0]["name"], serde_json::json!("main"));
+}
+
+// ---- Pseudocode -----------------------------------------------------------
+//
+// The lifter reads one block of straight-line x86-64 code, and the `add` of
+// every fixture is one. The PE passes its arguments the Windows way, in rcx
+// and rdx, and the lifter reads that from the image's language.
+
+#[test]
+fn the_pseudocode_of_the_sample_elf_add_is_c() {
+    let report = image("sample.elf", &["pseudocode", "add"]);
+
+    assert_eq!(
+        report,
+        "// add at 0x1149\nint add(int a, int b)\n{\n  return b + a;\n}\n"
+    );
+}
+
+#[test]
+fn the_pseudocode_of_the_pe_add_is_c() {
+    let report = image("sample.exe", &["pseudocode", "add"]);
+
+    assert_eq!(
+        report,
+        "// add at 0x140001000\nint add(int a, int b)\n{\n  return a + b;\n}\n"
+    );
+}
+
+#[test]
+fn the_pseudocode_of_the_macho_add_is_c() {
+    let report = image("sample.macho", &["pseudocode", "_add"]);
+
+    assert_eq!(
+        report,
+        "// _add at 0x100000420\nint _add(int a, int b)\n{\n  return a + b;\n}\n"
+    );
+}
+
+#[test]
+fn the_pseudocode_is_reported_as_json_with_the_addresses_of_each_line() {
+    let report = image_json("sample.elf", &["pseudocode", "0x1149"]);
+
+    assert_eq!(report["name"], serde_json::json!("add"));
+    assert_eq!(report["lifted"], serde_json::json!(true));
+    assert_eq!(
+        report["text"],
+        serde_json::json!("int add(int a, int b)\n{\n  return b + a;\n}")
+    );
+
+    let lines = report["lines"].as_array().expect("the lines");
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[2]["line"], serde_json::json!(3));
+    assert_eq!(lines[2]["text"], serde_json::json!("  return b + a;"));
+    let addresses = lines[2]["addresses_hex"].as_array().expect("the addresses");
+    assert!(
+        addresses.contains(&serde_json::json!("0x115d")),
+        "the add is one of them: {addresses:?}"
+    );
+}
+
+#[test]
+fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "main"])
+        .output()
+        .expect("the ag binary runs");
+
+    assert_eq!(output.status.code(), Some(1), "nothing was lifted");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(report, "// main at 0x1198: not lifted yet: 4 blocks\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "main", "--json"])
+        .output()
+        .expect("the ag binary runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report is JSON");
+    assert_eq!(report["lifted"], serde_json::json!(false));
+    assert_eq!(
+        report["reason"],
+        serde_json::json!("not lifted yet: 4 blocks")
+    );
+}
+
+#[test]
+fn a_32_bit_function_is_not_lifted_yet() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample32.elf"))
+        .args(["pseudocode", "add"])
+        .output()
+        .expect("the ag binary runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(report, "// add at 0x8049000: not lifted yet: 32-bit code\n");
 }

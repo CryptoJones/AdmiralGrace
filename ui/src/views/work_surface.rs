@@ -333,7 +333,7 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
     if body.trim().is_empty() {
         return empty_state(
             "No pseudocode for this function",
-            "The provider recorded no body for this address.",
+            "The provider recorded no body for this address; the Problems panel says why when it knows.",
         )
         .into();
     }
