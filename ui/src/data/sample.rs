@@ -104,6 +104,7 @@ impl Provider for SampleProvider {
             .iter()
             .map(|f| FunctionRow {
                 address: f.body.detail.start.unwrap_or_default(),
+                space: None,
                 name: f.name.clone(),
                 status: f.status.clone(),
                 size: Some(f.size),

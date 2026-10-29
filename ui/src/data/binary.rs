@@ -220,6 +220,7 @@ impl Provider for BinaryProvider {
             .iter()
             .map(|function| FunctionRow {
                 address: function.address,
+                space: None,
                 name: function.name.clone(),
                 status: "Loaded".into(),
                 size: None,
