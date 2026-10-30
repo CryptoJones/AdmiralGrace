@@ -206,6 +206,19 @@ pub enum ProjectCmd {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Write a copy of the target with the project's patches in it, leaving
+    /// the target as it is.
+    WritePatched {
+        /// The project file whose patches are written.
+        #[arg(long)]
+        file: PathBuf,
+        /// Where the copy goes.
+        #[arg(long)]
+        out: PathBuf,
+        /// Write over an existing copy.
+        #[arg(long)]
+        force: bool,
+    },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
         /// The project file to read.
@@ -262,6 +275,7 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             force,
         } => save(&target, &out, options, force),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
+        ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
         ProjectCmd::Rename {
             file,
             address,
@@ -598,6 +612,40 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         out.display(),
         std::fs::metadata(target)?.len(),
         project.options.len()
+    );
+    Ok(0)
+}
+
+/// Write a copy of `target` with the patches `file` holds in it.
+fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<i32> {
+    let project = ProjectFile::load(file)?;
+    let patches = project.patches();
+    anyhow::ensure!(!patches.is_empty(), "{} holds no patches", file.display());
+    // The target is never written: the copy goes somewhere else.
+    let same =
+        out.exists() && std::fs::canonicalize(out).ok() == std::fs::canonicalize(target).ok();
+    anyhow::ensure!(!same, "{} is the target itself", out.display());
+    if out.exists() && !force {
+        anyhow::bail!("{} exists. Pass --force to write over it.", out.display());
+    }
+    let image =
+        ag_image::Binary::open(target).with_context(|| format!("reading {}", target.display()))?;
+    let count = patches.len();
+    let bytes: usize = patches.values().map(Vec::len).sum();
+    image.set_patches(patches);
+    let original =
+        std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
+    let written = image.patched_file(&original)?;
+    std::fs::write(out, &written).with_context(|| format!("writing {}", out.display()))?;
+    // The copy runs as the target does.
+    std::fs::set_permissions(out, std::fs::metadata(target)?.permissions())
+        .with_context(|| format!("setting the mode of {}", out.display()))?;
+    println!(
+        "wrote {} ({} bytes; {count} patch{} over {bytes} byte{})",
+        out.display(),
+        written.len(),
+        if count == 1 { "" } else { "es" },
+        if bytes == 1 { "" } else { "s" },
     );
     Ok(0)
 }

@@ -67,6 +67,8 @@ pub enum Message {
     FileSaveProject,
     /// Prompt for a project file to save to.
     FileSaveProjectAs,
+    /// Write a copy of the program with the patches in it.
+    FileWritePatched,
     /// Reload the open project.
     FileReload,
     /// Close the open project.
@@ -208,6 +210,8 @@ pub enum PromptKind {
     ProjectOpen,
     /// A project file to save to.
     ProjectSave,
+    /// Where the copy of the program with the patches in it goes.
+    WritePatched,
     /// The new name of the selected function.
     Rename,
     /// The new name of the label at the selected address.
@@ -1532,6 +1536,34 @@ impl App {
     }
 
     /// Write the analyst's changes to `path`, recording it as the project file.
+    /// Write a copy of the program with the patches in it to `path`, and
+    /// say what was done. The program itself is never written.
+    fn write_patched_to(&mut self, path: &Path) {
+        let Some(binary) = self.binary_path.clone() else {
+            self.notice = Some("Writing a patched program needs a program image".into());
+            return;
+        };
+        if path.exists() && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&binary).ok()
+        {
+            self.notice = Some(format!("{} is the program itself", path.display()));
+            return;
+        }
+        let count = self.annotations.patches().len();
+        match self.provider.write_patched(path) {
+            Some(Ok(len)) => {
+                self.notice = Some(format!(
+                    "Wrote {} ({len} bytes, {count} patch{})",
+                    path.display(),
+                    if count == 1 { "" } else { "es" }
+                ));
+            }
+            Some(Err(error)) => self.notice = Some(error),
+            None => {
+                self.notice = Some("Writing a patched program needs a program image".into());
+            }
+        }
+    }
+
     fn save_project_to(&mut self, path: &Path) {
         // The target identity comes from the open project, not the last save.
         // A program image knows its own hash only when the reader computed
@@ -2644,6 +2676,9 @@ impl App {
                     PromptKind::ProjectSave => {
                         self.save_project_to(&path);
                     }
+                    PromptKind::WritePatched => {
+                        self.write_patched_to(&path);
+                    }
                     PromptKind::Rename => {
                         let name = prompt.value.trim().to_string();
                         if let Some(address) = self.selection.address() {
@@ -3057,6 +3092,22 @@ impl App {
                 };
                 self.save_project_to(&path);
                 return Task::none();
+            }
+
+            Message::FileWritePatched => {
+                let Some(binary) = self.binary_path.clone() else {
+                    self.notice = Some("Writing a patched program needs a program image".into());
+                    return Task::none();
+                };
+                if self.annotations.patches().is_empty() {
+                    self.notice = Some("No patches to write".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::WritePatched,
+                    title: "Write the patched program to",
+                    value: format!("{}.patched", binary.display()),
+                });
             }
 
             Message::FileSaveProjectAs => {
@@ -6343,6 +6394,73 @@ mod tests {
         let _ = app.update(Message::AddressSelected(add + 2));
         let _ = app.update(Message::EditBytes);
         assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("00"));
+    }
+
+    #[test]
+    fn the_patched_program_is_written_as_a_copy_and_the_patch_history_lists_the_patches() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let add = 0x1149;
+        let _ = app.update(Message::FunctionSelected(add));
+        let _ = app.update(Message::AddressSelected(add));
+
+        // Nothing to write before a patch.
+        let _ = app.update(Message::FileWritePatched);
+        assert_eq!(app.notice.as_deref(), Some("No patches to write"));
+        assert!(app.prompt.is_none());
+        assert!(app.annotations.patch_records().is_empty());
+
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("mov eax, 1".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let records = app.annotations.patch_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, add);
+        assert_eq!(records[0].1.patch_text.as_deref(), Some("mov eax, 1"));
+
+        // The prompt offers a path beside the program; the copy differs
+        // from it in the five bytes, and the program is untouched.
+        let out = std::env::temp_dir().join(format!(
+            "ag-ui-write-patched-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let _ = app.update(Message::FileWritePatched);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(format!("{}.patched", sample_elf().display()).as_str())
+        );
+        let _ = app.update(Message::PromptChanged(out.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Wrote ") && n.ends_with("1 patch)")),
+            "{:?}",
+            app.notice
+        );
+        let original = std::fs::read(sample_elf()).expect("the program");
+        let written = std::fs::read(&out).expect("the copy");
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(written.len(), original.len());
+        let differing = (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count();
+        assert_eq!(differing, 5);
+
+        // Writing over the program itself is refused.
+        let _ = app.update(Message::FileWritePatched);
+        let _ = app.update(Message::PromptChanged(sample_elf().display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.ends_with("is the program itself")));
+        assert_eq!(std::fs::read(sample_elf()).expect("the program"), original);
     }
 
     #[test]

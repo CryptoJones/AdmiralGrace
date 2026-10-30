@@ -1048,6 +1048,21 @@ impl ProjectFile {
             .collect()
     }
 
+    /// The records that carry a patch, in address order: what the Patch
+    /// History lists.
+    pub fn patch_records(&self) -> Vec<(u64, &Annotation)> {
+        let mut records: Vec<(u64, &Annotation)> = self
+            .places()
+            .filter(|a| a.patch.is_some())
+            .filter_map(|a| {
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, a))
+            })
+            .collect();
+        records.sort_by_key(|(address, _)| *address);
+        records
+    }
+
     /// The records that are on a place: an address, a function, a region.
     /// A variable or register record is a thing at a place and is skipped.
     fn places(&self) -> impl Iterator<Item = &Annotation> {

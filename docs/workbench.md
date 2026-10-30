@@ -365,6 +365,14 @@ Patching a binary starts with changing an instruction:
   byte is refused, as are bytes that would run past the end of the section; an empty submit
   takes the patch off, and the prompt submitted as it came up changes nothing.
 
+- **Write patched program…** (File menu) writes a copy of the program with every patch in it,
+  wherever the file holds the bytes a patch changes, and leaves the program itself as it is.
+  The prompt offers a path beside the program. A patch over bytes the file does not hold — an
+  address no section holds, or a section with no bytes in the file — is refused by address.
+- The **Patch History** tab of the bottom panel lists the patches in address order: the
+  address, the bytes, and the instruction they were assembled from when they were. Clicking
+  one goes there.
+
 A patch written over another takes the other off: the bytes written last are the bytes. The
 file on disk is never changed. The patch is a record in the project file — the bytes, and
 the instruction they came from — and the image is read as if its bytes were the patched ones,

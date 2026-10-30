@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1214,4 +1215,51 @@ fn a_32_bit_image_has_no_pseudocode_yet() {
         .pseudocode(0x8049000)
         .expect_err("32-bit code is refused");
     assert_eq!(error.to_string(), "not lifted yet: 32-bit code");
+}
+
+#[test]
+fn the_file_is_written_with_the_patches_in_it_and_a_patch_outside_it_is_refused() {
+    let binary = sample();
+    let original = std::fs::read(sample_path()).expect("the sample's bytes");
+    let text = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect(".text");
+    let offset = text.file_offset.expect(".text is in the file") + (0x1149 - text.vma);
+
+    // Nothing patched: the file comes back as it is.
+    assert_eq!(
+        binary.patched_file(&original).as_deref(),
+        Ok(original.as_slice())
+    );
+
+    // Four no-ops over the start of `add` land at .text's offset, and the
+    // rest of the file is untouched.
+    let patches = BTreeMap::from([(0x1149_u64, vec![0x90; 4])]);
+    assert!(binary.set_patches(patches));
+    let written = binary.patched_file(&original).expect("written");
+    assert_eq!(written.len(), original.len());
+    let offset = offset as usize;
+    assert_eq!(&written[offset..offset + 4], &[0x90; 4]);
+    let differing: Vec<usize> = (0..original.len())
+        .filter(|&i| original[i] != written[i])
+        .collect();
+    assert_eq!(differing, (offset..offset + 4).collect::<Vec<_>>());
+
+    // A patch at an address no section holds has nowhere to go.
+    binary.set_patches(BTreeMap::from([(0x10_u64, vec![0x90])]));
+    let refused = binary.patched_file(&original).expect_err("refused");
+    assert_eq!(refused.address, 0x10);
+    assert!(refused.reason.contains("no section holds"), "{refused}");
+
+    // So has one over a section the file holds no bytes for.
+    let bss = binary
+        .sections()
+        .iter()
+        .find(|section| section.name == ".bss")
+        .expect(".bss");
+    binary.set_patches(BTreeMap::from([(bss.vma, vec![0x90])]));
+    let refused = binary.patched_file(&original).expect_err("refused");
+    assert_eq!(refused.address, bss.vma);
 }

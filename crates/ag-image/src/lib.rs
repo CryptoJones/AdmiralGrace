@@ -600,6 +600,63 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// `original`, the bytes of the file the image was read from, with every
+    /// patch written where the file holds the bytes it changes.
+    ///
+    /// A patch is placed through the section it falls in: the file offset of
+    /// the section, plus the patch's distance into it. A patch over bytes the
+    /// file does not hold — a section with no bytes in the file, or past what
+    /// the file holds of one — has nowhere to go, and is refused by address.
+    pub fn patched_file(&self, original: &[u8]) -> Result<Vec<u8>, NotWritten> {
+        let mut out = original.to_vec();
+        for (&at, bytes) in self.patches().iter() {
+            let mut rest = bytes.as_slice();
+            let mut vma = at;
+            while !rest.is_empty() {
+                let refuse = |reason: &str| NotWritten {
+                    address: at,
+                    reason: reason.to_string(),
+                };
+                // A section that is not mapped into memory — the debug
+                // information of an ELF, say — sits at no address, so it
+                // holds none.
+                let section = self
+                    .sections
+                    .iter()
+                    .filter(|section| section.vma != 0)
+                    .find(|section| {
+                        section.vma <= vma && vma < section.vma.saturating_add(section.size)
+                    })
+                    .ok_or_else(|| refuse(&format!("no section holds {vma:#x}")))?;
+                let Some(offset) = section.file_offset else {
+                    return Err(refuse(&format!(
+                        "the file holds no bytes for {} at {vma:#x}",
+                        section.name
+                    )));
+                };
+                let held = section.file_size.unwrap_or(section.size);
+                let skip = vma - section.vma;
+                if skip >= held {
+                    return Err(refuse(&format!(
+                        "{vma:#x} is past the bytes the file holds for {}",
+                        section.name
+                    )));
+                }
+                let take = usize::try_from(held - skip)
+                    .unwrap_or(usize::MAX)
+                    .min(rest.len());
+                let start = usize::try_from(offset.saturating_add(skip))
+                    .ok()
+                    .filter(|start| start.saturating_add(take) <= out.len())
+                    .ok_or_else(|| refuse(&format!("{vma:#x} lies beyond the end of the file")))?;
+                out[start..start + take].copy_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                vma += take as u64;
+            }
+        }
+        Ok(out)
+    }
+
     /// `bytes`, which start at `base`, with the patches that fall in them
     /// written over.
     fn patched(&self, bytes: &[u8], base: u64) -> Vec<u8> {
@@ -1582,6 +1639,27 @@ impl Symbols for ImageSymbols<'_> {
             .map(|name| Pointee::Function(name.to_string()))
     }
 }
+
+/// Why a patch could not be written into the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotWritten {
+    /// The address the patch starts at.
+    pub address: u64,
+    /// What kept it out of the file.
+    pub reason: String,
+}
+
+impl std::fmt::Display for NotWritten {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the patch at {:#x} cannot be written: {}",
+            self.address, self.reason
+        )
+    }
+}
+
+impl std::error::Error for NotWritten {}
 
 /// The bytes of one section, as the file holds them.
 struct FileSection {
