@@ -13,7 +13,7 @@ regenerated, and the annotations stay.
 
 ```json
 {
-  "format": 3,
+  "format": 4,
   "target": {
     "path": "/bin/ls",
     "sha256": "35ee8f62…"
@@ -23,14 +23,15 @@ regenerated, and the annotations stay.
     { "kind": "function", "address": "0x1198", "name": "main", "bookmark": true },
     { "kind": "address", "address": "EXTERNAL:0x1", "comment": "imported qsort" },
     { "kind": "variable", "address": "0x1161", "variable": "local_14", "name": "count" },
-    { "kind": "register", "address": "0x1161", "register": "rax", "name": "total" }
+    { "kind": "register", "address": "0x1161", "register": "rax", "name": "total" },
+    { "kind": "region", "address": "0x1161", "block": true, "color": "#8bcf9c" }
   ]
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `format` | The format version. This program writes and reads `3`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register. A reader of an older version would misread those records as the address's own. A file naming a newer version is refused with a notice, not misread. An older file that gains a register record is written back at `3`, so a reader that would misread it refuses it instead. |
+| `format` | The format version. This program writes and reads `4`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register; version 4 adds a record for the block of bytes starting at an address, apart from the address's own. A reader of an older version would misread those records as the address's own. A file naming a newer version is refused with a notice, not misread. An older file that gains a register or block record is written back at `4`, so a reader that would misread it refuses it instead. |
 | `target.path` | Where the target was when the project was written. |
 | `target.sha256` | The SHA-256 of the target, so a project can be checked against the binary it describes. |
 | `options` | The analysis options the run used, as name to value — the names `ag catalog` lists. |
@@ -42,9 +43,10 @@ An annotation is one address's worth of the analyst's decisions.
 
 | Field | Meaning |
 |---|---|
-| `kind` | What the annotation is attached to: `function`, `address`, `region`, `variable` or `register`. |
+| `kind` | What the annotation is attached to: `function`, `address`, `region`, `variable` or `register`. A record made at a bare address becomes a `function`'s when a later change knows the address is a function entry; it never goes back, so a mark that reaches the whole function keeps reaching it. |
 | `address` | The address, written the way a corpus writes it — `EXTERNAL:0x1` when the record names an address space. The space is part of the address's meaning, so a function and its `EXTERNAL` twin key apart. |
 | `variable` | The local variable the record names, as the pseudocode declares it. A variable is a different thing from the function or label at the same address, so it carries this field and gets a record of its own; a record without it belongs to the address. |
+| `block` | `true` on the record of the block of bytes starting at the address, as opposed to the address's own record. A block and its first instruction share an address but are two things — a color on the block tints every line of it, a color on the address one — so the block's record stands apart, and the two never overwrite each other. Always written with `kind` `region`. |
 | `register` | The register the record renames, spelled as the listing spells it — `rax`, `ebp`. A register belongs to no one address; it is printed across one function's pseudocode and listing, so the record keys on the register's name beside the function's entry address and the rename reaches that function alone. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `comment` | The analyst's note. |

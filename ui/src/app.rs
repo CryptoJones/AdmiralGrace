@@ -324,25 +324,15 @@ pub(crate) struct Renames {
     /// The analyst's comments, keyed by the bare hex address, each with
     /// whether it stands on the line above.
     comments: std::collections::HashMap<String, Comment>,
-    /// The analyst's highlights, keyed by the bare hex address, each with
-    /// what it is on.
-    colors: std::collections::HashMap<String, Highlight>,
+    /// The analyst's highlights on addresses, keyed by the bare hex
+    /// address. The one on a function's entry is the function's.
+    colors: std::collections::HashMap<String, iced::Color>,
+    /// The analyst's highlights on blocks, keyed by the bare hex address
+    /// the block starts at.
+    block_colors: std::collections::HashMap<String, iced::Color>,
     /// The highlight on the function on screen, when the analyst gave it
     /// one: the color every line of it falls back to.
     function_color: Option<iced::Color>,
-}
-
-/// One analyst highlight, with what it is on.
-///
-/// The kind decides how far the color reaches: an address colors its one
-/// line, a region colors the block starting there, and a function colors
-/// every line of the function.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Highlight {
-    /// The color itself.
-    pub(crate) color: iced::Color,
-    /// What the analyst put it on.
-    pub(crate) kind: ag_corpus::project::TargetKind,
 }
 
 /// One analyst comment, with where it stands.
@@ -379,41 +369,39 @@ impl Renames {
         self.comments.get(&format!("{address:#x}"))
     }
 
-    /// A rename set carrying one highlight of kind `kind` at one address,
-    /// and taking the function color from it when it is a function's.
+    /// A rename set carrying one highlight of kind `kind` at one address:
+    /// on the block starting there for `Region`, on the address otherwise,
+    /// and the function's own when it is a function's.
     #[cfg(test)]
     pub(crate) fn with_color(
         address: u64,
         hex: &str,
         kind: ag_corpus::project::TargetKind,
     ) -> Self {
+        use ag_corpus::project::TargetKind;
         let color = crate::theme::hex_color(hex).expect("a test color");
+        let one = std::collections::HashMap::from([(format!("{address:#x}"), color)]);
+        let (colors, block_colors) = if kind == TargetKind::Region {
+            (std::collections::HashMap::new(), one)
+        } else {
+            (one, std::collections::HashMap::new())
+        };
         Self {
-            colors: std::collections::HashMap::from([(
-                format!("{address:#x}"),
-                Highlight { color, kind },
-            )]),
-            function_color: (kind == ag_corpus::project::TargetKind::Function).then_some(color),
+            colors,
+            block_colors,
+            function_color: (kind == TargetKind::Function).then_some(color),
             ..Self::default()
         }
     }
 
-    /// The highlight of kind `kind` at `address`, when one is there.
-    fn highlight(&self, address: u64, kind: ag_corpus::project::TargetKind) -> Option<iced::Color> {
-        self.colors
-            .get(&format!("{address:#x}"))
-            .filter(|highlight| highlight.kind == kind)
-            .map(|highlight| highlight.color)
-    }
-
     /// The analyst's highlight on the one line at `address`.
     pub(crate) fn address_color(&self, address: u64) -> Option<iced::Color> {
-        self.highlight(address, ag_corpus::project::TargetKind::Address)
+        self.colors.get(&format!("{address:#x}")).copied()
     }
 
     /// The analyst's highlight on the block starting at `from`.
     pub(crate) fn block_color(&self, from: u64) -> Option<iced::Color> {
-        self.highlight(from, ag_corpus::project::TargetKind::Region)
+        self.block_colors.get(&format!("{from:#x}")).copied()
     }
 
     /// The analyst's highlight on the function on screen.
@@ -943,49 +931,59 @@ impl App {
     /// A view that prints many rows builds this once per render rather than
     /// asking the provider row by row.
     pub(crate) fn renames(&self) -> Renames {
-        let colors = self.address_colors();
-        // The function's own color is the one on its entry record, when
-        // the analyst colored the function rather than its first line.
-        let function_color = self.work.listing_of.and_then(|function| {
-            colors
-                .get(&format!("{function:#x}"))
-                .filter(|highlight| highlight.kind == ag_corpus::project::TargetKind::Function)
-                .map(|highlight| highlight.color)
-        });
+        let (colors, block_colors) = self.address_colors();
+        // A color on a function's entry is the function's: it reaches every
+        // line of the function on screen, whatever the record was called.
+        let function_color = self
+            .work
+            .listing_of
+            .and_then(|function| colors.get(&format!("{function:#x}")).copied());
         Renames {
             addresses: self.renamed_names(),
             registers: self.renamed_registers(),
             comments: self.address_comments(),
             colors,
+            block_colors,
             function_color,
         }
     }
 
-    /// Every highlight the analyst set, keyed by the bare hex address, each
-    /// with what it is on.
+    /// Every highlight the analyst set, keyed by the bare hex address: the
+    /// ones on addresses, and apart from them the ones on blocks.
     ///
     /// A spaced record keys on its bare value, the way a comment does, so
     /// a view asks by the address it prints. A record whose color is not a
     /// `#rrggbb` — a hand-edited file — is skipped rather than drawn wrong.
-    pub(crate) fn address_colors(&self) -> std::collections::HashMap<String, Highlight> {
-        self.annotations
-            .annotations
-            .iter()
-            .filter(|a| a.variable.is_none() && a.register.is_none())
-            .filter_map(|annotation| {
-                let color = crate::theme::hex_color(annotation.color.as_deref()?)?;
-                let key = ag_corpus::parse_addr_space(&annotation.address)
-                    .map(|(value, _)| format!("{value:#x}"))
-                    .unwrap_or_else(|_| annotation.address.clone());
-                Some((
-                    key,
-                    Highlight {
-                        color,
-                        kind: annotation.kind,
-                    },
-                ))
-            })
-            .collect()
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn address_colors(
+        &self,
+    ) -> (
+        std::collections::HashMap<String, iced::Color>,
+        std::collections::HashMap<String, iced::Color>,
+    ) {
+        let mut colors = std::collections::HashMap::new();
+        let mut block_colors = std::collections::HashMap::new();
+        for annotation in &self.annotations.annotations {
+            if annotation.variable.is_some() || annotation.register.is_some() {
+                continue;
+            }
+            let Some(color) = annotation
+                .color
+                .as_deref()
+                .and_then(crate::theme::hex_color)
+            else {
+                continue;
+            };
+            let key = ag_corpus::parse_addr_space(&annotation.address)
+                .map(|(value, _)| format!("{value:#x}"))
+                .unwrap_or_else(|_| annotation.address.clone());
+            if annotation.block {
+                block_colors.insert(key, color);
+            } else {
+                colors.insert(key, color);
+            }
+        }
+        (colors, block_colors)
     }
 
     /// The first address of the block of the function on screen that holds
@@ -1021,20 +1019,22 @@ impl App {
             self.notice = Some("Select something to highlight".into());
             return Task::none();
         };
-        let key = if block {
+        // The block's own record, not the entry's beneath it, when the
+        // color goes on the block.
+        let current = if block {
             let Some(from) = self.block_of(address) else {
                 self.notice = Some("No block of the function on screen holds the selection".into());
                 return Task::none();
             };
-            self.annotation_key(from)
+            self.annotations
+                .block_for(&self.annotation_key(from))
+                .and_then(|a| a.color.clone())
         } else {
-            self.annotation_key(address)
-        };
-        let current = self
-            .annotations
-            .annotation_for(&key)
-            .and_then(|a| a.color.clone())
-            .unwrap_or_default();
+            self.annotations
+                .annotation_for(&self.annotation_key(address))
+                .and_then(|a| a.color.clone())
+        }
+        .unwrap_or_default();
         self.prompt = Some(Prompt {
             kind: PromptKind::Color { block },
             title: if block {
@@ -4073,14 +4073,27 @@ mod tests {
         assert_eq!(record.color.as_deref(), Some("#e07a6a"), "the name's value");
         assert_eq!(record.kind, ag_corpus::project::TargetKind::Function);
 
-        // A function's color reaches every line of it.
+        // A function's color reaches every line of it, its entry included.
         let renamed = app.renames();
         assert!(renamed.function_color().is_some());
         assert!(renamed.line_color(address + 8, None).is_some());
+        assert_eq!(renamed.address_color(address), renamed.function_color());
+
+        // A comment on the entry leaves the function's color reaching.
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged("the entry".into()));
+        let _ = app.update(Message::PromptSubmit);
         assert!(
-            renamed.address_color(address).is_none(),
-            "the function's, not the line's"
+            app.renames().function_color().is_some(),
+            "a comment is not a relabel"
         );
+        assert_eq!(
+            app.annotations.annotation_for(&key).map(|a| a.kind),
+            Some(ag_corpus::project::TargetKind::Function)
+        );
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
 
         // The prompt prefills the color; a hex value is normalized; a typo
         // is refused and changes nothing.
@@ -4137,7 +4150,7 @@ mod tests {
 
         let record = app
             .annotations
-            .annotation_for(&app.annotation_key(from))
+            .block_for(&app.annotation_key(from))
             .expect("the block's record");
         assert_eq!(record.kind, ag_corpus::project::TargetKind::Region);
         assert_eq!(record.color.as_deref(), Some("#8bcf9c"));
@@ -4158,6 +4171,51 @@ mod tests {
         let own = renamed.address_color(inside).expect("the line's color");
         assert_eq!(renamed.line_color(inside, Some(from)), Some(own));
         assert_ne!(renamed.block_color(from), Some(own));
+    }
+
+    #[test]
+    fn the_entry_block_and_the_function_keep_their_own_colors() {
+        let mut app = app();
+        let function = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(function));
+        assert_eq!(
+            app.block_of(function),
+            Some(function),
+            "the entry starts a block"
+        );
+
+        let _ = app.update(Message::EditColor);
+        let _ = app.update(Message::PromptChanged("red".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // The block prompt does not prefill the function's color: the block
+        // has none yet.
+        let _ = app.update(Message::EditColorBlock);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some(""));
+        let _ = app.update(Message::PromptChanged("green".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let renamed = app.renames();
+        let red = crate::theme::hex_color("#e07a6a");
+        let green = crate::theme::hex_color("#8bcf9c");
+        assert_eq!(renamed.function_color(), red);
+        assert_eq!(renamed.block_color(function), green);
+        // The nearest mark wins: the entry line is the function's color,
+        // a later line of the entry block the block's.
+        assert_eq!(renamed.line_color(function, Some(function)), red);
+        assert_eq!(renamed.line_color(function + 8, Some(function)), green);
+
+        // Clearing the block's color leaves the function's.
+        let _ = app.update(Message::EditColorBlock);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("#8bcf9c")
+        );
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        let renamed = app.renames();
+        assert_eq!(renamed.function_color(), red);
+        assert_eq!(renamed.block_color(function), None);
     }
 
     #[test]

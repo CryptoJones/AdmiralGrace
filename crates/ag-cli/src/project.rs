@@ -428,9 +428,14 @@ fn edit(
     change(project.annotation_mut(kind, address));
     project.prune();
     project.save(file)?;
-    let key = ag_corpus::project::canonical_address(address)
-        .unwrap_or_else(|| address.to_string());
-    let kept = project.annotation_for(&key);
+    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
+    // A block's record stands apart from the address's own, so the report
+    // reads back the one the edit reached.
+    let kept = if kind == TargetKind::Region {
+        project.block_for(&key)
+    } else {
+        project.annotation_for(&key)
+    };
     match kept {
         Some(a) => println!(
             "{}: {} {key} now {}",

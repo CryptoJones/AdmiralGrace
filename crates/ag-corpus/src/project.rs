@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -178,6 +178,16 @@ pub struct Annotation {
     /// field is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub register: Option<String>,
+    /// Whether this record is on the block of bytes starting at the address
+    /// rather than on the address itself.
+    ///
+    /// A block and its first instruction share an address but are two
+    /// things: a color on the block tints every line of it, a color on the
+    /// address tints one. So a block record stands apart from the address's
+    /// own, told from it by this field the way a variable record is told by
+    /// its name — and the two never overwrite each other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block: bool,
     /// The analyst's name for the target, replacing the analysis's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -216,6 +226,7 @@ impl Annotation {
             address: address.to_string(),
             variable: Some(variable.to_string()),
             register: None,
+            block: false,
             name: None,
             comment: None,
             comment_above: false,
@@ -234,6 +245,7 @@ impl Annotation {
             address: address.to_string(),
             variable: None,
             register: Some(register.to_string()),
+            block: false,
             name: None,
             comment: None,
             comment_above: false,
@@ -251,6 +263,7 @@ impl Annotation {
             address: address.to_string(),
             variable: None,
             register: None,
+            block: kind == TargetKind::Region,
             name: None,
             comment: None,
             comment_above: false,
@@ -382,27 +395,50 @@ impl ProjectFile {
     /// One address carries one record: the lookup keys on the canonical
     /// spelling of the address (see [`canonical_address`]), so `0X10` and
     /// `0x10` reach the same record and a rename, a comment and a bookmark
-    /// at one address live together rather than masking one another. The
-    /// record's `kind` says what the most recent change was attached to.
+    /// at one address live together rather than masking one another.
+    ///
+    /// The record's `kind` says what the place is. A caller that knows the
+    /// place is a function says so and the record becomes a function's; a
+    /// caller that only knows the address — a comment, a label — never
+    /// turns a function's record back into a bare address's, so a mark that
+    /// reaches the whole function keeps reaching it. A `Region` kind reaches
+    /// the block's own record instead; see [`Annotation::block`].
     pub fn annotation_mut(&mut self, kind: TargetKind, address: &str) -> &mut Annotation {
         let key = canonical_address(address).unwrap_or_else(|| address.to_string());
-        let found = self
-            .annotations
-            .iter()
-            .position(|a| a.address == key && a.variable.is_none() && a.register.is_none());
+        let block = kind == TargetKind::Region;
+        let found = self.annotations.iter().position(|a| {
+            a.address == key && a.variable.is_none() && a.register.is_none() && a.block == block
+        });
         match found {
             Some(index) => {
                 let annotation = &mut self.annotations[index];
-                annotation.kind = kind;
+                if annotation.kind == TargetKind::Address && kind == TargetKind::Function {
+                    annotation.kind = kind;
+                }
                 annotation
             }
             None => {
+                if block {
+                    // A block record is new to a file written before
+                    // version 4: an older reader would take it for the
+                    // address's own, so the file names a version it refuses.
+                    self.format = FORMAT_VERSION;
+                }
                 self.annotations.push(Annotation::new(kind, &key));
                 self.annotations
                     .last_mut()
                     .expect("the annotation was just pushed")
             }
         }
+    }
+
+    /// The record on the block of bytes starting at `address`, when one is
+    /// there.
+    pub fn block_for(&self, address: &str) -> Option<&Annotation> {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        self.annotations
+            .iter()
+            .find(|a| a.address == key && a.block && a.variable.is_none() && a.register.is_none())
     }
 
     /// The annotation for the address `address`, when one is there.
@@ -416,7 +452,7 @@ impl ProjectFile {
         let key = canonical_address(address).unwrap_or_else(|| address.to_string());
         self.annotations
             .iter()
-            .find(|a| a.address == key && a.variable.is_none() && a.register.is_none())
+            .find(|a| a.address == key && !a.block && a.variable.is_none() && a.register.is_none())
     }
 
     /// The record naming the local variable `variable` at `address`, added
@@ -871,6 +907,53 @@ mod tests {
     }
 
     #[test]
+    fn a_record_keeps_being_a_functions_and_a_block_stands_apart() {
+        let mut project = ProjectFile::new(Target::default());
+        project.annotation_mut(TargetKind::Function, "0x10").color = Some("#e07a6a".into());
+        // A comment knows only the address; it does not make the function's
+        // record a bare address's.
+        project
+            .annotation_mut(TargetKind::Address, "0x10")
+            .set_comment(Some("entry".into()), false);
+        let record = project.annotation_for("0x10").unwrap();
+        assert_eq!(record.kind, TargetKind::Function);
+        assert_eq!(record.color.as_deref(), Some("#e07a6a"));
+        // The other way, a bare address found to be a function becomes one.
+        project.annotation_mut(TargetKind::Address, "0x20").bookmark = true;
+        project.annotation_mut(TargetKind::Function, "0x20").name = Some("f".into());
+        assert_eq!(
+            project.annotation_for("0x20").unwrap().kind,
+            TargetKind::Function
+        );
+
+        // The block starting at the entry is its own record, so coloring
+        // it leaves the function's color alone, and both are found.
+        project.format = 3;
+        project.annotation_mut(TargetKind::Region, "0x10").color = Some("#8bcf9c".into());
+        assert_eq!(
+            project.format, FORMAT_VERSION,
+            "a block record needs the new version"
+        );
+        assert_eq!(
+            project.annotation_for("0x10").unwrap().color.as_deref(),
+            Some("#e07a6a")
+        );
+        let block = project.block_for("0x10").unwrap();
+        assert!(block.block);
+        assert_eq!(block.kind, TargetKind::Region);
+        assert_eq!(block.color.as_deref(), Some("#8bcf9c"));
+        assert!(project.block_for("0x20").is_none());
+
+        // Both survive the file, and a block is a place for the indexes.
+        project
+            .annotation_mut(TargetKind::Region, "0x10")
+            .add_tag("hot");
+        let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
+        assert_eq!(read, project);
+        assert_eq!(read.tags().get("hot"), Some(&1));
+    }
+
+    #[test]
     fn a_color_is_a_name_or_a_hex_value() {
         assert_eq!(parse_color("red").as_deref(), Some("#e07a6a"));
         assert_eq!(parse_color(" Amber ").as_deref(), Some("#e4ba6a"));
@@ -1037,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_2_file_that_gains_a_register_is_written_as_3() {
+    fn a_version_2_file_that_gains_a_register_is_written_at_the_current_version() {
         // A project written by the version that had variables but no
         // register records keeps its declared version across a load; once
         // the analyst renames a register, the file must name a version an
@@ -1049,7 +1132,10 @@ mod tests {
         assert_eq!(project.format, 2, "loading does not silently restamp");
         project.register_mut("0x1000", "rax").name = Some("result".into());
         let text = project.to_json().expect("json");
-        assert!(text.contains("\"format\": 3"), "{text}");
+        assert!(
+            text.contains(&format!("\"format\": {FORMAT_VERSION}")),
+            "{text}"
+        );
         let read = ProjectFile::from_json(&text).expect("the text reads back");
         assert_eq!(read, project);
     }
@@ -1061,7 +1147,10 @@ mod tests {
             .annotation_mut(TargetKind::Function, "0x1000")
             .bookmark = true;
         let text = project.to_json().expect("json");
-        assert!(text.contains("\"format\": 3"), "{text}");
+        assert!(
+            text.contains(&format!("\"format\": {FORMAT_VERSION}")),
+            "{text}"
+        );
         assert!(text.contains("\"bookmark\": true"), "{text}");
         // An empty name is not written at all.
         assert!(!text.contains("\"name\""), "{text}");

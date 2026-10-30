@@ -261,13 +261,16 @@ glance:
 - **Highlight block…** (Ctrl+Shift+H) colors the basic block of the function on screen that
   holds the selection.
 
-A color reaches the listing and the graph. A function's color tints every line of the
-function and every block of its graph; a block's color tints that block and its lines; a
-line's own color tints that one row, and in the graph a band behind the line. The nearest
-mark wins, so a green block with one red line in it reads as the analyst meant. The color is
-mixed into the surface rather than painted outright, so the text on it stays legible, and the
-inspector shows the value the file holds beside a swatch. The same color is what `ag project
-color` records.
+A color reaches the listing and the graph. A color on a function's entry is the function's:
+it tints every line of the function and every block of its graph. A block's color is a record
+of its own, apart from the entry's, and tints that block and its lines; a line's own color
+tints that one row, and in the graph a band behind the line. The nearest mark wins, so a
+green block with one red line in it reads as the analyst meant, and the entry block colored
+apart from its function keeps both colors. One address holds one color, so an entry line
+cannot be colored apart from its function. The color is mixed into the surface rather than
+painted outright, so the text on it stays legible; the selected row and block show the focus
+color instead, so a highlight shows once the selection moves on. The inspector shows the
+value the file holds beside a swatch. The same color is what `ag project color` records.
 
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a

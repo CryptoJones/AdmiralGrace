@@ -697,7 +697,7 @@ impl GraphProgram {
             // the surface around it.
             if let Some(tint) = line.color {
                 frame.fill_rectangle(
-                    Point::new(x + 2.0 * scale, line_y - 2.0 * scale),
+                    Point::new(x + 2.0 * scale, line_y),
                     Size::new(width - 4.0 * scale, LINE_HEIGHT * scale),
                     tinted(surface, tint, 0.45),
                 );
