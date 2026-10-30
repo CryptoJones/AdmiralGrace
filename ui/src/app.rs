@@ -2090,13 +2090,14 @@ impl App {
         task
     }
 
-    /// `len` bytes from `address` as the byte pane shows them, when the
-    /// pane holds that run.
+    /// `len` bytes from `address` as the image reads them now, patches
+    /// and all, when the image holds that run.
     fn bytes_at(&self, address: u64, len: usize) -> Option<Vec<u8>> {
+        let rows = self.provider.bytes(address)?;
         let mut out = Vec::with_capacity(len);
         for offset in 0..len as u64 {
             let at = address + offset;
-            let byte = self.work.bytes.iter().find_map(|row| {
+            let byte = rows.iter().find_map(|row| {
                 (row.address <= at && at < row.address + row.bytes.len() as u64)
                     .then(|| row.bytes[(at - row.address) as usize])
             })?;
@@ -2110,7 +2111,10 @@ impl App {
     fn nop_at(&mut self, address: u64, len: usize) {
         // A run that leaves the section has nothing to fill past its end,
         // and a slip of the finger would fill gigabytes: refused.
-        let end = self.provider.section_end(address).unwrap_or(u64::MAX);
+        let Some(end) = self.provider.section_end(address) else {
+            self.notice = Some(format!("No section holds {address:#x}"));
+            return;
+        };
         if address.saturating_add(len as u64) > end {
             self.notice = Some(format!(
                 "{len} bytes from {address:#x} run past the end of the section at {end:#x}"
@@ -2800,8 +2804,16 @@ impl App {
                             let key = self.annotation_key(address);
                             let kind = self.kind_at(address);
                             if text.is_empty() {
+                                let had_patch = self
+                                    .annotations
+                                    .annotation_for(&key)
+                                    .is_some_and(|a| a.patch.is_some());
                                 self.annotations.write_patch(kind, &key, None);
-                                self.notice = Some(format!("Patch taken off {key}"));
+                                self.notice = Some(if had_patch {
+                                    format!("Patch taken off {key}")
+                                } else {
+                                    format!("No patch at {key}")
+                                });
                             } else {
                                 let Some(bytes) = ag_corpus::project::bytes_of_hex(text) else {
                                     self.notice = Some(format!(
@@ -2810,12 +2822,27 @@ impl App {
                                     return Task::none();
                                 };
                                 // Bytes past the section's end have nowhere to go.
-                                let end = self.provider.section_end(address).unwrap_or(u64::MAX);
+                                let Some(end) = self.provider.section_end(address) else {
+                                    self.notice = Some(format!("No section holds {key}"));
+                                    return Task::none();
+                                };
                                 if address.saturating_add(bytes.len() as u64) > end {
                                     self.notice = Some(format!(
                                         "{} bytes from {key} run past the end of the section at {end:#x}",
                                         bytes.len()
                                     ));
+                                    return Task::none();
+                                }
+                                // The prompt submitted as it came up is no
+                                // edit: the bytes stand, and so does the text
+                                // of an instruction assembled there.
+                                let current = self
+                                    .annotations
+                                    .annotation_for(&key)
+                                    .and_then(|a| a.patch_bytes())
+                                    .or_else(|| self.bytes_at(address, bytes.len()));
+                                if current.as_deref() == Some(bytes.as_slice()) {
+                                    self.notice = Some(format!("No change at {key}"));
                                     return Task::none();
                                 }
                                 // Through the same door as every patch, so one
@@ -2857,8 +2884,16 @@ impl App {
                             let key = self.annotation_key(address);
                             let kind = self.kind_at(address);
                             if text.is_empty() {
+                                let had_patch = self
+                                    .annotations
+                                    .annotation_for(&key)
+                                    .is_some_and(|a| a.patch.is_some());
                                 self.annotations.write_patch(kind, &key, None);
-                                self.notice = Some(format!("Patch taken off {key}"));
+                                self.notice = Some(if had_patch {
+                                    format!("Patch taken off {key}")
+                                } else {
+                                    format!("No patch at {key}")
+                                });
                             } else {
                                 let Some(bitness) = self.provider.bitness() else {
                                     self.notice = Some("Assembling needs a program image".into());
@@ -6253,7 +6288,13 @@ mod tests {
         let _ = app.update(Message::EditUndo);
         assert_eq!(app.undo.len(), 1);
 
-        // Editing again starts from the patch; half a byte is refused.
+        // Editing again starts from the patch; submitted as it came up it
+        // changes nothing, and half a byte is refused.
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("31 C0"));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("No change at 0x1149"));
+        assert_eq!(app.undo.len(), 1);
         let _ = app.update(Message::EditBytes);
         assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("31 C0"));
         let _ = app.update(Message::PromptChanged("9".into()));
@@ -6264,15 +6305,56 @@ mod tests {
             .is_some_and(|n| n.starts_with("Not bytes")));
         assert_eq!(app.undo.len(), 1);
 
-        // Undo and an empty submit both put the file's bytes back.
+        // Undo and an empty submit both put the file's bytes back; a second
+        // empty submit has nothing to take off.
         let _ = app.update(Message::EditUndo);
         assert_eq!(app.work.listing[0].mnemonic, before[0].mnemonic);
         let _ = app.update(Message::EditRedo);
         let _ = app.update(Message::EditBytes);
         let _ = app.update(Message::PromptChanged(String::new()));
         let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("Patch taken off 0x1149"));
         assert!(app.annotations.annotation_for("0x1149").is_none());
         assert_eq!(app.work.listing[0].mnemonic, before[0].mnemonic);
+        let _ = app.update(Message::EditBytes);
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("No patch at 0x1149"));
+
+        // The instruction's bytes come up as the image reads them now, so
+        // the prompt over an assembled instruction holds its bytes, and
+        // submitting them keeps the instruction's text; a byte inside an
+        // instruction comes up alone.
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("mov eax, 1".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("B8 01 00 00 00")
+        );
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("No change at 0x1149"));
+        let record = app
+            .annotations
+            .annotation_for("0x1149")
+            .expect("the record");
+        assert_eq!(record.patch_text.as_deref(), Some("mov eax, 1"));
+        let _ = app.update(Message::AddressSelected(add + 2));
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("00"));
+    }
+
+    #[test]
+    fn editing_bytes_needs_a_program_image() {
+        let mut app = App::boot(Config::default()).0;
+        app.selection = Selection::Address(0x1149);
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Editing bytes needs a program image")
+        );
+        assert!(app.prompt.is_none());
     }
 
     #[test]
