@@ -102,6 +102,8 @@ pub enum Message {
     EditReferenceRemove,
     /// Jump to a place: a function opens, any other address is selected.
     JumpTo(u64),
+    /// Say how the bytes at the selection are read.
+    EditMark(Mark),
     /// Take back the analyst's last change.
     EditUndo,
     /// Put back the change last taken back.
@@ -218,6 +220,21 @@ pub enum PromptKind {
         /// Whether the reference is being taken back rather than recorded.
         remove: bool,
     },
+}
+
+/// How the analyst marks the bytes at the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// An instruction.
+    Code,
+    /// The entry of a function.
+    Function,
+    /// Data; marking data again makes each item one step wider.
+    Data,
+    /// A string of bytes ending in a zero.
+    String,
+    /// Bytes with no meaning given.
+    Undefined,
 }
 
 /// An inline prompt for a filesystem path.
@@ -788,7 +805,14 @@ impl App {
             .strip_prefix('#')
             .map(ag_corpus::project::normalize_tag);
         let entry = self.entry_address();
-        let functions = self.provider.functions();
+        let mut functions = self.provider.functions();
+        // The functions the analyst marked take their place among the
+        // analysis's, in address order.
+        let marked = self.marked_functions(&functions);
+        if !marked.is_empty() {
+            functions.extend(marked);
+            functions.sort_by_key(|row| row.address);
+        }
         self.navigator.tags = self.tag_index_of(&functions, entry);
         let rows = functions
             .into_iter()
@@ -1524,10 +1548,14 @@ impl App {
         self.navigator.selected = Some(address);
         self.data_selection = None;
 
-        self.work.detail = self.provider.function_detail(address);
+        // A function the analyst marked where the analysis found none is
+        // described by the mark, since the analysis has nothing to say.
+        self.work.detail = self
+            .provider
+            .function_detail(address)
+            .or_else(|| self.marked_function_detail(address));
         self.work.listing_of = Some(address);
-        self.work.listing = self.provider.listing(address).unwrap_or_default();
-        self.work.graph = self.provider.graph(address).unwrap_or_default();
+        self.refresh_listing();
         self.work.pseudocode = self.provider.pseudocode(address);
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
@@ -1545,6 +1573,136 @@ impl App {
         self.refresh_problems();
 
         self.ask_kuna_about_the_function(address)
+    }
+
+    /// Read the listing and the graph of the function on screen again, with
+    /// the analyst's marks applied: where the analyst said the bytes are
+    /// data, a string or undefined, those lines stand in place of the
+    /// instructions the analysis decoded there.
+    fn refresh_listing(&mut self) {
+        let Some(function) = self.work.listing_of else {
+            return;
+        };
+        let listing = self.provider.listing(function).unwrap_or_default();
+        self.work.listing = self.marked(listing);
+        let mut graph = self.provider.graph(function).unwrap_or_default();
+        for block in &mut graph.blocks {
+            block.instructions = self.marked(std::mem::take(&mut block.instructions));
+        }
+        self.work.graph = graph;
+    }
+
+    /// The analyst's byte mark at `address`, when there is one.
+    fn mark_at(&self, address: u64) -> Option<ag_corpus::project::ByteType> {
+        self.annotations
+            .annotation_for(&self.annotation_key(address))
+            .and_then(|a| a.byte_type())
+    }
+
+    /// The listing `lines` with the analyst's marks applied.
+    ///
+    /// A line whose address the analyst marked as data, a string or
+    /// undefined is replaced by what the mark says the bytes are, and the
+    /// bytes come from the instructions the analysis decoded there: a mark
+    /// that reaches past one instruction takes the next ones' bytes too. A
+    /// data mark takes exactly its span and leaves the rest of the last
+    /// instruction it touched as bytes; a string runs to its zero; an
+    /// undefined mark covers the one instruction. A code mark changes
+    /// nothing where the analysis already shows an instruction.
+    fn marked(&self, lines: Vec<ListingLine>) -> Vec<ListingLine> {
+        use ag_corpus::project::ByteType;
+        let mut out = Vec::with_capacity(lines.len());
+        let mut at = 0;
+        while at < lines.len() {
+            let line = &lines[at];
+            let mark = match self.mark_at(line.address) {
+                Some(mark @ (ByteType::Data { .. } | ByteType::String | ByteType::Undefined)) => {
+                    mark
+                }
+                _ => {
+                    out.push(line.clone());
+                    at += 1;
+                    continue;
+                }
+            };
+            // Gather the bytes the mark covers, instruction by instruction.
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut next = at;
+            let enough = |bytes: &[u8]| match mark {
+                ByteType::Data { .. } => bytes.len() >= mark.span().unwrap_or(0),
+                ByteType::String => bytes.contains(&0),
+                _ => true,
+            };
+            loop {
+                bytes.extend(hex_bytes(&lines[next].bytes));
+                next += 1;
+                if next >= lines.len() || enough(&bytes) {
+                    break;
+                }
+            }
+            if bytes.is_empty() {
+                // A provider that prints no bytes leaves nothing to re-read.
+                out.push(line.clone());
+                at += 1;
+                continue;
+            }
+            out.extend(data_lines(line.address, &bytes, mark));
+            at = next;
+        }
+        out
+    }
+
+    /// The detail of a function the analyst marked at `address`, when the
+    /// analysis found none there.
+    fn marked_function_detail(&self, address: u64) -> Option<FunctionDetail> {
+        let record = self
+            .annotations
+            .annotation_for(&self.annotation_key(address))?;
+        if record.byte_type() != Some(ag_corpus::project::ByteType::Function) {
+            return None;
+        }
+        Some(FunctionDetail {
+            name: record
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("sub_{address:x}")),
+            status: "Marked".into(),
+            start: Some(address),
+            end: None,
+            provenance: "Analyst".into(),
+            summary: "The analyst marked these bytes as a function; the analysis found none here."
+                .into(),
+        })
+    }
+
+    /// The functions the analyst marked that the analysis did not list, as
+    /// rows of the function list, named by the analyst or `sub_` and the
+    /// address.
+    fn marked_functions(&self, known: &[FunctionRow]) -> Vec<FunctionRow> {
+        self.annotations
+            .annotations
+            .iter()
+            .filter(|a| {
+                a.variable.is_none()
+                    && a.register.is_none()
+                    && !a.block
+                    && a.byte_type() == Some(ag_corpus::project::ByteType::Function)
+            })
+            .filter_map(|a| {
+                let (address, space) = ag_corpus::parse_addr_space(&a.address).ok()?;
+                if known.iter().any(|row| row.address == address) {
+                    return None;
+                }
+                Some(FunctionRow {
+                    address,
+                    space,
+                    name: a.name.clone().unwrap_or_else(|| format!("sub_{address:x}")),
+                    status: "Marked".into(),
+                    size: None,
+                    objc: false,
+                })
+            })
+            .collect()
     }
 
     /// Reload the bytes around the selection.
@@ -1828,7 +1986,7 @@ impl App {
         // is read before either and compared after, and a difference is
         // one change undo remembers, labelled by what the notice said.
         let edits = match &message {
-            Message::EditBookmark => true,
+            Message::EditBookmark | Message::EditMark(_) => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -1879,6 +2037,43 @@ impl App {
     /// Carry out one message.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditMark(mark) => {
+                use ag_corpus::project::{ByteType, TargetKind};
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the bytes to mark".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.byte_type());
+                let next = match mark {
+                    Mark::Code => ByteType::Code,
+                    Mark::Function => ByteType::Function,
+                    Mark::String => ByteType::String,
+                    Mark::Undefined => ByteType::Undefined,
+                    // Marking data where data is marked makes each item one
+                    // step wider; anywhere else it starts at a byte.
+                    Mark::Data => match current {
+                        Some(data @ ByteType::Data { .. }) => data.next_width(),
+                        _ => ByteType::Data { width: 1, count: 1 },
+                    },
+                };
+                // A function mark says what the place is.
+                let kind = if next == ByteType::Function {
+                    TargetKind::Function
+                } else {
+                    self.kind_at(address)
+                };
+                let annotation = self.annotations.annotation_mut(kind, &key);
+                annotation.set_byte_type(Some(next));
+                self.annotations.prune();
+                self.notice = Some(format!("Marked {key} as {}", next.label()));
+                self.refresh_functions();
+                self.refresh_listing();
+            }
+
             Message::EditUndo => {
                 // While the analyst is typing into a prompt, the chord is
                 // about the typing, not the marks beneath it.
@@ -1893,6 +2088,7 @@ impl App {
                 self.notice = Some(format!("Undid: {}", change.label));
                 self.redo.push(change);
                 self.refresh_functions();
+                self.refresh_listing();
             }
 
             Message::EditRedo => {
@@ -1907,6 +2103,7 @@ impl App {
                 self.notice = Some(format!("Redid: {}", change.label));
                 self.undo.push(change);
                 self.refresh_functions();
+                self.refresh_listing();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -2833,6 +3030,123 @@ pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
     out
 }
 
+/// The bytes a listing line prints, `FD 03 00 91`, as values; anything that
+/// is not a pair of hex digits — the mark a cut-short line ends in — is
+/// passed over.
+fn hex_bytes(text: &str) -> Vec<u8> {
+    text.split_whitespace()
+        .filter_map(|pair| u8::from_str_radix(pair, 16).ok())
+        .collect()
+}
+
+/// The listing lines that show `bytes`, starting at `address`, as the mark
+/// says they are read.
+///
+/// Data is one line per item — `db`, `dw`, `dd` or `dq` with the value,
+/// little-endian — for as many items as the mark covers, and whatever is
+/// left of the last instruction the mark touched as bytes. A string is one
+/// line, its printable runs quoted and the rest as values, up to and with
+/// its zero. Undefined bytes are shown eight to a line.
+fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) -> Vec<ListingLine> {
+    use ag_corpus::project::ByteType;
+    let line = |at: u64, mnemonic: &str, chunk: &[u8], operands: String| ListingLine {
+        address: at,
+        bytes: chunk
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        mnemonic: mnemonic.to_string(),
+        operands,
+        call_target: None,
+        registers: Vec::new(),
+        comment: None,
+    };
+    let raw = |at: u64, chunk: &[u8]| {
+        line(
+            at,
+            "db",
+            chunk,
+            chunk
+                .iter()
+                .map(|byte| format!("{byte:#04x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
+    let mut out = Vec::new();
+    let mut at = address;
+    let mut rest = bytes;
+    match mark {
+        ByteType::Data { width, count } => {
+            let width = width as usize;
+            let mnemonic = match width {
+                1 => "db",
+                2 => "dw",
+                4 => "dd",
+                _ => "dq",
+            };
+            for _ in 0..count {
+                if rest.len() < width {
+                    break;
+                }
+                let (item, after) = rest.split_at(width);
+                let value = item
+                    .iter()
+                    .rev()
+                    .fold(0u64, |value, byte| (value << 8) | *byte as u64);
+                out.push(line(
+                    at,
+                    mnemonic,
+                    item,
+                    format!("{value:#0w$x}", w = 2 + width * 2),
+                ));
+                at += width as u64;
+                rest = after;
+            }
+        }
+        ByteType::String => {
+            let end = rest
+                .iter()
+                .position(|b| *b == 0)
+                .map(|i| i + 1)
+                .unwrap_or(rest.len());
+            let (text, after) = rest.split_at(end);
+            let mut parts = Vec::new();
+            let mut run = String::new();
+            for byte in text {
+                if (0x20..0x7f).contains(byte) && *byte != b'"' {
+                    run.push(*byte as char);
+                } else {
+                    if !run.is_empty() {
+                        parts.push(format!("\"{run}\""));
+                        run.clear();
+                    }
+                    parts.push(if *byte == 0 {
+                        "0".to_string()
+                    } else {
+                        format!("{byte:#04x}")
+                    });
+                }
+            }
+            if !run.is_empty() {
+                parts.push(format!("\"{run}\""));
+            }
+            out.push(line(at, "db", text, parts.join(", ")));
+            at += text.len() as u64;
+            rest = after;
+        }
+        _ => {}
+    }
+    // What is left — the tail of an instruction a data mark cut into, or
+    // every byte of an undefined mark — is shown as bytes, eight to a line.
+    for chunk in rest.chunks(8) {
+        out.push(raw(at, chunk));
+        at += chunk.len() as u64;
+    }
+    out
+}
+
 /// The tags the analysis implies for the function `row`, given the
 /// program's entry point when it has one.
 ///
@@ -2889,6 +3203,13 @@ fn shortcut(event: keyboard::Event) -> Message {
         // Shift takes one back.
         (Key::Character("x"), true, false) => Message::EditReference,
         (Key::Character("x"), true, true) => Message::EditReferenceRemove,
+        // How the bytes at the selection are read: code, a function, data
+        // (again for a wider item), a string, or nothing.
+        (Key::Character("c"), true, true) => Message::EditMark(Mark::Code),
+        (Key::Character("f"), true, true) => Message::EditMark(Mark::Function),
+        (Key::Character("d"), true, true) => Message::EditMark(Mark::Data),
+        (Key::Character("a"), true, true) => Message::EditMark(Mark::String),
+        (Key::Character("u"), true, true) => Message::EditMark(Mark::Undefined),
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -3754,6 +4075,28 @@ mod tests {
             text: None,
             repeat: false,
         };
+        let chord =
+            |letter: &str, upper: &str, code: keyboard::key::Code| keyboard::Event::KeyPressed {
+                key: Key::Character(letter.into()),
+                modified_key: Key::Character(upper.into()),
+                physical_key: keyboard::key::Physical::Code(code),
+                location: keyboard::Location::Standard,
+                modifiers: ctrl | keyboard::Modifiers::SHIFT,
+                text: None,
+                repeat: false,
+            };
+        assert!(matches!(
+            shortcut(chord("c", "C", keyboard::key::Code::KeyC)),
+            Message::EditMark(Mark::Code)
+        ));
+        assert!(matches!(
+            shortcut(chord("d", "D", keyboard::key::Code::KeyD)),
+            Message::EditMark(Mark::Data)
+        ));
+        assert!(matches!(
+            shortcut(chord("u", "U", keyboard::key::Code::KeyU)),
+            Message::EditMark(Mark::Undefined)
+        ));
         assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
         assert!(matches!(
             shortcut(x(ctrl | keyboard::Modifiers::SHIFT)),
@@ -4752,6 +5095,164 @@ mod tests {
         assert_eq!(app.undo.len(), 1, "nothing recorded");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_data_mark_stands_in_for_the_instruction_and_widens_each_time() {
+        let mut app = app();
+        let start = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(start));
+        let before = app.work.listing.clone();
+        let at = before
+            .iter()
+            .position(|line| line.address == start + 4)
+            .expect("the second instruction");
+        assert_eq!(before[at].bytes, "FD 03 00 91");
+        let _ = app.update(Message::AddressSelected(start + 4));
+
+        // One byte, and the rest of the instruction as bytes.
+        let _ = app.update(Message::EditMark(Mark::Data));
+        let shown = &app.work.listing;
+        assert_eq!(shown.len(), before.len() + 1);
+        assert_eq!(
+            (shown[at].mnemonic.as_str(), shown[at].operands.as_str()),
+            ("db", "0xfd")
+        );
+        assert_eq!(shown[at + 1].address, start + 5);
+        assert_eq!(shown[at + 1].operands, "0x03, 0x00, 0x91");
+        assert_eq!(
+            shown[at + 2].address,
+            start + 8,
+            "the next instruction follows"
+        );
+        assert_eq!(app.undo.len(), 1);
+
+        // Again: a word, then a double word that takes the whole instruction.
+        let _ = app.update(Message::EditMark(Mark::Data));
+        assert_eq!(
+            (
+                app.work.listing[at].mnemonic.as_str(),
+                app.work.listing[at].operands.as_str()
+            ),
+            ("dw", "0x03fd")
+        );
+        let _ = app.update(Message::EditMark(Mark::Data));
+        let shown = &app.work.listing;
+        assert_eq!(shown.len(), before.len());
+        assert_eq!(
+            (shown[at].mnemonic.as_str(), shown[at].operands.as_str()),
+            ("dd", "0x910003fd")
+        );
+        assert_eq!(shown[at].bytes, "FD 03 00 91");
+
+        // A quad word reaches into the next instruction's bytes.
+        let _ = app.update(Message::EditMark(Mark::Data));
+        let shown = &app.work.listing;
+        assert_eq!(shown.len(), before.len() - 1);
+        assert_eq!(shown[at].mnemonic, "dq");
+        assert_eq!(shown[at + 1].address, start + 12);
+
+        // Round to a byte again; the graph shows the same lines.
+        let _ = app.update(Message::EditMark(Mark::Data));
+        assert_eq!(app.work.listing[at].mnemonic, "db");
+        let in_graph = app
+            .work
+            .graph
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .find(|line| line.address == start + 4)
+            .expect("the graph has the line");
+        assert_eq!(in_graph.mnemonic, "db");
+
+        // Code puts the instruction back; undo walks the marks back too.
+        let _ = app.update(Message::EditMark(Mark::Code));
+        assert_eq!(app.work.listing.len(), before.len());
+        assert_eq!(app.work.listing[at].mnemonic, before[at].mnemonic);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.work.listing[at].mnemonic, "db");
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(app.work.listing[at].mnemonic, before[at].mnemonic);
+    }
+
+    #[test]
+    fn undefined_and_string_marks_show_the_bytes_their_own_way() {
+        let mut app = app();
+        let start = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(start));
+        let before = app.work.listing.clone();
+        let at = before
+            .iter()
+            .position(|line| line.address == start + 4)
+            .expect("the second instruction");
+        let _ = app.update(Message::AddressSelected(start + 4));
+
+        let _ = app.update(Message::EditMark(Mark::Undefined));
+        let shown = &app.work.listing;
+        assert_eq!(
+            shown.len(),
+            before.len(),
+            "one instruction, one line of bytes"
+        );
+        assert_eq!(shown[at].mnemonic, "db");
+        assert_eq!(shown[at].operands, "0xfd, 0x03, 0x00, 0x91");
+
+        // A string runs to its zero; what is left of the instruction follows.
+        let _ = app.update(Message::EditMark(Mark::String));
+        let shown = &app.work.listing;
+        assert_eq!(shown.len(), before.len() + 1);
+        assert_eq!(shown[at].operands, "0xfd, 0x03, 0");
+        assert_eq!(shown[at + 1].address, start + 7);
+        assert_eq!(shown[at + 1].operands, "0x91");
+
+        let record = app
+            .annotations
+            .annotation_for(&app.annotation_key(start + 4))
+            .expect("the record");
+        assert_eq!(record.byte_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn a_function_mark_lists_a_function_the_analysis_did_not() {
+        let mut app = app();
+        let total = app.navigator.rows.len();
+        let inside = 0x100084A44;
+        let _ = app.update(Message::FunctionSelected(0x100084A20));
+        let _ = app.update(Message::AddressSelected(inside));
+        let _ = app.update(Message::EditMark(Mark::Function));
+
+        let record = app
+            .annotations
+            .annotation_for(&app.annotation_key(inside))
+            .expect("the record");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Function);
+        assert_eq!(record.byte_type.as_deref(), Some("function"));
+
+        let rows = &app.navigator.rows;
+        assert_eq!(rows.len(), total + 1);
+        let row = rows
+            .iter()
+            .find(|row| row.address == inside)
+            .expect("the new row");
+        assert_eq!(row.name, "sub_100084a44");
+        assert_eq!(row.status, "Marked");
+        let after = rows.iter().position(|row| row.address == inside).unwrap();
+        assert!(
+            rows[..after].iter().all(|row| row.address < inside),
+            "in address order"
+        );
+
+        // Opening it describes the mark, since the analysis found nothing.
+        let _ = app.update(Message::FunctionSelected(inside));
+        assert!(matches!(app.selection, Selection::Function(a) if a == inside));
+        let detail = app.work.detail.as_ref().expect("a detail");
+        assert_eq!(detail.name, "sub_100084a44");
+        assert_eq!(detail.provenance, "Analyst");
+        assert_eq!(detail.start, Some(inside));
+
+        // Undo takes the function off the list again.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.navigator.rows.len(), total);
     }
 
     #[test]

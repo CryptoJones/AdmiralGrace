@@ -377,6 +377,8 @@ ag project ./bin/ls tags ls.agproj crypto
 ag project ./bin/ls color --file ls.agproj --on function 0x1198 amber
 ag project ./bin/ls color --file ls.agproj 0x11a0 none
 ag project ./bin/ls xref --file ls.agproj 0x11a0 0x1300
+ag project ./bin/ls mark --file ls.agproj 0x2010 data:4[8]
+ag project ./bin/ls mark --file ls.agproj 0x1300 function
 
 # Name a label at an address, a local variable, or a register of the function there
 ag project ./bin/ls label --file ls.agproj 0x1198 start_here
@@ -407,6 +409,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET tag --file FILE ADDRESS TAG…` | Attaches one or more tags to the address; `--remove` takes them off, and `--on function` or `--on block` puts them on the function entered there or the block of bytes starting there. A tag is one word: it is trimmed, a space inside one becomes a hyphen, and `a,b` is two tags. |
 | `ag project TARGET tags FILE [TAG]` | Prints every tag with how many places carry it; with `TAG`, the places carrying it, in address order. |
 | `ag project TARGET xref --file FILE FROM TO` | Records that the code at `FROM` reaches `TO` — a computed call or jump the analysis cannot see; `--remove` takes the reference back. `TO` must be an address, spelled with its space when the analysis gave the place one (`EXTERNAL:0x1`), since the command cannot ask the analysis; the workbench's prompt adds the space itself. The workbench shows it in the inspector's references, marked manual, from both ends. |
+| `ag project TARGET mark --file FILE ADDRESS KIND` | Says how the bytes at `ADDRESS` are read, correcting the analysis: `code`, `function`, `string`, `undefined`, `data`, `data:W` for items of 1, 2, 4 or 8 bytes, `data:W[N]` for an array of `N`; `none` takes the mark off. The workbench shows a data, string or undefined mark in place of the instructions it covers, and lists a function mark as a function. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
 ## `ag catalog`: the engine's options
