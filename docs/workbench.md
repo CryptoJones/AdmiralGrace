@@ -272,6 +272,17 @@ painted outright, so the text on it stays legible; the selected row and block sh
 color instead, so a highlight shows once the selection moves on. The inspector shows the
 value the file holds beside a swatch. The same color is what `ag project color` records.
 
+Every one of these changes can be taken back:
+
+- **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
+  Edit menu names the change each would reach, as the notice named it when it was made:
+  `Undo: Renamed 0x1198`. A new change after an undo forgets what was taken back.
+
+Undo covers every mark the analyst makes — renames, labels, local variable and register
+names, comments, bookmarks, tags and highlights — in the order they were made, and the
+navigator and every view follow. Opening a project file or a different analysis starts
+afresh: the marks those changes were made to are gone.
+
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a
 reload of the same one keeps them.
