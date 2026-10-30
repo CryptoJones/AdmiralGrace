@@ -11,7 +11,17 @@ use crate::app::{App, Message};
 use crate::theme::color;
 
 /// Build the menu bar.
-pub fn view(_app: &App) -> Element<'_, Message> {
+pub fn view(app: &App) -> Element<'_, Message> {
+    // The Undo and Redo items say what they would take back or put back,
+    // the way the notice said it when the change was made.
+    let undo_label = match app.undo.last() {
+        Some(change) => format!("Undo: {}", change.label),
+        None => "Undo".to_string(),
+    };
+    let redo_label = match app.redo.last() {
+        Some(change) => format!("Redo: {}", change.label),
+        None => "Redo".to_string(),
+    };
     let file = Item::with_menu(
         root_button("File"),
         Menu::new(vec![
@@ -77,8 +87,8 @@ pub fn view(_app: &App) -> Element<'_, Message> {
                 Message::EditColorBlock,
             )),
             Item::new(separator()),
-            Item::new(disabled_item("Undo", "Ctrl+Z")),
-            Item::new(disabled_item("Redo", "Ctrl+Shift+Z")),
+            Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
+            Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),
         ])
         .width(240.0),
     );
@@ -202,34 +212,6 @@ fn item_button(label: &str, shortcut: &str, message: Message) -> Element<'static
             _ => None,
         },
         text_color: color::TEXT,
-        border: Border {
-            color: color::PANEL,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..button::Style::default()
-    })
-    .into()
-}
-
-/// A menu entry that is not available yet.
-fn disabled_item(label: &str, shortcut: &str) -> Element<'static, Message> {
-    button::Button::new(
-        Row::new()
-            .align_y(Alignment::Center)
-            .push(
-                Text::new(label.to_string())
-                    .size(12)
-                    .color(color::DIM)
-                    .width(Length::Fill),
-            )
-            .push(Text::new(shortcut.to_string()).size(11).color(color::DIM)),
-    )
-    .width(Length::Fill)
-    .padding([6, 8])
-    .style(|_, _| button::Style {
-        background: None,
-        text_color: color::DIM,
         border: Border {
             color: color::PANEL,
             width: 1.0,

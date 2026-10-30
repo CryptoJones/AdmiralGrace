@@ -95,6 +95,10 @@ pub enum Message {
     EditColor,
     /// Set or clear the highlight color on the block holding the selection.
     EditColorBlock,
+    /// Take back the analyst's last change.
+    EditUndo,
+    /// Put back the change last taken back.
+    EditRedo,
     /// Filter the function list to the places carrying a tag.
     TagSelected(String),
     /// Show or hide the navigator.
@@ -489,7 +493,31 @@ pub struct App {
     /// reloading the same one keeps them. `None` is the sample project, which
     /// has no root of its own.
     pub annotations_root: Option<PathBuf>,
+    /// The analyst's changes, most recent last, each as the annotations
+    /// before and after it, so undo is a swap rather than an inverse.
+    pub undo: Vec<Change>,
+    /// The changes taken back, most recently taken back last, until a new
+    /// change makes them unreachable.
+    pub redo: Vec<Change>,
 }
+
+/// One change to the analyst's annotations, as undo records it.
+///
+/// A change is the whole annotation list before and after, not a patch:
+/// the list is the analyst's own marks, a few hundred records at most, so
+/// the copy is cheap and the restore cannot drift from what was there.
+#[derive(Debug, Clone)]
+pub struct Change {
+    /// What the change was, as the notice said it: `Renamed 0x1198`.
+    pub label: String,
+    /// The annotations before the change.
+    before: Vec<ag_corpus::project::Annotation>,
+    /// The annotations after it.
+    after: Vec<ag_corpus::project::Annotation>,
+}
+
+/// How many changes undo remembers.
+const UNDO_DEPTH: usize = 200;
 
 impl App {
     /// Build the application state from the startup configuration.
@@ -543,6 +571,8 @@ impl App {
             ),
             project_path: None,
             annotations_root: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         };
 
         let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
@@ -676,6 +706,7 @@ impl App {
         self.kuna = None;
         self.annotations =
             ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+        self.forget_changes();
         self.project_path = None;
         self.annotations_root = None;
         self.notice = Some("Project closed".into());
@@ -700,6 +731,7 @@ impl App {
         if root != self.annotations_root {
             self.annotations =
                 ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+            self.forget_changes();
             self.project_path = None;
             self.annotations_root = root;
         }
@@ -1706,7 +1738,83 @@ impl App {
 
     /// Handle a message.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // The annotations change through two doors: a prompt submitted
+        // for one of the analyst's marks, and the bookmark toggle. The list
+        // is read before either and compared after, and a difference is
+        // one change undo remembers, labelled by what the notice said.
+        let edits = match &message {
+            Message::EditBookmark => true,
+            Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
+                matches!(
+                    prompt.kind,
+                    PromptKind::Rename
+                        | PromptKind::Label
+                        | PromptKind::Variable
+                        | PromptKind::Register
+                        | PromptKind::Comment { .. }
+                        | PromptKind::Tags
+                        | PromptKind::Color { .. }
+                )
+            }),
+            _ => false,
+        };
+        let before = edits.then(|| self.annotations.annotations.clone());
+        let task = self.apply(message);
+        if let Some(before) = before {
+            if before != self.annotations.annotations {
+                self.record_change(before);
+            }
+        }
+        task
+    }
+
+    /// Remember the change that took the annotations from `before` to what
+    /// they are now, and forget the changes taken back: they led from a
+    /// state that is gone.
+    fn record_change(&mut self, before: Vec<ag_corpus::project::Annotation>) {
+        self.undo.push(Change {
+            label: self.notice.clone().unwrap_or_else(|| "Edit".into()),
+            before,
+            after: self.annotations.annotations.clone(),
+        });
+        if self.undo.len() > UNDO_DEPTH {
+            let overflow = self.undo.len() - UNDO_DEPTH;
+            self.undo.drain(0..overflow);
+        }
+        self.redo.clear();
+    }
+
+    /// Forget every change: the annotations they were made to are gone.
+    fn forget_changes(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    /// Carry out one message.
+    fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditUndo => {
+                let Some(change) = self.undo.pop() else {
+                    self.notice = Some("Nothing to undo".into());
+                    return Task::none();
+                };
+                self.annotations.annotations = change.before.clone();
+                self.notice = Some(format!("Undid: {}", change.label));
+                self.redo.push(change);
+                self.refresh_functions();
+            }
+
+            Message::EditRedo => {
+                let Some(change) = self.redo.pop() else {
+                    self.notice = Some("Nothing to redo".into());
+                    return Task::none();
+                };
+                self.annotations.annotations = change.after.clone();
+                self.notice = Some(format!("Redid: {}", change.label));
+                self.undo.push(change);
+                self.refresh_functions();
+            }
+
             Message::NavigatorFilterChanged(filter) => {
                 self.navigator.filter = filter;
                 self.refresh_functions();
@@ -1906,12 +2014,11 @@ impl App {
                             match ag_corpus::project::ProjectFile::load(&path) {
                                 Ok(project) => {
                                     self.annotations = project;
+                                    self.forget_changes();
                                     self.project_path = Some(path.clone());
                                     self.refresh_functions();
-                                    self.notice = Some(format!(
-                                        "Opened project {}",
-                                        path.display()
-                                    ));
+                                    self.notice =
+                                        Some(format!("Opened project {}", path.display()));
                                 }
                                 Err(error) => {
                                     self.notice = Some(format!(
@@ -2382,7 +2489,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+H highlight · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+H highlight · Ctrl+Z undo · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }
@@ -2635,6 +2742,9 @@ fn shortcut(event: keyboard::Event) -> Message {
         // block holding it.
         (Key::Character("h"), true, false) => Message::EditColor,
         (Key::Character("h"), true, true) => Message::EditColorBlock,
+        // The plain chord takes a change back; Shift puts it back.
+        (Key::Character("z"), true, false) => Message::EditUndo,
+        (Key::Character("z"), true, true) => Message::EditRedo,
         // The plain chord comments inline; Shift stands the note on its
         // own line above the instruction.
         (Key::Character("/"), true, false) => Message::EditComment,
@@ -3478,6 +3588,21 @@ mod tests {
             shortcut(h(ctrl | keyboard::Modifiers::SHIFT)),
             Message::EditColorBlock
         ));
+
+        let z = |modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("z".into()),
+            modified_key: Key::Character("Z".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyZ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(shortcut(z(ctrl)), Message::EditUndo));
+        assert!(matches!(
+            shortcut(z(ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditRedo
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -4216,6 +4341,124 @@ mod tests {
         let renamed = app.renames();
         assert_eq!(renamed.function_color(), red);
         assert_eq!(renamed.block_color(function), None);
+    }
+
+    #[test]
+    fn every_analyst_change_is_undone_and_redone_in_order() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let key = app.annotation_key(address);
+        let _ = app.update(Message::FunctionSelected(address));
+
+        // Nothing yet.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.notice.as_deref(), Some("Nothing to undo"));
+
+        // Three changes: a rename, a bookmark, a comment.
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decrypt".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::EditBookmark);
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged("careful".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.undo.len(), 3);
+        assert_eq!(app.undo[0].label, format!("Renamed {key}"));
+        let record = |app: &App| app.annotations.annotation_for(&key).cloned();
+        assert_eq!(
+            record(&app).and_then(|a| a.comment).as_deref(),
+            Some("careful")
+        );
+
+        // Undo walks back one at a time, and the list follows.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(&*format!("Undid: Commented {key}"))
+        );
+        assert!(record(&app).and_then(|a| a.comment).is_none());
+        assert!(record(&app).is_some_and(|a| a.bookmark));
+        let _ = app.update(Message::EditUndo);
+        assert!(record(&app).is_some_and(|a| !a.bookmark));
+        assert_eq!(
+            app.navigator
+                .rows
+                .iter()
+                .find(|r| r.address == address)
+                .map(|r| r.name.as_str()),
+            Some("decrypt")
+        );
+        let _ = app.update(Message::EditUndo);
+        assert!(record(&app).is_none(), "back to nothing");
+        assert_ne!(
+            app.navigator
+                .rows
+                .iter()
+                .find(|r| r.address == address)
+                .map(|r| r.name.as_str()),
+            Some("decrypt"),
+            "the list follows the undo"
+        );
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.notice.as_deref(), Some("Nothing to undo"));
+
+        // Redo walks forward again.
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(
+            record(&app).and_then(|a| a.name).as_deref(),
+            Some("decrypt")
+        );
+        let _ = app.update(Message::EditRedo);
+        assert!(record(&app).is_some_and(|a| a.bookmark));
+        assert_eq!(app.redo.len(), 1);
+
+        // A new change after an undo forgets what was taken back.
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("crypto".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.redo.is_empty());
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(app.notice.as_deref(), Some("Nothing to redo"));
+        assert_eq!(app.undo.len(), 3);
+
+        // A submit that changes nothing is not a change.
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.undo.len(), 3);
+
+        // A path prompt is not an analyst change either.
+        let _ = app.update(Message::FileOpenCorpus);
+        let _ = app.update(Message::PromptChanged("/nowhere".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.undo.len(), 3);
+    }
+
+    #[test]
+    fn opening_a_project_forgets_the_changes_made_before_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ui-undo-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("empty.agproj");
+        ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default())
+            .save(&file)
+            .expect("the file");
+
+        let mut app = app();
+        let _ = app.update(Message::FunctionSelected(0x100084A20));
+        let _ = app.update(Message::EditBookmark);
+        assert_eq!(app.undo.len(), 1);
+
+        let _ = app.update(Message::FileOpenProject);
+        let _ = app.update(Message::PromptChanged(file.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.undo.is_empty(), "the marks those changes were made to are gone");
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.notice.as_deref(), Some("Nothing to undo"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
