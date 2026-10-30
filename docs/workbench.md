@@ -177,7 +177,7 @@ reports.
 
 ## The project file
 
-The workbench's Rename, Comment and Bookmark record the analyst's changes in a project
+The workbench's Rename, Comment, Bookmark and Tags record the analyst's changes in a project
 file (`.agproj`): versioned JSON holding the target's path and SHA-256, the analysis
 options, and every annotation keyed by address. **File ▸ Open project file…** reads one
 back and applies its renames to the function list; **File ▸ Save project** (Ctrl+S) writes
@@ -230,6 +230,22 @@ analyst's own name for the address when there is one (a label, F3), the function
 function entry, and the address itself where nothing names the place — so naming a bookmark
 means naming the place. The section's count is the analyst's own marks, not something the
 analysis reported.
+
+A tag is one word the analyst groups places by, so a large function list is navigable by
+what has been found:
+
+- **Tags…** (Ctrl+T) edits the tags on the selected place. The prompt reads the tags as
+  words separated by spaces or commas, and prefills the ones already there; an empty submit
+  clears them. A tag is trimmed, and a space inside one becomes a hyphen.
+- Typing `#tag` into the navigator's filter keeps only the functions carrying that tag,
+  whatever its case. Any other filter text still matches names.
+
+The **Tags** explore section lists every tag with how many places carry it, and clicking
+one filters the function list to those places. Two tags are the analysis's own and need no
+hand: `entry` marks the function the program starts in, and `objc:Class` marks each method
+the Objective-C method map named, by its class, so one class's methods gather under one tag.
+Automatic tags are read off the analysis as the views draw, not written to the project file,
+and the inspector's **Tags** line shows both kinds together.
 
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a

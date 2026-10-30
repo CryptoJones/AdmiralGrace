@@ -3,14 +3,14 @@
 //! A project file (`.agproj`) records what was analysed — the target's path
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
-//! (`show`), and adds one annotation at a time (`rename`, `comment`,
-//! `bookmark`) so a script or an agent can build a project without editing
-//! JSON by hand.
+//! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
+//! `tag`) so a script or an agent can build a project without editing JSON
+//! by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
 use ag_corpus::project::{sha256_of, Annotation, ProjectFile, Target, TargetKind};
 
@@ -69,6 +69,31 @@ pub enum ProjectCmd {
         file: PathBuf,
         /// The function's address, with its space when it names one.
         address: String,
+    },
+    /// Attach tags to, or take them off, the thing at an address.
+    Tag {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address, with its space when it names one.
+        address: String,
+        /// The tags to attach, one word each.
+        #[arg(required = true)]
+        tags: Vec<String>,
+        /// Take the tags off instead of attaching them.
+        #[arg(long)]
+        remove: bool,
+        /// What the tags are on: the function entered at the address, the
+        /// block of bytes starting there, or the one address.
+        #[arg(long, value_enum, default_value_t = TagOn::Address)]
+        on: TagOn,
+    },
+    /// Report the tags the project holds, or the places carrying one tag.
+    Tags {
+        /// The project file to read.
+        file: PathBuf,
+        /// A tag: list the places carrying it rather than every tag.
+        tag: Option<String>,
     },
     /// Record a name for the label at an address.
     ///
@@ -141,6 +166,22 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 a.bookmark = !a.bookmark;
             })
         }
+        ProjectCmd::Tag {
+            file,
+            address,
+            tags,
+            remove,
+            on,
+        } => edit(&target, &file, on.into(), &address, |a| {
+            for tag in &tags {
+                if remove {
+                    a.remove_tag(tag);
+                } else {
+                    a.add_tag(tag);
+                }
+            }
+        }),
+        ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Label {
             file,
             address,
@@ -174,6 +215,27 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             &register,
             |a| a.name = Some(name),
         ),
+    }
+}
+
+/// What a tag is on: the record's kind, as the command line names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TagOn {
+    /// The one address.
+    Address,
+    /// The function entered at the address.
+    Function,
+    /// The block of bytes starting at the address.
+    Block,
+}
+
+impl From<TagOn> for TargetKind {
+    fn from(on: TagOn) -> TargetKind {
+        match on {
+            TagOn::Address => TargetKind::Address,
+            TagOn::Function => TargetKind::Function,
+            TagOn::Block => TargetKind::Region,
+        }
     }
 }
 
@@ -274,6 +336,44 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
             }
             Err(_) => println!("  note: {target:?} cannot be read to check its hash"),
             _ => {}
+        }
+    }
+    Ok(0)
+}
+
+/// Print the tags of the project file, or the places carrying `tag`.
+///
+/// Without a tag, one line per tag with how many places carry it. With
+/// one, one line per place, in address order, in the shape `show` prints a
+/// record — the kind, the address, and what the record carries.
+fn tags(file: &Path, tag: Option<&str>) -> Result<i32> {
+    let project = ProjectFile::load(file)?;
+    match tag {
+        None => {
+            let index = project.tags();
+            for (tag, places) in &index {
+                println!(
+                    "  {tag:20} {places} place{}",
+                    if *places == 1 { "" } else { "s" }
+                );
+            }
+            if index.is_empty() {
+                println!("  (no tags)");
+            }
+        }
+        Some(tag) => {
+            let places = project.tagged(tag);
+            for annotation in &places {
+                println!(
+                    "  {:9} {:>16}  {}",
+                    annotation.kind.label(),
+                    annotation.address,
+                    summarize(annotation)
+                );
+            }
+            if places.is_empty() {
+                println!("  (nothing carries the tag {tag:?})");
+            }
         }
     }
     Ok(0)

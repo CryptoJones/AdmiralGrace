@@ -82,6 +82,32 @@ pub fn canonical_address(raw: &str) -> Option<String> {
     })
 }
 
+/// The spelling a tag is stored under: trimmed, with no inner whitespace.
+///
+/// A tag is one word the analyst filters by, so the spaces around it are
+/// noise and a space inside it would make two words of one tag. Case is
+/// kept: `Crypto` and `crypto` are the analyst's to tell apart or not.
+/// Nothing but whitespace is no tag at all.
+pub fn normalize_tag(tag: &str) -> Option<String> {
+    let tag: String = tag.split_whitespace().collect::<Vec<_>>().join("-");
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// The tags in a line the analyst typed: `crypto, network parser` reads as
+/// three tags, split at commas and whitespace, each normalized, in the
+/// order they were written with repeats dropped.
+pub fn parse_tags(line: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for word in line.split([',', ' ', '\t', '\n']) {
+        if let Some(tag) = normalize_tag(word) {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    tags
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -200,6 +226,47 @@ impl Annotation {
     pub fn set_comment(&mut self, comment: Option<String>, above: bool) {
         self.comment = comment;
         self.comment_above = self.comment.is_some() && above;
+    }
+
+    /// Attach the tag `tag`, which is trimmed, to the target.
+    ///
+    /// The tags of one record are kept sorted and unique, so a file written
+    /// by two tools in two orders reads the same, and tagging a target twice
+    /// is tagging it once. An empty tag is no tag and is not recorded.
+    pub fn add_tag(&mut self, tag: &str) {
+        let Some(tag) = normalize_tag(tag) else {
+            return;
+        };
+        if let Err(at) = self.tags.binary_search(&tag) {
+            self.tags.insert(at, tag);
+        }
+    }
+
+    /// Take the tag `tag` off the target; a tag it does not carry is left
+    /// alone.
+    pub fn remove_tag(&mut self, tag: &str) {
+        let Some(tag) = normalize_tag(tag) else {
+            return;
+        };
+        self.tags.retain(|carried| *carried != tag);
+    }
+
+    /// Replace the target's tags with `tags`, normalized the way
+    /// [`Annotation::add_tag`] normalizes one.
+    pub fn set_tags<I, S>(&mut self, tags: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.tags.clear();
+        for tag in tags {
+            self.add_tag(tag.as_ref());
+        }
+    }
+
+    /// Whether the target carries the tag `tag`.
+    pub fn has_tag(&self, tag: &str) -> bool {
+        normalize_tag(tag).is_some_and(|tag| self.tags.binary_search(&tag).is_ok())
     }
 
     /// Whether this annotation carries nothing; a carried-empty annotation
@@ -387,20 +454,40 @@ impl ProjectFile {
     /// itself, and is skipped even when the flag is set. An address that
     /// parses to no value keeps its stored spelling and sorts last.
     pub fn bookmarks(&self) -> Vec<&Annotation> {
-        let mut marked: Vec<&Annotation> = self
-            .annotations
-            .iter()
-            .filter(|a| a.bookmark && a.variable.is_none() && a.register.is_none())
-            .collect();
-        marked.sort_by_key(|a| {
-            // `None` orders before `Some`, so the parse failure is keyed
-            // separately to send an unparseable address to the end.
-            let value = crate::parse_addr_space(&a.address)
-                .map(|(value, _)| value)
-                .ok();
-            (value.is_none(), value.unwrap_or(0), a.address.clone())
-        });
+        let mut marked: Vec<&Annotation> = self.places().filter(|a| a.bookmark).collect();
+        sort_by_address(&mut marked);
         marked
+    }
+
+    /// Every tag the analyst gave, with how many places carry it, in tag
+    /// order.
+    ///
+    /// A tag is on a place, so only address records are counted; a variable
+    /// or register record is a thing at a place, not the place itself, and
+    /// any tags it carries are not counted here.
+    pub fn tags(&self) -> BTreeMap<String, usize> {
+        let mut tags = BTreeMap::new();
+        for annotation in self.places() {
+            for tag in &annotation.tags {
+                *tags.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        tags
+    }
+
+    /// The places carrying the tag `tag`, in address order.
+    pub fn tagged(&self, tag: &str) -> Vec<&Annotation> {
+        let mut places: Vec<&Annotation> = self.places().filter(|a| a.has_tag(tag)).collect();
+        sort_by_address(&mut places);
+        places
+    }
+
+    /// The records that are on a place: an address, a function, a region.
+    /// A variable or register record is a thing at a place and is skipped.
+    fn places(&self) -> impl Iterator<Item = &Annotation> {
+        self.annotations
+            .iter()
+            .filter(|a| a.variable.is_none() && a.register.is_none())
     }
 
     /// Drop every annotation that carries nothing.
@@ -449,6 +536,20 @@ impl ProjectFile {
         text.push('\n');
         Ok(text)
     }
+}
+
+/// Order records by the value of their address, an address that parses to
+/// no value last by its spelling.
+///
+/// `None` orders before `Some`, so the parse failure is keyed on its own
+/// ahead of the value to send the unparseable to the end.
+fn sort_by_address(records: &mut [&Annotation]) {
+    records.sort_by_key(|a| {
+        let value = crate::parse_addr_space(&a.address)
+            .map(|(value, _)| value)
+            .ok();
+        (value.is_none(), value.unwrap_or(0), a.address.clone())
+    });
 }
 
 #[cfg(test)]
@@ -698,6 +799,69 @@ mod tests {
             ["EXTERNAL:0x1", "0x100", "0x2000", "nowhere"],
             "in address order, the space first, the register skipped, the unparseable last"
         );
+    }
+
+    #[test]
+    fn tags_are_normalized_sorted_and_unique() {
+        let mut annotation = Annotation::new(TargetKind::Function, "0x10");
+        annotation.add_tag(" parser ");
+        annotation.add_tag("crypto");
+        annotation.add_tag("parser");
+        annotation.add_tag("   ");
+        annotation.add_tag("two words");
+        assert_eq!(annotation.tags, ["crypto", "parser", "two-words"]);
+        assert!(annotation.has_tag("crypto "));
+        assert!(!annotation.has_tag("Crypto"), "case is the analyst's");
+
+        annotation.remove_tag("parser");
+        annotation.remove_tag("never-there");
+        assert_eq!(annotation.tags, ["crypto", "two-words"]);
+
+        annotation.set_tags(["b", "a", "b"]);
+        assert_eq!(annotation.tags, ["a", "b"]);
+
+        assert_eq!(
+            parse_tags("crypto, network parser,,  crypto"),
+            ["crypto", "network", "parser"]
+        );
+        assert!(parse_tags(" , ").is_empty());
+    }
+
+    #[test]
+    fn the_tag_index_counts_places_and_lists_them_in_address_order() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x2000")
+            .add_tag("crypto");
+        project
+            .annotation_mut(TargetKind::Address, "0x100")
+            .add_tag("crypto");
+        project
+            .annotation_mut(TargetKind::Region, "0x100")
+            .add_tag("parser");
+        project
+            .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
+            .add_tag("crypto");
+        // A tagged thing that is not a place — a variable — is not counted.
+        project.variable_mut("0x3000", "count").add_tag("crypto");
+
+        let index = project.tags();
+        assert_eq!(index.get("crypto"), Some(&3));
+        assert_eq!(index.get("parser"), Some(&1));
+        assert_eq!(index.len(), 2);
+
+        let tagged: Vec<&str> = project
+            .tagged("crypto")
+            .iter()
+            .map(|a| a.address.as_str())
+            .collect();
+        assert_eq!(tagged, ["EXTERNAL:0x1", "0x100", "0x2000"]);
+        assert!(project.tagged("nothing").is_empty());
+
+        // The tags survive the file.
+        let text = project.to_json().unwrap();
+        let read = ProjectFile::from_json(&text).unwrap();
+        assert_eq!(read.tags(), index);
     }
 
     #[test]

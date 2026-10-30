@@ -89,6 +89,10 @@ pub enum Message {
     EditBookmark,
     /// Jump to a bookmarked place from the navigator's list.
     BookmarkSelected(u64),
+    /// Edit the tags on the selection.
+    EditTags,
+    /// Filter the function list to the places carrying a tag.
+    TagSelected(String),
     /// Show or hide the navigator.
     ViewToggleNavigator,
     /// Show or hide the inspector.
@@ -187,6 +191,8 @@ pub enum PromptKind {
         /// Whether the comment stands above the instruction.
         above: bool,
     },
+    /// The tags on the selection, as words separated by spaces or commas.
+    Tags,
 }
 
 /// An inline prompt for a filesystem path.
@@ -642,20 +648,102 @@ impl App {
     /// it. The provider's row is otherwise untouched.
     fn refresh_functions(&mut self) {
         let filter = self.navigator.filter.trim().to_lowercase();
+        // A filter that starts with `#` names a tag rather than a piece of a
+        // name: `#crypto` keeps the functions carrying that tag, the
+        // analyst's own or an automatic one.
+        let tag = self
+            .navigator
+            .filter
+            .trim()
+            .strip_prefix('#')
+            .map(str::trim);
+        let entry = self.entry_address();
         let rows = self
             .provider
             .functions()
             .into_iter()
+            .filter(|row| match tag {
+                Some(tag) => {
+                    !tag.is_empty()
+                        && self
+                            .function_tags(row, entry)
+                            .iter()
+                            .any(|carried| carried.eq_ignore_ascii_case(tag))
+                }
+                None => true,
+            })
             .map(|mut row| {
                 if let Some(name) = self.annotation_name(&row.display_address()) {
                     row.name = name;
                 }
                 row
             })
-            .filter(|row| filter.is_empty() || row.name.to_lowercase().contains(&filter))
+            .filter(|row| {
+                tag.is_some() || filter.is_empty() || row.name.to_lowercase().contains(&filter)
+            })
             .collect();
 
         self.navigator.rows = rows;
+    }
+
+    /// The program's entry point, when the analysis reported one.
+    fn entry_address(&self) -> Option<u64> {
+        self.provider
+            .summary()
+            .and_then(|summary| summary.entry.map(|(_, address)| address))
+    }
+
+    /// The tags on the function `row`: the analyst's own, then the automatic
+    /// ones the analysis implies, each once.
+    fn function_tags(&self, row: &FunctionRow, entry: Option<u64>) -> Vec<String> {
+        let mut tags = self
+            .annotations
+            .annotation_for(&row.display_address())
+            .map(|a| a.tags.clone())
+            .unwrap_or_default();
+        for tag in automatic_tags(row, entry) {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+        tags
+    }
+
+    /// The tags on the place at `address`, the analyst's own and the
+    /// automatic ones, each once.
+    pub(crate) fn tags_at(&self, address: u64) -> Vec<String> {
+        let entry = self.entry_address();
+        let functions = self.provider.functions();
+        match functions.iter().find(|row| row.address == address) {
+            Some(row) => self.function_tags(row, entry),
+            None => self
+                .annotations
+                .annotation_for(&self.annotation_key(address))
+                .map(|a| a.tags.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Every tag in the project with how many places carry it, in tag
+    /// order: the analyst's own tags on any place, and the automatic tags
+    /// on the functions.
+    pub(crate) fn tag_index(&self) -> BTreeMap<String, usize> {
+        let mut index = self.annotations.tags();
+        let entry = self.entry_address();
+        for row in self.provider.functions() {
+            for tag in automatic_tags(&row, entry) {
+                // An automatic tag the analyst also gave by hand is one
+                // tag on one place, not two.
+                let given = self
+                    .annotations
+                    .annotation_for(&row.display_address())
+                    .is_some_and(|a| a.has_tag(&tag));
+                if !given {
+                    *index.entry(tag).or_insert(0) += 1;
+                }
+            }
+        }
+        index
     }
 
     /// The analyst's recorded name for the address `key`, when there is one.
@@ -1679,6 +1767,34 @@ impl App {
                             self.notice = Some(format!("Renamed {key}"));
                         }
                     }
+                    PromptKind::Tags => {
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            // The record's kind says what the tags are on:
+                            // the function at an entry, the address
+                            // anywhere else.
+                            let kind = if self
+                                .provider
+                                .functions()
+                                .iter()
+                                .any(|row| row.address == address)
+                            {
+                                ag_corpus::project::TargetKind::Function
+                            } else {
+                                ag_corpus::project::TargetKind::Address
+                            };
+                            let tags = ag_corpus::project::parse_tags(&prompt.value);
+                            let annotation = self.annotations.annotation_mut(kind, &key);
+                            annotation.set_tags(&tags);
+                            self.annotations.prune();
+                            self.refresh_functions();
+                            self.notice = Some(if tags.is_empty() {
+                                format!("Tags cleared at {key}")
+                            } else {
+                                format!("Tagged {key} {}", tags.join(" "))
+                            });
+                        }
+                    }
                     PromptKind::Variable => {
                         // `DECLARED=NAME`: the declared name the pseudocode
                         // writes, and the name to show for it. An empty
@@ -1975,6 +2091,35 @@ impl App {
                 self.refresh_bytes();
             }
 
+            Message::EditTags => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select something to tag".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                // The prompt holds the analyst's own tags; an automatic tag
+                // is the analysis's and is not theirs to take off.
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .map(|a| a.tags.join(" "))
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Tags,
+                    title: "Tags (separate with spaces)",
+                    value: current,
+                });
+            }
+
+            Message::TagSelected(tag) => {
+                // The tag becomes the filter, spelled the way the analyst
+                // could have typed it, and the function list shows the
+                // result.
+                self.navigator.filter = format!("#{tag}");
+                self.navigator.section = Section::Functions;
+                self.refresh_functions();
+            }
+
             Message::ViewToggleNavigator => {
                 self.show_navigator = !self.show_navigator;
             }
@@ -2005,7 +2150,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }
@@ -2207,6 +2352,38 @@ pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
 }
 
 /// Map a key press onto a workbench command.
+/// The tags the analysis implies for the function `row`, given the
+/// program's entry point when it has one.
+///
+/// `entry` marks the function the program starts in. `objc:Class` marks a
+/// method the Objective-C method map named, by the class in `-[Class
+/// method]` or `+[Class method]`, so one class's methods gather under one
+/// tag. Nothing is stored: the tags are read off the analysis each time.
+pub(crate) fn automatic_tags(row: &FunctionRow, entry: Option<u64>) -> Vec<String> {
+    let mut tags = Vec::new();
+    if entry == Some(row.address) {
+        tags.push("entry".to_string());
+    }
+    if row.objc {
+        if let Some(class) = objc_class(&row.name) {
+            tags.push(format!("objc:{class}"));
+        }
+    }
+    tags
+}
+
+/// The class in an Objective-C method name, `-[Class method]` or
+/// `+[Class method]`, when the name has that shape; a category's
+/// `Class(Category)` is its class.
+fn objc_class(name: &str) -> Option<&str> {
+    let rest = name
+        .strip_prefix("-[")
+        .or_else(|| name.strip_prefix("+["))?;
+    let class = rest.split([' ', ']']).next()?;
+    let class = class.split('(').next()?;
+    (!class.is_empty()).then_some(class)
+}
+
 fn shortcut(event: keyboard::Event) -> Message {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return Message::Ignore;
@@ -2221,6 +2398,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("b"), true, true) => Message::EditBookmark,
         (Key::Character("i"), true, _) => Message::ViewToggleInspector,
         (Key::Character("j"), true, _) => Message::ViewToggleBottom,
+        (Key::Character("t"), true, _) => Message::EditTags,
         // The plain chord comments inline; Shift stands the note on its
         // own line above the instruction.
         (Key::Character("/"), true, false) => Message::EditComment,
@@ -3038,6 +3216,17 @@ mod tests {
             shortcut(b(ctrl | keyboard::Modifiers::SHIFT)),
             Message::EditBookmark
         ));
+
+        let t = keyboard::Event::KeyPressed {
+            key: Key::Character("t".into()),
+            modified_key: Key::Character("t".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyT),
+            location: keyboard::Location::Standard,
+            modifiers: ctrl,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(shortcut(t), Message::EditTags));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -3430,6 +3619,134 @@ mod tests {
         let _ = app.update(Message::PromptChanged("loop_head".into()));
         let _ = app.update(Message::PromptSubmit);
         assert_eq!(app.place_name(address), "loop_head");
+    }
+
+    #[test]
+    fn the_tags_prompt_records_tags_on_the_selection() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditTags);
+        assert!(matches!(
+            app.prompt.as_ref().map(|p| &p.kind),
+            Some(PromptKind::Tags)
+        ));
+        let _ = app.update(Message::PromptChanged("crypto, parser  crypto".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let key = app.annotation_key(address);
+        let record = app.annotations.annotation_for(&key).expect("the record");
+        assert_eq!(record.tags, ["crypto", "parser"], "sorted, unique");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Function);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Tagged 0x100084a20 crypto parser")
+        );
+
+        // The prompt prefills the analyst's own tags; an empty submit clears them.
+        let _ = app.update(Message::EditTags);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("crypto parser")
+        );
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.annotations.annotation_for(&key).is_none(),
+            "an empty record is dropped"
+        );
+
+        // A tag on a bare address is on the address, not a function.
+        let bare = 0x100084A28;
+        let _ = app.update(Message::AddressSelected(bare));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("loop".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let record = app
+            .annotations
+            .annotation_for(&app.annotation_key(bare))
+            .expect("the record");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Address);
+        assert_eq!(app.tags_at(bare), ["loop"]);
+    }
+
+    #[test]
+    fn a_hash_filter_narrows_the_list_to_a_tag() {
+        let mut app = app();
+        let total = app.navigator.rows.len();
+        let tagged = 0x100081D60;
+        let _ = app.update(Message::FunctionSelected(tagged));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("Crypto".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // Typing the tag with a hash narrows the list, whatever the case.
+        let _ = app.update(Message::NavigatorFilterChanged("#crypto".into()));
+        assert_eq!(app.navigator.rows.len(), 1);
+        assert_eq!(app.navigator.rows[0].address, tagged);
+
+        // A bare hash matches nothing rather than everything.
+        let _ = app.update(Message::NavigatorFilterChanged("#".into()));
+        assert!(app.navigator.rows.is_empty());
+
+        // Clearing the filter brings the list back.
+        let _ = app.update(Message::NavigatorFilterChanged(String::new()));
+        assert_eq!(app.navigator.rows.len(), total);
+
+        // Picking a tag from the Tags section does the same as typing it,
+        // and lands on the function list.
+        let _ = app.update(Message::SectionSelected(Section::Bookmarks));
+        let _ = app.update(Message::TagSelected("Crypto".into()));
+        assert_eq!(app.navigator.filter, "#Crypto");
+        assert_eq!(app.navigator.section, Section::Functions);
+        assert_eq!(app.navigator.rows.len(), 1);
+    }
+
+    #[test]
+    fn the_analysis_tags_its_entry_point_and_objective_c_classes() {
+        let row = |name: &str, address: u64, objc: bool| FunctionRow {
+            address,
+            space: None,
+            name: name.into(),
+            status: String::new(),
+            size: None,
+            objc,
+        };
+        assert_eq!(
+            automatic_tags(&row("_start", 0x1000, false), Some(0x1000)),
+            ["entry"]
+        );
+        assert!(automatic_tags(&row("main", 0x1100, false), Some(0x1000)).is_empty());
+        assert!(automatic_tags(&row("main", 0x1100, false), None).is_empty());
+        assert_eq!(
+            automatic_tags(&row("-[SignalService decryptMessage:]", 0x2000, true), None),
+            ["objc:SignalService"]
+        );
+        assert_eq!(
+            automatic_tags(&row("+[NSString(Hex) fromHex:]", 0x2000, true), None),
+            ["objc:NSString"]
+        );
+        // A name the method map gave that is not a method has no class.
+        assert!(automatic_tags(&row("sub_2000", 0x2000, true), None).is_empty());
+
+        // The sample's Objective-C method shows up in the index, filters the
+        // list, and is one tag on one place when the analyst gives it too.
+        let mut app = app();
+        let index = app.tag_index();
+        assert_eq!(index.get("objc:SignalService"), Some(&1), "{index:?}");
+        assert_eq!(app.tags_at(0x100084A20), ["objc:SignalService"]);
+        let _ = app.update(Message::NavigatorFilterChanged(
+            "#objc:SignalService".into(),
+        ));
+        assert_eq!(app.navigator.rows.len(), 1);
+        assert_eq!(app.navigator.rows[0].address, 0x100084A20);
+
+        let _ = app.update(Message::FunctionSelected(0x100084A20));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("objc:SignalService".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.tag_index().get("objc:SignalService"), Some(&1));
+        assert_eq!(app.tags_at(0x100084A20), ["objc:SignalService"]);
     }
 
     #[test]
