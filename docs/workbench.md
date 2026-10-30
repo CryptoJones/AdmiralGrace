@@ -208,6 +208,18 @@ views draw. Returning the analysis's own name clears the annotation. A bookmark 
 annotation that carries nothing is dropped on save, so the file says only what the analyst
 changed.
 
+A comment is the analyst's note at one address, and the analyst chooses where it stands:
+
+- **Add comment inline** (Ctrl+/) rides at the end of the instruction's line.
+- **Add comment above** (Ctrl+Shift+/) stands on its own line over the instruction.
+
+The note reaches every view that shows the address: the listing, the graph block, and —
+where a pseudocode line maps to the address — the pseudocode. An above-comment takes a line
+of its own in each; an inline one rides at the end. The disassembler's own comment (what the
+bytes point at) keeps its slot beside the instruction, so the two never fight for the same
+place. The prompt prefills the comment already there, so moving a note between inline and
+above is a re-submit.
+
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a
 reload of the same one keeps them.

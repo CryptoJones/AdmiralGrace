@@ -57,6 +57,10 @@ pub enum ProjectCmd {
         address: String,
         /// The comment to record.
         text: String,
+        /// Stand the comment on its own line above the instruction, rather
+        /// than inline at the end of it.
+        #[arg(long)]
+        above: bool,
     },
     /// Flip a bookmark on a function.
     Bookmark {
@@ -126,8 +130,11 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             file,
             address,
             text,
+            above,
         } => edit(&target, &file, TargetKind::Address, &address, |a| {
-            a.comment = Some(text);
+            // An empty note is no note: it clears the comment the way the
+            // workbench's empty submit does, rather than recording "".
+            a.set_comment((!text.is_empty()).then_some(text), above);
         }),
         ProjectCmd::Bookmark { file, address } => {
             edit(&target, &file, TargetKind::Function, &address, |a| {
@@ -370,7 +377,13 @@ fn summarize(annotation: &Annotation) -> String {
         parts.push(format!("name {name}"));
     }
     if let Some(comment) = &annotation.comment {
-        parts.push(format!("comment {comment:?}"));
+        // The placement is part of what the record says, so the report
+        // names it: an above-comment is not the same note as an inline one.
+        if annotation.comment_above {
+            parts.push(format!("comment above {comment:?}"));
+        } else {
+            parts.push(format!("comment {comment:?}"));
+        }
     }
     if annotation.bookmark {
         parts.push("bookmark".to_string());

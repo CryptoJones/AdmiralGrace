@@ -51,19 +51,42 @@ pub struct GraphLine {
     pub mnemonic: String,
     /// The operands of the instruction.
     pub operands: String,
+    /// The analyst's note at this address, when one is there.
+    pub comment: Option<String>,
+    /// Whether the note stands on its own line above the instruction,
+    /// rather than inline at the end of it.
+    pub comment_above: bool,
+    /// The row the instruction is drawn on, counting the comment lines the
+    /// block inserts above it.
+    pub row: usize,
 }
 
 impl GraphLine {
     /// The line of a listing instruction.
     ///
     /// A call shows the callee by the analyst's name when it has one, so
-    /// the graph reads the same as the listing beside it.
+    /// the graph reads the same as the listing beside it. The analyst's note
+    /// rides with it: inline at the end, or on a row of its own above.
     fn of(line: &ListingLine, renamed: &crate::app::Renames) -> Self {
+        let note = renamed.comment_for(line.address);
         Self {
             address: format!("{:08X}", line.address),
             bytes: short_bytes(&line.bytes),
             mnemonic: line.mnemonic.clone(),
             operands: crate::app::App::shown_operands(line, renamed),
+            comment: note.map(|note| note.text.clone()),
+            comment_above: note.is_some_and(|note| note.above),
+            row: 0,
+        }
+    }
+
+    /// How many rows this instruction takes: one, plus one more when its
+    /// note stands above it.
+    fn rows(&self) -> usize {
+        if self.comment_above {
+            2
+        } else {
+            1
         }
     }
 }
@@ -193,20 +216,38 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
 
     let mut nodes: Vec<GraphNode> = blocks
         .iter()
-        .map(|block| GraphNode {
-            from: block.from,
-            to: block.to,
-            rank: 0,
-            x: 0.0,
-            y: 0.0,
-            width: NODE_WIDTH,
-            height: height_of(block),
-            lines: block
+        .map(|block| {
+            // Each instruction takes a row, and an above-comment takes one
+            // more over it. The rows are numbered as they are laid out so
+            // the painter draws a note directly over its instruction, and
+            // the block grows to hold every row it inserts.
+            let mut row = 0;
+            let lines: Vec<GraphLine> = block
                 .instructions
                 .iter()
-                .map(|line| GraphLine::of(line, renamed))
-                .collect(),
-            branching: block.successors.len() > 1,
+                .map(|line| {
+                    let mut graph_line = GraphLine::of(line, renamed);
+                    if graph_line.comment_above {
+                        graph_line.row = row + 1;
+                    } else {
+                        graph_line.row = row;
+                    }
+                    row += graph_line.rows();
+                    graph_line
+                })
+                .collect();
+            let height = HEADER_HEIGHT + PADDING * 2.0 + row as f32 * LINE_HEIGHT;
+            GraphNode {
+                from: block.from,
+                to: block.to,
+                rank: 0,
+                x: 0.0,
+                y: 0.0,
+                width: NODE_WIDTH,
+                height,
+                lines,
+                branching: block.successors.len() > 1,
+            }
         })
         .collect();
 
@@ -479,11 +520,6 @@ fn reachable_from(
     reached
 }
 
-/// The height of a block: a header and the lines under it.
-fn height_of(block: &GraphBlock) -> f32 {
-    HEADER_HEIGHT + PADDING * 2.0 + block.instructions.len() as f32 * LINE_HEIGHT
-}
-
 /// The view that fits the whole graph into a viewport.
 pub fn fit(layout: &GraphLayout, viewport: Size) -> View {
     if layout.width <= 0.0
@@ -646,8 +682,22 @@ impl GraphProgram {
             size,
         ));
 
-        for (index, line) in node.lines.iter().enumerate() {
-            let line_y = y + (HEADER_HEIGHT + PADDING + index as f32 * LINE_HEIGHT) * scale;
+        for line in &node.lines {
+            let line_y = y + (HEADER_HEIGHT + PADDING + line.row as f32 * LINE_HEIGHT) * scale;
+
+            // A note that stands above its instruction is drawn on the row
+            // just over it, indented to the operands so it reads as
+            // belonging to the line below.
+            if line.comment_above {
+                if let Some(comment) = &line.comment {
+                    frame.fill_text(text(
+                        &format!("; {comment}"),
+                        Point::new(x + 352.0 * scale, line_y - LINE_HEIGHT * scale),
+                        color::AMBER,
+                        size,
+                    ));
+                }
+            }
 
             frame.fill_text(text(
                 &line.address,
@@ -673,6 +723,18 @@ impl GraphProgram {
                 color::TEXT,
                 size,
             ));
+            // An inline note rides at the end of the line, past the
+            // operands column, in the analyst's color.
+            if !line.comment_above {
+                if let Some(comment) = &line.comment {
+                    frame.fill_text(text(
+                        &format!("; {comment}"),
+                        Point::new(x + 470.0 * scale, line_y),
+                        color::AMBER,
+                        size,
+                    ));
+                }
+            }
         }
     }
 
@@ -1087,6 +1149,53 @@ mod tests {
             edges: Graph::edges_of_blocks(&blocks),
             blocks,
         }
+    }
+
+    #[test]
+    fn an_above_comment_takes_a_row_of_its_own() {
+        // Two instructions, a note standing above the first. The block
+        // grows by one row, the note owns the first row, and the
+        // instructions follow below it.
+        let blocks = vec![block(0x1000, 0x1010, vec![], 2)];
+        let renamed = crate::app::Renames::with_comment(0x1000, "the loop head", true);
+
+        let layout = layout(&graph_of(blocks), &renamed);
+        let node = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == 0x1000)
+            .expect("the block is laid out");
+
+        assert_eq!(node.lines.len(), 2);
+        assert_eq!(node.lines[0].row, 1, "the note takes the row above");
+        assert_eq!(node.lines[1].row, 2, "the second instruction follows");
+        assert!(node.lines[0].comment_above);
+        assert_eq!(
+            node.height,
+            HEADER_HEIGHT + PADDING * 2.0 + 3.0 * LINE_HEIGHT,
+            "two instructions and the note between them"
+        );
+    }
+
+    #[test]
+    fn an_inline_comment_takes_no_row() {
+        let blocks = vec![block(0x1000, 0x1010, vec![], 2)];
+        let renamed = crate::app::Renames::with_comment(0x1000, "the entry", false);
+
+        let layout = layout(&graph_of(blocks), &renamed);
+        let node = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == 0x1000)
+            .expect("the block is laid out");
+
+        assert_eq!(node.lines[0].row, 0, "an inline note rides, not stands");
+        assert_eq!(node.lines[0].comment.as_deref(), Some("the entry"));
+        assert_eq!(
+            node.height,
+            HEADER_HEIGHT + PADDING * 2.0 + 2.0 * LINE_HEIGHT,
+            "the block is no taller for an inline note"
+        );
     }
 
     #[test]

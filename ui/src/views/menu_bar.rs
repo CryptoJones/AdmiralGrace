@@ -54,7 +54,16 @@ pub fn view(_app: &App) -> Element<'_, Message> {
                 "Ctrl+F2",
                 Message::EditRenameVariable,
             )),
-            Item::new(item_button("Add comment", "Ctrl+/", Message::EditComment)),
+            Item::new(item_button(
+                "Add comment inline",
+                "Ctrl+/",
+                Message::EditComment,
+            )),
+            Item::new(item_button(
+                "Add comment above",
+                "Ctrl+Shift+/",
+                Message::EditCommentAbove,
+            )),
             Item::new(item_button("Toggle bookmark", "", Message::EditBookmark)),
             Item::new(separator()),
             Item::new(disabled_item("Undo", "Ctrl+Z")),

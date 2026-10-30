@@ -48,6 +48,7 @@ An annotation is one address's worth of the analyst's decisions.
 | `register` | The register the record renames, spelled as the listing spells it — `rax`, `ebp`. A register belongs to no one address; it is printed across one function's pseudocode and listing, so the record keys on the register's name beside the function's entry address and the rename reaches that function alone. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `comment` | The analyst's note. |
+| `comment_above` | Whether the note stands on its own line above the instruction. Absent means inline, at the end of the line. A reader that does not know the field prints every comment inline, which loses placement but misreads nothing. |
 | `bookmark` | Whether the target is bookmarked. |
 | `tags` | Tags carried by the target. |
 | `color` | A color for the target, as `#rrggbb`. |

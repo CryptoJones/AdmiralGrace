@@ -148,6 +148,42 @@ fn one_address_holds_one_record_whatever_the_spelling() {
 }
 
 #[test]
+fn a_line_comment_keeps_its_placement_in_the_file() {
+    let file = TempFile::new("line-comment");
+    let (ok, _, stderr) = project(&["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+
+    let (ok, _, stderr) = project(&[
+        "comment",
+        "--file",
+        &file.text(),
+        "--above",
+        "0x1149",
+        "the loop head",
+    ]);
+    assert!(ok, "{stderr}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 1, "{report}");
+    assert_eq!(annotations[0]["comment"], serde_json::json!("the loop head"));
+    assert_eq!(
+        annotations[0]["comment_above"],
+        serde_json::json!(true),
+        "--above is recorded, not dropped: {report}"
+    );
+
+    // The report says where the note stands, so a reader of `show` can
+    // tell the two apart without opening the JSON.
+    let (ok, stdout, stderr) = project(&["show", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("comment above"),
+        "the report names the placement: {stdout}"
+    );
+}
+
+#[test]
 fn a_spaced_address_keys_apart_from_the_bare_value() {
     let file = TempFile::new("spaced");
     let (ok, _, stderr) = project(&["rename", "--file", &file.text(), "0x1", "local"]);

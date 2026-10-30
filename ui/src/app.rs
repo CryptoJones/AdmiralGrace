@@ -81,8 +81,10 @@ pub enum Message {
     EditRenameVariable,
     /// Rename a register as the function at the selection prints it.
     EditRenameRegister,
-    /// Comment the selected function.
+    /// Comment the selected address, inline at the end of its line.
     EditComment,
+    /// Comment the selected address, on its own line above the instruction.
+    EditCommentAbove,
     /// Toggle a bookmark on the selection.
     EditBookmark,
     /// Show or hide the navigator.
@@ -178,8 +180,11 @@ pub enum PromptKind {
     Variable,
     /// The new name of a register within one function, as `REGISTER=NAME`.
     Register,
-    /// A comment for the selection.
-    Comment,
+    /// A comment for the selection: inline, or on the line above.
+    Comment {
+        /// Whether the comment stands above the instruction.
+        above: bool,
+    },
 }
 
 /// An inline prompt for a filesystem path.
@@ -286,6 +291,44 @@ pub(crate) struct Renames {
     addresses: std::collections::HashMap<String, String>,
     /// The register renames of the function on screen, by spelling.
     registers: std::collections::HashMap<String, String>,
+    /// The analyst's comments, keyed by the bare hex address, each with
+    /// whether it stands on the line above.
+    comments: std::collections::HashMap<String, Comment>,
+}
+
+/// One analyst comment, with where it stands.
+#[derive(Debug, Clone)]
+pub(crate) struct Comment {
+    /// The note itself.
+    pub(crate) text: String,
+    /// Whether it stands on its own line above the instruction.
+    pub(crate) above: bool,
+}
+
+impl Renames {
+    /// A rename set carrying one comment at one address.
+    #[cfg(test)]
+    pub(crate) fn with_comment(address: u64, comment: &str, above: bool) -> Self {
+        Self {
+            comments: std::collections::HashMap::from([(
+                format!("{address:#x}"),
+                Comment {
+                    text: comment.to_string(),
+                    above,
+                },
+            )]),
+            ..Self::default()
+        }
+    }
+
+    /// The analyst's note at `address`, when one is there.
+    ///
+    /// A listing or graph line names its instruction's address, so the view
+    /// asks for the note by that address; the pseudocode asks for every
+    /// address a line maps to.
+    pub(crate) fn comment_for(&self, address: u64) -> Option<&Comment> {
+        self.comments.get(&format!("{address:#x}"))
+    }
 }
 
 /// The whole workbench.
@@ -667,17 +710,50 @@ impl App {
         renamed
     }
 
-    /// The names a listing, graph, or reference view replaces as it draws:
-    /// every function and label rename by address, and the register renames
-    /// of the function on screen.
+    /// The names and notes a listing, graph, or pseudocode view draws: every
+    /// function and label rename by address, the register renames of the
+    /// function on screen, and every comment by address.
     ///
-    /// A view that prints many names builds this once per render rather
-    /// than asking the provider row by row.
+    /// A view that prints many rows builds this once per render rather than
+    /// asking the provider row by row.
     pub(crate) fn renames(&self) -> Renames {
         Renames {
             addresses: self.renamed_names(),
             registers: self.renamed_registers(),
+            comments: self.address_comments(),
         }
+    }
+
+    /// Every comment the analyst left, keyed by the bare hex address.
+    ///
+    /// A comment belongs to the address it was made at, the way a label
+    /// does; a variable or register record carries a name, not a note, so
+    /// its comment — if one were ever recorded there — keys the same way.
+    ///
+    /// A spaced record keys on its bare value, the way a rename of the same
+    /// import does: a view asks by the address it prints, and an import
+    /// commented as `EXTERNAL:0x1` must answer to `0x1`. No provider that
+    /// writes listings also names a space, so no two rows collide today.
+    pub(crate) fn address_comments(
+        &self,
+    ) -> std::collections::HashMap<String, Comment> {
+        self.annotations
+            .annotations
+            .iter()
+            .filter_map(|annotation| {
+                let text = annotation.comment.as_ref()?;
+                let key = ag_corpus::parse_addr_space(&annotation.address)
+                    .map(|(value, _)| format!("{value:#x}"))
+                    .unwrap_or_else(|_| annotation.address.clone());
+                Some((
+                    key,
+                    Comment {
+                        text: text.clone(),
+                        above: annotation.comment_above,
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// The register renames of the function on screen, keyed by the
@@ -929,6 +1005,35 @@ impl App {
     pub(crate) fn canonical_key(&self, address: u64) -> String {
         let written = self.annotation_key(address);
         ag_corpus::project::canonical_address(&written).unwrap_or(written)
+    }
+
+    /// Open the comment prompt for the selection.
+    ///
+    /// `above` says where the note will stand: on its own line over the
+    /// instruction, or inline at the end of it. The prompt prefills the
+    /// comment already there, wherever it stands, so the analyst moves a
+    /// comment between the two by re-submitting it.
+    fn comment_prompt(&mut self, above: bool) -> Task<Message> {
+        let Some(address) = self.selection.address() else {
+            self.notice = Some("Select something to comment".into());
+            return Task::none();
+        };
+        let key = self.annotation_key(address);
+        let current = self
+            .annotations
+            .annotation_for(&key)
+            .and_then(|a| a.comment.clone())
+            .unwrap_or_default();
+        self.prompt = Some(Prompt {
+            kind: PromptKind::Comment { above },
+            title: if above {
+                "Add comment above"
+            } else {
+                "Add comment inline"
+            },
+            value: current,
+        });
+        Task::none()
     }
 
     /// Write the analyst's changes to `path`, recording it as the project file.
@@ -1609,7 +1714,7 @@ impl App {
                         self.annotations.prune();
                         self.notice = Some(format!("Renamed {register} in {key}"));
                     }
-                    PromptKind::Comment => {
+                    PromptKind::Comment { above } => {
                         let text = prompt.value.trim().to_string();
                         if let Some(address) = self.selection.address() {
                             let key = self.annotation_key(address);
@@ -1617,8 +1722,10 @@ impl App {
                                 ag_corpus::project::TargetKind::Address,
                                 &key,
                             );
-                            annotation.comment =
-                                (!text.is_empty()).then_some(text);
+                            annotation.set_comment(
+                                (!text.is_empty()).then_some(text),
+                                above,
+                            );
                             self.annotations.prune();
                             self.notice = Some(format!("Commented {key}"));
                         }
@@ -1792,23 +1899,9 @@ impl App {
                 });
             }
 
-            Message::EditComment => {
-                let Some(address) = self.selection.address() else {
-                    self.notice = Some("Select something to comment".into());
-                    return Task::none();
-                };
-                let key = self.annotation_key(address);
-                let current = self
-                    .annotations
-                    .annotation_for(&key)
-                    .and_then(|a| a.comment.clone())
-                    .unwrap_or_default();
-                self.prompt = Some(Prompt {
-                    kind: PromptKind::Comment,
-                    title: "Add comment",
-                    value: current,
-                });
-            }
+            Message::EditComment => return self.comment_prompt(false),
+
+            Message::EditCommentAbove => return self.comment_prompt(true),
 
             Message::EditBookmark => {
                 let Some(address) = self.selection.address() else {
@@ -2068,21 +2161,24 @@ fn shortcut(event: keyboard::Event) -> Message {
         return Message::Ignore;
     };
 
-    match (key.as_ref(), modifiers.command()) {
-        (Key::Character("o"), true) => Message::FileOpenCorpus,
-        (Key::Character("q"), true) => Message::FileQuit,
-        (Key::Character("b"), true) => Message::ViewToggleNavigator,
-        (Key::Character("i"), true) => Message::ViewToggleInspector,
-        (Key::Character("j"), true) => Message::ViewToggleBottom,
-        (Key::Character("/"), true) => Message::EditComment,
-        (Key::Character("r"), true) => Message::FileReload,
-        (Key::Character("s"), true) => Message::FileSaveProject,
-        (Key::Named(keyboard::key::Named::F2), true) => Message::EditRenameVariable,
-        (Key::Named(keyboard::key::Named::F2), false) => Message::EditRename,
-        (Key::Named(keyboard::key::Named::F3), true) => Message::EditRenameRegister,
-        (Key::Named(keyboard::key::Named::F3), false) => Message::EditRenameLabel,
-        (Key::Named(keyboard::key::Named::F5), _) => Message::FileReload,
-        (Key::Named(keyboard::key::Named::Escape), _) => Message::Dismiss,
+    match (key.as_ref(), modifiers.command(), modifiers.shift()) {
+        (Key::Character("o"), true, _) => Message::FileOpenCorpus,
+        (Key::Character("q"), true, _) => Message::FileQuit,
+        (Key::Character("b"), true, _) => Message::ViewToggleNavigator,
+        (Key::Character("i"), true, _) => Message::ViewToggleInspector,
+        (Key::Character("j"), true, _) => Message::ViewToggleBottom,
+        // The plain chord comments inline; Shift stands the note on its
+        // own line above the instruction.
+        (Key::Character("/"), true, false) => Message::EditComment,
+        (Key::Character("/"), true, true) => Message::EditCommentAbove,
+        (Key::Character("r"), true, _) => Message::FileReload,
+        (Key::Character("s"), true, _) => Message::FileSaveProject,
+        (Key::Named(keyboard::key::Named::F2), true, _) => Message::EditRenameVariable,
+        (Key::Named(keyboard::key::Named::F2), false, _) => Message::EditRename,
+        (Key::Named(keyboard::key::Named::F3), true, _) => Message::EditRenameRegister,
+        (Key::Named(keyboard::key::Named::F3), false, _) => Message::EditRenameLabel,
+        (Key::Named(keyboard::key::Named::F5), _, _) => Message::FileReload,
+        (Key::Named(keyboard::key::Named::Escape), _, _) => Message::Dismiss,
         _ => Message::Ignore,
     }
 }
@@ -2852,6 +2948,24 @@ mod tests {
             shortcut(named(keyboard::key::Named::F3, ctrl)),
             Message::EditRenameRegister
         ));
+
+        let slash = |modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("/".into()),
+            modified_key: Key::Character("/".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Slash),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(
+            shortcut(slash(ctrl)),
+            Message::EditComment
+        ));
+        assert!(matches!(
+            shortcut(slash(ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditCommentAbove
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -3268,6 +3382,61 @@ mod tests {
         assert_eq!(kept.comment.as_deref(), Some("the entry"));
     }
 
+    #[test]
+    fn an_inline_comment_and_an_above_comment_are_told_apart() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+
+        // The plain chord comments inline…
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged("the entry".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let kept = app
+            .annotations
+            .annotation_for(&format!("{address:#x}"))
+            .expect("the comment is there");
+        assert_eq!(kept.comment.as_deref(), Some("the entry"));
+        assert!(!kept.comment_above, "Ctrl+/ comments inline");
+
+        // …and the shifted chord stands the note above, on the same record.
+        let _ = app.update(Message::EditCommentAbove);
+        let _ = app.update(Message::PromptChanged("the loop head".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations.annotations.len(),
+            1,
+            "placement changes the record, it does not add one"
+        );
+        let kept = app
+            .annotations
+            .annotation_for(&format!("{address:#x}"))
+            .expect("the comment is there");
+        assert_eq!(kept.comment.as_deref(), Some("the loop head"));
+        assert!(kept.comment_above, "Ctrl+Shift+/ stands the note above");
+    }
+
+    #[test]
+    fn a_comment_reaches_the_listing_by_address() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditCommentAbove);
+        let _ = app.update(Message::PromptChanged("the loop head".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let renamed = app.renames();
+        let note = renamed
+            .comment_for(address)
+            .expect("the comment reaches the view by address");
+        assert_eq!(note.text, "the loop head");
+        assert!(note.above, "the placement travels with the note");
+        assert!(
+            renamed.comment_for(0xdeadbeef).is_none(),
+            "an address with no note has none to draw"
+        );
+    }
+
     /// A corpus whose index holds one plain function and one import, so a
     /// row exists that only the provider's own list shows with its space.
     fn temp_corpus(tag: &str) -> PathBuf {
@@ -3322,6 +3491,15 @@ mod tests {
             .annotation_for("EXTERNAL:0x1")
             .expect("the comment is keyed on the space");
         assert_eq!(kept.comment.as_deref(), Some("imported"));
+
+        // A view asks by the address it prints, so the spaced record must
+        // answer to the bare value — the way a rename of the same import
+        // already does.
+        let renamed = app.renames();
+        let comment = renamed
+            .comment_for(0x1)
+            .expect("the spaced comment resolves for a view");
+        assert_eq!(comment.text, "imported");
 
         let _ = fs::remove_dir_all(&dir);
     }
