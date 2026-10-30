@@ -107,6 +107,7 @@ impl Provider for CorpusProvider {
                 let (name, objc) = self.display_name(f);
                 FunctionRow {
                     address: f.address,
+                    space: f.space.clone(),
                     name,
                     status: f.status.clone(),
                     size: Self::body_size(f),

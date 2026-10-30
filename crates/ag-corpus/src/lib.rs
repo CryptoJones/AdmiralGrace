@@ -17,6 +17,13 @@ pub enum BodyRange {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub address: u64,
+    /// The address space the address is written in, when the record names one.
+    ///
+    /// A provider writes an address outside the default space as
+    /// `<space>:0x<hex>` — `EXTERNAL:0x1` for a function the target only
+    /// imports. The space is part of the address's meaning, so it is kept
+    /// rather than dropped, and the display says it.
+    pub space: Option<String>,
     pub name: Option<String>,
     pub status: String,
     pub path: PathBuf,
@@ -26,6 +33,15 @@ pub struct Function {
 impl Function {
     pub fn has_body(&self) -> bool {
         self.status == "written" && self.range.is_some()
+    }
+
+    /// The address as the record wrote it: `EXTERNAL:0x1` when it names a
+    /// space, plain `0x1` when it does not.
+    pub fn display_address(&self) -> String {
+        match &self.space {
+            Some(space) => format!("{space}:{:#x}", self.address),
+            None => format!("{:#x}", self.address),
+        }
     }
 }
 
@@ -59,7 +75,7 @@ impl FunctionJson {
     /// address, a range that cannot be read — is an error. The caller says so
     /// rather than dropping the record in silence.
     pub fn to_function(&self, corpus_root: &Path) -> Result<Function> {
-        let address = parse_addr(&self.address)
+        let (address, space) = parse_addr_space(&self.address)
             .with_context(|| format!("the address of {}", self.label()))?;
 
         let range = if self.body.available && !self.body.ranges.is_empty() {
@@ -94,6 +110,7 @@ impl FunctionJson {
 
         Ok(Function {
             address,
+            space,
             name,
             status: self.status.clone(),
             path,
@@ -109,6 +126,25 @@ impl FunctionJson {
             format!("{:?}", self.name)
         }
     }
+}
+
+/// Parse an address that may name an address space.
+///
+/// `EXTERNAL:0x1` is the address `0x1` in the space `EXTERNAL`; a plain
+/// hexadecimal address is in no named space. The space name is kept as the
+/// record wrote it. An empty space name, an empty value, or a value that is
+/// not hexadecimal is an error.
+pub fn parse_addr_space(s: &str) -> Result<(u64, Option<String>)> {
+    let trimmed = s.trim();
+    if let Some((space, value)) = trimmed.split_once(':') {
+        let space = space.trim();
+        if space.is_empty() {
+            return Err(anyhow::anyhow!("non-address {s:?}"));
+        }
+        let address = parse_addr(value).map_err(|_| anyhow::anyhow!("bad address {s:?}"))?;
+        return Ok((address, Some(space.to_string())));
+    }
+    Ok((parse_addr(trimmed)?, None))
 }
 
 /// Parse an address written as hexadecimal.
@@ -359,6 +395,60 @@ mod tests {
         for text in ["", "0x", "0X", "zzz", "0x1000h", "0x 1000", "-1"] {
             assert!(parse_addr(text).is_err(), "{text:?} is not an address");
         }
+    }
+
+    #[test]
+    fn an_address_naming_a_space_keeps_the_space() {
+        let (address, space) = parse_addr_space("EXTERNAL:0x1").expect("a spaced address");
+        assert_eq!(address, 0x1);
+        assert_eq!(space.as_deref(), Some("EXTERNAL"));
+
+        // The space is kept as written; the value reads like any address.
+        let (address, space) = parse_addr_space("external:0Xff").expect("a spaced address");
+        assert_eq!(address, 0xff);
+        assert_eq!(space.as_deref(), Some("external"));
+
+        // A plain address names no space.
+        let (address, space) = parse_addr_space("0x1000").expect("a plain address");
+        assert_eq!(address, 0x1000);
+        assert_eq!(space, None);
+    }
+
+    #[test]
+    fn a_malformed_spaced_address_is_refused() {
+        for text in [":0x1", "EXTERNAL:", "EXTERNAL:zz", "EXTERNAL:0x1:0x2"] {
+            assert!(
+                parse_addr_space(text).is_err(),
+                "{text:?} is not an address"
+            );
+        }
+    }
+
+    #[test]
+    fn an_external_record_is_kept_and_says_its_space() {
+        let dir = TempDir::new("external-record");
+        dir.write(
+            "decompile-index.json",
+            &index_with(concat!(
+                "{\"address\":\"EXTERNAL:0x1\",\"name\":\"<EXTERNAL>::qsort\",",
+                "\"status\":\"failed\",\"body\":{\"available\":false,",
+                "\"non_contiguous\":false,\"ranges\":[]}}"
+            )),
+        );
+
+        let corpus = Corpus::load(&dir.0).expect("a corpus");
+
+        assert!(
+            corpus.warnings.is_empty(),
+            "the record is kept, not skipped: {:?}",
+            corpus.warnings
+        );
+        assert_eq!(corpus.functions.len(), 1);
+        let f = &corpus.functions[0];
+        assert_eq!(f.address, 0x1);
+        assert_eq!(f.space.as_deref(), Some("EXTERNAL"));
+        assert_eq!(f.display_address(), "EXTERNAL:0x1");
+        assert!(corpus.by_address.contains_key(&0x1), "the address resolves");
     }
 
     #[test]

@@ -118,6 +118,8 @@ enum CorpusCmd {
 struct Entry {
     /// The function's entry address.
     address: u64,
+    /// The address space the source wrote the address in, when it named one.
+    space: Option<String>,
     /// The function's own name, or an empty string when it has none.
     name: String,
     /// The analysis status of the function.
@@ -132,6 +134,15 @@ impl Entry {
     /// Whether the function carries a name.
     fn named(&self) -> bool {
         !self.name.is_empty()
+    }
+
+    /// The address as the source wrote it: `EXTERNAL:0x1` when it names a
+    /// space, plain `0x1` when it does not.
+    fn display_address(&self) -> String {
+        match &self.space {
+            Some(space) => format!("{space}:{:#x}", self.address),
+            None => format!("{:#x}", self.address),
+        }
     }
 }
 
@@ -152,6 +163,7 @@ impl Source {
                 .iter()
                 .map(|f| Entry {
                     address: f.address,
+                    space: f.space.clone(),
                     name: f.name.clone().unwrap_or_default(),
                     status: f.status.clone(),
                     range: f.range.clone(),
@@ -163,6 +175,7 @@ impl Source {
                 .iter()
                 .map(|f| Entry {
                     address: f.address,
+                    space: None,
                     name: f.name.clone(),
                     status: if f.error.is_some() {
                         "failed".to_string()
@@ -348,7 +361,7 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
                         continue;
                     }
                 }
-                println!("{:#x} {:20} {}", entry.address, entry.status, name);
+                println!("{} {:20} {}", entry.display_address(), entry.status, name);
             }
         }
         CorpusCmd::Show { target } => {
@@ -356,7 +369,7 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
             let entry = &entries[index];
             let name = display_name(entry, overlay.as_ref());
             let name = truncate_chars(&name, 70);
-            println!("{} [{}] {:#x}", name, entry.status, entry.address);
+            println!("{} [{}] {}", name, entry.status, entry.display_address());
             if let Some(r) = &entry.range {
                 match r {
                     BodyRange::Contiguous { start, end } => {
@@ -396,7 +409,7 @@ fn corpus(root: PathBuf, methods: Option<PathBuf>, shift: String, cmd: CorpusCmd
                 };
                 if body.is_match(&text) {
                     let name = display_name(entry, overlay.as_ref());
-                    println!("{:#x} {name}", entry.address);
+                    println!("{} {name}", entry.display_address());
                 }
             }
         }
@@ -466,12 +479,24 @@ fn pick_body(entries: &[Entry], idxs: &[usize]) -> Result<usize> {
 
 /// The index of the function at the address `target` names, when it names one.
 ///
-/// The address may be written `0x1000`, `0X1000`, or as bare hexadecimal. A
-/// target that names no function is not an error here: it may still be a
+/// The address may be written `0x1000`, `0X1000`, or as bare hexadecimal, and
+/// it may name a space: `EXTERNAL:0x1` finds the function at `0x1` in the
+/// `EXTERNAL` space, and the space match ignores case. A bare address finds
+/// the function at that value whatever space it is in, the first one winning.
+/// A target that names no function is not an error here: it may still be a
 /// name, and the caller looks for one.
 fn address_index(entries: &[Entry], target: &str) -> Option<usize> {
-    let address = ag_corpus::parse_addr(target).ok()?;
-    entries.iter().position(|entry| entry.address == address)
+    let (address, space) = ag_corpus::parse_addr_space(target).ok()?;
+    match space {
+        Some(space) => entries.iter().position(|entry| {
+            entry.address == address
+                && entry
+                    .space
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&space))
+        }),
+        None => entries.iter().position(|entry| entry.address == address),
+    }
 }
 
 /// Shorten a string to at most `limit` characters.
@@ -494,6 +519,7 @@ mod tests {
         vec![
             Entry {
                 address: 0x1000,
+                space: None,
                 name: "one".into(),
                 status: "written".into(),
                 range: None,
@@ -501,12 +527,60 @@ mod tests {
             },
             Entry {
                 address: 0x2000,
+                space: None,
                 name: "two".into(),
                 status: "written".into(),
                 range: None,
                 has_body: true,
             },
         ]
+    }
+
+    /// A function in the default space and one in a named space, sharing a value.
+    fn spaced_entries() -> Vec<Entry> {
+        vec![
+            Entry {
+                address: 0x1,
+                space: None,
+                name: "local".into(),
+                status: "written".into(),
+                range: None,
+                has_body: true,
+            },
+            Entry {
+                address: 0x1,
+                space: Some("EXTERNAL".into()),
+                name: "<EXTERNAL>::qsort".into(),
+                status: "failed".into(),
+                range: None,
+                has_body: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_spaced_address_finds_the_function_in_that_space() {
+        let entries = spaced_entries();
+
+        assert_eq!(
+            resolve(&entries, None, "EXTERNAL:0x1").expect("the external"),
+            1,
+            "the space names the second function"
+        );
+        assert_eq!(
+            resolve(&entries, None, "external:0x1").expect("the external"),
+            1,
+            "the space match ignores case"
+        );
+        // A bare address names the value, and the first function wins.
+        assert_eq!(resolve(&entries, None, "0x1").expect("a function"), 0);
+    }
+
+    #[test]
+    fn a_spaced_address_is_displayed_with_its_space() {
+        let entries = spaced_entries();
+        assert_eq!(entries[0].display_address(), "0x1");
+        assert_eq!(entries[1].display_address(), "EXTERNAL:0x1");
     }
 
     #[test]

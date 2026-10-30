@@ -335,7 +335,7 @@ fn function_row<'a>(app: &'a App, row: &'a FunctionRow) -> Element<'a, Message> 
                 .width(Length::Fill),
         )
         .push(
-            Text::new(format!("{:#x}", row.address))
+            Text::new(row.display_address())
                 .size(11)
                 .color(color::MUTED)
                 .font(MONO),

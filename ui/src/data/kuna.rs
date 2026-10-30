@@ -192,6 +192,7 @@ impl Provider for KunaProvider {
             .iter()
             .map(|f| FunctionRow {
                 address: f.address,
+                space: None,
                 name: Self::display_name(f),
                 status: Self::status(f),
                 size: f.size,

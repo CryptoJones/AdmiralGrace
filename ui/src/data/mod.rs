@@ -49,6 +49,8 @@ impl AnalysisState {
 pub struct FunctionRow {
     /// Entry address.
     pub address: u64,
+    /// The address space the source wrote the address in, when it named one.
+    pub space: Option<String>,
     /// Best known name (symbol, Objective-C method, or generated).
     pub name: String,
     /// Analysis status reported for this function.
@@ -57,6 +59,17 @@ pub struct FunctionRow {
     pub size: Option<u64>,
     /// Whether the name came from an Objective-C method map.
     pub objc: bool,
+}
+
+impl FunctionRow {
+    /// The address as the source wrote it: `EXTERNAL:0x1` when it names a
+    /// space, plain `0x1` when it does not.
+    pub fn display_address(&self) -> String {
+        match &self.space {
+            Some(space) => format!("{space}:{:#x}", self.address),
+            None => format!("{:#x}", self.address),
+        }
+    }
 }
 
 /// Details about a single function, shown in the inspector.

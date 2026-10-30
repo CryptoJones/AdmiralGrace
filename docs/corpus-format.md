@@ -34,7 +34,7 @@ lives in `functions/<address>.c`, or wherever the entry's `relative_path` points
 
 | Field | Meaning |
 |---|---|
-| `address` | The function's entry address, as a hex string. |
+| `address` | The function's entry address, as a hex string. An address outside the default space names its space first — `EXTERNAL:0x1` is the address `0x1` in the `EXTERNAL` space — and the space is kept and displayed. |
 | `name` | The function's name. Empty when it has none. |
 | `status` | `written` when the body is there, `failed` when it is not. |
 | `relative_path` | Where the body lives, relative to the corpus root. Absent means `functions/<address>.c`. |
