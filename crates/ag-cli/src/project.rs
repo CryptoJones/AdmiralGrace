@@ -92,6 +92,18 @@ pub enum ProjectCmd {
         /// The name to record.
         name: String,
     },
+    /// Record a name for a register as one function prints it.
+    Reg {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function's address, with its space when it names one.
+        address: String,
+        /// The register's name, as the listing spells it: `rax`, `ebp`.
+        register: String,
+        /// The name to record.
+        name: String,
+    },
 }
 
 /// Run `ag project <target> …`: the target is the binary the project describes.
@@ -134,9 +146,45 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             address,
             variable,
             name,
-        } => edit_variable(&target, &file, &address, &variable, |a| {
-            a.name = Some(name);
-        }),
+        } => edit_named(
+            &target,
+            &file,
+            Named::Variable,
+            &address,
+            &variable,
+            |a| a.name = Some(name),
+        ),
+        ProjectCmd::Reg {
+            file,
+            address,
+            register,
+            name,
+        } => edit_named(
+            &target,
+            &file,
+            Named::Register,
+            &address,
+            &register,
+            |a| a.name = Some(name),
+        ),
+    }
+}
+
+/// Which keyed-on-one-thing record an edit reaches.
+enum Named {
+    /// A local variable of the function at the address.
+    Variable,
+    /// A register as the function at the address prints it.
+    Register,
+}
+
+impl Named {
+    /// The kind's label, as the report prints it.
+    fn label(self) -> &'static str {
+        match self {
+            Named::Variable => "variable",
+            Named::Register => "register",
+        }
     }
 }
 
@@ -193,11 +241,12 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
         println!("  option  {name} = {value}");
     }
     for annotation in &project.annotations {
-        // A variable record says which variable it names; the address alone
-        // would not tell it from the function's own record.
-        let target = match &annotation.variable {
-            Some(variable) => format!("{}::{variable}", annotation.address),
-            None => annotation.address.clone(),
+        // A variable or register record says which thing it names; the
+        // address alone would not tell it from the function's own record.
+        let target = match (&annotation.variable, &annotation.register) {
+            (Some(variable), _) => format!("{}::{variable}", annotation.address),
+            (_, Some(register)) => format!("{}::{register}", annotation.address),
+            (None, None) => annotation.address.clone(),
         };
         println!(
             "  {:9} {:>16}  {}",
@@ -250,28 +299,41 @@ fn edit(
     Ok(0)
 }
 
-/// Change the record naming the local variable `variable` at `address`.
-fn edit_variable(
+/// Change the record that names one thing — a variable, a register — at
+/// `address`, keyed on `thing` beside it.
+///
+/// The two records are the same shape: a name at one address, told apart
+/// from the address's own record by a key of their own. The caller says
+/// which record to reach and what to call the kind in the report.
+fn edit_named(
     target: &Path,
     file: &Path,
+    named: Named,
     address: &str,
-    variable: &str,
+    thing: &str,
     change: impl FnOnce(&mut Annotation),
 ) -> Result<i32> {
     let mut project = open_project(target, file)?;
-    change(project.variable_mut(address, variable));
-    project.prune();
-    project.save(file)?;
     let key = ag_corpus::project::canonical_address(address)
         .unwrap_or_else(|| address.to_string());
-    let kept = project.variable_for(&key, variable);
+    match named {
+        Named::Variable => change(project.variable_mut(&key, thing)),
+        Named::Register => change(project.register_mut(&key, thing)),
+    }
+    project.prune();
+    project.save(file)?;
+    let kept = match named {
+        Named::Variable => project.variable_for(&key, thing),
+        Named::Register => project.register_for(&key, thing),
+    };
+    let label = named.label();
     match kept {
         Some(a) => println!(
-            "{}: variable {key}::{variable} now {}",
+            "{}: {label} {key}::{thing} now {}",
             file.display(),
             summarize(a)
         ),
-        None => println!("{}: variable {key}::{variable} cleared", file.display()),
+        None => println!("{}: {label} {key}::{thing} cleared", file.display()),
     }
     Ok(0)
 }

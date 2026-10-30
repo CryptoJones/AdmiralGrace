@@ -453,6 +453,7 @@ fn line(
         mnemonic: mnemonic.to_string(),
         operands: operands.to_string(),
         call_target: None,
+        registers: Vec::new(),
         comment: comment.map(str::to_string),
     }
 }

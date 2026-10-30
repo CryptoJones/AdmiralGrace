@@ -205,6 +205,40 @@ fn a_label_and_a_variable_name_their_own_records() {
 }
 
 #[test]
+fn a_register_names_its_own_record() {
+    let file = TempFile::new("regs");
+    let (ok, _, stderr) = project(&["rename", "--file", &file.text(), "0x1149", "decode"]);
+    assert!(ok, "{stderr}");
+
+    // A register of the function at the entry is a third thing at the
+    // address: its own record, keyed on the register's name.
+    let (ok, stdout, stderr) =
+        project(&["reg", "--file", &file.text(), "0x1149", "rax", "result"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("register 0x1149::rax now name result"), "{stdout}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 2, "one address record, one register: {report}");
+    let address_record = annotations
+        .iter()
+        .find(|a| a["variable"].is_null() && a["register"].is_null())
+        .expect("the address record");
+    assert_eq!(address_record["name"], serde_json::json!("decode"));
+    let register_record = annotations
+        .iter()
+        .find(|a| a["register"] == serde_json::json!("rax"))
+        .expect("the register record");
+    assert_eq!(register_record["kind"], serde_json::json!("register"));
+    assert_eq!(register_record["name"], serde_json::json!("result"));
+
+    // show prints the register beside its address.
+    let (ok, report, stderr) = project(&["show", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(report.contains("0x1149::rax"), "{report}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

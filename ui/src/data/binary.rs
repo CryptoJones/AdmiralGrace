@@ -153,6 +153,7 @@ impl BinaryProvider {
             mnemonic: instruction.mnemonic.clone(),
             operands,
             call_target,
+            registers: instruction.registers.clone(),
             comment: instruction.comment.clone(),
         }
     }

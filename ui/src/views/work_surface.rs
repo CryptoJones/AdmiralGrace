@@ -241,7 +241,7 @@ fn listing_content(app: &App) -> Element<'_, Message> {
     }
 
     // The analyst's names, resolved once for the whole listing.
-    let renamed = app.renamed_names();
+    let renamed = app.renames();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for line in &app.work.listing {
@@ -261,7 +261,7 @@ fn listing_content(app: &App) -> Element<'_, Message> {
 fn listing_row<'a>(
     app: &'a App,
     line: &'a ListingLine,
-    renamed: &std::collections::HashMap<String, String>,
+    renamed: &crate::app::Renames,
 ) -> Element<'a, Message> {
     let focused = matches!(app.selection, Selection::Address(a) if a == line.address);
     let operands = App::shown_operands(line, renamed);
