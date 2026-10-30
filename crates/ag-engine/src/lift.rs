@@ -750,6 +750,46 @@ fn chains(
         .collect()
 }
 
+/// The expression `node` without the `- offset` the compiler put on a
+/// switch's index to bring its first case to zero, when that subtraction is
+/// there to be seen through the casts around it: `(unsigned)(a - 3)` with an
+/// offset of 3 is `(unsigned)a`. `None` when the offset is zero or the shape
+/// is not that.
+fn without_offset(node: &AstNode, offset: i64) -> Option<AstNode> {
+    if offset == 0 {
+        return None;
+    }
+    match node {
+        AstNode::Cast { ty, target } => Some(AstNode::Cast {
+            ty: ty.clone(),
+            target: Box::new(without_offset(target, offset)?),
+        }),
+        AstNode::Binary {
+            lhs,
+            op: BinaryOp::Sub,
+            rhs,
+        } => match rhs.as_ref() {
+            AstNode::Constant { value, .. } if *value as i64 == offset => Some((**lhs).clone()),
+            _ => None,
+        },
+        AstNode::Binary {
+            lhs,
+            op: BinaryOp::Add,
+            rhs,
+        } => match rhs.as_ref() {
+            AstNode::Constant { value, width_bytes }
+                if offset < 0 && (*value as i64) == -offset
+                    || (*width_bytes < 8
+                        && (*value as i64 - (1i64 << (*width_bytes * 8))) == -offset) =>
+            {
+                Some((**lhs).clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether the instruction is a branch of any kind: it may go somewhere
 /// other than the next instruction, and not by calling or returning.
 fn branches(ins: &DecodedInsn) -> bool {
@@ -1287,9 +1327,28 @@ impl<'a> Lifter<'a> {
                 let index = self.node_of(&value)?;
                 let mut addresses = vec![last.address];
                 addresses.extend(value.from.iter().copied());
+                // The case values the table records are the source's, but
+                // the register was read after the `sub` that brought the
+                // first case to zero, so the index says `a - 3` where the
+                // cases say 3, 4, 5. Where the subtraction is there to be
+                // seen, the index is read without it and the cases stand
+                // as the source wrote them; otherwise the cases come down
+                // to meet the index.
+                let (index, cases) = match without_offset(&index, table.base) {
+                    Some(index) => (index, cases.clone()),
+                    None => (
+                        index,
+                        cases
+                            .iter()
+                            .map(|(values, node)| {
+                                (values.iter().map(|v| v - table.base).collect(), *node)
+                            })
+                            .collect(),
+                    ),
+                };
                 Ok(Terminator::Switch {
                     index,
-                    cases: cases.clone(),
+                    cases,
                     addresses,
                 })
             }

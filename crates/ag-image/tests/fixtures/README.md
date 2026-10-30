@@ -97,3 +97,8 @@ gcc -O1 -fpie -pie -fno-stack-protector -fcf-protection=none \
 ```
 
 `classify` is at `0x401000` (table at `0x402000`) and at `0x1000` (table at `0x2000`).
+
+`switch_sub.elf` (from `switch_sub.c`, the same cases numbered 3..8, so gcc puts a `sub edi, 3`
+before the guard) and `switch_loop.elf` (from `switch_loop.c`, a `switch` inside a `for` with
+an arm that leaves the loop) are built the non-position-independent way. `classify` and `scan`
+are at `0x401000`.

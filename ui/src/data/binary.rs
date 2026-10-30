@@ -356,8 +356,8 @@ impl Provider for BinaryProvider {
         Some(self.byte_rows(address))
     }
 
-    fn set_jump_table_hints(&self, hints: BTreeMap<u64, ag_image::JumpTableHint>) {
-        self.binary.set_jump_table_hints(hints);
+    fn set_jump_table_hints(&self, hints: BTreeMap<u64, ag_image::JumpTableHint>) -> bool {
+        self.binary.set_jump_table_hints(hints)
     }
 
     fn references(&self, address: u64) -> Vec<Reference> {
@@ -465,8 +465,8 @@ impl Provider for BinaryProvider {
                 text: string.text.clone(),
                 section: Some(string.section.clone()),
                 functions: users
-                    .and_then(|users| users.get(&string.address))
-                    .cloned()
+                    .as_ref()
+                    .and_then(|users| users.get(&string.address).cloned())
                     .unwrap_or_default(),
             })
             .collect()

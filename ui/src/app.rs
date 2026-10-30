@@ -225,8 +225,8 @@ pub enum PromptKind {
         /// Whether the reference is being taken back rather than recorded.
         remove: bool,
     },
-    /// Where the jump table the selected `jmp` reads is: `TABLE COUNT
-    /// [WIDTH] [rel]`.
+    /// Where the jump table the selected `jmp` reads is: `TABLE [WIDTH]
+    /// COUNT [rel]`.
     Switch,
 }
 
@@ -2080,10 +2080,13 @@ impl App {
                 )
             })
             .collect();
-        self.provider.set_jump_table_hints(hints);
+        if !self.provider.set_jump_table_hints(hints) {
+            return;
+        }
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
         }
     }
 
@@ -2125,7 +2128,7 @@ impl App {
                     .unwrap_or_default();
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Switch,
-                    title: "Jump table (TABLE COUNT [WIDTH] [rel]; empty clears)",
+                    title: "Jump table (TABLE [WIDTH] COUNT [rel]; empty clears)",
                     value: current,
                 });
             }
@@ -2216,6 +2219,7 @@ impl App {
                 self.notice = Some(format!("Undid: {}", change.label));
                 self.redo.push(change);
                 self.refresh_functions();
+                self.refresh_listing();
                 self.tell_jump_tables();
             }
 
@@ -2231,6 +2235,7 @@ impl App {
                 self.notice = Some(format!("Redid: {}", change.label));
                 self.undo.push(change);
                 self.refresh_functions();
+                self.refresh_listing();
                 self.tell_jump_tables();
             }
 
@@ -2616,7 +2621,7 @@ impl App {
                                     Some(note) => Some(note),
                                     None => {
                                         self.notice = Some(format!(
-                                            "Not a jump table: {text:?} (TABLE COUNT, with a width of 4 or 8 between and rel after for offsets)"
+                                            "Not a jump table: {text:?} (TABLE COUNT, or TABLE WIDTH COUNT with a width of 4 or 8, and rel after for offsets)"
                                         ));
                                         return Task::none();
                                     }

@@ -1097,3 +1097,29 @@ fn the_pseudocode_of_a_switch_prints_its_cases() {
     assert!(report.starts_with("// classify at 0x1000\n"), "{report}");
     assert!(report.ends_with(expected), "{report}");
 }
+
+#[test]
+fn a_switch_whose_cases_start_above_zero_keeps_the_sources_values() {
+    // gcc brings the first case to zero with `sub edi, 3` before the guard;
+    // the cases are 3..8 in the source, and the switch says so on `a`.
+    let report = image("switch_sub.elf", &["pseudocode", "classify"]);
+    assert!(
+        report.contains("switch ((unsigned long)(unsigned int)a) {\n"),
+        "{report}"
+    );
+    assert!(report.contains("  case 3:\n"), "{report}");
+    assert!(report.contains("  case 8:\n"), "{report}");
+    assert!(!report.contains("case 0:"), "{report}");
+    assert!(!report.contains("case 9:"), "{report}");
+    let report = image("switch_sub.elf", &["cfg", "classify"]);
+    assert!(report.contains("    case 3 -> 0x401011\n"), "{report}");
+
+    // A switch inside a loop lifts, and no arm leaves the loop with a
+    // `break` that would only leave the switch.
+    let report = image("switch_loop.elf", &["pseudocode", "scan"]);
+    assert!(
+        report.contains("switch ((unsigned long)(unsigned int)(edx_2 & 7)) {\n"),
+        "{report}"
+    );
+    assert!(report.contains("do {\n"), "{report}");
+}
