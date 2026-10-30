@@ -238,10 +238,14 @@ what has been found:
   words separated by spaces or commas, and prefills the ones already there; an empty submit
   clears them. A tag is trimmed, and a space inside one becomes a hyphen.
 - Typing `#tag` into the navigator's filter keeps only the functions carrying that tag,
-  whatever its case. Any other filter text still matches names.
+  spelled as it is stored — `#Crypto` and `#crypto` are two tags. Any other filter text still
+  matches names.
 
-The **Tags** explore section lists every tag with how many places carry it, and clicking
-one filters the function list to those places. Two tags are the analysis's own and need no
+The **Tags** explore section lists every tag with how many functions carry it, and clicking
+one filters the function list to those functions. A tag on a place that is not a function —
+a bare address, a block of bytes — is counted beside the row as `+N places`, since the
+function list cannot show it; the inspector shows it at that address. Two tags are the
+analysis's own and need no
 hand: `entry` marks the function the program starts in, and `objc:Class` marks each method
 the Objective-C method map named, by its class, so one class's methods gather under one tag.
 Automatic tags are read off the analysis as the views draw, not written to the project file,

@@ -237,9 +237,24 @@ impl Annotation {
         let Some(tag) = normalize_tag(tag) else {
             return;
         };
-        if let Err(at) = self.tags.binary_search(&tag) {
+        // The list is small and may have come from a file another tool
+        // wrote in its own order, so membership is a scan, not a search
+        // that trusts the order.
+        if !self.tags.contains(&tag) {
+            let at = self
+                .tags
+                .iter()
+                .position(|t| *t > tag)
+                .unwrap_or(self.tags.len());
             self.tags.insert(at, tag);
         }
+    }
+
+    /// Put the tags in the stored order — sorted, unique, each normalized —
+    /// whatever order a file wrote them in.
+    pub fn normalize_tags(&mut self) {
+        let tags = std::mem::take(&mut self.tags);
+        self.set_tags(tags);
     }
 
     /// Take the tag `tag` off the target; a tag it does not carry is left
@@ -266,7 +281,7 @@ impl Annotation {
 
     /// Whether the target carries the tag `tag`.
     pub fn has_tag(&self, tag: &str) -> bool {
-        normalize_tag(tag).is_some_and(|tag| self.tags.binary_search(&tag).is_ok())
+        normalize_tag(tag).is_some_and(|tag| self.tags.contains(&tag))
     }
 
     /// Whether this annotation carries nothing; a carried-empty annotation
@@ -468,7 +483,10 @@ impl ProjectFile {
     pub fn tags(&self) -> BTreeMap<String, usize> {
         let mut tags = BTreeMap::new();
         for annotation in self.places() {
-            for tag in &annotation.tags {
+            // A record is one place: a tag it somehow carries twice counts
+            // once.
+            let carried: std::collections::BTreeSet<&String> = annotation.tags.iter().collect();
+            for tag in carried {
                 *tags.entry(tag.clone()).or_insert(0) += 1;
             }
         }
@@ -526,7 +544,15 @@ impl ProjectFile {
                 FORMAT_VERSION
             );
         }
-        serde_json::from_str(raw).context("parsing the project file")
+        let mut project: ProjectFile =
+            serde_json::from_str(raw).context("parsing the project file")?;
+        // Another tool may write a record's tags in its own order, or
+        // twice; they are put in the stored order here so every lookup
+        // afterwards sees one shape.
+        for annotation in &mut project.annotations {
+            annotation.normalize_tags();
+        }
+        Ok(project)
     }
 
     /// The project as JSON text.
@@ -862,6 +888,26 @@ mod tests {
         let text = project.to_json().unwrap();
         let read = ProjectFile::from_json(&text).unwrap();
         assert_eq!(read.tags(), index);
+    }
+
+    #[test]
+    fn tags_another_tool_wrote_out_of_order_read_in_the_stored_order() {
+        let raw = r##"{"format":3,"annotations":[
+            {"kind":"function","address":"0x10","tags":["b","c","a"," a ","two words","c"]}
+        ]}"##;
+        let project = ProjectFile::from_json(raw).unwrap();
+        let record = project.annotation_for("0x10").unwrap();
+        assert_eq!(record.tags, ["a", "b", "c", "two-words"]);
+        assert!(record.has_tag("a"));
+        assert_eq!(project.tags().get("c"), Some(&1), "one place, not two");
+        assert_eq!(project.tagged("a").len(), 1);
+
+        // A record built by hand in the wrong order still answers right.
+        let mut loose = Annotation::new(TargetKind::Address, "0x20");
+        loose.tags = vec!["z".into(), "a".into()];
+        assert!(loose.has_tag("a"));
+        loose.add_tag("a");
+        assert_eq!(loose.tags, ["z", "a"], "no duplicate added");
     }
 
     #[test]

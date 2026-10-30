@@ -236,6 +236,19 @@ pub struct Navigator {
     pub selected: Option<u64>,
     /// Counts for the explore sections.
     pub counts: SectionCounts,
+    /// Every tag in the project with what carries it, in tag order,
+    /// worked out when the function list is.
+    pub tags: BTreeMap<String, TagCount>,
+}
+
+/// What carries one tag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TagCount {
+    /// How many functions carry it: what filtering by the tag lists.
+    pub functions: usize,
+    /// How many other places carry it — a bare address, a block of bytes —
+    /// which the function list cannot show.
+    pub places: usize,
 }
 
 /// The center work surface.
@@ -429,6 +442,7 @@ impl App {
                 rows: Vec::new(),
                 selected: None,
                 counts: SectionCounts::default(),
+                tags: BTreeMap::new(),
             },
             work: WorkSurface::default(),
             bottom: BottomPanel {
@@ -650,26 +664,24 @@ impl App {
         let filter = self.navigator.filter.trim().to_lowercase();
         // A filter that starts with `#` names a tag rather than a piece of a
         // name: `#crypto` keeps the functions carrying that tag, the
-        // analyst's own or an automatic one.
+        // analyst's own or an automatic one. The tag is matched as it is
+        // stored — spelled the same, case and all — so the filter agrees
+        // with the Tags section, which lists `Crypto` and `crypto` apart.
         let tag = self
             .navigator
             .filter
             .trim()
             .strip_prefix('#')
-            .map(str::trim);
+            .map(ag_corpus::project::normalize_tag);
         let entry = self.entry_address();
-        let rows = self
-            .provider
-            .functions()
+        let functions = self.provider.functions();
+        self.navigator.tags = self.tag_index_of(&functions, entry);
+        let rows = functions
             .into_iter()
-            .filter(|row| match tag {
-                Some(tag) => {
-                    !tag.is_empty()
-                        && self
-                            .function_tags(row, entry)
-                            .iter()
-                            .any(|carried| carried.eq_ignore_ascii_case(tag))
-                }
+            .filter(|row| match &tag {
+                Some(Some(tag)) => self.function_tags(row, entry).contains(tag),
+                // A bare `#` names no tag and matches nothing.
+                Some(None) => false,
                 None => true,
             })
             .map(|mut row| {
@@ -724,23 +736,41 @@ impl App {
         }
     }
 
-    /// Every tag in the project with how many places carry it, in tag
-    /// order: the analyst's own tags on any place, and the automatic tags
-    /// on the functions.
-    pub(crate) fn tag_index(&self) -> BTreeMap<String, usize> {
-        let mut index = self.annotations.tags();
-        let entry = self.entry_address();
-        for row in self.provider.functions() {
-            for tag in automatic_tags(&row, entry) {
-                // An automatic tag the analyst also gave by hand is one
-                // tag on one place, not two.
-                let given = self
-                    .annotations
-                    .annotation_for(&row.display_address())
-                    .is_some_and(|a| a.has_tag(&tag));
-                if !given {
-                    *index.entry(tag).or_insert(0) += 1;
-                }
+    /// Every tag in the project with what carries it, in tag order: the
+    /// analyst's own tags on any place, and the automatic tags on the
+    /// functions.
+    ///
+    /// A tag is counted on functions apart from other places because the
+    /// function list is what filtering by the tag shows; a tag on a bare
+    /// address or a block of bytes is counted beside it so the section
+    /// does not promise a row the list cannot give.
+    fn tag_index_of(
+        &self,
+        functions: &[FunctionRow],
+        entry: Option<u64>,
+    ) -> BTreeMap<String, TagCount> {
+        let mut index: BTreeMap<String, TagCount> = BTreeMap::new();
+        let mut function_keys = std::collections::HashSet::new();
+        for row in functions {
+            let written = row.display_address();
+            function_keys
+                .insert(ag_corpus::project::canonical_address(&written).unwrap_or(written));
+            for tag in self.function_tags(row, entry) {
+                index.entry(tag).or_default().functions += 1;
+            }
+        }
+        for (tag, places) in self.annotations.tags() {
+            // The analyst's tags on functions were counted with the rows;
+            // what is left is the places that are not functions.
+            let on_functions = self
+                .annotations
+                .tagged(&tag)
+                .iter()
+                .filter(|a| function_keys.contains(&a.address))
+                .count();
+            let elsewhere = places.saturating_sub(on_functions);
+            if elsewhere > 0 {
+                index.entry(tag).or_default().places += elsewhere;
             }
         }
         index
@@ -2351,7 +2381,6 @@ pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
     out
 }
 
-/// Map a key press onto a workbench command.
 /// The tags the analysis implies for the function `row`, given the
 /// program's entry point when it has one.
 ///
@@ -2384,6 +2413,7 @@ fn objc_class(name: &str) -> Option<&str> {
     (!class.is_empty()).then_some(class)
 }
 
+/// Map a key press onto a workbench command.
 fn shortcut(event: keyboard::Event) -> Message {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return Message::Ignore;
@@ -3680,10 +3710,15 @@ mod tests {
         let _ = app.update(Message::PromptChanged("Crypto".into()));
         let _ = app.update(Message::PromptSubmit);
 
-        // Typing the tag with a hash narrows the list, whatever the case.
-        let _ = app.update(Message::NavigatorFilterChanged("#crypto".into()));
+        // Typing the tag with a hash narrows the list. The tag is matched
+        // as stored, so a different case is a different tag.
+        let _ = app.update(Message::NavigatorFilterChanged("#Crypto".into()));
         assert_eq!(app.navigator.rows.len(), 1);
         assert_eq!(app.navigator.rows[0].address, tagged);
+        let _ = app.update(Message::NavigatorFilterChanged("# Crypto ".into()));
+        assert_eq!(app.navigator.rows.len(), 1, "the spaces around are noise");
+        let _ = app.update(Message::NavigatorFilterChanged("#crypto".into()));
+        assert!(app.navigator.rows.is_empty());
 
         // A bare hash matches nothing rather than everything.
         let _ = app.update(Message::NavigatorFilterChanged("#".into()));
@@ -3732,8 +3767,16 @@ mod tests {
         // The sample's Objective-C method shows up in the index, filters the
         // list, and is one tag on one place when the analyst gives it too.
         let mut app = app();
-        let index = app.tag_index();
-        assert_eq!(index.get("objc:SignalService"), Some(&1), "{index:?}");
+        let one_function = TagCount {
+            functions: 1,
+            places: 0,
+        };
+        assert_eq!(
+            app.navigator.tags.get("objc:SignalService"),
+            Some(&one_function),
+            "{:?}",
+            app.navigator.tags
+        );
         assert_eq!(app.tags_at(0x100084A20), ["objc:SignalService"]);
         let _ = app.update(Message::NavigatorFilterChanged(
             "#objc:SignalService".into(),
@@ -3745,8 +3788,50 @@ mod tests {
         let _ = app.update(Message::EditTags);
         let _ = app.update(Message::PromptChanged("objc:SignalService".into()));
         let _ = app.update(Message::PromptSubmit);
-        assert_eq!(app.tag_index().get("objc:SignalService"), Some(&1));
+        assert_eq!(
+            app.navigator.tags.get("objc:SignalService"),
+            Some(&one_function)
+        );
         assert_eq!(app.tags_at(0x100084A20), ["objc:SignalService"]);
+    }
+
+    #[test]
+    fn the_tag_index_tells_functions_from_other_places() {
+        let mut app = app();
+        // The same tag on a function and on a bare address: the section
+        // says one function, and one place the list cannot show.
+        let _ = app.update(Message::FunctionSelected(0x100081D60));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("loop".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::AddressSelected(0x100084A28));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("loop".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.navigator.tags.get("loop"),
+            Some(&TagCount {
+                functions: 1,
+                places: 1
+            })
+        );
+        let _ = app.update(Message::TagSelected("loop".into()));
+        assert_eq!(
+            app.navigator.rows.len(),
+            1,
+            "the function; the address has no row"
+        );
+
+        // Two cases are two tags, each on its own place.
+        let _ = app.update(Message::FunctionSelected(0x100084A20));
+        let _ = app.update(Message::EditTags);
+        let _ = app.update(Message::PromptChanged("Loop".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.tags.get("Loop").map(|c| c.functions), Some(1));
+        assert_eq!(app.navigator.tags.get("loop").map(|c| c.functions), Some(1));
+        let _ = app.update(Message::TagSelected("Loop".into()));
+        assert_eq!(app.navigator.rows.len(), 1);
+        assert_eq!(app.navigator.rows[0].address, 0x100084A20);
     }
 
     #[test]

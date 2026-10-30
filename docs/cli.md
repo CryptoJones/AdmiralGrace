@@ -401,7 +401,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET reg --file FILE ADDRESS REGISTER NAME` | Records a name for the register `REGISTER` within the function at `ADDRESS`, spelled as the listing spells it. The rename reaches that function's pseudocode and listing alone. |
 | `ag project TARGET comment --file FILE ADDRESS TEXT` | Records a comment at `ADDRESS`; `--above` stands it on its own line over the instruction instead of inline. Empty `TEXT` clears the comment, placement and all. |
 | `ag project TARGET bookmark --file FILE ADDRESS` | Flips a bookmark on the function at `ADDRESS`. |
-| `ag project TARGET tag --file FILE ADDRESS TAG…` | Attaches one or more tags to the address; `--remove` takes them off, and `--on function` or `--on block` puts them on the function entered there or the block of bytes starting there. A tag is one word: it is trimmed, and a space inside one becomes a hyphen. |
+| `ag project TARGET tag --file FILE ADDRESS TAG…` | Attaches one or more tags to the address; `--remove` takes them off, and `--on function` or `--on block` puts them on the function entered there or the block of bytes starting there. A tag is one word: it is trimmed, a space inside one becomes a hyphen, and `a,b` is two tags. |
 | `ag project TARGET tags FILE [TAG]` | Prints every tag with how many places carry it; with `TAG`, the places carrying it, in address order. |
 
 ## `ag catalog`: the engine's options

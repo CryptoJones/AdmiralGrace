@@ -5,7 +5,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
-use crate::app::{App, Message};
+use crate::app::{App, Message, TagCount};
 use crate::data::{DataSymbolEntry, FunctionRow, SegmentEntry};
 use crate::theme::{color, MONO};
 use crate::views::{count, count_or_indexing, section_header, subtle};
@@ -188,7 +188,7 @@ fn list_count(app: &App) -> usize {
     match app.navigator.section {
         Section::Segments => app.provider.segments().len() + app.provider.data_symbols().len(),
         Section::Bookmarks => app.annotations.bookmarks().len(),
-        Section::Tags => app.tag_index().len(),
+        Section::Tags => app.navigator.tags.len(),
         _ => app.navigator.rows.len(),
     }
 }
@@ -464,12 +464,14 @@ fn bookmark_list(app: &App) -> Column<'_, Message> {
     list
 }
 
-/// The tags, each with how many places carry it, in tag order.
+/// The tags, each with how many functions carry it, in tag order.
 ///
-/// Clicking a tag filters the function list to the places carrying it, the
-/// way typing `#tag` into the filter does.
+/// Clicking a tag filters the function list to the functions carrying it,
+/// the way typing `#tag` into the filter does. A tag on a place that is
+/// not a function — a bare address, a block — is counted beside the row
+/// in its own words, since the list cannot show it.
 fn tag_list(app: &App) -> Column<'_, Message> {
-    let index = app.tag_index();
+    let index = &app.navigator.tags;
 
     if index.is_empty() {
         return Column::new()
@@ -490,10 +492,10 @@ fn tag_list(app: &App) -> Column<'_, Message> {
         .strip_prefix('#')
         .map(|tag| tag.trim().to_string());
 
-    for (tag, places) in index {
+    for (tag, TagCount { functions, places }) in index {
         let selected = active.as_deref() == Some(tag.as_str());
 
-        let content = Row::new()
+        let mut content = Row::new()
             .align_y(Alignment::Center)
             .spacing(6)
             .push(Text::new("#").size(11).color(color::PURPLE).font(MONO))
@@ -502,13 +504,23 @@ fn tag_list(app: &App) -> Column<'_, Message> {
                     .size(12)
                     .color(color::TEXT)
                     .width(Length::Fill),
-            )
-            .push(
-                Text::new(count(places))
-                    .size(11)
-                    .color(color::MUTED)
-                    .font(MONO),
             );
+        if *places > 0 {
+            content = content.push(
+                Text::new(format!(
+                    "+{places} place{}",
+                    if *places == 1 { "" } else { "s" }
+                ))
+                .size(11)
+                .color(color::DIM),
+            );
+        }
+        content = content.push(
+            Text::new(count(*functions))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO),
+        );
 
         let surface = Container::new(content)
             .padding([5, 7])
@@ -528,7 +540,7 @@ fn tag_list(app: &App) -> Column<'_, Message> {
             });
 
         let element: Element<'_, Message> = mouse_area(surface)
-            .on_press(Message::TagSelected(tag))
+            .on_press(Message::TagSelected(tag.clone()))
             .into();
 
         list = list.push(element);
@@ -553,7 +565,7 @@ fn explore_list(app: &App) -> Column<'_, Message> {
             Section::Segments => counts.segments,
             Section::Types => counts.types,
             Section::Bookmarks => app.annotations.bookmarks().len(),
-            Section::Tags => app.tag_index().len(),
+            Section::Tags => app.navigator.tags.len(),
             Section::Functions => counts.functions,
         };
 

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 
-use ag_corpus::project::{sha256_of, Annotation, ProjectFile, Target, TargetKind};
+use ag_corpus::project::{parse_tags, sha256_of, Annotation, ProjectFile, Target, TargetKind};
 
 /// What to do with a project file.
 #[derive(Subcommand)]
@@ -77,7 +77,7 @@ pub enum ProjectCmd {
         file: PathBuf,
         /// The address, with its space when it names one.
         address: String,
-        /// The tags to attach, one word each.
+        /// The tags to attach, one word each; `a,b` is two.
         #[arg(required = true)]
         tags: Vec<String>,
         /// Take the tags off instead of attaching them.
@@ -173,11 +173,13 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             remove,
             on,
         } => edit(&target, &file, on.into(), &address, |a| {
-            for tag in &tags {
+            // Each argument reads the way the workbench's prompt does, so
+            // `crypto,parser` is two tags here as it is there.
+            for tag in tags.iter().flat_map(|tag| parse_tags(tag)) {
                 if remove {
-                    a.remove_tag(tag);
+                    a.remove_tag(&tag);
                 } else {
-                    a.add_tag(tag);
+                    a.add_tag(&tag);
                 }
             }
         }),

@@ -295,6 +295,31 @@ fn tags_attach_detach_and_are_listed() {
     );
     let (ok, _, stderr) = project(&["tag", "--file", &file.text(), "0x1161", "crypto"]);
     assert!(ok, "{stderr}");
+    // A block of bytes is a place of its own kind, and a comma splits tags
+    // the way the workbench's prompt does.
+    let (ok, stdout, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--on",
+        "block",
+        "0x1200",
+        "data,table",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("region 0x1200 now tags data,table"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1200",
+        "data,table",
+    ]);
+    assert!(ok, "{stderr}");
 
     // Every tag with its count, in tag order.
     let (ok, report, stderr) = project(&["tags", &file.text()]);
