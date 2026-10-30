@@ -750,28 +750,32 @@ fn hex_row<'a>(
             .iter()
             .any(|&(start, length)| address >= start && address < start + length as u64);
 
+        // A byte is picked by clicking it, so Edit bytes… starts there.
         hex = hex.push(
-            Container::new(
-                Text::new(format!("{byte:02X}"))
-                    .size(12)
-                    .color(if marked {
-                        color::CYAN
-                    } else if written {
-                        color::AMBER
+            mouse_area(
+                Container::new(
+                    Text::new(format!("{byte:02X}"))
+                        .size(12)
+                        .color(if marked {
+                            color::CYAN
+                        } else if written {
+                            color::AMBER
+                        } else {
+                            color::BYTES
+                        })
+                        .font(MONO),
+                )
+                .width(Length::Fixed(21.0))
+                .style(move |_| container::Style {
+                    background: if marked {
+                        Some(Background::Color(color::FOCUS_BG))
                     } else {
-                        color::BYTES
-                    })
-                    .font(MONO),
+                        None
+                    },
+                    ..container::Style::default()
+                }),
             )
-            .width(Length::Fixed(21.0))
-            .style(move |_| container::Style {
-                background: if marked {
-                    Some(Background::Color(color::FOCUS_BG))
-                } else {
-                    None
-                },
-                ..container::Style::default()
-            }),
+            .on_press(Message::AddressSelected(address)),
         );
     }
 

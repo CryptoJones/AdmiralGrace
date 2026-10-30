@@ -110,6 +110,8 @@ pub enum Message {
     EditAssemble,
     /// Fill the selected instruction with the architecture's no-op.
     EditNop,
+    /// Edit the bytes at the selection, as hex pairs.
+    EditBytes,
     /// Fill a run of bytes from the selection with the no-op.
     EditNopRange,
     /// Show the constants in the selected instruction's operands the next
@@ -239,6 +241,8 @@ pub enum PromptKind {
     /// How far from the selection to fill with the no-op: an address to
     /// stop before, or `+N` bytes.
     Nop,
+    /// The bytes at the selection, as hex pairs.
+    Bytes,
 }
 
 /// How the analyst marks the bytes at the selection.
@@ -2069,6 +2073,7 @@ impl App {
                         | PromptKind::Switch
                         | PromptKind::Assemble
                         | PromptKind::Nop
+                        | PromptKind::Bytes
                 )
             }),
             _ => false,
@@ -2083,6 +2088,21 @@ impl App {
             }
         }
         task
+    }
+
+    /// `len` bytes from `address` as the byte pane shows them, when the
+    /// pane holds that run.
+    fn bytes_at(&self, address: u64, len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len);
+        for offset in 0..len as u64 {
+            let at = address + offset;
+            let byte = self.work.bytes.iter().find_map(|row| {
+                (row.address <= at && at < row.address + row.bytes.len() as u64)
+                    .then(|| row.bytes[(at - row.address) as usize])
+            })?;
+            out.push(byte);
+        }
+        Some(out)
     }
 
     /// Fill `len` bytes from `address` with the no-op, as a patch that says
@@ -2186,6 +2206,37 @@ impl App {
     /// Carry out one message.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditBytes => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the bytes to edit".into());
+                    return Task::none();
+                };
+                if self.provider.bitness().is_none() {
+                    self.notice = Some("Editing bytes needs a program image".into());
+                    return Task::none();
+                }
+                // The prompt starts from what is there: the patch written
+                // here before, else the bytes of the instruction the
+                // selection sits on as the image reads them now, else the
+                // one byte.
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.patch.clone())
+                    .or_else(|| {
+                        let len = self.provider.instruction_length_at(address).unwrap_or(1);
+                        self.bytes_at(address, len)
+                            .map(|bytes| ag_corpus::project::hex_of_bytes(&bytes))
+                    })
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Bytes,
+                    title: "Bytes here (hex pairs; empty takes the patch off)",
+                    value: current,
+                });
+            }
+
             Message::EditNop => {
                 let Some(address) = self.selection.address() else {
                     self.notice = Some("Select the instruction to fill with nop".into());
@@ -2741,6 +2792,41 @@ impl App {
                             } else {
                                 format!("Referenced {key} → {target}")
                             });
+                        }
+                    }
+                    PromptKind::Bytes => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            let kind = self.kind_at(address);
+                            if text.is_empty() {
+                                self.annotations.write_patch(kind, &key, None);
+                                self.notice = Some(format!("Patch taken off {key}"));
+                            } else {
+                                let Some(bytes) = ag_corpus::project::bytes_of_hex(text) else {
+                                    self.notice = Some(format!(
+                                        "Not bytes: {text:?} (hex pairs, such as 90 or B8 01 00 00 00)"
+                                    ));
+                                    return Task::none();
+                                };
+                                // Bytes past the section's end have nowhere to go.
+                                let end = self.provider.section_end(address).unwrap_or(u64::MAX);
+                                if address.saturating_add(bytes.len() as u64) > end {
+                                    self.notice = Some(format!(
+                                        "{} bytes from {key} run past the end of the section at {end:#x}",
+                                        bytes.len()
+                                    ));
+                                    return Task::none();
+                                }
+                                // Through the same door as every patch, so one
+                                // it overlaps comes off.
+                                self.annotations
+                                    .write_patch(kind, &key, Some((&bytes, None)));
+                                self.notice = Some(format!(
+                                    "Wrote {} at {key}",
+                                    ag_corpus::project::hex_of_bytes(&bytes)
+                                ));
+                            }
                         }
                     }
                     PromptKind::Nop => {
@@ -3756,6 +3842,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("j"), true, true) => Message::EditSwitch,
         // An instruction written over the bytes at the selection.
         (Key::Character("e"), true, true) => Message::EditAssemble,
+        // The bytes at the selection, edited as hex.
+        (Key::Character("y"), true, true) => Message::EditBytes,
         // The selected instruction, or a run from it, filled with nop.
         (Key::Character("o"), true, true) => Message::EditNop,
         (Key::Character("r"), true, true) => Message::EditNopRange,
@@ -4661,6 +4749,10 @@ mod tests {
         assert!(matches!(
             shortcut(chord("o", "O", keyboard::key::Code::KeyO)),
             Message::EditNop
+        ));
+        assert!(matches!(
+            shortcut(chord("y", "Y", keyboard::key::Code::KeyY)),
+            Message::EditBytes
         ));
         assert!(matches!(
             shortcut(chord("r", "R", keyboard::key::Code::KeyR)),
@@ -6088,6 +6180,99 @@ mod tests {
 
     fn switch_elf() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/switch.elf")
+    }
+
+    #[test]
+    fn the_bytes_at_the_selection_are_edited_as_hex_and_the_listing_follows() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let add = 0x1149;
+        let _ = app.update(Message::FunctionSelected(add));
+        let before = app.work.listing.clone();
+
+        // The prompt starts from the bytes of the instruction here.
+        let _ = app.update(Message::AddressSelected(add));
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(before[0].bytes.as_str())
+        );
+
+        // Two bytes typed over the one-byte `push rbp`: `xor eax, eax`.
+        let _ = app.update(Message::PromptChanged("31 c0".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("Wrote 31 C0 at 0x1149"));
+        assert_eq!(app.work.listing[0].mnemonic, "xor");
+        assert_eq!(app.work.listing[0].bytes, "31 C0");
+        let record = app
+            .annotations
+            .annotation_for("0x1149")
+            .expect("the record");
+        assert_eq!(record.patch.as_deref(), Some("31 C0"));
+        assert!(
+            record.patch_text.is_none(),
+            "typed bytes, not an instruction"
+        );
+        let row = app
+            .work
+            .bytes
+            .iter()
+            .find(|row| row.address <= add && add < row.address + row.bytes.len() as u64)
+            .expect("the bytes pane shows the address");
+        assert_eq!(row.bytes[(add - row.address) as usize], 0x31);
+        assert_eq!(app.undo.len(), 1);
+
+        // Bytes past the section's end are refused; bytes over an older
+        // patch take it off.
+        let _ = app.update(Message::EditBytes);
+        let _ = app.update(Message::PromptChanged("90 ".repeat(100_000)));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("past the end of the section")));
+        assert_eq!(app.undo.len(), 1);
+        let _ = app.update(Message::AddressSelected(add + 1));
+        let _ = app.update(Message::EditBytes);
+        let _ = app.update(Message::PromptChanged("cc".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x114a").is_some());
+        let _ = app.update(Message::AddressSelected(add));
+        let _ = app.update(Message::EditBytes);
+        let _ = app.update(Message::PromptChanged("31 c0".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.annotations.annotation_for("0x114a").is_none(),
+            "the overlapped patch is gone"
+        );
+        assert_eq!(app.undo.len(), 3);
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.undo.len(), 1);
+
+        // Editing again starts from the patch; half a byte is refused.
+        let _ = app.update(Message::EditBytes);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("31 C0"));
+        let _ = app.update(Message::PromptChanged("9".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not bytes")));
+        assert_eq!(app.undo.len(), 1);
+
+        // Undo and an empty submit both put the file's bytes back.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.work.listing[0].mnemonic, before[0].mnemonic);
+        let _ = app.update(Message::EditRedo);
+        let _ = app.update(Message::EditBytes);
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x1149").is_none());
+        assert_eq!(app.work.listing[0].mnemonic, before[0].mnemonic);
     }
 
     #[test]
