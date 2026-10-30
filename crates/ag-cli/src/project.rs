@@ -4,9 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `patch`, `asm`) so
-//! a script or an agent can build a project without editing JSON by hand,
-//! and reports the tags the analyst gave (`tags`).
+//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `patch`, `asm`,
+//! `nop`) so a script or an agent can build a project without editing JSON
+//! by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -189,6 +189,22 @@ pub enum ProjectCmd {
         address: String,
         /// The instruction, in Intel syntax: `mov eax, 1`.
         text: String,
+    },
+    /// Fill a run of bytes with the architecture's no-op: the instruction
+    /// at an address, or as many bytes as said.
+    Nop {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address of the first byte, with its space when it names one.
+        address: String,
+        /// How many bytes to fill; without it, the instruction at the
+        /// address, as long as it is.
+        #[arg(long, conflicts_with = "to")]
+        len: Option<usize>,
+        /// Fill up to, not including, this address.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -416,6 +432,43 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 }
             }
             edit_patch(&target, &file, &address, Some((&bytes, Some(text.trim()))))
+        }
+        ProjectCmd::Nop {
+            file,
+            address,
+            len,
+            to,
+        } => {
+            let at = ag_corpus::parse_addr_space(&address)
+                .map(|(value, _)| value)
+                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let len = match (len, to) {
+                (Some(len), _) => len,
+                (None, Some(to)) => {
+                    let end = ag_corpus::parse_addr_space(&to)
+                        .map(|(value, _)| value)
+                        .map_err(|_| anyhow::anyhow!("{to:?} is not an address"))?;
+                    usize::try_from(end.checked_sub(at).context("--to is before the address")?)?
+                }
+                (None, None) => {
+                    // The instruction at the address, as long as it is.
+                    let image = ag_image::Binary::open(&target)
+                        .with_context(|| format!("reading {}", target.display()))?;
+                    image.instruction_length_at(at).with_context(|| {
+                        format!("no instruction starts at {at:#x}; say --len or --to")
+                    })?
+                }
+            };
+            anyhow::ensure!(len > 0, "nothing to fill");
+            let bytes = ag_image::no_ops(len);
+            let text = if len == 1 {
+                "nop".to_string()
+            } else {
+                format!("nop x{len}")
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_patch(Some((&bytes, Some(&text))))
+            })
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {

@@ -694,6 +694,35 @@ fn a_patch_is_written_over_the_image_and_assembled_from_text() {
 }
 
 #[test]
+fn a_run_of_bytes_is_filled_with_no_ops() {
+    let file = TempFile::new("nop");
+    // The instruction at the address, as long as it is: add's `endbr64`.
+    let (ok, stdout, stderr) = project(&["nop", "--file", &file.text(), "0x1149"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1149 now patch 90 90 90 90 (nop x4)"),
+        "{stdout}"
+    );
+    // As many bytes as said, either way of saying it.
+    let (ok, stdout, stderr) = project(&["nop", "--file", &file.text(), "0x1150", "--len", "3"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1150 now patch 90 90 90 (nop x3)"),
+        "{stdout}"
+    );
+    let (ok, stdout, stderr) =
+        project(&["nop", "--file", &file.text(), "0x1160", "--to", "0x1162"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1160 now patch 90 90 (nop x2)"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x1160", "--to", "0x1150"]);
+    assert!(!ok);
+    assert!(stderr.contains("before the address"), "{stderr}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

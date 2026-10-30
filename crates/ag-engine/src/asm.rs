@@ -82,6 +82,13 @@ enum Typed {
     R8(AsmRegister8),
 }
 
+/// The architecture's no-op, `len` bytes of it: x86's one-byte `nop`
+/// repeated, which decodes as `len` instructions that do nothing, in
+/// either width.
+pub fn no_ops(len: usize) -> Vec<u8> {
+    vec![0x90; len]
+}
+
 /// Assemble the one instruction `text` as it would sit at `address` in a
 /// program of width `bitness`, to its bytes.
 pub fn assemble(text: &str, address: u64, bitness: Bitness) -> Result<Vec<u8>, NotAssembled> {
@@ -941,6 +948,13 @@ mod tests {
         assemble(text, 0x401000, Bitness::Bits64)
             .expect_err(text)
             .reason
+    }
+
+    #[test]
+    fn a_run_of_no_ops_is_that_many_nops() {
+        assert_eq!(no_ops(3), [0x90, 0x90, 0x90]);
+        assert!(no_ops(0).is_empty());
+        assert_eq!(asm("nop"), no_ops(1));
     }
 
     #[test]

@@ -108,6 +108,10 @@ pub enum Message {
     EditSwitch,
     /// Assemble an instruction over the bytes at the selection.
     EditAssemble,
+    /// Fill the selected instruction with the architecture's no-op.
+    EditNop,
+    /// Fill a run of bytes from the selection with the no-op.
+    EditNopRange,
     /// Show the constants in the selected instruction's operands the next
     /// way round: hex, signed, decimal, octal, as an address.
     EditOperandFormat,
@@ -232,6 +236,9 @@ pub enum PromptKind {
     Switch,
     /// An instruction to assemble over the bytes at the selection.
     Assemble,
+    /// How far from the selection to fill with the no-op: an address to
+    /// stop before, or `+N` bytes.
+    Nop,
 }
 
 /// How the analyst marks the bytes at the selection.
@@ -2044,7 +2051,10 @@ impl App {
         // is read before either and compared after, and a difference is
         // one change undo remembers, labelled by what the notice said.
         let edits = match &message {
-            Message::EditBookmark | Message::EditMark(_) | Message::EditOperandFormat => true,
+            Message::EditBookmark
+            | Message::EditMark(_)
+            | Message::EditOperandFormat
+            | Message::EditNop => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -2058,6 +2068,7 @@ impl App {
                         | PromptKind::Reference { .. }
                         | PromptKind::Switch
                         | PromptKind::Assemble
+                        | PromptKind::Nop
                 )
             }),
             _ => false,
@@ -2072,6 +2083,27 @@ impl App {
             }
         }
         task
+    }
+
+    /// Fill `len` bytes from `address` with the no-op, as a patch that says
+    /// so, and say what was done.
+    fn nop_at(&mut self, address: u64, len: usize) {
+        let key = self.annotation_key(address);
+        let kind = self.kind_at(address);
+        let bytes = ag_image::no_ops(len);
+        let text = if len == 1 {
+            "nop".to_string()
+        } else {
+            format!("nop x{len}")
+        };
+        self.annotations
+            .annotation_mut(kind, &key)
+            .set_patch(Some((&bytes, Some(&text))));
+        self.annotations.prune();
+        self.notice = Some(format!(
+            "Filled {len} byte{} at {key} with nop",
+            if len == 1 { "" } else { "s" }
+        ));
     }
 
     /// Tell the analysis which bytes the analyst wrote over the image's,
@@ -2145,6 +2177,40 @@ impl App {
     /// Carry out one message.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditNop => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the instruction to fill with nop".into());
+                    return Task::none();
+                };
+                if self.provider.bitness().is_none() {
+                    self.notice = Some("Filling with nop needs a program image".into());
+                    return Task::none();
+                }
+                let Some(len) = self.provider.instruction_length_at(address) else {
+                    self.notice = Some(format!(
+                        "No instruction starts at {address:#x}; NOP a range to say how far"
+                    ));
+                    return Task::none();
+                };
+                self.nop_at(address, len);
+            }
+
+            Message::EditNopRange => {
+                if self.selection.address().is_none() {
+                    self.notice = Some("Select where the nops start".into());
+                    return Task::none();
+                }
+                if self.provider.bitness().is_none() {
+                    self.notice = Some("Filling with nop needs a program image".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Nop,
+                    title: "Fill with nop up to (an address to stop before, or +N bytes)",
+                    value: String::new(),
+                });
+            }
+
             Message::EditAssemble => {
                 let Some(address) = self.selection.address() else {
                     self.notice = Some("Select the instruction to write over".into());
@@ -2666,6 +2732,28 @@ impl App {
                             } else {
                                 format!("Referenced {key} → {target}")
                             });
+                        }
+                    }
+                    PromptKind::Nop => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            let len = if let Some(count) = text.strip_prefix('+') {
+                                count.trim().parse::<usize>().ok()
+                            } else {
+                                ag_corpus::parse_addr_space(text)
+                                    .ok()
+                                    .and_then(|(end, _)| end.checked_sub(address))
+                                    .and_then(|len| usize::try_from(len).ok())
+                            };
+                            match len {
+                                Some(len) if len > 0 => self.nop_at(address, len),
+                                _ => {
+                                    self.notice = Some(format!(
+                                        "Not a reach: {text:?} (an address after {address:#x} to stop before, or +N bytes)"
+                                    ));
+                                    return Task::none();
+                                }
+                            }
                         }
                     }
                     PromptKind::Assemble => {
@@ -3629,7 +3717,7 @@ fn shortcut(event: keyboard::Event) -> Message {
     };
 
     match (key.as_ref(), modifiers.command(), modifiers.shift()) {
-        (Key::Character("o"), true, _) => Message::FileOpenCorpus,
+        (Key::Character("o"), true, false) => Message::FileOpenCorpus,
         (Key::Character("q"), true, _) => Message::FileQuit,
         // The plain chord shows or hides the navigator; Shift marks the
         // selection with a bookmark.
@@ -3659,6 +3747,9 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("j"), true, true) => Message::EditSwitch,
         // An instruction written over the bytes at the selection.
         (Key::Character("e"), true, true) => Message::EditAssemble,
+        // The selected instruction, or a run from it, filled with nop.
+        (Key::Character("o"), true, true) => Message::EditNop,
+        (Key::Character("r"), true, true) => Message::EditNopRange,
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -3666,7 +3757,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         // own line above the instruction.
         (Key::Character("/"), true, false) => Message::EditComment,
         (Key::Character("/"), true, true) => Message::EditCommentAbove,
-        (Key::Character("r"), true, _) => Message::FileReload,
+        (Key::Character("r"), true, false) => Message::FileReload,
         (Key::Character("s"), true, _) => Message::FileSaveProject,
         (Key::Named(keyboard::key::Named::F2), true, _) => Message::EditRenameVariable,
         (Key::Named(keyboard::key::Named::F2), false, _) => Message::EditRename,
@@ -4557,6 +4648,14 @@ mod tests {
         assert!(matches!(
             shortcut(chord("e", "E", keyboard::key::Code::KeyE)),
             Message::EditAssemble
+        ));
+        assert!(matches!(
+            shortcut(chord("o", "O", keyboard::key::Code::KeyO)),
+            Message::EditNop
+        ));
+        assert!(matches!(
+            shortcut(chord("r", "R", keyboard::key::Code::KeyR)),
+            Message::EditNopRange
         ));
         assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
         assert!(matches!(
@@ -5980,6 +6079,82 @@ mod tests {
 
     fn switch_elf() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/switch.elf")
+    }
+
+    #[test]
+    fn an_instruction_or_a_run_of_bytes_is_filled_with_nops() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let add = 0x1149;
+        let _ = app.update(Message::FunctionSelected(add));
+        let before = app.work.listing.len();
+
+        // The one instruction: add's `endbr64` is four bytes, which become
+        // four one-byte nops.
+        let _ = app.update(Message::AddressSelected(add));
+        let _ = app.update(Message::EditNop);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Filled 4 bytes at 0x1149 with nop")
+        );
+        assert!(app.work.listing[..4]
+            .iter()
+            .all(|line| line.mnemonic == "nop"));
+        assert_eq!(app.work.listing.len(), before + 3);
+        let record = app
+            .annotations
+            .annotation_for("0x1149")
+            .expect("the record");
+        assert_eq!(record.patch.as_deref(), Some("90 90 90 90"));
+        assert_eq!(record.patch_text.as_deref(), Some("nop x4"));
+        assert_eq!(app.undo.len(), 1);
+
+        // A run from the next instruction, said as +N.
+        let second = app.work.listing[4].address;
+        let _ = app.update(Message::AddressSelected(second));
+        let _ = app.update(Message::EditNopRange);
+        let _ = app.update(Message::PromptChanged("+4".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for(&format!("{second:#x}"))
+                .and_then(|a| a.patch.clone())
+                .as_deref(),
+            Some("90 90 90 90")
+        );
+        assert!(app.work.listing[4..8]
+            .iter()
+            .all(|line| line.mnemonic == "nop"));
+
+        // Said as an address to stop before, and refused when it reaches
+        // nowhere.
+        let _ = app.update(Message::EditNopRange);
+        let _ = app.update(Message::PromptChanged(format!("{:#x}", second + 2)));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for(&format!("{second:#x}"))
+                .and_then(|a| a.patch.clone())
+                .as_deref(),
+            Some("90 90")
+        );
+        let _ = app.update(Message::EditNopRange);
+        let _ = app.update(Message::PromptChanged(format!("{:#x}", second - 2)));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not a reach")));
+
+        // Undo puts the instructions back.
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        assert_ne!(app.work.listing[0].mnemonic, "nop");
+        assert_eq!(app.work.listing.len(), before);
     }
 
     #[test]

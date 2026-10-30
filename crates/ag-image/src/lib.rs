@@ -52,7 +52,7 @@ use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Image};
 use anyhow::{Context, Result};
 
-pub use ag_engine::asm::{assemble, NotAssembled};
+pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::options;
