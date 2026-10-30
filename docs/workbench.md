@@ -204,9 +204,8 @@ and the pseudocode — where a renamed function, local, or register is replaced 
 word, so `add` never reaches into `address`. A renamed register also reaches the operands of
 the listing and graph, including inside a memory operand, so a renamed `rbp` reads
 `[frame-0x8]`. The provider's own text is never rewritten; the names are applied as the
-views draw. Returning the analysis's own name clears the annotation. A bookmark toggles. An
-annotation that carries nothing is dropped on save, so the file says only what the analyst
-changed.
+views draw. Returning the analysis's own name clears the annotation. An annotation that
+carries nothing is dropped on save, so the file says only what the analyst changed.
 
 A comment is the analyst's note at one address, and the analyst chooses where it stands:
 
@@ -219,6 +218,18 @@ of its own in each; an inline one rides at the end. The disassembler's own comme
 bytes point at) keeps its slot beside the instruction, so the two never fight for the same
 place. The prompt prefills the comment already there, so moving a note between inline and
 above is a re-submit.
+
+A bookmark marks a place of interest so the analyst can come back to it:
+
+- **Toggle bookmark** (Ctrl+Shift+B) marks or clears the selected place.
+
+The **Bookmarks** explore section lists every marked place in address order, and clicking a
+row jumps to it: a function entry opens the function across the work surface, and any other
+address moves the selection there. A bookmark borrows the name of the place it marks — the
+analyst's own name for the address when there is one (a label, F3), the function's name at a
+function entry, and the address itself where nothing names the place — so naming a bookmark
+means naming the place. The section's count is the analyst's own marks, not something the
+analysis reported.
 
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a

@@ -163,7 +163,6 @@ impl Provider for SampleProvider {
             strings: 2106,
             segments: 12,
             types: 86,
-            bookmarks: 4,
         }
     }
 

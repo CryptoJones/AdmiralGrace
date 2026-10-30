@@ -380,6 +380,29 @@ impl ProjectFile {
             .and_then(|a| a.name.clone())
     }
 
+    /// The analyst's bookmarks, in address order.
+    ///
+    /// A bookmark marks a place, so only address records appear here; a
+    /// variable or register record is a thing at a place, not the place
+    /// itself, and is skipped even when the flag is set. An address that
+    /// parses to no value keeps its stored spelling and sorts last.
+    pub fn bookmarks(&self) -> Vec<&Annotation> {
+        let mut marked: Vec<&Annotation> = self
+            .annotations
+            .iter()
+            .filter(|a| a.bookmark && a.variable.is_none() && a.register.is_none())
+            .collect();
+        marked.sort_by_key(|a| {
+            (
+                crate::parse_addr_space(&a.address)
+                    .map(|(value, _)| value)
+                    .ok(),
+                a.address.clone(),
+            )
+        });
+        marked
+    }
+
     /// Drop every annotation that carries nothing.
     pub fn prune(&mut self) {
         self.annotations.retain(|a| !a.is_empty());
@@ -644,6 +667,35 @@ mod tests {
         assert_eq!(text.matches("\"register\":").count(), 1, "{text}");
         let read = ProjectFile::from_json(&text).expect("the text reads back");
         assert_eq!(read, project);
+    }
+
+    #[test]
+    fn the_bookmarks_come_back_in_address_order() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x2000")
+            .bookmark = true;
+        project
+            .annotation_mut(TargetKind::Address, "0x100")
+            .bookmark = true;
+        project
+            .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
+            .bookmark = true;
+        // A marked thing that is not a place — a register — is not a bookmark.
+        project.register_mut("0x3000", "rax").bookmark = true;
+        // An unmarked address is not a bookmark either.
+        project.annotation_mut(TargetKind::Address, "0x999").name = Some("x".into());
+
+        let marked: Vec<&str> = project
+            .bookmarks()
+            .iter()
+            .map(|a| a.address.as_str())
+            .collect();
+        assert_eq!(
+            marked,
+            ["EXTERNAL:0x1", "0x100", "0x2000"],
+            "in address order, the space first, the register skipped"
+        );
     }
 
     #[test]
