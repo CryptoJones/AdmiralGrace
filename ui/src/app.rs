@@ -1967,13 +1967,7 @@ impl App {
                 // two are different because a function fills the work
                 // surface while a bare address only moves the panes that
                 // follow the selection.
-                if self.provider.function_detail(address).is_some()
-                    || self
-                        .provider
-                        .functions()
-                        .iter()
-                        .any(|row| row.address == address)
-                {
+                if self.provider.function_detail(address).is_some() {
                     return self.select_function(address, true);
                 }
                 self.selection = Selection::Address(address);
@@ -2011,7 +2005,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }

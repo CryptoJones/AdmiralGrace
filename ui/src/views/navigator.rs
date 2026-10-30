@@ -391,38 +391,41 @@ fn bookmark_list(app: &App) -> Column<'_, Message> {
 
     for annotation in marked {
         // The stored address is canonical; a place in a named space keys on
-        // its value, the way every other view asks for it.
-        let Some(address) = ag_corpus::parse_addr_space(&annotation.address)
+        // its value, the way every other view asks for it. A record whose
+        // address parses to no value — a hand-edited file, say — is still
+        // listed, so the count and the list agree, but there is nowhere to
+        // jump, so its row does not press.
+        let address = ag_corpus::parse_addr_space(&annotation.address)
             .map(|(value, _)| value)
-            .ok()
-        else {
-            continue;
-        };
+            .ok();
 
-        let selected =
+        let selected = address.is_some_and(|address| {
             matches!(app.selection, crate::model::Selection::Address(a) if a == address)
-                || app.navigator.selected == Some(address);
+                || app.navigator.selected == Some(address)
+        });
 
-        let content = Row::new()
+        // A place named only by its address shows the address once.
+        let name = address.map(|address| app.place_name(address));
+        let shows_address = name.as_deref() != Some(annotation.address.as_str());
+
+        let mut content = Row::new()
             .align_y(Alignment::Center)
             .spacing(6)
+            .push(Text::new("★").size(11).color(color::AMBER))
             .push(
-                Text::new("★")
-                    .size(11)
-                    .color(color::AMBER),
-            )
-            .push(
-                Text::new(app.place_name(address))
+                Text::new(name.unwrap_or_else(|| annotation.address.clone()))
                     .size(12)
                     .color(color::TEXT)
                     .width(Length::Fill),
-            )
-            .push(
+            );
+        if shows_address {
+            content = content.push(
                 Text::new(annotation.address.clone())
                     .size(11)
                     .color(color::MUTED)
                     .font(MONO),
             );
+        }
 
         let surface = Container::new(content)
             .padding([5, 7])
@@ -441,9 +444,12 @@ fn bookmark_list(app: &App) -> Column<'_, Message> {
                 ..container::Style::default()
             });
 
-        let element: Element<'_, Message> = mouse_area(surface)
-            .on_press(Message::BookmarkSelected(address))
-            .into();
+        let element: Element<'_, Message> = match address {
+            Some(address) => mouse_area(surface)
+                .on_press(Message::BookmarkSelected(address))
+                .into(),
+            None => surface.into(),
+        };
 
         list = list.push(element);
     }
