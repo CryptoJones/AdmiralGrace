@@ -712,3 +712,31 @@ fn a_branch_past_the_next_function_ends_the_procedure_when_told_to() {
     assert_eq!(cfg.blocks.len(), 1);
     assert_eq!(cfg.blocks[0].to, 0x40100d);
 }
+
+#[test]
+fn a_conditional_branch_past_the_next_function_leaves_on_the_taken_side_only() {
+    // 401000: je 401007 (into helper) ; 401002: ret ; ... helper at 401007
+    let bytes = [
+        0x74, 0x05, 0xc3, 0x90, 0x90, 0x90, 0x90, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3,
+    ];
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, &bytes, 0x401000).unwrap();
+    let bounded = Bounded {
+        functions: vec![0x401000, 0x401007],
+        ends: true,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &bounded);
+    let entry = cfg.blocks.iter().find(|b| b.from == 0x401000).unwrap();
+    assert_eq!(
+        entry.successor_addresses,
+        [0x401002],
+        "only the fall-through"
+    );
+    assert_eq!(
+        cfg.tail_calls,
+        [TailCall {
+            site: 0x401000,
+            target: 0x401007
+        }]
+    );
+}

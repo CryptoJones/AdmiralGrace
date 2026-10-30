@@ -115,4 +115,10 @@ gcc -nostdlib -static -no-pie -Wl,-e,main -o boundaries.elf boundaries.s
 ```
 
 `main` is at `0x401000`, `helper` at `0x401007`, the shared `ret` at `0x40100c` and the
-unnamed routine at `0x401010`.
+unnamed routine at `0x401010`. `boundaries32.elf` is the same source built `-m32`, where the
+assembler pads with `lea esi, [esi+0]` rather than `nop`: `main` at `0x8049000`, the padding
+at `0x804900d`, the unnamed routine at `0x8049010`.
+
+```sh
+gcc -m32 -nostdlib -static -no-pie -Wl,-e,main -o boundaries32.elf boundaries.s
+```

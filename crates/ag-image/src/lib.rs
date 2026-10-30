@@ -531,7 +531,19 @@ impl Binary {
             }
         }
         if self.options.code_sections == CodeSections::Procedures {
-            self.functions = self.every_procedure();
+            // Each procedure found is a function the next walks stop at —
+            // and, under `branches-end-procedures`, bound their branches
+            // by — so the list is worked out again until it stops growing.
+            loop {
+                let found = self.every_procedure();
+                if found == self.functions {
+                    break;
+                }
+                self.functions = found;
+                if let Ok(mut cache) = self.disassembly.lock() {
+                    cache.clear();
+                }
+            }
         }
         self
     }
@@ -561,26 +573,49 @@ impl Binary {
             return functions;
         }
         let mut covered: BTreeSet<u64> = BTreeSet::new();
+        // The instructions are in address order, so a block's run of them
+        // is found by a binary search for its start and read to its end.
         let cover = |covered: &mut BTreeSet<u64>, entry: u64, code: &FileSection| {
             let decoded = code.decoded();
             let cfg = self.walk(&decoded.disasm, entry);
+            let instructions = &decoded.disasm.instructions;
             for block in &cfg.blocks {
+                let start = instructions.partition_point(|ins| ins.address < block.from);
                 covered.extend(
-                    decoded
-                        .disasm
-                        .instructions
+                    instructions[start..]
                         .iter()
-                        .map(|ins| ins.address)
-                        .filter(|address| block.contains(*address)),
+                        .take_while(|ins| ins.address < block.to)
+                        .map(|ins| ins.address),
                 );
             }
         };
+        // Padding is what an assembler fills alignment with: `nop` in its
+        // forms, `int3`, `ud2`, the `lea esi, [esi+0]` and `mov r, r` of
+        // 32-bit GNU code, and bytes that do not decode at all.
         let is_padding = |ins: &DecodedInsn| {
-            ins.flow == Flow::Invalid
-                || matches!(
-                    iced_x86::Mnemonic::try_from(ins.mnemonic as usize),
-                    Ok(iced_x86::Mnemonic::Nop | iced_x86::Mnemonic::Int3)
-                )
+            use ag_engine::cpu_context::Operand;
+            if ins.flow == Flow::Invalid {
+                return true;
+            }
+            match iced_x86::Mnemonic::try_from(ins.mnemonic as usize) {
+                Ok(
+                    iced_x86::Mnemonic::Nop | iced_x86::Mnemonic::Int3 | iced_x86::Mnemonic::Ud2,
+                ) => true,
+                Ok(iced_x86::Mnemonic::Lea) => matches!(
+                    ins.operands.as_slice(),
+                    [Operand::Register(dst), Operand::Mem {
+                        base,
+                        index,
+                        disp: 0,
+                        ..
+                    }] if dst.class == base.class && dst.index == base.index && index.bit_size == 0
+                ),
+                Ok(iced_x86::Mnemonic::Mov) => matches!(
+                    ins.operands.as_slice(),
+                    [Operand::Register(dst), Operand::Register(src)] if dst == src
+                ),
+                _ => false,
+            }
         };
         for code in self.file.iter().filter(|code| code.section.executable) {
             for function in &self.functions {
