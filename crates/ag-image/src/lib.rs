@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 // The trait that spells one register the way the operand text does.
 use iced_x86::Formatter as _;
 
-use ag_engine::cfgwalk::{resolve_branches_among, Entries};
+use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
 use ag_engine::lift::{lift_function, Pointee, Symbols};
@@ -52,6 +52,8 @@ use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
 
+pub use ag_engine::cfg::JumpTable;
+pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::options;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
@@ -285,6 +287,8 @@ pub struct ControlFlowGraph {
     pub blocks: Vec<Block>,
     /// The edges between the blocks.
     pub edges: Vec<Edge>,
+    /// The jump tables the function's indirect jumps read.
+    pub jump_tables: Vec<JumpTable>,
 }
 
 /// The disassembly of one function.
@@ -302,6 +306,9 @@ pub struct Disassembly {
     pub calls: Vec<Call>,
     /// The addresses the instructions of the function point at.
     pub pointers: Vec<Pointer>,
+    /// The jump tables the function's indirect jumps read: the cases of
+    /// each `switch`, recovered from the code or told by the analyst.
+    pub jump_tables: Vec<JumpTable>,
 }
 
 /// The calls between the functions of an image.
@@ -364,13 +371,23 @@ pub struct Binary {
     wide_strings: Vec<ImageString>,
     /// The engine's options, fixed for the life of the image.
     options: Options,
+    /// What the analyst said about the jump tables the image's indirect
+    /// jumps read, by the address of the jump.
+    table_hints: Mutex<BTreeMap<u64, TableHint>>,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
-    graph: OnceLock<CallGraph>,
-    string_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
-    data_users: OnceLock<BTreeMap<u64, Vec<u64>>>,
+    /// The program-wide indexes, each built once from every function's
+    /// walk and forgotten when the walks change: a jump table the analyst
+    /// places can reach blocks that call, or that read a string or data.
+    graph: Mutex<Option<Arc<CallGraph>>>,
+    string_users: Mutex<Option<Arc<Users>>>,
+    data_users: Mutex<Option<Arc<Users>>>,
 }
+
+/// The functions that use each thing — a string, a piece of data — by the
+/// thing's address.
+type Users = BTreeMap<u64, Vec<u64>>;
 
 impl std::fmt::Debug for Binary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -484,12 +501,13 @@ impl Binary {
             strings,
             wide_strings,
             options: Options::default(),
+            table_hints: Mutex::new(BTreeMap::new()),
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
-            graph: OnceLock::new(),
-            string_users: OnceLock::new(),
-            data_users: OnceLock::new(),
+            graph: Mutex::new(None),
+            string_users: Mutex::new(None),
+            data_users: Mutex::new(None),
         }
     }
 
@@ -503,6 +521,35 @@ impl Binary {
             cache.clear();
         }
         self
+    }
+
+    /// Tell the image where the jump tables are that its code does not
+    /// say: one hint per indirect jump, by the jump's address. The walks
+    /// and the pseudocode built so far are forgotten, since the graph of
+    /// a function may have grown cases.
+    pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) -> bool {
+        if let Ok(mut held) = self.table_hints.lock() {
+            if *held == hints {
+                return false;
+            }
+            *held = hints;
+        }
+        if let Ok(mut cache) = self.disassembly.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        // The program-wide indexes were built from the old walks.
+        for index in [&self.string_users, &self.data_users] {
+            if let Ok(mut held) = index.lock() {
+                *held = None;
+            }
+        }
+        if let Ok(mut held) = self.graph.lock() {
+            *held = None;
+        }
+        true
     }
 
     /// The engine's options this image is read with.
@@ -645,8 +692,11 @@ impl Binary {
     /// The functions that refer to each string, by the address of the string.
     ///
     /// This needs the whole program read, so it is worked out once and kept.
-    pub fn string_users(&self) -> &BTreeMap<u64, Vec<u64>> {
-        self.string_users.get_or_init(|| {
+    pub fn string_users(&self) -> Arc<BTreeMap<u64, Vec<u64>>> {
+        if let Some(built) = self.string_users.lock().ok().and_then(|held| held.clone()) {
+            return built;
+        }
+        let built = Arc::new({
             let mut users: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
 
             for function in &self.functions {
@@ -659,15 +709,19 @@ impl Binary {
             }
 
             users
-        })
+        });
+        if let Ok(mut held) = self.string_users.lock() {
+            *held = Some(Arc::clone(&built));
+        }
+        built
     }
 
     /// The functions that refer to each string, when they have been worked out.
     ///
     /// This does not wait for the map: a reader that must not block asks this,
     /// and gets nothing until the whole program has been read.
-    pub fn string_users_ready(&self) -> Option<&BTreeMap<u64, Vec<u64>>> {
-        self.string_users.get()
+    pub fn string_users_ready(&self) -> Option<Arc<BTreeMap<u64, Vec<u64>>>> {
+        self.string_users.lock().ok().and_then(|held| held.clone())
     }
 
     /// The data the function at `address` refers to.
@@ -719,8 +773,11 @@ impl Binary {
     /// The functions that refer to each piece of data, by its address.
     ///
     /// This needs the whole program read, so it is worked out once and kept.
-    pub fn data_users(&self) -> &BTreeMap<u64, Vec<u64>> {
-        self.data_users.get_or_init(|| {
+    pub fn data_users(&self) -> Arc<BTreeMap<u64, Vec<u64>>> {
+        if let Some(built) = self.data_users.lock().ok().and_then(|held| held.clone()) {
+            return built;
+        }
+        let built = Arc::new({
             let mut users: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
 
             for function in &self.functions {
@@ -733,7 +790,11 @@ impl Binary {
             }
 
             users
-        })
+        });
+        if let Ok(mut held) = self.data_users.lock() {
+            *held = Some(Arc::clone(&built));
+        }
+        built
     }
 
     /// The functions that refer to each piece of data, when they have been
@@ -741,8 +802,8 @@ impl Binary {
     ///
     /// This does not wait for the map: a reader that must not block asks this,
     /// and gets nothing until the whole program has been read.
-    pub fn data_users_ready(&self) -> Option<&BTreeMap<u64, Vec<u64>>> {
-        self.data_users.get()
+    pub fn data_users_ready(&self) -> Option<Arc<BTreeMap<u64, Vec<u64>>>> {
+        self.data_users.lock().ok().and_then(|held| held.clone())
     }
 
     /// The data symbol at `address`, when the image has one there.
@@ -881,6 +942,7 @@ impl Binary {
             section: disassembly.section.clone(),
             blocks: disassembly.blocks.clone(),
             edges,
+            jump_tables: disassembly.jump_tables.clone(),
         }))
     }
 
@@ -906,8 +968,11 @@ impl Binary {
     ///
     /// The graph is built over every function's control-flow graph, once, and
     /// kept.
-    pub fn call_graph(&self) -> &CallGraph {
-        self.graph.get_or_init(|| {
+    pub fn call_graph(&self) -> Arc<CallGraph> {
+        if let Some(built) = self.graph.lock().ok().and_then(|held| held.clone()) {
+            return built;
+        }
+        let built = Arc::new({
             let mut graph = CallGraph::default();
 
             for function in &self.functions {
@@ -929,7 +994,11 @@ impl Binary {
             }
 
             graph
-        })
+        });
+        if let Ok(mut held) = self.graph.lock() {
+            *held = Some(Arc::clone(&built));
+        }
+        built
     }
 
     /// The functions reachable from the entry point.
@@ -1184,6 +1253,7 @@ impl Binary {
             blocks,
             calls,
             pointers,
+            jump_tables: cfg.jump_tables.clone(),
         })
     }
 }
@@ -1198,6 +1268,25 @@ impl Entries for Binary {
 
     fn is_import_slot(&self, slot: u64) -> bool {
         self.imports.contains_key(&slot)
+    }
+
+    /// A jump table's entry is read out of the file's bytes, little-endian,
+    /// where the file holds them.
+    fn table_entry(&self, address: u64, width: u8) -> Option<u64> {
+        let bytes = self.bytes_at(address, width as usize)?;
+        if bytes.len() != width as usize {
+            return None;
+        }
+        Some(
+            bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, byte| (value << 8) | *byte as u64),
+        )
+    }
+
+    fn table_hint(&self, site: u64) -> Option<TableHint> {
+        self.table_hints.lock().ok()?.get(&site).copied()
     }
 }
 

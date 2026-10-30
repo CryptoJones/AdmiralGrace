@@ -1,4 +1,4 @@
-use ag_engine::cfgwalk::{resolve_branches, resolve_branches_among, Entries};
+use ag_engine::cfgwalk::{resolve_branches, resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::X86IcedContext;
 use ag_engine::pipeline::Disasm;
 use ag_engine::TailCall;
@@ -389,4 +389,248 @@ fn a_jmp_through_an_import_slot_is_a_tail_call_to_the_slot() {
     assert_eq!(cfg.blocks.len(), 1);
     assert!(cfg.blocks[0].successor_addresses.is_empty());
     assert!(cfg.tail_calls.is_empty());
+}
+
+/// A `switch` of six cases compiled without position independence, as
+/// `gcc -O1 -fno-pic -no-pie` lays it out: the index is bounded by a
+/// compare, zero-extended, and jumps through an absolute table of 8-byte
+/// entries.
+///
+/// ```text
+/// 401000: cmp    edi,0x5
+/// 401003: ja     40102d
+/// 401005: mov    edi,edi
+/// 401007: jmp    QWORD PTR [rdi*8+0x402000]
+/// 40100e: mov    eax,0xa     ; ret        case 0
+/// 401014: mov    eax,[rip+…] ; ret        case 2
+/// 40101b: mov    eax,0x28    ; ret        case 3
+/// 401021: mov    eax,0x32    ; ret        case 4
+/// 401027: mov    eax,0x3c    ; ret        case 5
+/// 40102d: mov    eax,-1      ; ret        default
+/// 401033: mov    eax,0x14    ; ret        case 1
+/// ```
+const SWITCH_ABSOLUTE: &[u8] = &[
+    0x83, 0xff, 0x05, 0x77, 0x28, 0x89, 0xff, 0xff, 0x24, 0xfd, 0x00, 0x20, 0x40, 0x00, 0xb8, 0x0a,
+    0x00, 0x00, 0x00, 0xc3, 0x8b, 0x05, 0x16, 0x20, 0x00, 0x00, 0xc3, 0xb8, 0x28, 0x00, 0x00, 0x00,
+    0xc3, 0xb8, 0x32, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x3c, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0xff, 0xff,
+    0xff, 0xff, 0xc3, 0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3,
+];
+
+/// The same `switch` compiled position-independent: the table holds
+/// 4-byte offsets from its own address, read through `lea`/`movsxd`/`add`.
+///
+/// ```text
+/// 1000: cmp    edi,0x5
+/// 1003: ja     1036
+/// 1005: mov    edi,edi
+/// 1007: lea    rdx,[rip+0xff2]          ; 2000
+/// 100e: movsxd rax,DWORD PTR [rdx+rdi*4]
+/// 1012: add    rax,rdx
+/// 1015: jmp    rax
+/// 1017: mov eax,0xa ; ret                 case 0
+/// 101d: mov eax,[rip+…] ; ret             case 2
+/// 1024: mov eax,0x28 ; ret                case 3
+/// 102a: mov eax,0x32 ; ret                case 4
+/// 1030: mov eax,0x3c ; ret                case 5
+/// 1036: mov eax,-1 ; ret                  default
+/// 103c: mov eax,0x14 ; ret                case 1
+/// ```
+const SWITCH_RELATIVE: &[u8] = &[
+    0x83, 0xff, 0x05, 0x77, 0x31, 0x89, 0xff, 0x48, 0x8d, 0x15, 0xf2, 0x0f, 0x00, 0x00, 0x48, 0x63,
+    0x04, 0xba, 0x48, 0x01, 0xd0, 0xff, 0xe0, 0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, 0x8b, 0x05, 0xdd,
+    0x2f, 0x00, 0x00, 0xc3, 0xb8, 0x28, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x32, 0x00, 0x00, 0x00, 0xc3,
+    0xb8, 0x3c, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, 0xb8, 0x14, 0x00, 0x00,
+    0x00, 0xc3,
+];
+
+/// An image that knows a jump table's bytes, and nothing else.
+struct Table {
+    at: u64,
+    entries: Vec<u64>,
+    width: u8,
+    hint: Option<TableHint>,
+}
+
+impl Entries for Table {
+    fn is_function(&self, _address: u64) -> bool {
+        false
+    }
+    fn is_import_slot(&self, _slot: u64) -> bool {
+        false
+    }
+    fn table_entry(&self, address: u64, width: u8) -> Option<u64> {
+        if width != self.width || address < self.at {
+            return None;
+        }
+        let offset = address - self.at;
+        if !offset.is_multiple_of(width as u64) {
+            return None;
+        }
+        self.entries.get((offset / width as u64) as usize).copied()
+    }
+    fn table_hint(&self, _site: u64) -> Option<TableHint> {
+        self.hint
+    }
+}
+
+#[test]
+fn a_jump_through_an_absolute_table_goes_to_every_case() {
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, SWITCH_ABSOLUTE, 0x401000).unwrap();
+    let table = Table {
+        at: 0x402000,
+        entries: vec![0x40100e, 0x401033, 0x401014, 0x40101b, 0x401021, 0x401027],
+        width: 8,
+        hint: None,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &table);
+
+    let jump = cfg
+        .blocks
+        .iter()
+        .find(|b| b.from == 0x401005)
+        .expect("the block that jumps through the table");
+    assert_eq!(
+        jump.successor_addresses,
+        [0x40100e, 0x401033, 0x401014, 0x40101b, 0x401021, 0x401027],
+        "every case, in table order"
+    );
+    assert!(
+        cfg.blocks.iter().any(|b| b.from == 0x401033),
+        "the case only the table reaches is walked"
+    );
+    assert_eq!(cfg.jump_tables.len(), 1);
+    let recovered = &cfg.jump_tables[0];
+    assert_eq!(recovered.site, 0x401007);
+    assert_eq!(recovered.table, 0x402000);
+    assert_eq!(recovered.width, 8);
+    assert!(!recovered.relative);
+    assert_eq!(recovered.base, 0);
+    assert_eq!(recovered.targets.len(), 6, "cmp edi,5; ja — six cases");
+    let index = recovered.index.expect("the index register");
+    assert_eq!(index.index, 7, "rdi");
+    assert_eq!(
+        recovered.cases(),
+        vec![
+            (vec![0], 0x40100e),
+            (vec![1], 0x401033),
+            (vec![2], 0x401014),
+            (vec![3], 0x40101b),
+            (vec![4], 0x401021),
+            (vec![5], 0x401027),
+        ]
+    );
+    assert!(cfg.tail_calls.is_empty(), "a table jump is not a tail call");
+}
+
+#[test]
+fn a_jump_through_a_relative_table_adds_each_offset_to_the_table() {
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, SWITCH_RELATIVE, 0x1000).unwrap();
+    let offsets: [i32; 6] =
+        [0x1017, 0x103c, 0x101d, 0x1024, 0x102a, 0x1030].map(|target: i32| target - 0x2000);
+    let table = Table {
+        at: 0x2000,
+        entries: offsets.iter().map(|o| *o as u32 as u64).collect(),
+        width: 4,
+        hint: None,
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &table);
+
+    let jump = cfg
+        .blocks
+        .iter()
+        .find(|b| b.from == 0x1005)
+        .expect("the block that jumps through the table");
+    assert_eq!(
+        jump.successor_addresses,
+        [0x1017, 0x103c, 0x101d, 0x1024, 0x102a, 0x1030]
+    );
+    let recovered = &cfg.jump_tables[0];
+    assert_eq!(recovered.site, 0x1015);
+    assert_eq!(recovered.table, 0x2000);
+    assert_eq!(recovered.width, 4);
+    assert!(recovered.relative);
+    assert_eq!(
+        recovered.index.map(|r| r.index),
+        Some(7),
+        "rdi indexes the table"
+    );
+}
+
+#[test]
+fn a_table_the_walk_cannot_read_leaves_the_jump_unresolved() {
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, SWITCH_ABSOLUTE, 0x401000).unwrap();
+    // No bytes behind the table: nothing to recover, as before.
+    let cfg = resolve_branches(&d, 0x401000);
+    let jump = cfg.blocks.iter().find(|b| b.from == 0x401005).unwrap();
+    assert!(jump.successor_addresses.is_empty());
+    assert!(cfg.jump_tables.is_empty());
+
+    // A table whose entries point outside the code stops at the first
+    // such entry; one with no good entry is no table.
+    let bad = Table {
+        at: 0x402000,
+        entries: vec![0x40100e, 0x401033, 0xdead_beef, 0x40101b],
+        width: 8,
+        hint: None,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &bad);
+    assert_eq!(cfg.jump_tables[0].targets, [0x40100e, 0x401033]);
+    let none = Table {
+        at: 0x402000,
+        entries: vec![0xdead_beef],
+        width: 8,
+        hint: None,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &none);
+    assert!(cfg.jump_tables.is_empty());
+}
+
+#[test]
+fn the_analysts_hint_stands_in_for_the_table_and_the_count() {
+    // A jump through a register the code before it does not explain: only
+    // the hint says where the table is.
+    // 1000: jmp rax ; 1002: ret ; 1003: ret
+    let bytes = [0xff, 0xe0, 0xc3, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let table = Table {
+        at: 0x3000,
+        entries: vec![0x1002, 0x1003, 0x1002],
+        width: 8,
+        hint: Some(TableHint {
+            table: 0x3000,
+            width: 8,
+            count: 3,
+            relative: false,
+        }),
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &table);
+    let jump = cfg.blocks.iter().find(|b| b.from == 0x1000).unwrap();
+    assert_eq!(
+        jump.successor_addresses,
+        [0x1002, 0x1003],
+        "each place once"
+    );
+    let recovered = &cfg.jump_tables[0];
+    assert_eq!(recovered.targets, [0x1002, 0x1003, 0x1002]);
+    assert_eq!(
+        recovered.cases(),
+        vec![(vec![0, 2], 0x1002), (vec![1], 0x1003)],
+        "two cases share a place"
+    );
+    assert!(
+        recovered.index.is_none(),
+        "the code did not say which register"
+    );
+
+    // With the bytes but no hint, the same jump stays unresolved.
+    let plain = Table {
+        hint: None,
+        ..table
+    };
+    let cfg = resolve_branches_among(&d, 0x1000, &plain);
+    assert!(cfg.jump_tables.is_empty());
 }

@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::AstNode;
-use crate::lift::{NotLifted, Statement, StatementKind};
+use crate::lift::{NotLifted, Statement, StatementKind, SwitchArm};
 use crate::options::{LoopForm, Options, SharedTail};
 
 /// How a node leaves.
@@ -69,6 +69,14 @@ pub enum Terminator {
         next: usize,
         addresses: Vec<u64>,
     },
+    /// The node switches on `index`: to each case's node by the values
+    /// that reach it, as a jump table laid them out. The addresses are the
+    /// jump's and the index's.
+    Switch {
+        index: AstNode,
+        cases: Vec<(Vec<i64>, usize)>,
+        addresses: Vec<u64>,
+    },
 }
 
 impl Terminator {
@@ -78,6 +86,15 @@ impl Terminator {
             Self::Return => Vec::new(),
             Self::Goto { target, .. } => vec![*target],
             Self::Branch { taken, next, .. } => vec![*taken, *next],
+            Self::Switch { cases, .. } => {
+                let mut nodes = Vec::new();
+                for (_, node) in cases {
+                    if !nodes.contains(node) {
+                        nodes.push(*node);
+                    }
+                }
+                nodes
+            }
         }
     }
 }
@@ -277,6 +294,10 @@ struct Structurer<'a> {
     opened: Vec<bool>,
     /// The nodes a `goto` names.
     labelled: BTreeSet<usize>,
+    /// How many `switch` arms the statements being emitted sit inside, in
+    /// the loop being structured: a `break` there leaves the switch, not
+    /// the loop, so a loop exit is a `goto` instead.
+    switch_depth: usize,
 }
 
 /// Structure the graph of `nodes`, entered at `entry`, into statements.
@@ -293,6 +314,7 @@ pub fn structure(
         visited: vec![false; nodes.len()],
         opened: vec![false; nodes.len()],
         labelled: BTreeSet::new(),
+        switch_depth: 0,
     };
     let mut body = structurer.region(entry, None, None);
     let named: BTreeSet<String> = structurer
@@ -368,6 +390,36 @@ impl Structurer<'_> {
                         );
                         join
                     }
+                    Terminator::Switch {
+                        index,
+                        cases,
+                        addresses,
+                    } => {
+                        // The follow is where every case comes back
+                        // together; an arm that runs on to it ends in
+                        // `break`, and one that returns or jumps away
+                        // needs none.
+                        let targets: Vec<usize> = cases.iter().map(|(_, node)| *node).collect();
+                        let join = self.follow_of(cur, &targets, ctx);
+                        let inner = join.or(follow);
+                        let cases = cases.clone();
+                        let mut arms = Vec::new();
+                        self.switch_depth += 1;
+                        for (values, target) in cases {
+                            let mut body = self.arm(target, inner, ctx);
+                            if falls_through(&body) {
+                                body.push(Statement::plain(AstNode::Break, Vec::new()));
+                            }
+                            arms.push(SwitchArm { values, body });
+                        }
+                        self.switch_depth -= 1;
+                        seq.push(Statement {
+                            node: index.clone(),
+                            addresses: addresses.clone(),
+                            kind: StatementKind::Switch { arms },
+                        });
+                        join
+                    }
                 }
             };
             let Some(next) = next else {
@@ -402,7 +454,7 @@ impl Structurer<'_> {
     /// it is the follow, a `break` when it is the loop's exit, a `continue`
     /// when it is the loop's header; `None` when it is more code.
     fn escape(
-        &self,
+        &mut self,
         target: usize,
         follow: Option<usize>,
         ctx: Option<&LoopContext>,
@@ -412,6 +464,11 @@ impl Structurer<'_> {
         }
         let ctx = ctx?;
         if Some(target) == ctx.exit {
+            // Inside a `switch` arm a `break` leaves the switch, so the
+            // loop's exit is named instead.
+            if self.switch_depth > 0 {
+                return Some(vec![self.goto(target, Vec::new())]);
+            }
             return Some(vec![Statement::plain(AstNode::Break, Vec::new())]);
         }
         if target == ctx.header {
@@ -435,7 +492,7 @@ impl Structurer<'_> {
             match &node.terminator {
                 Terminator::Return => return Some(statements),
                 Terminator::Goto { target, .. } => cur = *target,
-                Terminator::Branch { .. } => return None,
+                Terminator::Branch { .. } | Terminator::Switch { .. } => return None,
             }
         }
         None
@@ -452,6 +509,41 @@ impl Structurer<'_> {
             },
             addresses,
         )
+    }
+
+    /// The follow of the `switch` at `branch`: the nearest node every arm
+    /// reaches and the switch dominates, as [`Structurer::if_follow`] finds
+    /// it for two arms.
+    fn follow_of(
+        &self,
+        branch: usize,
+        targets: &[usize],
+        ctx: Option<&LoopContext>,
+    ) -> Option<usize> {
+        let inside = |node: usize| ctx.is_none_or(|ctx| ctx.body.contains(&node));
+        let reach = |start: usize| -> BTreeSet<usize> {
+            let mut seen = BTreeSet::new();
+            let mut work = vec![start];
+            while let Some(node) = work.pop() {
+                if node == branch || !inside(node) || !seen.insert(node) {
+                    continue;
+                }
+                work.extend(self.nodes[node].terminator.successors());
+            }
+            seen
+        };
+        let mut common: Option<BTreeSet<usize>> = None;
+        for &target in targets {
+            let reached = reach(target);
+            common = Some(match common {
+                Some(common) => common.intersection(&reached).copied().collect(),
+                None => reached,
+            });
+        }
+        common?
+            .into_iter()
+            .filter(|&node| self.analysis.dominates(branch, node))
+            .min_by_key(|&node| self.analysis.order[node])
     }
 
     /// The follow of the `if` at `branch`: the nearest node both arms reach
@@ -485,7 +577,21 @@ impl Structurer<'_> {
     }
 
     /// The loop at `header`, and the node after it.
+    ///
+    /// A loop inside a `switch` arm is its own: a `break` in its body
+    /// leaves it, whatever the switch outside.
     fn open_loop(&mut self, header: usize, arriving: Vec<u64>) -> (Vec<Statement>, Option<usize>) {
+        let outside = std::mem::replace(&mut self.switch_depth, 0);
+        let opened = self.open_loop_inside(header, arriving);
+        self.switch_depth = outside;
+        opened
+    }
+
+    fn open_loop_inside(
+        &mut self,
+        header: usize,
+        arriving: Vec<u64>,
+    ) -> (Vec<Statement>, Option<usize>) {
         self.opened[header] = true;
         let lp = self.analysis.loops[&header].clone();
         let node = &self.nodes[header];
@@ -817,6 +923,55 @@ mod tests {
             statements,
             terminator,
         }
+    }
+
+    #[test]
+    fn a_loop_exit_inside_a_switch_arm_is_a_goto_not_a_break() {
+        // while (a < 10) { switch (a) { case 0: x = 1; continue; case 1: -> exit } } return x;
+        // A `break` in the arm would leave the switch and keep looping.
+        let nodes = vec![
+            node(
+                0x1000,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("a", BinaryOp::Less, 10),
+                    taken: 1,
+                    next: 3,
+                    addresses: vec![0x1000],
+                },
+            ),
+            node(
+                0x1010,
+                vec![],
+                Terminator::Switch {
+                    index: AstNode::var("a"),
+                    cases: vec![(vec![0], 2), (vec![1], 3)],
+                    addresses: vec![0x1010],
+                },
+            ),
+            node(
+                0x1020,
+                vec![assign("x", 1, 0x1020)],
+                Terminator::Goto {
+                    target: 0,
+                    addresses: vec![0x1024],
+                },
+            ),
+            node(0x1030, vec![ret("x", 0x1030)], Terminator::Return),
+        ];
+        let text = c(&nodes).expect("structured");
+        assert!(text.contains("switch (a) {"), "{text}");
+        // The arm that leaves the loop names the exit; a `break` there
+        // would only leave the switch and loop again.
+        assert!(text.contains("case 1:\n      goto label_1030;"), "{text}");
+        assert!(text.contains("label_1030:\n  return x;"), "{text}");
+        assert!(!text.contains("case 1:\n      break;"), "{text}");
+        // The arm that goes round again leaves the switch with `break`,
+        // which is the loop's own end: correct C.
+        assert!(
+            text.contains("case 0:\n      x = 1;\n      break;"),
+            "{text}"
+        );
     }
 
     /// Structure `nodes` and print the body as the C of `f`.

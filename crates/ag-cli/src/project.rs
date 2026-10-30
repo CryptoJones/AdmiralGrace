@@ -4,9 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`, `operand`) so a script or an agent can
-//! build a project without editing JSON by hand, and reports the tags the
-//! analyst gave (`tags`).
+//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`) so a script or an
+//! agent can build a project without editing JSON by hand, and reports the
+//! tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 
 use ag_corpus::project::{
-    parse_color, parse_tags, sha256_of, Annotation, ByteType, OperandFormat, ProjectFile, Target,
-    TargetKind,
+    parse_color, parse_tags, sha256_of, Annotation, ByteType, JumpTableNote, OperandFormat,
+    ProjectFile, Target, TargetKind,
 };
 
 /// What to do with a project file.
@@ -143,6 +143,28 @@ pub enum ProjectCmd {
         /// The format: `hex`, `signed`, `decimal`, `octal` or `address`;
         /// `hex` is how the analysis prints them and clears the record.
         format: String,
+    },
+    /// Say where the jump table an indirect `jmp` reads is, when the
+    /// analysis cannot work it out from the code.
+    Switch {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address of the `jmp`, with its space when it names one.
+        address: String,
+        /// The address of the table's first entry; `none` takes the note
+        /// off.
+        table: String,
+        /// How many entries the table has; needed unless the table is
+        /// `none`.
+        count: Option<u32>,
+        /// How many bytes one entry takes: 4 or 8. Eight when unsaid, or
+        /// four for offsets.
+        #[arg(long)]
+        width: Option<u8>,
+        /// The entries are offsets from the table rather than addresses.
+        #[arg(long)]
+        relative: bool,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -293,6 +315,35 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             })?;
             edit(&target, &file, TargetKind::Address, &address, |a| {
                 a.set_operand_format(Some(format))
+            })
+        }
+        ProjectCmd::Switch {
+            file,
+            address,
+            table,
+            count,
+            width,
+            relative,
+        } => {
+            // `none` clears; otherwise the note must read back before the
+            // file is touched.
+            let note = if table.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                let count = count.context("COUNT is needed: how many entries the table has")?;
+                let width = width.unwrap_or(if relative { 4 } else { 8 });
+                let text = format!(
+                    "{table} {width} {count}{}",
+                    if relative { " rel" } else { "" }
+                );
+                Some(JumpTableNote::parse(&text).with_context(|| {
+                    format!(
+                        "{text:?} is not a jump table: TABLE is an address, COUNT at least 1, --width 4 or 8"
+                    )
+                })?)
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_jump_table(note)
             })
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
@@ -639,6 +690,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(format) = &annotation.operand_format {
         parts.push(format!("operands {format}"));
+    }
+    if let Some(table) = &annotation.jump_table {
+        parts.push(format!("switch {table}"));
     }
     if parts.is_empty() {
         "(empty)".to_string()

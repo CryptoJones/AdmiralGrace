@@ -318,6 +318,71 @@ impl OperandFormat {
     }
 }
 
+/// Where a jump table is and how long, as the analyst says it when the
+/// analysis cannot work it out from the code.
+///
+/// Stored on the record of the `jmp` as text — `0x402000 8 6`, the table's
+/// address, the width of an entry in bytes and the number of entries, with
+/// `rel` after them when an entry is an offset from the table rather than
+/// an address — so a reader that does not know the spelling keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JumpTableNote {
+    /// The address of the first entry.
+    pub table: u64,
+    /// How many bytes one entry takes: 4 or 8.
+    pub width: u8,
+    /// How many entries there are.
+    pub count: u32,
+    /// Whether an entry is an offset from `table` rather than an address.
+    pub relative: bool,
+}
+
+impl JumpTableNote {
+    /// Read a note as it is stored or typed: `TABLE COUNT`, `TABLE WIDTH
+    /// COUNT`, either with `rel` after it; the table is an address in any
+    /// spelling [`parse_addr`](crate::parse_addr) reads. The width is 8
+    /// when unsaid, or 4 for offsets. Commas count as spaces.
+    pub fn parse(text: &str) -> Option<JumpTableNote> {
+        let mut words: Vec<&str> = text
+            .split([' ', ',', '\t'])
+            .filter(|word| !word.is_empty())
+            .collect();
+        let relative = words
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case("rel"));
+        if relative {
+            words.pop();
+        }
+        let (table, width, count) = match words.as_slice() {
+            [table, count] => (*table, if relative { 4 } else { 8 }, *count),
+            [table, width, count] => (*table, width.parse().ok()?, *count),
+            _ => return None,
+        };
+        let table = crate::parse_addr(table).ok()?;
+        let count: u32 = count.parse().ok().filter(|count| *count >= 1)?;
+        if !matches!(width, 4 | 8) {
+            return None;
+        }
+        Some(JumpTableNote {
+            table,
+            width,
+            count,
+            relative,
+        })
+    }
+
+    /// The note as it is stored: `0x402000 8 6`, with ` rel` for offsets.
+    pub fn label(self) -> String {
+        format!(
+            "{:#x} {} {}{}",
+            self.table,
+            self.width,
+            self.count,
+            if self.relative { " rel" } else { "" }
+        )
+    }
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -398,6 +463,11 @@ pub struct Annotation {
     /// as the analysis printed them and misreads nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand_format: Option<String>,
+    /// Where the jump table the instruction reads is and how long, when
+    /// the analyst said; see [`JumpTableNote`]. A reader that does not know
+    /// the field recovers what it can from the code, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_table: Option<String>,
 }
 
 impl Annotation {
@@ -413,6 +483,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            jump_table: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -434,6 +505,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            jump_table: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -454,6 +526,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            jump_table: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -580,6 +653,18 @@ impl Annotation {
             .map(|format| format.label().to_string());
     }
 
+    /// The jump table the instruction reads, as the analyst said, when the
+    /// record says and this program reads the spelling.
+    pub fn jump_table(&self) -> Option<JumpTableNote> {
+        self.jump_table.as_deref().and_then(JumpTableNote::parse)
+    }
+
+    /// Record where the jump table the instruction reads is, or clear it
+    /// with `None`.
+    pub fn set_jump_table(&mut self, note: Option<JumpTableNote>) {
+        self.jump_table = note.map(JumpTableNote::label);
+    }
+
     /// Whether the target carries the tag `tag`.
     pub fn has_tag(&self, tag: &str) -> bool {
         normalize_tag(tag).is_some_and(|tag| self.tags.contains(&tag))
@@ -590,6 +675,7 @@ impl Annotation {
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.operand_format.is_none()
+            && self.jump_table.is_none()
             && self.references.is_empty()
             && self.comment.is_none()
             && !self.bookmark
@@ -836,6 +922,19 @@ impl ProjectFile {
             .collect();
         sort_by_address(&mut sources);
         sources
+    }
+
+    /// Every jump table the analyst placed, by the value of the address of
+    /// the `jmp` that reads it: what an analysis is told where its own
+    /// recovery fails. A note on a spaced address keys on its value.
+    pub fn jump_tables(&self) -> BTreeMap<u64, JumpTableNote> {
+        self.places()
+            .filter_map(|a| {
+                let note = a.jump_table()?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, note))
+            })
+            .collect()
     }
 
     /// The records that are on a place: an address, a function, a region.
@@ -1327,6 +1426,62 @@ mod tests {
             None,
             "a spelling this program does not read"
         );
+    }
+
+    #[test]
+    fn a_jump_table_note_reads_its_spelling_and_the_project_lists_them() {
+        let note = JumpTableNote::parse("0x402000 8 6").unwrap();
+        assert_eq!(
+            note,
+            JumpTableNote {
+                table: 0x402000,
+                width: 8,
+                count: 6,
+                relative: false
+            }
+        );
+        assert_eq!(note.label(), "0x402000 8 6");
+        assert_eq!(
+            JumpTableNote::parse("2000, 6, rel").unwrap(),
+            JumpTableNote {
+                table: 0x2000,
+                width: 4,
+                count: 6,
+                relative: true
+            },
+            "two words: the width is 4 for offsets"
+        );
+        assert_eq!(JumpTableNote::parse("0x3000 3").unwrap().width, 8);
+        assert_eq!(
+            JumpTableNote::parse("0x2000 4 6 REL").unwrap().label(),
+            "0x2000 4 6 rel"
+        );
+        assert_eq!(JumpTableNote::parse("0x2000 3 6"), None, "no such width");
+        assert_eq!(JumpTableNote::parse("0x2000 8 0"), None, "no empty table");
+        assert_eq!(JumpTableNote::parse("nowhere 8 6"), None);
+        assert_eq!(JumpTableNote::parse("0x2000"), None);
+
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Address, "0x401007")
+            .set_jump_table(Some(note));
+        project
+            .annotation_mut(TargetKind::Address, "EXTERNAL:0x10")
+            .set_jump_table(JumpTableNote::parse("0x5000 4 2 rel"));
+        // A record on a thing at a place is not a jump.
+        project.variable_mut("0x401007", "x").jump_table = Some("0x1 8 1".into());
+        let tables = project.jump_tables();
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables.get(&0x401007), Some(&note));
+        assert_eq!(tables.get(&0x10).map(|n| n.relative), Some(true));
+        let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
+        assert_eq!(read.jump_tables(), tables);
+
+        let mut record = Annotation::new(TargetKind::Address, "0x10");
+        record.set_jump_table(Some(note));
+        assert_eq!(record.jump_table.as_deref(), Some("0x402000 8 6"));
+        record.set_jump_table(None);
+        assert!(record.is_empty());
     }
 
     #[test]

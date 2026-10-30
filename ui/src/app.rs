@@ -104,6 +104,8 @@ pub enum Message {
     JumpTo(u64),
     /// Say how the bytes at the selection are read.
     EditMark(Mark),
+    /// Say where the jump table the selected `jmp` reads is.
+    EditSwitch,
     /// Show the constants in the selected instruction's operands the next
     /// way round: hex, signed, decimal, octal, as an address.
     EditOperandFormat,
@@ -223,6 +225,9 @@ pub enum PromptKind {
         /// Whether the reference is being taken back rather than recorded.
         remove: bool,
     },
+    /// Where the jump table the selected `jmp` reads is: `TABLE [WIDTH]
+    /// COUNT [rel]`.
+    Switch,
 }
 
 /// How the analyst marks the bytes at the selection.
@@ -2039,6 +2044,7 @@ impl App {
                         | PromptKind::Tags
                         | PromptKind::Color { .. }
                         | PromptKind::Reference { .. }
+                        | PromptKind::Switch
                 )
             }),
             _ => false,
@@ -2048,9 +2054,40 @@ impl App {
         if let Some(before) = before {
             if before != self.annotations.annotations {
                 self.record_change(before);
+                self.tell_jump_tables();
             }
         }
         task
+    }
+
+    /// Tell the analysis where the analyst's jump tables are, and read the
+    /// function on screen again if the analysis is one that walks code:
+    /// a table it is told grows a graph by its cases.
+    fn tell_jump_tables(&mut self) {
+        let hints = self
+            .annotations
+            .jump_tables()
+            .into_iter()
+            .map(|(site, note)| {
+                (
+                    site,
+                    ag_image::JumpTableHint {
+                        table: note.table,
+                        width: note.width,
+                        count: note.count,
+                        relative: note.relative,
+                    },
+                )
+            })
+            .collect();
+        if !self.provider.set_jump_table_hints(hints) {
+            return;
+        }
+        self.refresh_listing();
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+        }
     }
 
     /// Remember the change that took the annotations from `before` to what
@@ -2078,6 +2115,24 @@ impl App {
     /// Carry out one message.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditSwitch => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the jmp that reads the table".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.jump_table.clone())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Switch,
+                    title: "Jump table (TABLE [WIDTH] COUNT [rel]; empty clears)",
+                    value: current,
+                });
+            }
+
             Message::EditMark(mark) => {
                 use ag_corpus::project::{ByteType, TargetKind};
                 let Some(address) = self.selection.address() else {
@@ -2165,6 +2220,7 @@ impl App {
                 self.redo.push(change);
                 self.refresh_functions();
                 self.refresh_listing();
+                self.tell_jump_tables();
             }
 
             Message::EditRedo => {
@@ -2180,6 +2236,7 @@ impl App {
                 self.undo.push(change);
                 self.refresh_functions();
                 self.refresh_listing();
+                self.tell_jump_tables();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -2382,6 +2439,7 @@ impl App {
                                 Ok(project) => {
                                     self.annotations = project;
                                     self.forget_changes();
+                                    self.tell_jump_tables();
                                     self.project_path = Some(path.clone());
                                     self.refresh_functions();
                                     self.notice =
@@ -2550,6 +2608,34 @@ impl App {
                                 format!("Reference {key} → {target} removed")
                             } else {
                                 format!("Referenced {key} → {target}")
+                            });
+                        }
+                    }
+                    PromptKind::Switch => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            let note = if text.is_empty() {
+                                None
+                            } else {
+                                match ag_corpus::project::JumpTableNote::parse(text) {
+                                    Some(note) => Some(note),
+                                    None => {
+                                        self.notice = Some(format!(
+                                            "Not a jump table: {text:?} (TABLE COUNT, or TABLE WIDTH COUNT with a width of 4 or 8, and rel after for offsets)"
+                                        ));
+                                        return Task::none();
+                                    }
+                                }
+                            };
+                            let key = self.annotation_key(address);
+                            let kind = self.kind_at(address);
+                            self.annotations
+                                .annotation_mut(kind, &key)
+                                .set_jump_table(note);
+                            self.annotations.prune();
+                            self.notice = Some(match note {
+                                Some(note) => format!("Jump table at {key}: {}", note.label()),
+                                None => format!("Jump table note taken off {key}"),
                             });
                         }
                     }
@@ -3453,7 +3539,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("b"), true, false) => Message::ViewToggleNavigator,
         (Key::Character("b"), true, true) => Message::EditBookmark,
         (Key::Character("i"), true, _) => Message::ViewToggleInspector,
-        (Key::Character("j"), true, _) => Message::ViewToggleBottom,
+        (Key::Character("j"), true, false) => Message::ViewToggleBottom,
         (Key::Character("t"), true, _) => Message::EditTags,
         // The plain chord highlights the selection; Shift highlights the
         // block holding it.
@@ -3472,6 +3558,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("u"), true, true) => Message::EditMark(Mark::Undefined),
         // The constants of the selected instruction, the next way round.
         (Key::Character("n"), true, true) => Message::EditOperandFormat,
+        // Where the jump table the selected jmp reads is.
+        (Key::Character("j"), true, true) => Message::EditSwitch,
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -4362,6 +4450,10 @@ mod tests {
         assert!(matches!(
             shortcut(chord("n", "N", keyboard::key::Code::KeyN)),
             Message::EditOperandFormat
+        ));
+        assert!(matches!(
+            shortcut(chord("j", "J", keyboard::key::Code::KeyJ)),
+            Message::EditSwitch
         ));
         assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
         assert!(matches!(
@@ -5781,6 +5873,68 @@ mod tests {
         let _ = app.update(Message::EditUndo);
         assert_eq!(app.work.listing[at].operands, "x29, sp, #0o60");
         assert_eq!(app.work.listing[at + 1].operands, "x19, x0");
+    }
+
+    fn switch_elf() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/switch.elf")
+    }
+
+    #[test]
+    fn a_jump_table_note_tells_the_analysis_where_the_cases_are() {
+        let config = Config {
+            binary: Some(switch_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let classify = 0x401000;
+        let _ = app.update(Message::FunctionSelected(classify));
+        let jump_block = |app: &App| {
+            app.work
+                .graph
+                .blocks
+                .iter()
+                .find(|block| block.from == 0x401005)
+                .map(|block| block.successors.clone())
+                .expect("the block that jumps through the table")
+        };
+        assert_eq!(jump_block(&app).len(), 6, "the walk reads the table itself");
+        assert!(
+            app.work
+                .pseudocode
+                .as_deref()
+                .is_some_and(|code| code.contains("switch (")),
+            "{:?}",
+            app.work.pseudocode
+        );
+
+        // The analyst says three entries: the graph and the pseudocode
+        // follow the note.
+        let _ = app.update(Message::AddressSelected(0x401007));
+        let _ = app.update(Message::EditSwitch);
+        let _ = app.update(Message::PromptChanged("0x402000 3".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x401007")
+                .and_then(|a| a.jump_table.clone())
+                .as_deref(),
+            Some("0x402000 8 3")
+        );
+        assert_eq!(jump_block(&app).len(), 3);
+        assert!(app
+            .work
+            .pseudocode
+            .as_deref()
+            .is_some_and(|code| code.contains("case 2:") && !code.contains("case 3:")));
+
+        // A note that does not read is refused; undo brings the six back.
+        let _ = app.update(Message::EditSwitch);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("0x402000 8 3"));
+        let _ = app.update(Message::PromptChanged("0x402000 3 9".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.notice.as_deref().is_some_and(|n| n.starts_with("Not a jump table")));
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(jump_block(&app).len(), 6);
     }
 
     #[test]

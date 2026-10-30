@@ -244,6 +244,25 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                     addresses: Vec::new(),
                 });
             }
+            StatementKind::Switch { arms } => {
+                lines.push(Line {
+                    text: format!("{pad}switch ({}) {{", expression(&statement.node, style)),
+                    addresses: statement.addresses.clone(),
+                });
+                for arm in arms {
+                    for value in &arm.values {
+                        lines.push(Line {
+                            text: format!("{pad}case {value}:"),
+                            addresses: Vec::new(),
+                        });
+                    }
+                    emit_statements(&arm.body, depth + 1, lines, style);
+                }
+                lines.push(Line {
+                    text: format!("{pad}}}"),
+                    addresses: Vec::new(),
+                });
+            }
             StatementKind::While { body } => {
                 lines.push(Line {
                     text: format!(

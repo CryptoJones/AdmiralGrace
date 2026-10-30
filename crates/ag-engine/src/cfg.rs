@@ -44,6 +44,54 @@ pub struct ProcedureCfg {
     /// at the jump — the block it ends has no successor — and records it
     /// here, in walk order.
     pub tail_calls: Vec<TailCall>,
+    /// The jump tables the procedure's indirect jumps read, in walk order:
+    /// the cases of each `switch` the walk recovered, or was told.
+    pub jump_tables: Vec<JumpTable>,
+}
+
+/// A jump table an indirect `jmp` reads: the cases of a `switch`.
+///
+/// The walk recovers the table from the shape of the code around the jump
+/// — `jmp [table + index*8]` straight into an absolute table, or the
+/// position-independent `lea base, [rip+table]; movsxd r, [base + index*4];
+/// add r, base; jmp r` whose entries are offsets from the table — and the
+/// number of entries from the `cmp index, N` that guards it. Where that
+/// fails, the analyst says where the table is and how long.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JumpTable {
+    /// The address of the `jmp`.
+    pub site: u64,
+    /// The address of the first entry.
+    pub table: u64,
+    /// How many bytes one entry takes: 4 or 8.
+    pub width: u8,
+    /// Whether an entry is an offset from `table` rather than an address.
+    pub relative: bool,
+    /// The case value of the first entry: the `sub index, N` before the
+    /// compare, when there is one, else zero.
+    pub base: i64,
+    /// The register holding the case index as the table is read, when the
+    /// shape of the code says which.
+    pub index: Option<RegisterId>,
+    /// Where each entry goes, in table order; two entries may go to one
+    /// place.
+    pub targets: Vec<u64>,
+}
+
+impl JumpTable {
+    /// The cases, grouped by where they go: each distinct target, in the
+    /// order its first case appears, with every case value that reaches it.
+    pub fn cases(&self) -> Vec<(Vec<i64>, u64)> {
+        let mut cases: Vec<(Vec<i64>, u64)> = Vec::new();
+        for (i, &target) in self.targets.iter().enumerate() {
+            let value = self.base + i as i64;
+            match cases.iter_mut().find(|(_, t)| *t == target) {
+                Some((values, _)) => values.push(value),
+                None => cases.push((vec![value], target)),
+            }
+        }
+        cases
+    }
 }
 
 /// A `jmp` that leaves the procedure for another function: a tail call.
