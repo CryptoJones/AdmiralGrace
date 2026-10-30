@@ -144,6 +144,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditNop,
             )),
             Item::new(item_button(
+                "Edit bytes…",
+                "Ctrl+Shift+Y",
+                Message::EditBytes,
+            )),
+            Item::new(item_button(
                 "NOP range…",
                 "Ctrl+Shift+R",
                 Message::EditNopRange,

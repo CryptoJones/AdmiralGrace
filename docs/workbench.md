@@ -358,6 +358,13 @@ Patching a binary starts with changing an instruction:
   `nop`, repeated, so the run decodes as that many instructions that do nothing. A run that
   would leave the section it starts in is refused.
 
+- **Edit bytes…** (Ctrl+Shift+Y) edits the bytes at the selection as hex pairs. The prompt
+  starts from the patch written there before, else from the bytes of the instruction the
+  selection sits on; clicking a byte in the **Bytes** pane picks it. The bytes typed become a
+  patch like any other, so the listing, the graph and the pseudocode follow at once. Half a
+  byte is refused, as are bytes that would run past the end of the section; an empty submit
+  takes the patch off, and the prompt submitted as it came up changes nothing.
+
 A patch written over another takes the other off: the bytes written last are the bytes. The
 file on disk is never changed. The patch is a record in the project file — the bytes, and
 the instruction they came from — and the image is read as if its bytes were the patched ones,
