@@ -52,9 +52,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if annotation.bookmark {
                 notes = notes.push(subtle("★ bookmarked"));
             }
-            if !annotation.tags.is_empty() {
-                notes = notes.push(kv("Tags", annotation.tags.join(", ")));
-            }
+        }
+        // The tags on the place: the analyst's own and the ones the
+        // analysis implies, the entry point and an Objective-C class.
+        let tags = app.tags_at(address);
+        if !tags.is_empty() {
+            notes = notes.push(kv("Tags", tags.join(", ")));
         }
         // The locals of the function on screen that the analyst has named.
         let function = app
@@ -88,7 +91,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Row::new()
             .spacing(8)
             .push(note_button("＋ Add comment", Message::EditComment))
-            .push(note_button("☆ Bookmark", Message::EditBookmark)),
+            .push(note_button("☆ Bookmark", Message::EditBookmark))
+            .push(note_button("# Tags", Message::EditTags)),
     );
 
     scrollable(column)

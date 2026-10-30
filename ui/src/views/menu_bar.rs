@@ -69,6 +69,7 @@ pub fn view(_app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+B",
                 Message::EditBookmark,
             )),
+            Item::new(item_button("Tags…", "Ctrl+T", Message::EditTags)),
             Item::new(separator()),
             Item::new(disabled_item("Undo", "Ctrl+Z")),
             Item::new(disabled_item("Redo", "Ctrl+Shift+Z")),

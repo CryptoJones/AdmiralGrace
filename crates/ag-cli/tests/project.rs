@@ -275,6 +275,112 @@ fn a_register_names_its_own_record() {
 }
 
 #[test]
+fn tags_attach_detach_and_are_listed() {
+    let file = TempFile::new("tags");
+    // Tags go on the function at an address, or on the address alone.
+    let (ok, stdout, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--on",
+        "function",
+        "0x1149",
+        "crypto",
+        "parser",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x1149 now tags crypto,parser"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&["tag", "--file", &file.text(), "0x1161", "crypto"]);
+    assert!(ok, "{stderr}");
+    // A block of bytes is a place of its own kind, and a comma splits tags
+    // the way the workbench's prompt does.
+    let (ok, stdout, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--on",
+        "block",
+        "0x1200",
+        "data,table",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("region 0x1200 now tags data,table"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1200",
+        "data,table",
+    ]);
+    assert!(ok, "{stderr}");
+
+    // Every tag with its count, in tag order.
+    let (ok, report, stderr) = project(&["tags", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        report.contains("crypto") && report.contains("2 places"),
+        "{report}"
+    );
+    assert!(
+        report.contains("parser") && report.contains("1 place\n"),
+        "{report}"
+    );
+
+    // The places carrying one tag, in address order, each with its kind.
+    let (ok, report, stderr) = project(&["tags", &file.text(), "crypto"]);
+    assert!(ok, "{stderr}");
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 2, "{report}");
+    assert!(
+        lines[0].contains("function") && lines[0].contains("0x1149"),
+        "{report}"
+    );
+    assert!(
+        lines[1].contains("address") && lines[1].contains("0x1161"),
+        "{report}"
+    );
+
+    // Taking a tag off leaves the others; taking the last one off clears
+    // the record.
+    let (ok, stdout, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1149",
+        "parser",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("now tags crypto"), "{stdout}");
+    let (ok, stdout, stderr) = project(&[
+        "tag",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1161",
+        "crypto",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 1, "{report}");
+    assert_eq!(annotations[0]["tags"], serde_json::json!(["crypto"]));
+
+    let (ok, report, stderr) = project(&["tags", &file.text(), "parser"]);
+    assert!(ok, "{stderr}");
+    assert!(report.contains("nothing carries the tag"), "{report}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

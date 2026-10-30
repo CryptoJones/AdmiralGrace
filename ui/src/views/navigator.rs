@@ -5,7 +5,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
-use crate::app::{App, Message};
+use crate::app::{App, Message, TagCount};
 use crate::data::{DataSymbolEntry, FunctionRow, SegmentEntry};
 use crate::theme::{color, MONO};
 use crate::views::{count, count_or_indexing, section_header, subtle};
@@ -28,6 +28,8 @@ pub enum Section {
     Types,
     /// Analyst bookmarks.
     Bookmarks,
+    /// Tags, the analyst's and the analysis's.
+    Tags,
 }
 
 impl Section {
@@ -41,17 +43,19 @@ impl Section {
             Section::Segments => "Segments",
             Section::Types => "Types",
             Section::Bookmarks => "Bookmarks",
+            Section::Tags => "Tags",
         }
     }
 
     /// The order the sections appear in the explore list.
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::Imports,
         Section::Exports,
         Section::Strings,
         Section::Segments,
         Section::Types,
         Section::Bookmarks,
+        Section::Tags,
     ];
 }
 
@@ -145,7 +149,7 @@ fn summary_row(key: String, value: String) -> Element<'static, Message> {
 
 /// The navigator filter.
 fn filter_input(app: &App) -> Element<'_, Message> {
-    text_input::TextInput::new("Filter functions…", &app.navigator.filter)
+    text_input::TextInput::new("Filter functions, or #tag…", &app.navigator.filter)
         .on_input(Message::NavigatorFilterChanged)
         .width(Length::Fill)
         .size(13)
@@ -167,13 +171,14 @@ fn filter_input(app: &App) -> Element<'_, Message> {
 
 /// The heading above the navigator's list.
 ///
-/// The Segments section lists the sections of the program image and the
-/// Bookmarks section the analyst's marked places; every other section lists
-/// the functions.
+/// The Segments section lists the sections of the program image, the
+/// Bookmarks section the analyst's marked places and the Tags section the
+/// tags; every other section lists the functions.
 fn list_heading(app: &App) -> &'static str {
     match app.navigator.section {
         Section::Segments => "Segments",
         Section::Bookmarks => "Bookmarks",
+        Section::Tags => "Tags",
         _ => "Functions",
     }
 }
@@ -183,19 +188,21 @@ fn list_count(app: &App) -> usize {
     match app.navigator.section {
         Section::Segments => app.provider.segments().len() + app.provider.data_symbols().len(),
         Section::Bookmarks => app.annotations.bookmarks().len(),
+        Section::Tags => app.navigator.tags.len(),
         _ => app.navigator.rows.len(),
     }
 }
 
 /// The list the navigator shows.
 ///
-/// The Segments section holds the sections of the program image and the
-/// Bookmarks section the analyst's marked places; every other section holds
-/// the functions.
+/// The Segments section holds the sections of the program image, the
+/// Bookmarks section the analyst's marked places and the Tags section the
+/// tags; every other section holds the functions.
 fn list_contents(app: &App) -> Column<'_, Message> {
     match app.navigator.section {
         Section::Segments => segment_list(app),
         Section::Bookmarks => bookmark_list(app),
+        Section::Tags => tag_list(app),
         _ => function_list(app),
     }
 }
@@ -457,6 +464,91 @@ fn bookmark_list(app: &App) -> Column<'_, Message> {
     list
 }
 
+/// The tags, each with how many functions carry it, in tag order.
+///
+/// Clicking a tag filters the function list to the functions carrying it,
+/// the way typing `#tag` into the filter does. A tag on a place that is
+/// not a function — a bare address, a block — is counted beside the row
+/// in its own words, since the list cannot show it.
+fn tag_list(app: &App) -> Column<'_, Message> {
+    let index = &app.navigator.tags;
+
+    if index.is_empty() {
+        return Column::new()
+            .spacing(3)
+            .push(Text::new("No tags").size(12).color(color::MUTED))
+            .push(
+                Text::new("Select a place and press Ctrl+T to tag it.")
+                    .size(11)
+                    .color(color::DIM),
+            );
+    }
+
+    let mut list = Column::new().spacing(1).width(Length::Fill);
+    let active = app
+        .navigator
+        .filter
+        .trim()
+        .strip_prefix('#')
+        .map(|tag| tag.trim().to_string());
+
+    for (tag, TagCount { functions, places }) in index {
+        let selected = active.as_deref() == Some(tag.as_str());
+
+        let mut content = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(6)
+            .push(Text::new("#").size(11).color(color::PURPLE).font(MONO))
+            .push(
+                Text::new(tag.clone())
+                    .size(12)
+                    .color(color::TEXT)
+                    .width(Length::Fill),
+            );
+        if *places > 0 {
+            content = content.push(
+                Text::new(format!(
+                    "+{places} place{}",
+                    if *places == 1 { "" } else { "s" }
+                ))
+                .size(11)
+                .color(color::DIM),
+            );
+        }
+        content = content.push(
+            Text::new(count(*functions))
+                .size(11)
+                .color(color::MUTED)
+                .font(MONO),
+        );
+
+        let surface = Container::new(content)
+            .padding([5, 7])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if selected {
+                    color::SELECT_BG
+                } else {
+                    color::PANEL
+                })),
+                border: Border {
+                    color: color::PANEL,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+        let element: Element<'_, Message> = mouse_area(surface)
+            .on_press(Message::TagSelected(tag.clone()))
+            .into();
+
+        list = list.push(element);
+    }
+
+    list
+}
+
 /// The explore sections with their counts.
 fn explore_list(app: &App) -> Column<'_, Message> {
     let counts = &app.navigator.counts;
@@ -473,6 +565,7 @@ fn explore_list(app: &App) -> Column<'_, Message> {
             Section::Segments => counts.segments,
             Section::Types => counts.types,
             Section::Bookmarks => app.annotations.bookmarks().len(),
+            Section::Tags => app.navigator.tags.len(),
             Section::Functions => counts.functions,
         };
 
