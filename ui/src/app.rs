@@ -104,6 +104,9 @@ pub enum Message {
     JumpTo(u64),
     /// Say how the bytes at the selection are read.
     EditMark(Mark),
+    /// Show the constants in the selected instruction's operands the next
+    /// way round: hex, signed, decimal, octal, as an address.
+    EditOperandFormat,
     /// Take back the analyst's last change.
     EditUndo,
     /// Put back the change last taken back.
@@ -1593,11 +1596,69 @@ impl App {
         // block's start the way the graph's does, and the two agree.
         let stops: std::collections::HashSet<u64> =
             graph.blocks.iter().map(|block| block.from).collect();
-        self.work.listing = marked(listing, &marks, &stops);
+        // The operand formats are read the same way, once per function.
+        let formats = self.formats_by_address();
+        self.work.listing = self.formatted(marked(listing, &marks, &stops), &formats);
         for block in &mut graph.blocks {
-            block.instructions = marked(std::mem::take(&mut block.instructions), &marks, &stops);
+            block.instructions = self.formatted(
+                marked(std::mem::take(&mut block.instructions), &marks, &stops),
+                &formats,
+            );
         }
         self.work.graph = graph;
+    }
+
+    /// The analyst's operand formats by the value of the address they are
+    /// at.
+    fn formats_by_address(
+        &self,
+    ) -> std::collections::HashMap<u64, ag_corpus::project::OperandFormat> {
+        self.annotations
+            .annotations
+            .iter()
+            .filter(|a| a.variable.is_none() && a.register.is_none() && !a.block)
+            .filter_map(|a| {
+                let format = a.operand_format()?;
+                let (value, _) = ag_corpus::parse_addr_space(&a.address).ok()?;
+                Some((value, format))
+            })
+            .collect()
+    }
+
+    /// The listing `lines` with the analyst's operand `formats` applied: the
+    /// constants of an instruction the analyst chose a format for are
+    /// rewritten in it, and an address format names the place a constant
+    /// points at when the analysis or the analyst named one.
+    fn formatted(
+        &self,
+        mut lines: Vec<ListingLine>,
+        formats: &std::collections::HashMap<u64, ag_corpus::project::OperandFormat>,
+    ) -> Vec<ListingLine> {
+        if formats.is_empty() {
+            return lines;
+        }
+        for line in &mut lines {
+            let Some(&format) = formats.get(&line.address) else {
+                continue;
+            };
+            let name_of = |value: u64| self.named_place(value);
+            line.operands = reformat_operands(&line.operands, format, &name_of);
+        }
+        lines
+    }
+
+    /// The name of the place at `address`, when the analysis or the analyst
+    /// gave it one: a function's name, or a label.
+    fn named_place(&self, address: u64) -> Option<String> {
+        let key = self.annotation_key(address);
+        if let Some(name) = self.annotation_name(&key) {
+            return Some(name);
+        }
+        self.provider
+            .functions()
+            .iter()
+            .find(|row| row.address == address)
+            .map(|row| row.name.clone())
     }
 
     /// The analyst's marks that stand in for instructions — data, a string,
@@ -1966,7 +2027,7 @@ impl App {
         // is read before either and compared after, and a difference is
         // one change undo remembers, labelled by what the notice said.
         let edits = match &message {
-            Message::EditBookmark | Message::EditMark(_) => true,
+            Message::EditBookmark | Message::EditMark(_) | Message::EditOperandFormat => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -2064,6 +2125,28 @@ impl App {
                     None => format!("Mark taken off {key}: code"),
                 });
                 self.refresh_functions();
+                self.refresh_listing();
+            }
+
+            Message::EditOperandFormat => {
+                use ag_corpus::project::OperandFormat;
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select an instruction to format".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.operand_format())
+                    .unwrap_or(OperandFormat::Hex);
+                let next = current.next();
+                let kind = self.kind_at(address);
+                self.annotations
+                    .annotation_mut(kind, &key)
+                    .set_operand_format(Some(next));
+                self.annotations.prune();
+                self.notice = Some(format!("Operands of {key} shown as {}", next.label()));
                 self.refresh_listing();
             }
 
@@ -3090,6 +3173,123 @@ fn marked(
     out
 }
 
+/// The operand text `operands` with every constant shown as `format` says.
+///
+/// A constant is a hexadecimal literal as a disassembler prints one: `0x30`
+/// as the sample and a kuna export spell it, or `30h` / `0Ch` as iced's
+/// Intel syntax spells it for a program image — a run of hex digits that
+/// starts with a decimal digit and ends in `h`. Either way no word character
+/// may run into it, so a label such as `loc_0x10` or `sub_1149h` is left
+/// whole. Hex leaves the text as it is. Signed reads a value in the width it
+/// is printed in — two digits a byte, four a word, eight a double word, else
+/// a quad word — so `0xff` is `-0x1`; a constant the analysis already
+/// printed with a sign, `[rbp-0x88]` or `[rbp+0x10]`, is signed already and
+/// is left as it is. Decimal and octal print the value as a number. Address
+/// shows the name `name_of` gives the value, and leaves a value it names
+/// nothing for as it was. Anything that is not a constant — a register, a
+/// label, a mnemonic suffix — is left alone.
+pub(crate) fn reformat_operands(
+    operands: &str,
+    format: ag_corpus::project::OperandFormat,
+    name_of: &dyn Fn(u64) -> Option<String>,
+) -> String {
+    use ag_corpus::project::OperandFormat;
+    if format == OperandFormat::Hex {
+        return operands.to_string();
+    }
+    let bytes = operands.as_bytes();
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut out = String::with_capacity(operands.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let word_before = at > 0 && is_word(bytes[at - 1]);
+        // The literal at `at`, as (end, digits, spelled with `0x`), when
+        // one starts here and nothing runs into it on either side.
+        let literal = if word_before {
+            None
+        } else if bytes[at..].starts_with(b"0x") {
+            let mut end = at + 2;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let digits = &operands[at + 2..end];
+            (!digits.is_empty() && !(end < bytes.len() && is_word(bytes[end])))
+                .then_some((end, digits, true))
+        } else if bytes[at].is_ascii_digit() {
+            let mut end = at;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let suffixed = end < bytes.len()
+                && bytes[end] == b'h'
+                && !(end + 1 < bytes.len() && is_word(bytes[end + 1]));
+            suffixed.then_some((end + 1, &operands[at..end], false))
+        } else {
+            None
+        };
+        let Some((end, digits, prefixed)) = literal else {
+            out.push(bytes[at] as char);
+            at += 1;
+            continue;
+        };
+        let Ok(value) = u64::from_str_radix(digits, 16) else {
+            out.push_str(&operands[at..end]);
+            at = end;
+            continue;
+        };
+        // A sign the analysis printed — `-0x88`, `+ 0x10` — makes the
+        // constant signed already: its value is what it says.
+        let signed_already = out.trim_end().ends_with(['-', '+']);
+        let hex = |value: u64| {
+            if prefixed {
+                format!("{value:#x}")
+            } else {
+                format!("{value:X}h")
+            }
+        };
+        let shown = match format {
+            OperandFormat::Hex => unreachable!("hex returns above"),
+            OperandFormat::Signed if signed_already => operands[at..end].to_string(),
+            OperandFormat::Signed => {
+                // iced leads a constant that starts with a letter with a
+                // zero, `0FFh`, which is spelling, not width.
+                let printed = if prefixed {
+                    digits.len()
+                } else {
+                    digits.trim_start_matches('0').len().max(1)
+                };
+                let width_bits = match printed {
+                    0..=2 => 8,
+                    3..=4 => 16,
+                    5..=8 => 32,
+                    _ => 64,
+                };
+                let signed = if width_bits == 64 {
+                    value as i64
+                } else if value & (1u64 << (width_bits - 1)) != 0 {
+                    (value as i64) - (1i64 << width_bits)
+                } else {
+                    value as i64
+                };
+                if signed < 0 {
+                    format!("-{}", hex(signed.unsigned_abs()))
+                } else {
+                    hex(value)
+                }
+            }
+            OperandFormat::Decimal => value.to_string(),
+            OperandFormat::Octal => format!("{value:#o}"),
+            OperandFormat::Address => match name_of(value) {
+                Some(name) if !signed_already => name,
+                _ => operands[at..end].to_string(),
+            },
+        };
+        out.push_str(&shown);
+        at = end;
+    }
+    out
+}
+
 /// The bytes a listing line prints, `FD 03 00 91`, as values; anything that
 /// is not a pair of hex digits — the mark a cut-short line ends in — is
 /// passed over.
@@ -3270,6 +3470,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("d"), true, true) => Message::EditMark(Mark::Data),
         (Key::Character("a"), true, true) => Message::EditMark(Mark::String),
         (Key::Character("u"), true, true) => Message::EditMark(Mark::Undefined),
+        // The constants of the selected instruction, the next way round.
+        (Key::Character("n"), true, true) => Message::EditOperandFormat,
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -4156,6 +4358,10 @@ mod tests {
         assert!(matches!(
             shortcut(chord("u", "U", keyboard::key::Code::KeyU)),
             Message::EditMark(Mark::Undefined)
+        ));
+        assert!(matches!(
+            shortcut(chord("n", "N", keyboard::key::Code::KeyN)),
+            Message::EditOperandFormat
         ));
         assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
         assert!(matches!(
@@ -5428,6 +5634,153 @@ mod tests {
         // Undo takes the function off the list again.
         let _ = app.update(Message::EditUndo);
         assert_eq!(app.navigator.rows.len(), total);
+    }
+
+    #[test]
+    fn a_constant_is_shown_in_the_base_the_analyst_chose() {
+        use ag_corpus::project::OperandFormat::*;
+        let none = |_: u64| None;
+        let named = |value: u64| (value == 0x1149).then(|| "decode".to_string());
+        assert_eq!(
+            reformat_operands("x29, sp, #0x30", Hex, &none),
+            "x29, sp, #0x30"
+        );
+        assert_eq!(
+            reformat_operands("x29, sp, #0x30", Decimal, &none),
+            "x29, sp, #48"
+        );
+        assert_eq!(
+            reformat_operands("x29, sp, #0x30", Octal, &none),
+            "x29, sp, #0o60"
+        );
+        assert_eq!(
+            reformat_operands("x29, sp, #0x30", Signed, &none),
+            "x29, sp, #0x30"
+        );
+        // Signed reads the width the constant is printed in.
+        assert_eq!(reformat_operands("eax, 0xff", Signed, &none), "eax, -0x1");
+        assert_eq!(
+            reformat_operands("eax, 0xffffffff", Signed, &none),
+            "eax, -0x1"
+        );
+        assert_eq!(reformat_operands("eax, 0x7f", Signed, &none), "eax, 0x7f");
+        assert_eq!(
+            reformat_operands("rax, 0x8000000000000000", Signed, &none),
+            "rax, -0x8000000000000000"
+        );
+        assert_eq!(reformat_operands("al, 0x80", Signed, &none), "al, -0x80");
+        // A sign the analysis printed makes the constant signed already:
+        // it is what it says, under every format that keeps the base.
+        assert_eq!(reformat_operands("[rbp-0x88]", Signed, &none), "[rbp-0x88]");
+        assert_eq!(reformat_operands("[rbp+0x88]", Signed, &none), "[rbp+0x88]");
+        assert_eq!(
+            reformat_operands("[RBP + -0x88]", Signed, &none),
+            "[RBP + -0x88]"
+        );
+        assert_eq!(reformat_operands("[rbp-0x8]", Decimal, &none), "[rbp-8]");
+        assert_eq!(reformat_operands("[rbp+0x10]", Octal, &none), "[rbp+0o20]");
+        // Every constant in the line is shown the same way; labels are not
+        // constants, and neither is a literal a word runs into.
+        assert_eq!(reformat_operands("0x10, 0x20", Decimal, &none), "16, 32");
+        assert_eq!(
+            reformat_operands("x0, loc_0x10", Decimal, &none),
+            "x0, loc_0x10"
+        );
+        assert_eq!(reformat_operands("0x1Fh", Decimal, &none), "0x1Fh");
+        assert_eq!(reformat_operands("0x", Decimal, &none), "0x");
+        // An address shows the place's name when there is one.
+        assert_eq!(
+            reformat_operands("rdi, 0x1149", Address, &named),
+            "rdi, decode"
+        );
+        assert_eq!(
+            reformat_operands("rdi, 0x1150", Address, &named),
+            "rdi, 0x1150"
+        );
+        assert_eq!(
+            reformat_operands("[rbp-0x1149]", Address, &named),
+            "[rbp-0x1149]"
+        );
+
+        // iced's Intel syntax, which a program image's listing is printed
+        // in, spells hex with an `h`: the same constants, read the same way
+        // and shown in the same spelling.
+        assert_eq!(
+            reformat_operands("eax,[ebp+0Ch]", Decimal, &none),
+            "eax,[ebp+12]"
+        );
+        assert_eq!(reformat_operands("eax,30h", Octal, &none), "eax,0o60");
+        assert_eq!(reformat_operands("eax,0FFh", Signed, &none), "eax,-1h");
+        assert_eq!(
+            reformat_operands("eax,0FFFFFFFFh", Signed, &none),
+            "eax,-1h"
+        );
+        assert_eq!(
+            reformat_operands("rax,[rbp-88h]", Signed, &none),
+            "rax,[rbp-88h]"
+        );
+        assert_eq!(
+            reformat_operands("qword ptr [1149h]", Address, &named),
+            "qword ptr [decode]"
+        );
+        assert_eq!(
+            reformat_operands("qword ptr [3FD0h]", Address, &named),
+            "qword ptr [3FD0h]"
+        );
+        assert_eq!(reformat_operands("sub_1149h", Decimal, &none), "sub_1149h");
+        assert_eq!(reformat_operands("1149hx", Decimal, &none), "1149hx");
+        assert_eq!(reformat_operands("eax,ebx", Decimal, &none), "eax,ebx");
+    }
+
+    #[test]
+    fn the_operand_format_cycles_per_instruction_and_shows_in_the_listing() {
+        let mut app = app();
+        let start = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(start));
+        let at = app
+            .work
+            .listing
+            .iter()
+            .position(|line| line.address == start + 20)
+            .expect("the add");
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0x30");
+        let _ = app.update(Message::AddressSelected(start + 20));
+
+        // Hex → signed (the same for a small value) → decimal → octal →
+        // address (no place) → hex again, which clears the record.
+        let _ = app.update(Message::EditOperandFormat);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0x30");
+        assert!(app.notice.as_deref().unwrap().ends_with("signed"));
+        let _ = app.update(Message::EditOperandFormat);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #48");
+        let in_graph = app
+            .work
+            .graph
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .find(|line| line.address == start + 20)
+            .expect("the graph has the line");
+        assert_eq!(in_graph.operands, "x29, sp, #48");
+        let _ = app.update(Message::EditOperandFormat);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0o60");
+        let _ = app.update(Message::EditOperandFormat);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0x30");
+        let _ = app.update(Message::EditOperandFormat);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0x30");
+        assert!(
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 20))
+                .is_none(),
+            "hex is the default, so the record is gone"
+        );
+        assert_eq!(app.undo.len(), 5, "every step is a change");
+
+        // Only the one instruction changes; undo brings the base back.
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.work.listing[at].operands, "x29, sp, #0o60");
+        assert_eq!(app.work.listing[at + 1].operands, "x19, x0");
     }
 
     #[test]

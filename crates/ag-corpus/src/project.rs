@@ -254,6 +254,70 @@ impl ByteType {
     }
 }
 
+/// How the constants in one instruction's operands are shown.
+///
+/// The right base for a constant depends on what it means — a flag mask,
+/// a count, an address — and the analysis cannot know, so the analyst
+/// chooses per instruction. Stored on the record as text, so a reader that
+/// does not know a spelling shows the constants as the analysis printed
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandFormat {
+    /// Hexadecimal, as the analysis prints it: `0x30`.
+    Hex,
+    /// Signed hexadecimal, read in the width the constant is printed in:
+    /// `0xff` is `-0x1`.
+    Signed,
+    /// Decimal: `48`.
+    Decimal,
+    /// Octal: `0o60`.
+    Octal,
+    /// An address, shown by the name of the place it points at when the
+    /// analysis or the analyst named one.
+    Address,
+}
+
+impl OperandFormat {
+    /// The formats in the order the workbench cycles through them.
+    pub const ALL: [OperandFormat; 5] = [
+        OperandFormat::Hex,
+        OperandFormat::Signed,
+        OperandFormat::Decimal,
+        OperandFormat::Octal,
+        OperandFormat::Address,
+    ];
+
+    /// Read a format as it is stored or typed; case and the spaces around
+    /// do not matter.
+    pub fn parse(text: &str) -> Option<OperandFormat> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "hex" => Some(OperandFormat::Hex),
+            "signed" => Some(OperandFormat::Signed),
+            "decimal" => Some(OperandFormat::Decimal),
+            "octal" => Some(OperandFormat::Octal),
+            "address" => Some(OperandFormat::Address),
+            _ => None,
+        }
+    }
+
+    /// The format as it is stored.
+    pub fn label(self) -> &'static str {
+        match self {
+            OperandFormat::Hex => "hex",
+            OperandFormat::Signed => "signed",
+            OperandFormat::Decimal => "decimal",
+            OperandFormat::Octal => "octal",
+            OperandFormat::Address => "address",
+        }
+    }
+
+    /// The format after this one, round again from the last.
+    pub fn next(self) -> OperandFormat {
+        let at = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -329,6 +393,11 @@ pub struct Annotation {
     /// How the bytes at the target are classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_type: Option<String>,
+    /// How the constants in the instruction's operands are shown; see
+    /// [`OperandFormat`]. A reader that does not know the field shows them
+    /// as the analysis printed them and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operand_format: Option<String>,
 }
 
 impl Annotation {
@@ -343,6 +412,7 @@ impl Annotation {
             block: false,
             name: None,
             references: Vec::new(),
+            operand_format: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -363,6 +433,7 @@ impl Annotation {
             block: false,
             name: None,
             references: Vec::new(),
+            operand_format: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -382,6 +453,7 @@ impl Annotation {
             block: kind == TargetKind::Region,
             name: None,
             references: Vec::new(),
+            operand_format: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -491,6 +563,23 @@ impl Annotation {
         self.byte_type = byte_type.map(ByteType::label);
     }
 
+    /// How the constants in the instruction's operands are shown, when
+    /// the record says and this program reads the spelling.
+    pub fn operand_format(&self) -> Option<OperandFormat> {
+        self.operand_format
+            .as_deref()
+            .and_then(OperandFormat::parse)
+    }
+
+    /// Record how the operands' constants are shown, or clear it with
+    /// `None`. Hexadecimal is how the analysis prints them, so choosing it
+    /// clears the record rather than saying the default twice.
+    pub fn set_operand_format(&mut self, format: Option<OperandFormat>) {
+        self.operand_format = format
+            .filter(|format| *format != OperandFormat::Hex)
+            .map(|format| format.label().to_string());
+    }
+
     /// Whether the target carries the tag `tag`.
     pub fn has_tag(&self, tag: &str) -> bool {
         normalize_tag(tag).is_some_and(|tag| self.tags.contains(&tag))
@@ -500,6 +589,7 @@ impl Annotation {
     /// would say the analyst changed nothing.
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
+            && self.operand_format.is_none()
             && self.references.is_empty()
             && self.comment.is_none()
             && !self.bookmark
@@ -1206,6 +1296,37 @@ mod tests {
         );
         record.set_byte_type(None);
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn an_operand_format_reads_its_spelling_cycles_and_hex_is_the_default() {
+        for format in OperandFormat::ALL {
+            assert_eq!(OperandFormat::parse(format.label()), Some(format));
+        }
+        assert_eq!(
+            OperandFormat::parse(" Decimal "),
+            Some(OperandFormat::Decimal)
+        );
+        assert_eq!(OperandFormat::parse("binary"), None);
+        assert_eq!(OperandFormat::Hex.next(), OperandFormat::Signed);
+        assert_eq!(
+            OperandFormat::Address.next(),
+            OperandFormat::Hex,
+            "round again"
+        );
+
+        let mut record = Annotation::new(TargetKind::Address, "0x10");
+        record.set_operand_format(Some(OperandFormat::Octal));
+        assert_eq!(record.operand_format.as_deref(), Some("octal"));
+        assert_eq!(record.operand_format(), Some(OperandFormat::Octal));
+        record.set_operand_format(Some(OperandFormat::Hex));
+        assert!(record.is_empty(), "hex is the default, so it is no record");
+        record.operand_format = Some("binary".into());
+        assert_eq!(
+            record.operand_format(),
+            None,
+            "a spelling this program does not read"
+        );
     }
 
     #[test]

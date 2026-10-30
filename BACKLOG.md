@@ -101,7 +101,7 @@ Filed 2026-10-26.
 ### Correcting the analysis
 
 - [x] Mark bytes as code, function, data, string or undefined — [#311](https://github.com/CryptoJones/AdmiralGrace/issues/311)
-- [ ] Operand display format: hex, signed, decimal, octal, or as an address — [#312](https://github.com/CryptoJones/AdmiralGrace/issues/312)
+- [x] Operand display format: hex, signed, decimal, octal, or as an address — [#312](https://github.com/CryptoJones/AdmiralGrace/issues/312)
 - [ ] Switch tables: recover jump tables, with a manual hint when recovery fails — [#313](https://github.com/CryptoJones/AdmiralGrace/issues/313)
 - [ ] Analysis options: branches end procedures, and code sections hold only procedures — [#314](https://github.com/CryptoJones/AdmiralGrace/issues/314)
 

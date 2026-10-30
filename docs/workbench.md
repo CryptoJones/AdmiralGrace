@@ -310,6 +310,23 @@ marked is the function the addresses after it belong to, until the next. An arra
 recorded with `ag project mark`; the workbench cycles the width of one item. The inspector
 shows the mark as the file holds it.
 
+The right base for a constant depends on what it means — a flag mask, a count, an address —
+so the analyst chooses it per instruction:
+
+- **Operand format** (Ctrl+Shift+N) shows the constants in the selected instruction's
+  operands the next way round: hexadecimal as the analysis prints them, signed hexadecimal,
+  decimal, octal, then as an address, and round to hexadecimal, which is the default and
+  leaves no record. Signed reads a constant in the width it is printed in — two digits a
+  byte, four a word, eight a double word — so `0xff` is `-0x1`; a constant the analysis
+  already printed with a sign, `[rbp-0x88]`, is signed already and stays. An address shows
+  the name of the place the constant points at when the analysis or the analyst named one,
+  and leaves a constant that names nothing as it was. A constant is read whether the listing
+  spells it `0x30` or, as a program image's does, `30h`, and keeps its spelling.
+
+The format reaches the listing and the graph, every constant of the one instruction alike; a
+`-` the analysis printed before a constant stays with it. `ag project operand` records the
+same choice.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
@@ -317,8 +334,8 @@ Every one of these changes can be taken back:
   `Undo: Renamed 0x1198`. A new change after an undo forgets what was taken back.
 
 Undo covers every mark the analyst makes — renames, labels, local variable and register
-names, comments, bookmarks, tags, highlights, cross references and byte marks — in the order
-they were made, and the
+names, comments, bookmarks, tags, highlights, cross references, byte marks and operand
+formats — in the order they were made, and the
 navigator and every view follow. Opening a project file or a different analysis starts
 afresh: the marks those changes were made to are gone.
 

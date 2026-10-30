@@ -122,6 +122,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+U",
                 Message::EditMark(Mark::Undefined),
             )),
+            Item::new(item_button(
+                "Operand format (next: hex, signed, decimal, octal, address)",
+                "Ctrl+Shift+N",
+                Message::EditOperandFormat,
+            )),
             Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
             Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),
