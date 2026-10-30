@@ -6,6 +6,10 @@ Every judgment call the engine makes is an option, set per run with `--option NA
 
 If the output shows… | Try…
 --- | ---
+a function whose graph runs on into the next routine's blocks after a `jmp` into it, or a `sub_…` that swallowed its neighbour | `--option branches-end-procedures yes`
+a tail call to an address inside a function where the `jmp` is a loop or a shared block of the function's own | `--option branches-end-procedures no`
+code in an executable section that no function in the list reaches: a stripped routine, hand-written glue after the last symbol | `--option code-sections procedures`
+`sub_…` functions that are really a table, a string or padding the compiler left in `.text` | `--option code-sections mixed`
 `not lifted yet: rcx is read before it is written` on an ELF built for the Microsoft convention | `--option abi win64`
 `not lifted yet: rdi is read before it is written` on a PE built with a System V compiler | `--option abi sysv`
 a function you know takes more arguments than its signature shows, because the tail of them is only passed on | `--option parameters convention`
@@ -40,7 +44,10 @@ bodies indented two spaces next to source indented four | `--option indent 4`
 
 ## Decode
 
-No options yet.
+Option | Tier | Takes | Default | What it decides
+--- | --- | --- | --- | ---
+`branches-end-procedures` | analysis | `no` \| `yes` | `no` | Whether a branch out of a procedure's own range ends it: a `jmp` or `jcc` to an address before the entry, or at or past the next function the image knows, is a tail call to that address rather than more of the procedure. Hand-written and shared-tail code, where routines jump into one another, reads better that way; compiled code rarely does.
+`code-sections` | analysis | `mixed` \| `procedures` | `mixed` | What an executable section holds: code and data mixed, so the procedures are the functions the image names and its entry point; or procedures only, so every run of instructions no known procedure reaches starts one of its own, named `sub_` and its address, with padding — `nop`, `int3`, bytes that do not decode — passed over.
 
 ## Lift
 

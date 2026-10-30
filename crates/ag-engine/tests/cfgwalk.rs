@@ -634,3 +634,81 @@ fn the_analysts_hint_stands_in_for_the_table_and_the_count() {
     let cfg = resolve_branches_among(&d, 0x1000, &plain);
     assert!(cfg.jump_tables.is_empty());
 }
+
+/// Two routines that share a tail, and a third nothing names: the
+/// `boundaries.elf` fixture's code.
+///
+/// ```text
+/// 401000: mov eax,1 ; jmp 40100c        main
+/// 401007: mov eax,2                     helper
+/// 40100c: ret                           shared (no function symbol)
+/// 40100d: nop dword [rax]               padding
+/// 401010: mov eax,3 ; ret               an unnamed routine
+/// ```
+const SHARED_TAIL: &[u8] = &[
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xeb, 0x05, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3, 0x0f, 0x1f, 0x00,
+    0xb8, 0x03, 0x00, 0x00, 0x00, 0xc3,
+];
+
+/// An image of two functions whose branches end at the next function.
+struct Bounded {
+    functions: Vec<u64>,
+    ends: bool,
+}
+
+impl Entries for Bounded {
+    fn is_function(&self, address: u64) -> bool {
+        self.functions.contains(&address)
+    }
+    fn is_import_slot(&self, _slot: u64) -> bool {
+        false
+    }
+    fn branch_leaves(&self, entry: u64, target: u64) -> bool {
+        if !self.ends {
+            return false;
+        }
+        let next = self.functions.iter().filter(|f| **f > entry).min().copied();
+        target < entry || next.is_some_and(|next| target >= next)
+    }
+}
+
+#[test]
+fn a_branch_past_the_next_function_ends_the_procedure_when_told_to() {
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, SHARED_TAIL, 0x401000).unwrap();
+    let functions = vec![0x401000, 0x401007];
+
+    // By default the jump into helper's tail is main's own block.
+    let loose = Bounded {
+        functions: functions.clone(),
+        ends: false,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &loose);
+    assert_eq!(cfg.blocks.len(), 2);
+    assert!(cfg.tail_calls.is_empty());
+    assert!(cfg.blocks.iter().any(|b| b.from == 0x40100c));
+
+    // Told that branches end procedures, the jump is a tail call to the
+    // shared ret, and main is its one block.
+    let bounded = Bounded {
+        functions,
+        ends: true,
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &bounded);
+    assert_eq!(cfg.blocks.len(), 1);
+    assert_eq!(cfg.blocks[0].to, 0x401007);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(
+        cfg.tail_calls,
+        [TailCall {
+            site: 0x401005,
+            target: 0x40100c
+        }]
+    );
+
+    // helper's own jump-free body still reaches the shared ret: it is
+    // inside helper's range.
+    let cfg = resolve_branches_among(&d, 0x401007, &bounded);
+    assert_eq!(cfg.blocks.len(), 1);
+    assert_eq!(cfg.blocks[0].to, 0x40100d);
+}

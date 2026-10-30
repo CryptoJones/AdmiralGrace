@@ -129,6 +129,42 @@ const fn symptom(shows: &'static str, value: &'static str) -> Symptom {
 /// The registry: every option, by phase and then by name.
 pub const OPTIONS: &[OptionSpec] = &[
     OptionSpec {
+        name: "branches-end-procedures",
+        phase: Phase::Decode,
+        tier: Tier::Analysis,
+        kind: Kind::Choice(&["no", "yes"]),
+        default: "no",
+        description: "Whether a branch out of a procedure's own range ends it: a `jmp` or `jcc` to an address before the entry, or at or past the next function the image knows, is a tail call to that address rather than more of the procedure. Hand-written and shared-tail code, where routines jump into one another, reads better that way; compiled code rarely does.",
+        symptoms: &[
+            symptom(
+                "a function whose graph runs on into the next routine's blocks after a `jmp` into it, or a `sub_…` that swallowed its neighbour",
+                "yes",
+            ),
+            symptom(
+                "a tail call to an address inside a function where the `jmp` is a loop or a shared block of the function's own",
+                "no",
+            ),
+        ],
+    },
+    OptionSpec {
+        name: "code-sections",
+        phase: Phase::Decode,
+        tier: Tier::Analysis,
+        kind: Kind::Choice(&["mixed", "procedures"]),
+        default: "mixed",
+        description: "What an executable section holds: code and data mixed, so the procedures are the functions the image names and its entry point; or procedures only, so every run of instructions no known procedure reaches starts one of its own, named `sub_` and its address, with padding — `nop`, `int3`, bytes that do not decode — passed over.",
+        symptoms: &[
+            symptom(
+                "code in an executable section that no function in the list reaches: a stripped routine, hand-written glue after the last symbol",
+                "procedures",
+            ),
+            symptom(
+                "`sub_…` functions that are really a table, a string or padding the compiler left in `.text`",
+                "mixed",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "abi",
         phase: Phase::Lift,
         tier: Tier::Analysis,
@@ -530,6 +566,29 @@ pub enum DeadCompares {
     Keep,
 }
 
+/// Whether a branch out of a procedure's own range ends the procedure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchesEndProcedures {
+    /// A branch to an address no function is known at is more of the
+    /// procedure, wherever it lands.
+    #[default]
+    No,
+    /// A branch to an address before the entry, or at or past the next
+    /// function the image knows, is a tail call to that address.
+    Yes,
+}
+
+/// What an executable section holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodeSections {
+    /// Code and data: the procedures are the functions the image names.
+    #[default]
+    Mixed,
+    /// Procedures only: every run of instructions no known procedure
+    /// reaches starts one of its own.
+    Procedures,
+}
+
 /// What becomes of a `jmp` to another function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TailCalls {
@@ -586,6 +645,8 @@ pub enum ConstantStyle {
 /// The options of one run: one typed field per row of [`OPTIONS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
+    pub branches_end_procedures: BranchesEndProcedures,
+    pub code_sections: CodeSections,
     pub abi: AbiChoice,
     pub parameters: Parameters,
     pub merged_register_names: MergedNames,
@@ -606,6 +667,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            branches_end_procedures: BranchesEndProcedures::default(),
+            code_sections: CodeSections::default(),
             abi: AbiChoice::default(),
             parameters: Parameters::default(),
             merged_register_names: MergedNames::default(),
@@ -760,6 +823,26 @@ impl Options {
                     &[("return", TailCalls::Return), ("refuse", TailCalls::Refuse)],
                 )?
             }
+            "branches-end-procedures" => {
+                self.branches_end_procedures = choose(
+                    spec,
+                    value,
+                    &[
+                        ("no", BranchesEndProcedures::No),
+                        ("yes", BranchesEndProcedures::Yes),
+                    ],
+                )?
+            }
+            "code-sections" => {
+                self.code_sections = choose(
+                    spec,
+                    value,
+                    &[
+                        ("mixed", CodeSections::Mixed),
+                        ("procedures", CodeSections::Procedures),
+                    ],
+                )?
+            }
             "return-liveness" => {
                 self.return_liveness = choose(
                     spec,
@@ -869,6 +952,14 @@ impl Options {
                 "tail-calls" => match self.tail_calls {
                     TailCalls::Return => "return",
                     TailCalls::Refuse => "refuse",
+                },
+                "branches-end-procedures" => match self.branches_end_procedures {
+                    BranchesEndProcedures::No => "no",
+                    BranchesEndProcedures::Yes => "yes",
+                },
+                "code-sections" => match self.code_sections {
+                    CodeSections::Mixed => "mixed",
+                    CodeSections::Procedures => "procedures",
                 },
                 "return-liveness" => match self.return_liveness {
                     ReturnLiveness::Callers => "callers",
@@ -1237,13 +1328,18 @@ mod tests {
         }
         assert!(markdown.contains("| `--option loop-form while`\n"));
         assert!(markdown.contains("`loop-form` | transform | `for` \\| `while` | `for` |"));
-        assert!(markdown.contains("## Decode\n\nNo options yet."));
+        assert!(markdown.contains("## Decode\n\nOption | Tier"), "{markdown}");
+        assert!(markdown.contains("`branches-end-procedures` | analysis |"), "{markdown}");
+        assert!(markdown.contains("`code-sections` | analysis |"), "{markdown}");
     }
 
     #[test]
     fn the_json_is_one_object_per_row() {
         let json = catalog_json();
-        assert!(json.starts_with("[\n  {\n    \"name\": \"abi\",\n"));
+        assert!(
+            json.starts_with("[\n  {\n    \"name\": \"branches-end-procedures\",\n"),
+            "{json}"
+        );
         assert_eq!(json.matches("\"name\": ").count(), OPTIONS.len());
         assert!(json.contains("\"type\": { \"choice\": [\"for\", \"while\"] }"));
         assert!(json.contains("\"type\": { \"integer\": { \"min\": 1, \"max\": 8 } }"));

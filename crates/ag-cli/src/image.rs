@@ -31,6 +31,10 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// Set an engine option, such as `--option code-sections procedures`.
+        /// May be repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// The disassembly of one function.
     Disasm {
@@ -42,6 +46,10 @@ pub enum ImageCmd {
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Set an engine option, such as `--option branches-end-procedures yes`.
+        /// May be repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// The strings the image holds.
     Strings {
@@ -65,6 +73,10 @@ pub enum ImageCmd {
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Set an engine option, such as `--option branches-end-procedures yes`.
+        /// May be repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// The calls between the functions of the image.
     Calls {
@@ -75,6 +87,10 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// Set an engine option, such as `--option code-sections procedures`.
+        /// May be repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// The pseudocode of one function.
     Pseudocode {
@@ -512,7 +528,12 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     // The options are checked before the image is read, so a typo in one
     // is answered at once and names the row.
     let options = match &cmd {
-        ImageCmd::Pseudocode { options, .. } | ImageCmd::Export { options, .. } => {
+        ImageCmd::Symbols { options, .. }
+        | ImageCmd::Disasm { options, .. }
+        | ImageCmd::Cfg { options, .. }
+        | ImageCmd::Calls { options, .. }
+        | ImageCmd::Pseudocode { options, .. }
+        | ImageCmd::Export { options, .. } => {
             Options::from_flat(options).map_err(|error| anyhow::anyhow!("{error}"))?
         }
         _ => Options::default(),
@@ -550,7 +571,7 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
 
     match cmd {
         ImageCmd::Info { json } => info(&image, json),
-        ImageCmd::Symbols { filter, json } => symbols(&image, filter.as_deref(), json),
+        ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
         ImageCmd::Disasm { target, json, .. } => disasm(&image, &target, json),
         ImageCmd::Strings {
             filter,
@@ -558,7 +579,7 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
             json,
         } => strings(&image, filter.as_deref(), utf16, json),
         ImageCmd::Cfg { target, json, .. } => cfg(&image, &target, json),
-        ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
+        ImageCmd::Calls { target, json, .. } => calls(&image, target.as_deref(), json),
         ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
@@ -1977,7 +1998,9 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .starts_with("no option named \"loop-shape\"; the options are abi, "),
+                .starts_with(
+                    "no option named \"loop-shape\"; the options are branches-end-procedures, code-sections, abi, "
+                ),
             "{error}"
         );
     }
