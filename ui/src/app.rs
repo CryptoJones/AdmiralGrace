@@ -1794,6 +1794,11 @@ impl App {
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::EditUndo => {
+                // While the analyst is typing into a prompt, the chord is
+                // about the typing, not the marks beneath it.
+                if self.prompt.is_some() {
+                    return Task::none();
+                }
                 let Some(change) = self.undo.pop() else {
                     self.notice = Some("Nothing to undo".into());
                     return Task::none();
@@ -1805,6 +1810,9 @@ impl App {
             }
 
             Message::EditRedo => {
+                if self.prompt.is_some() {
+                    return Task::none();
+                }
                 let Some(change) = self.redo.pop() else {
                     self.notice = Some("Nothing to redo".into());
                     return Task::none();
@@ -4425,6 +4433,13 @@ mod tests {
         let _ = app.update(Message::EditTags);
         let _ = app.update(Message::PromptSubmit);
         assert_eq!(app.undo.len(), 3);
+
+        // Undo while a prompt is open leaves the marks alone: the chord is
+        // about the typing.
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.undo.len(), 3, "nothing undone under a prompt");
+        let _ = app.update(Message::Dismiss);
 
         // A path prompt is not an analyst change either.
         let _ = app.update(Message::FileOpenCorpus);
