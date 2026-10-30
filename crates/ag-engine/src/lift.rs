@@ -164,7 +164,7 @@ use iced_x86::Mnemonic;
 
 use crate::arch::Bitness;
 use crate::ast::{AstNode, BinaryOp};
-use crate::cfg::ProcedureCfg;
+use crate::cfg::{JumpTable, ProcedureCfg};
 use crate::cfgwalk::{resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
@@ -357,6 +357,19 @@ pub enum StatementKind {
         step: Box<Statement>,
         body: Vec<Statement>,
     },
+    /// `switch (index) { case a: case b: { arm } … }`: the node is the
+    /// index, and each arm carries the case values that reach it. An arm
+    /// that runs on to the statement after the `switch` ends in `break`.
+    Switch { arms: Vec<SwitchArm> },
+}
+
+/// One arm of a `switch`: the case values that reach it, and its body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchArm {
+    /// The case values, in table order.
+    pub values: Vec<i64>,
+    /// The statements of the arm.
+    pub body: Vec<Statement>,
 }
 
 impl Statement {
@@ -379,6 +392,7 @@ impl Statement {
             } => vec![then_part, else_part],
             StatementKind::While { body } | StatementKind::DoWhile { body } => vec![body],
             StatementKind::For { body, .. } => vec![body],
+            StatementKind::Switch { arms } => arms.iter().map(|arm| &arm.body).collect(),
         }
     }
 
@@ -392,6 +406,7 @@ impl Statement {
             } => vec![then_part, else_part],
             StatementKind::While { body } | StatementKind::DoWhile { body } => vec![body],
             StatementKind::For { body, .. } => vec![body],
+            StatementKind::Switch { arms } => arms.iter_mut().map(|arm| &mut arm.body).collect(),
         }
     }
 
@@ -564,6 +579,12 @@ enum End {
     Branch { taken: usize, next: usize },
     /// By falling into the chain, which other blocks also reach.
     Fall(usize),
+    /// In a `jmp` through a jump table: to each case's chain by the value
+    /// of the index register the table records.
+    Switch {
+        table: JumpTable,
+        cases: Vec<(Vec<i64>, usize)>,
+    },
 }
 
 impl End {
@@ -572,6 +593,15 @@ impl End {
             End::Return | End::Leave => Vec::new(),
             End::Jump(target) | End::Fall(target) => vec![*target],
             End::Branch { taken, next } => vec![*taken, *next],
+            End::Switch { cases, .. } => {
+                let mut nodes = Vec::new();
+                for (_, node) in cases {
+                    if !nodes.contains(node) {
+                        nodes.push(*node);
+                    }
+                }
+                nodes
+            }
         }
     }
 }
@@ -606,11 +636,14 @@ fn chains(
 ) -> Result<Vec<Chain>, NotLifted> {
     let block_at = |address: u64| cfg.blocks.iter().find(|block| block.from == address);
     // A `jmp` to the entry of another function leaves this one: a tail call.
+    // A `jmp` through a jump table the walk resolved stays in the function:
+    // it is the function's own `switch`.
+    let table_at = |site: u64| cfg.jump_tables.iter().find(|table| table.site == site);
     let leaves = |ins: &DecodedInsn| match ins.flow {
         Flow::UnconditionalBranch(target) => {
             target != entry && symbols.function_name(target).is_some()
         }
-        Flow::IndirectBranch => true,
+        Flow::IndirectBranch => table_at(ins.address).is_none(),
         _ => false,
     };
     let mut predecessors: BTreeMap<u64, usize> = BTreeMap::new();
@@ -682,6 +715,16 @@ fn chains(
             let end = match last.flow {
                 Flow::Return => End::Return,
                 _ if leaves(last) => End::Leave,
+                Flow::IndirectBranch => {
+                    let table = table_at(last.address)
+                        .expect("an indirect jump that does not leave reads a table")
+                        .clone();
+                    let mut cases = Vec::new();
+                    for (values, target) in table.cases() {
+                        cases.push((values, node_at(target)?));
+                    }
+                    End::Switch { table, cases }
+                }
                 Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
                 Flow::ConditionalBranch(target) if target == after => End::Jump(node_at(after)?),
                 Flow::ConditionalBranch(target) => End::Branch {
@@ -1225,6 +1268,28 @@ impl<'a> Lifter<'a> {
                     cond,
                     taken,
                     next,
+                    addresses,
+                })
+            }
+            End::Switch {
+                ref table,
+                ref cases,
+            } => {
+                // The index is what the register the table is read by
+                // holds at the jump: the `switch`'s own expression.
+                let Some(register) = table.index else {
+                    return Err(NotLifted::new(format!(
+                        "the jump table at {:#x} names no index register",
+                        last.address
+                    )));
+                };
+                let value = self.read(register, last.address)?;
+                let index = self.node_of(&value)?;
+                let mut addresses = vec![last.address];
+                addresses.extend(value.from.iter().copied());
+                Ok(Terminator::Switch {
+                    index,
+                    cases: cases.clone(),
                     addresses,
                 })
             }

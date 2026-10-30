@@ -39,6 +39,9 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// A project file whose jump-table notes the walk is told.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The strings the image holds.
     Strings {
@@ -59,6 +62,9 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// A project file whose jump-table notes the walk is told.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The calls between the functions of the image.
     Calls {
@@ -81,6 +87,9 @@ pub enum ImageCmd {
         /// repeated; `ag catalog` lists the options and their symptoms.
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
+        /// A project file whose jump-table notes the walk is told.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The data the image holds, and the functions that use it.
     Data {
@@ -327,6 +336,32 @@ pub(crate) struct CfgJson {
     blocks: Vec<BlockJson>,
     /// The edges between the blocks.
     edges: Vec<EdgeJson>,
+    /// The jump tables the function's indirect jumps read.
+    switches: Vec<SwitchJson>,
+}
+
+/// One jump table of a function, as JSON.
+#[derive(Debug, Serialize)]
+pub(crate) struct SwitchJson {
+    /// The address of the `jmp`.
+    site: u64,
+    /// The address of the first entry.
+    table: u64,
+    /// How many bytes one entry takes.
+    width: u8,
+    /// Whether an entry is an offset from `table` rather than an address.
+    relative: bool,
+    /// The cases: each distinct target with the values that reach it.
+    cases: Vec<CaseJson>,
+}
+
+/// One case of a `switch`, as JSON.
+#[derive(Debug, Serialize)]
+pub(crate) struct CaseJson {
+    /// The case values that reach the target.
+    values: Vec<i64>,
+    /// Where they go.
+    target: u64,
 }
 
 impl CfgJson {
@@ -485,17 +520,44 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     let image = Binary::open(binary)
         .with_context(|| format!("reading {}", binary.display()))?
         .with_options(options);
+    // The analyst's jump-table notes stand in where the walk cannot read
+    // a table from the code; they come from the project file, when one is
+    // named.
+    let project = match &cmd {
+        ImageCmd::Disasm { project, .. }
+        | ImageCmd::Cfg { project, .. }
+        | ImageCmd::Pseudocode { project, .. } => project.clone(),
+        _ => None,
+    };
+    if let Some(project) = project {
+        let notes = ag_corpus::project::ProjectFile::load(&project)?.jump_tables();
+        let hints = notes
+            .into_iter()
+            .map(|(site, note)| {
+                (
+                    site,
+                    ag_image::JumpTableHint {
+                        table: note.table,
+                        width: note.width,
+                        count: note.count,
+                        relative: note.relative,
+                    },
+                )
+            })
+            .collect();
+        image.set_jump_table_hints(hints);
+    }
 
     match cmd {
         ImageCmd::Info { json } => info(&image, json),
         ImageCmd::Symbols { filter, json } => symbols(&image, filter.as_deref(), json),
-        ImageCmd::Disasm { target, json } => disasm(&image, &target, json),
+        ImageCmd::Disasm { target, json, .. } => disasm(&image, &target, json),
         ImageCmd::Strings {
             filter,
             utf16,
             json,
         } => strings(&image, filter.as_deref(), utf16, json),
-        ImageCmd::Cfg { target, json } => cfg(&image, &target, json),
+        ImageCmd::Cfg { target, json, .. } => cfg(&image, &target, json),
         ImageCmd::Calls { target, json } => calls(&image, target.as_deref(), json),
         ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
@@ -882,6 +944,30 @@ fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
         println!("  {:#x} -> {:#x} {}", edge.from, edge.to, edge.kind.name());
     }
 
+    // A jump table is the shape of a `switch`: where the table is, how it
+    // is read, and which case goes where.
+    if !graph.jump_tables.is_empty() {
+        println!("switches:");
+        for table in &graph.jump_tables {
+            println!(
+                "  jmp at {:#x}: table {:#x}, {} entries of {} bytes{}",
+                table.site,
+                table.table,
+                table.targets.len(),
+                table.width,
+                if table.relative {
+                    ", offsets from the table"
+                } else {
+                    ""
+                }
+            );
+            for (values, target) in table.cases() {
+                let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                println!("    case {} -> {target:#x}", values.join(", "));
+            }
+        }
+    }
+
     Ok(0)
 }
 
@@ -894,6 +980,21 @@ pub(crate) fn cfg_json(graph: &ag_image::ControlFlowGraph) -> CfgJson {
         section: graph.section.clone(),
         blocks: graph.blocks.iter().map(block_json).collect(),
         edges: graph.edges.iter().map(edge_json).collect(),
+        switches: graph
+            .jump_tables
+            .iter()
+            .map(|table| SwitchJson {
+                site: table.site,
+                table: table.table,
+                width: table.width,
+                relative: table.relative,
+                cases: table
+                    .cases()
+                    .into_iter()
+                    .map(|(values, target)| CaseJson { values, target })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -1855,6 +1956,7 @@ mod tests {
                 target: "sum_to".into(),
                 json: false,
                 options: vec!["loop-form".into(), "sometimes".into()],
+                project: None,
             },
         )
         .expect_err("a bad value is refused");
@@ -1868,6 +1970,7 @@ mod tests {
                 target: "sum_to".into(),
                 json: false,
                 options: vec!["loop-shape".into(), "while".into()],
+                project: None,
             },
         )
         .expect_err("an unknown name is refused");

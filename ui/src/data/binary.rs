@@ -356,6 +356,10 @@ impl Provider for BinaryProvider {
         Some(self.byte_rows(address))
     }
 
+    fn set_jump_table_hints(&self, hints: BTreeMap<u64, ag_image::JumpTableHint>) {
+        self.binary.set_jump_table_hints(hints);
+    }
+
     fn references(&self, address: u64) -> Vec<Reference> {
         let mut references = Vec::new();
 

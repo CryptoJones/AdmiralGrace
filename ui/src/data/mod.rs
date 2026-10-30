@@ -415,6 +415,11 @@ pub trait Provider: Send + Sync {
     /// The cross-reference index has been worked out.
     fn mark_references_ready(&self) {}
 
+    /// Tell the analysis where the jump tables are that its code does not
+    /// say, by the address of the `jmp` that reads each. A provider that
+    /// walks no code has nothing to tell.
+    fn set_jump_table_hints(&self, _hints: BTreeMap<u64, ag_image::JumpTableHint>) {}
+
     /// The strings the project holds.
     fn strings(&self) -> Vec<StringEntry> {
         Vec::new()

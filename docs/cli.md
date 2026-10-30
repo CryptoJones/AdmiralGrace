@@ -129,7 +129,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
 | `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then a comment that says what decided the return type (`// returns int: main reads eax after the call`, `// void: no caller reads the result`), then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result — and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
 | `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
-| `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`. |
+| `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`, then the jump tables the function's indirect jumps read, each with its cases. `--project FILE` tells the walk the project's jump-table notes. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. A `jmp` out of a function — to a function the image names, or through a GOT slot it resolves to an import — is a call marked `(tail call)`. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
@@ -380,6 +380,8 @@ ag project ./bin/ls xref --file ls.agproj 0x11a0 0x1300
 ag project ./bin/ls mark --file ls.agproj 0x2010 data:4[8]
 ag project ./bin/ls mark --file ls.agproj 0x1300 function
 ag project ./bin/ls operand --file ls.agproj 0x1170 decimal
+ag project ./bin/ls switch --file ls.agproj 0x1207 0x2000 6 --relative
+ag image ./bin/ls cfg 0x1200 --project ls.agproj
 
 # Name a label at an address, a local variable, or a register of the function there
 ag project ./bin/ls label --file ls.agproj 0x1198 start_here
@@ -412,6 +414,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET xref --file FILE FROM TO` | Records that the code at `FROM` reaches `TO` — a computed call or jump the analysis cannot see; `--remove` takes the reference back. `TO` must be an address, spelled with its space when the analysis gave the place one (`EXTERNAL:0x1`), since the command cannot ask the analysis; the workbench's prompt adds the space itself. The workbench shows it in the inspector's references, marked manual, from both ends. |
 | `ag project TARGET mark --file FILE ADDRESS KIND` | Says how the bytes at `ADDRESS` are read, correcting the analysis: `code`, `function`, `string`, `undefined`, `data`, `data:W` for items of 1, 2, 4 or 8 bytes, `data:W[N]` for an array of `N`; `none` takes the mark off. The workbench shows a data, string or undefined mark in place of the instructions it covers, and lists a function mark as a function. |
 | `ag project TARGET operand --file FILE ADDRESS FORMAT` | Says how the constants in the operands of the instruction at `ADDRESS` are shown: `hex`, `signed`, `decimal`, `octal` or `address`. `hex` is how the analysis prints them, so it clears the record. |
+| `ag project TARGET switch --file FILE ADDRESS TABLE COUNT [--width 4\|8] [--relative]` | Says where the jump table the indirect `jmp` at `ADDRESS` reads is — its first entry and how many — when the analysis cannot read it from the code; `--relative` for entries that are offsets from the table, whose width is then 4 unless said. `TABLE` of `none` takes the note off. `ag image disasm\|cfg\|pseudocode … --project FILE` reads the notes. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
 ## `ag catalog`: the engine's options

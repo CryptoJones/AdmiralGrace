@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 // The trait that spells one register the way the operand text does.
 use iced_x86::Formatter as _;
 
-use ag_engine::cfgwalk::{resolve_branches_among, Entries};
+use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
 use ag_engine::lift::{lift_function, Pointee, Symbols};
@@ -52,6 +52,8 @@ use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Bitness, Image};
 use anyhow::{Context, Result};
 
+pub use ag_engine::cfg::JumpTable;
+pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::options;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
@@ -285,6 +287,8 @@ pub struct ControlFlowGraph {
     pub blocks: Vec<Block>,
     /// The edges between the blocks.
     pub edges: Vec<Edge>,
+    /// The jump tables the function's indirect jumps read.
+    pub jump_tables: Vec<JumpTable>,
 }
 
 /// The disassembly of one function.
@@ -302,6 +306,9 @@ pub struct Disassembly {
     pub calls: Vec<Call>,
     /// The addresses the instructions of the function point at.
     pub pointers: Vec<Pointer>,
+    /// The jump tables the function's indirect jumps read: the cases of
+    /// each `switch`, recovered from the code or told by the analyst.
+    pub jump_tables: Vec<JumpTable>,
 }
 
 /// The calls between the functions of an image.
@@ -364,6 +371,9 @@ pub struct Binary {
     wide_strings: Vec<ImageString>,
     /// The engine's options, fixed for the life of the image.
     options: Options,
+    /// What the analyst said about the jump tables the image's indirect
+    /// jumps read, by the address of the jump.
+    table_hints: Mutex<BTreeMap<u64, TableHint>>,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
@@ -484,6 +494,7 @@ impl Binary {
             strings,
             wide_strings,
             options: Options::default(),
+            table_hints: Mutex::new(BTreeMap::new()),
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
@@ -503,6 +514,25 @@ impl Binary {
             cache.clear();
         }
         self
+    }
+
+    /// Tell the image where the jump tables are that its code does not
+    /// say: one hint per indirect jump, by the jump's address. The walks
+    /// and the pseudocode built so far are forgotten, since the graph of
+    /// a function may have grown cases.
+    pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) {
+        if let Ok(mut held) = self.table_hints.lock() {
+            if *held == hints {
+                return;
+            }
+            *held = hints;
+        }
+        if let Ok(mut cache) = self.disassembly.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
     }
 
     /// The engine's options this image is read with.
@@ -881,6 +911,7 @@ impl Binary {
             section: disassembly.section.clone(),
             blocks: disassembly.blocks.clone(),
             edges,
+            jump_tables: disassembly.jump_tables.clone(),
         }))
     }
 
@@ -1184,6 +1215,7 @@ impl Binary {
             blocks,
             calls,
             pointers,
+            jump_tables: cfg.jump_tables.clone(),
         })
     }
 }
@@ -1198,6 +1230,25 @@ impl Entries for Binary {
 
     fn is_import_slot(&self, slot: u64) -> bool {
         self.imports.contains_key(&slot)
+    }
+
+    /// A jump table's entry is read out of the file's bytes, little-endian,
+    /// where the file holds them.
+    fn table_entry(&self, address: u64, width: u8) -> Option<u64> {
+        let bytes = self.bytes_at(address, width as usize)?;
+        if bytes.len() != width as usize {
+            return None;
+        }
+        Some(
+            bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, byte| (value << 8) | *byte as u64),
+        )
+    }
+
+    fn table_hint(&self, site: u64) -> Option<TableHint> {
+        self.table_hints.lock().ok()?.get(&site).copied()
     }
 }
 

@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::AstNode;
-use crate::lift::{NotLifted, Statement, StatementKind};
+use crate::lift::{NotLifted, Statement, StatementKind, SwitchArm};
 use crate::options::{LoopForm, Options, SharedTail};
 
 /// How a node leaves.
@@ -69,6 +69,14 @@ pub enum Terminator {
         next: usize,
         addresses: Vec<u64>,
     },
+    /// The node switches on `index`: to each case's node by the values
+    /// that reach it, as a jump table laid them out. The addresses are the
+    /// jump's and the index's.
+    Switch {
+        index: AstNode,
+        cases: Vec<(Vec<i64>, usize)>,
+        addresses: Vec<u64>,
+    },
 }
 
 impl Terminator {
@@ -78,6 +86,15 @@ impl Terminator {
             Self::Return => Vec::new(),
             Self::Goto { target, .. } => vec![*target],
             Self::Branch { taken, next, .. } => vec![*taken, *next],
+            Self::Switch { cases, .. } => {
+                let mut nodes = Vec::new();
+                for (_, node) in cases {
+                    if !nodes.contains(node) {
+                        nodes.push(*node);
+                    }
+                }
+                nodes
+            }
         }
     }
 }
@@ -368,6 +385,34 @@ impl Structurer<'_> {
                         );
                         join
                     }
+                    Terminator::Switch {
+                        index,
+                        cases,
+                        addresses,
+                    } => {
+                        // The follow is where every case comes back
+                        // together; an arm that runs on to it ends in
+                        // `break`, and one that returns or jumps away
+                        // needs none.
+                        let targets: Vec<usize> = cases.iter().map(|(_, node)| *node).collect();
+                        let join = self.follow_of(cur, &targets, ctx);
+                        let inner = join.or(follow);
+                        let cases = cases.clone();
+                        let mut arms = Vec::new();
+                        for (values, target) in cases {
+                            let mut body = self.arm(target, inner, ctx);
+                            if falls_through(&body) {
+                                body.push(Statement::plain(AstNode::Break, Vec::new()));
+                            }
+                            arms.push(SwitchArm { values, body });
+                        }
+                        seq.push(Statement {
+                            node: index.clone(),
+                            addresses: addresses.clone(),
+                            kind: StatementKind::Switch { arms },
+                        });
+                        join
+                    }
                 }
             };
             let Some(next) = next else {
@@ -435,7 +480,7 @@ impl Structurer<'_> {
             match &node.terminator {
                 Terminator::Return => return Some(statements),
                 Terminator::Goto { target, .. } => cur = *target,
-                Terminator::Branch { .. } => return None,
+                Terminator::Branch { .. } | Terminator::Switch { .. } => return None,
             }
         }
         None
@@ -452,6 +497,41 @@ impl Structurer<'_> {
             },
             addresses,
         )
+    }
+
+    /// The follow of the `switch` at `branch`: the nearest node every arm
+    /// reaches and the switch dominates, as [`Structurer::if_follow`] finds
+    /// it for two arms.
+    fn follow_of(
+        &self,
+        branch: usize,
+        targets: &[usize],
+        ctx: Option<&LoopContext>,
+    ) -> Option<usize> {
+        let inside = |node: usize| ctx.is_none_or(|ctx| ctx.body.contains(&node));
+        let reach = |start: usize| -> BTreeSet<usize> {
+            let mut seen = BTreeSet::new();
+            let mut work = vec![start];
+            while let Some(node) = work.pop() {
+                if node == branch || !inside(node) || !seen.insert(node) {
+                    continue;
+                }
+                work.extend(self.nodes[node].terminator.successors());
+            }
+            seen
+        };
+        let mut common: Option<BTreeSet<usize>> = None;
+        for &target in targets {
+            let reached = reach(target);
+            common = Some(match common {
+                Some(common) => common.intersection(&reached).copied().collect(),
+                None => reached,
+            });
+        }
+        common?
+            .into_iter()
+            .filter(|&node| self.analysis.dominates(branch, node))
+            .min_by_key(|&node| self.analysis.order[node])
     }
 
     /// The follow of the `if` at `branch`: the nearest node both arms reach

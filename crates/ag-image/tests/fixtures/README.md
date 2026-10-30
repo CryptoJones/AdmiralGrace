@@ -78,3 +78,22 @@ to read 32-bit code. `-fno-pic -no-pie` is what makes `main` read `counter` and
 GOT register, so the data references of the image tests have something to find. The
 functions are `add` at `0x8049000` and `main` at `0x804900d`; `counter` is at
 `0x804b008` and `greeting` at `0x804b00c`.
+
+## The switch fixtures
+
+`crates/ag-engine/tests/fixtures/switch.elf` and `switch_pie.elf` hold a function with a
+six-case `switch` that GCC (gcc 15.2.0, GNU ld 2.46, Ubuntu) compiles to a jump table,
+built from `switch.c` beside them. The first reads an absolute table of 8-byte entries;
+the second, position-independent, reads 4-byte offsets from the table's own address
+through `lea`/`movsxd`/`add`:
+
+```sh
+gcc -O1 -fno-pic -no-pie -fno-stack-protector -fcf-protection=none \
+    -fno-asynchronous-unwind-tables -nostdlib -static -Wl,-e,main \
+    -o switch.elf switch.c
+gcc -O1 -fpie -pie -fno-stack-protector -fcf-protection=none \
+    -fno-asynchronous-unwind-tables -nostdlib -static-pie -Wl,-e,main \
+    -o switch_pie.elf switch.c
+```
+
+`classify` is at `0x401000` (table at `0x402000`) and at `0x1000` (table at `0x2000`).

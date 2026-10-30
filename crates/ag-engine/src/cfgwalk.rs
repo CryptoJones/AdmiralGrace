@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cfg::{BasicBlock, ProcedureCfg, TailCall};
-use crate::cpu_context::{DecodedInsn, Flow};
+use iced_x86::Mnemonic;
+
+use crate::cfg::{BasicBlock, JumpTable, ProcedureCfg, TailCall};
+use crate::cpu_context::{DecodedInsn, Flow, Operand};
 use crate::pipeline::Disasm;
+use crate::register::RegisterId;
 
 /// The function entries the walk stops at.
 ///
@@ -17,7 +20,38 @@ pub trait Entries {
     /// Whether `slot` is a GOT slot the image relocates to an import, so a
     /// `jmp [rip+slot]` is a tail call to that import.
     fn is_import_slot(&self, slot: u64) -> bool;
+
+    /// The little-endian value of the `width`-byte entry at `address`, when
+    /// the image holds bytes there: how the walk reads a jump table. The
+    /// default knows no bytes, so no table is recovered.
+    fn table_entry(&self, _address: u64, _width: u8) -> Option<u64> {
+        None
+    }
+
+    /// What the analyst said about the jump table the `jmp` at `site`
+    /// reads, when they said anything: it stands in for what the walk
+    /// could not work out.
+    fn table_hint(&self, _site: u64) -> Option<TableHint> {
+        None
+    }
 }
+
+/// The analyst's word on a jump table: where it is and how long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableHint {
+    /// The address of the first entry.
+    pub table: u64,
+    /// How many bytes one entry takes: 4 or 8.
+    pub width: u8,
+    /// How many entries there are.
+    pub count: u32,
+    /// Whether an entry is an offset from `table` rather than an address.
+    pub relative: bool,
+}
+
+/// How far back from a `jmp` the walk looks for the code that set up its
+/// table and bounded its index.
+const LOOKBACK: usize = 12;
 
 /// No function entries known: every `jmp` is followed where it goes.
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,6 +107,7 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
     let mut call_sites: Vec<u64> = Vec::new();
     let mut call_targets: Vec<u64> = Vec::new();
     let mut tail_calls: Vec<TailCall> = Vec::new();
+    let mut tables: BTreeMap<u64, JumpTable> = BTreeMap::new();
     let mut frontier: Vec<u64> = Vec::new();
 
     if by_addr.contains_key(&entry) {
@@ -87,7 +122,14 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
                 break;
             }
             let ins = &disasm.instructions[i];
-            let step = step_of(ins, entry, entries);
+            // An indirect jump may read a jump table; the table is worked
+            // out once, here, and its targets are the jump's.
+            if ins.flow == Flow::IndirectBranch && !tables.contains_key(&ins.address) {
+                if let Some(table) = recover_table(disasm, i, &by_addr, entries) {
+                    tables.insert(ins.address, table);
+                }
+            }
+            let step = step_of(ins, entry, entries, tables.get(&ins.address));
             if let Some(target) = step.call_target {
                 call_targets.push(target);
             }
@@ -144,7 +186,7 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
         };
         bb.to = next;
 
-        let step = step_of(ins, entry, entries);
+        let step = step_of(ins, entry, entries, tables.get(&ins.address));
         let next_is_leader = leaders.contains(&next);
         if step.ends_block || !step.falls_through || next_is_leader {
             let mut successors: Vec<u64> = Vec::new();
@@ -175,8 +217,228 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
         call_sites,
         call_targets,
         tail_calls,
+        jump_tables: tables.into_values().collect(),
         ..ProcedureCfg::default()
     }
+}
+
+/// The jump table the indirect `jmp` at `at` (an index into the
+/// disassembly) reads, when the walk can work it out or the analyst said.
+///
+/// The shape of the code names the table and the index register: a `jmp
+/// [index*8 + table]` reads an absolute table outright; the
+/// position-independent `lea base, [rip+table]; movsxd r, [base+index*4];
+/// add r, base; jmp r` reads offsets from the table. The entry count comes
+/// from the `cmp index, N` that guards the jump — `N + 1` entries under a
+/// `ja`/`jbe`, `N` under a `jae`/`jb` — and a `sub index, M` just before
+/// the compare makes `M` the first case's value. An analyst's hint stands
+/// in for the table and the count where the code does not say. Every
+/// entry must land on an instruction of the disassembly; the table stops
+/// at the first that does not, and a table with no entry at all is no
+/// table.
+fn recover_table(
+    disasm: &Disasm,
+    at: usize,
+    by_addr: &BTreeMap<u64, usize>,
+    entries: &dyn Entries,
+) -> Option<JumpTable> {
+    let jmp = &disasm.instructions[at];
+    let hint = entries.table_hint(jmp.address);
+    let shape = table_shape(disasm, at);
+    let (table, width, relative) = match (&shape, hint) {
+        (_, Some(hint)) => (hint.table, hint.width, hint.relative),
+        (Some(shape), None) => (shape.table, shape.width, shape.relative),
+        (None, None) => return None,
+    };
+    let index = shape.as_ref().map(|shape| shape.index);
+    let (count, base) = match hint {
+        Some(hint) => (hint.count, 0),
+        None => bound_of(disasm, at, index?)?,
+    };
+    if count == 0 || !matches!(width, 4 | 8) {
+        return None;
+    }
+    let mut targets = Vec::new();
+    for i in 0..count as u64 {
+        let Some(raw) = entries.table_entry(table + i * width as u64, width) else {
+            break;
+        };
+        let target = if relative {
+            // An offset is signed in its own width.
+            let offset = if width == 4 {
+                raw as u32 as i32 as i64
+            } else {
+                raw as i64
+            };
+            table.wrapping_add(offset as u64)
+        } else {
+            raw
+        };
+        if !by_addr.contains_key(&target) {
+            break;
+        }
+        targets.push(target);
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    Some(JumpTable {
+        site: jmp.address,
+        table,
+        width,
+        relative,
+        base,
+        index,
+        targets,
+    })
+}
+
+/// What the code around an indirect `jmp` says about its table.
+struct TableShape {
+    table: u64,
+    width: u8,
+    relative: bool,
+    index: RegisterId,
+}
+
+/// Whether `a` and `b` name the same general register, whatever the width
+/// each reads it at: `edi` and `rdi` are one register.
+fn same_register(a: RegisterId, b: RegisterId) -> bool {
+    a.class == b.class && a.index == b.index
+}
+
+/// Whether the register id names a register at all; a memory operand with
+/// no base or no index names none there.
+fn is_register(id: RegisterId) -> bool {
+    id.bit_size != 0
+}
+
+/// The table and index register the shape of the code at `at` names.
+fn table_shape(disasm: &Disasm, at: usize) -> Option<TableShape> {
+    let jmp = &disasm.instructions[at];
+    match jmp.operands.as_slice() {
+        // `jmp [index*scale + table]`: the table is absolute and the index
+        // is scaled by the width of an entry.
+        [Operand::Mem {
+            base,
+            index,
+            scale,
+            disp,
+            ..
+        }] if !is_register(*base) && is_register(*index) && matches!(scale, 4 | 8) => {
+            Some(TableShape {
+                table: *disp as u64,
+                width: *scale as u8,
+                relative: false,
+                index: *index,
+            })
+        }
+        // `jmp r`: look back for `add r, base`, `movsxd r, [base+index*4]`
+        // and `lea base, [rip+table]`, in that order back from the jump,
+        // within the straight run of code before it.
+        [Operand::Register(target)] => {
+            let mnemonic = |ins: &DecodedInsn| {
+                Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID)
+            };
+            let run: Vec<&DecodedInsn> = disasm.instructions[..at]
+                .iter()
+                .rev()
+                .take(LOOKBACK)
+                .take_while(|ins| ins.flow == Flow::Next)
+                .collect();
+            let mut base: Option<RegisterId> = None;
+            let mut index: Option<RegisterId> = None;
+            let mut table: Option<u64> = None;
+            for ins in run {
+                match (mnemonic(ins), ins.operands.as_slice()) {
+                    (Mnemonic::Add, [Operand::Register(dst), Operand::Register(src)])
+                        if base.is_none() && same_register(*dst, *target) =>
+                    {
+                        base = Some(*src);
+                    }
+                    (
+                        Mnemonic::Movsxd,
+                        [Operand::Register(dst), Operand::Mem {
+                            base: b,
+                            index: i,
+                            scale: 4,
+                            ..
+                        }],
+                    ) if base.is_some_and(|base| same_register(base, *b))
+                        && index.is_none()
+                        && same_register(*dst, *target)
+                        && is_register(*i) =>
+                    {
+                        index = Some(*i);
+                    }
+                    (Mnemonic::Lea, [Operand::Register(dst), Operand::Mem { .. }])
+                        if index.is_some()
+                            && base.is_some_and(|base| same_register(base, *dst)) =>
+                    {
+                        table = ins.rip_relative_address;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Some(TableShape {
+                table: table?,
+                width: 4,
+                relative: true,
+                index: index?,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The entry count and first case value the compare guarding the jump at
+/// `at` gives for the index register: the nearest `cmp index, N` before
+/// the jump, read with the conditional jump after it, and a `sub index, M`
+/// just before the compare.
+fn bound_of(disasm: &Disasm, at: usize, index: RegisterId) -> Option<(u32, i64)> {
+    let mnemonic =
+        |ins: &DecodedInsn| Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
+    let start = at.saturating_sub(LOOKBACK);
+    let before = &disasm.instructions[start..at];
+    for (k, ins) in before.iter().enumerate().rev() {
+        // The run of code before the jump may cross the guard's own
+        // conditional jump, but not a call or a return.
+        if matches!(ins.flow, Flow::Call(_) | Flow::IndirectCall | Flow::Return) {
+            return None;
+        }
+        let (Mnemonic::Cmp, [Operand::Register(reg), Operand::Imm(limit)]) =
+            (mnemonic(ins), ins.operands.as_slice())
+        else {
+            continue;
+        };
+        if !same_register(*reg, index) {
+            continue;
+        }
+        let limit = i64::try_from(*limit).ok()?;
+        let jcc = before.get(k + 1).map(mnemonic)?;
+        let count = match jcc {
+            Mnemonic::Ja | Mnemonic::Jbe => limit.checked_add(1)?,
+            Mnemonic::Jae | Mnemonic::Jb => limit,
+            _ => return None,
+        };
+        let count = u32::try_from(count).ok()?;
+        // `sub index, M` just before the compare offsets the case values.
+        let base = match before
+            .get(k.wrapping_sub(1))
+            .map(|ins| (mnemonic(ins), ins))
+        {
+            Some((Mnemonic::Sub, ins)) => match ins.operands.as_slice() {
+                [Operand::Register(reg), Operand::Imm(m)] if same_register(*reg, index) => {
+                    i64::try_from(*m).ok()?
+                }
+                _ => 0,
+            },
+            _ => 0,
+        };
+        return Some((count, base));
+    }
+    None
 }
 
 /// What one instruction does to the walk.
@@ -199,8 +461,14 @@ struct Step {
 }
 
 /// What the instruction does to the walk of the procedure entered at
-/// `entry`, among the functions `entries` knows.
-fn step_of(ins: &DecodedInsn, entry: u64, entries: &dyn Entries) -> Step {
+/// `entry`, among the functions `entries` knows, with the jump table the
+/// instruction reads when it is an indirect jump that reads one.
+fn step_of(
+    ins: &DecodedInsn,
+    entry: u64,
+    entries: &dyn Entries,
+    table: Option<&JumpTable>,
+) -> Step {
     let plain = Step {
         targets: Vec::new(),
         falls_through: true,
@@ -262,9 +530,23 @@ fn step_of(ins: &DecodedInsn, entry: u64, entries: &dyn Entries) -> Step {
                 ..plain
             }
         }
-        // Returns, indirect jumps, traps, halts and undecodable bytes end
-        // the block with no fall-through; an indirect jump's targets come
-        // from a later phase.
+        // An indirect jump through a jump table goes to every case.
+        Flow::IndirectBranch if table.is_some() => {
+            let mut targets = Vec::new();
+            for &target in &table.expect("checked above").targets {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            Step {
+                targets,
+                falls_through: false,
+                ends_block: true,
+                ..plain
+            }
+        }
+        // Returns, indirect jumps the walk cannot resolve, traps, halts and
+        // undecodable bytes end the block with no fall-through.
         Flow::Return | Flow::IndirectBranch | Flow::Trap | Flow::Halt | Flow::Invalid => Step {
             falls_through: false,
             ends_block: true,

@@ -1025,3 +1025,75 @@ fn an_export_of_the_pe_the_macho_and_the_32_bit_elf_writes_each_function() {
         );
     }
 }
+
+#[test]
+fn the_cfg_of_a_switch_holds_every_case_the_jump_table_names() {
+    // classify jumps through an absolute table of six 8-byte entries; the
+    // block that jumps goes to every case, and the report says so.
+    let report = image("switch.elf", &["cfg", "classify"]);
+    assert!(report.contains("blocks: 9\n"), "{report}");
+    assert!(
+        report.contains(
+            "block 0x401005 - 0x40100e\n  successors: 0x40100e, 0x401033, 0x401014, 0x40101b, 0x401021, 0x401027\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("switches:\n  jmp at 0x401007: table 0x402000, 6 entries of 8 bytes\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains("    case 0 -> 0x40100e\n    case 1 -> 0x401033\n"),
+        "{report}"
+    );
+    assert!(report.contains("    case 5 -> 0x401027\n"), "{report}");
+
+    let report = image_json("switch.elf", &["cfg", "classify"]);
+    let switches = report["switches"].as_array().expect("the switches");
+    assert_eq!(switches.len(), 1);
+    assert_eq!(switches[0]["site"], serde_json::json!(0x401007));
+    assert_eq!(switches[0]["cases"].as_array().map(Vec::len), Some(6));
+
+    // The position-independent build reads offsets from the table.
+    let report = image("switch_pie.elf", &["cfg", "classify"]);
+    assert!(
+        report.contains(
+            "jmp at 0x1015: table 0x2000, 6 entries of 4 bytes, offsets from the table\n"
+        ),
+        "{report}"
+    );
+    assert!(report.contains("    case 1 -> 0x103c\n"), "{report}");
+}
+
+#[test]
+fn the_pseudocode_of_a_switch_prints_its_cases() {
+    // The guard the compiler put before the table is an early return, and
+    // the table is a switch on the zero-extended index; each case returns.
+    let expected = "{\n\
+         \x20 if ((unsigned int)a > 5) {\n\
+         \x20   return;\n\
+         \x20 }\n\
+         \x20 switch ((unsigned long)(unsigned int)a) {\n\
+         \x20 case 0:\n\
+         \x20   return;\n\
+         \x20 case 1:\n\
+         \x20   return;\n\
+         \x20 case 2:\n\
+         \x20   return;\n\
+         \x20 case 3:\n\
+         \x20   return;\n\
+         \x20 case 4:\n\
+         \x20   return;\n\
+         \x20 case 5:\n\
+         \x20   return;\n\
+         \x20 }\n\
+         }\n";
+    let report = image("switch.elf", &["pseudocode", "classify"]);
+    assert!(report.starts_with("// classify at 0x401000\n"), "{report}");
+    assert!(report.ends_with(expected), "{report}");
+
+    // The position-independent build reads the same switch.
+    let report = image("switch_pie.elf", &["pseudocode", "classify"]);
+    assert!(report.starts_with("// classify at 0x1000\n"), "{report}");
+    assert!(report.ends_with(expected), "{report}");
+}

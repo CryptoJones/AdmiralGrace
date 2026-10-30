@@ -327,6 +327,22 @@ The format reaches the listing and the graph, every constant of the one instruct
 `-` the analysis printed before a constant stays with it. `ag project operand` records the
 same choice.
 
+A `switch` compiled to a jump table reaches its cases through an indirect `jmp`, which the
+analysis recovers by itself when the code has the usual shape — `jmp [index*8 + table]`
+into an absolute table, or the position-independent `lea`/`movsxd`/`add`/`jmp` through a
+table of offsets — bounded by the `cmp` that guards it. The graph then holds every case,
+and the pseudocode prints a `switch`. Where the recovery fails, the analyst says where the
+table is:
+
+- **Jump table…** (Ctrl+Shift+J) records, on the selected `jmp`, the table's address and
+  entry count — `0x402000 6` — with the entry width between them when it is not 8 bytes,
+  and `rel` after when the entries are offsets from the table rather than addresses:
+  `0x2000 4 6 rel`. The note stands in for what the walk would read from the code; an
+  empty submit takes it off.
+
+The graph and the pseudocode follow the note at once, and so do undo and redo. The same note
+is what `ag project switch` records and `ag image … --project` reads.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
@@ -334,8 +350,8 @@ Every one of these changes can be taken back:
   `Undo: Renamed 0x1198`. A new change after an undo forgets what was taken back.
 
 Undo covers every mark the analyst makes — renames, labels, local variable and register
-names, comments, bookmarks, tags, highlights, cross references, byte marks and operand
-formats — in the order they were made, and the
+names, comments, bookmarks, tags, highlights, cross references, byte marks, operand
+formats and jump-table notes — in the order they were made, and the
 navigator and every view follow. Opening a project file or a different analysis starts
 afresh: the marks those changes were made to are gone.
 

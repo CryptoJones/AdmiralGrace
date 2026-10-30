@@ -570,6 +570,63 @@ fn an_operand_format_is_recorded_and_hex_clears_it() {
 }
 
 #[test]
+fn a_jump_table_note_is_recorded_and_told_to_the_image() {
+    let file = TempFile::new("switch");
+    // The analyst says the table at 0x402000 has three entries, not six:
+    // the note stands in for what the walk would read from the code.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "switch",
+            "--file",
+            &file.text(),
+            "0x401007",
+            "0x402000",
+            "3",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401007 now switch 0x402000 8 3"),
+        "{stdout}"
+    );
+
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &["switch", "--file", &file.text(), "0x401007", "nowhere", "3"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("is not a jump table"), "{stderr}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("switch.elf"))
+        .args(["cfg", "classify", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report.contains("jmp at 0x401007: table 0x402000, 3 entries of 8 bytes"),
+        "{report}"
+    );
+    assert!(report.contains("    case 2 -> 0x401014\n"), "{report}");
+    assert!(!report.contains("case 3"), "{report}");
+
+    // `none` takes the note off, and the walk reads the code again.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &["switch", "--file", &file.text(), "0x401007", "none"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x401007 cleared"), "{stdout}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");
