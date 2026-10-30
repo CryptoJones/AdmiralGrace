@@ -355,6 +355,42 @@ takes; the whole-image files are never limited. A function the decoder cannot re
 symbol in no code section — gets no files, and a warning on stderr names it. An image the
 decoder does not read is refused, like `disasm`. An error names the file it could not write.
 
+## The project file: `ag project`
+
+A project file (`.agproj`) records what was analysed — the target's path and SHA-256 — the
+analysis options the run used, and the analyst's own changes: names, comments, bookmarks,
+tags, colors and byte types, each keyed by address. It is versioned JSON, so it survives a
+session, travels between machines, and stays readable without this program. The workbench
+opens and saves the same file. See `ag docs project-format` for the format itself.
+
+```sh
+# Create a project file for a binary, recording two options
+ag project ./bin/ls save --out ls.agproj --option-pair loop-form=while
+
+# Record a rename, a comment and a bookmark
+ag project ./bin/ls rename --file ls.agproj 0x1198 main
+ag project ./bin/ls comment --file ls.agproj EXTERNAL:0x1 "imported qsort"
+ag project ./bin/ls bookmark --file ls.agproj 0x1198
+
+# Report what it holds, as text or JSON
+ag project ./bin/ls show ls.agproj
+ag project ./bin/ls show ls.agproj --json
+```
+
+The target binary comes first: it is what the project describes, and `show` re-hashes it to
+say so when it no longer matches the recorded SHA-256. Addresses are written the way a
+corpus writes them, with the address space when the record names one (`EXTERNAL:0x1`). An
+edit to a project file that does not exist yet creates it from the target. A file whose
+`format` is newer than this program reads is refused with a notice, not misread.
+
+| Command | What it does |
+|---|---|
+| `ag project TARGET save --out FILE` | Creates a project file for `TARGET`, hashing it; `--option-pair NAME=VALUE` records an option (repeatable). |
+| `ag project TARGET show FILE` | Prints what the project holds; `--json` prints the file itself. |
+| `ag project TARGET rename --file FILE ADDRESS NAME` | Records a name for the function at `ADDRESS`. |
+| `ag project TARGET comment --file FILE ADDRESS TEXT` | Records a comment at `ADDRESS`. |
+| `ag project TARGET bookmark --file FILE ADDRESS` | Flips a bookmark on the function at `ADDRESS`. |
+
 ## `ag catalog`: the engine's options
 
 Every judgment call the engine makes is a row of one registry

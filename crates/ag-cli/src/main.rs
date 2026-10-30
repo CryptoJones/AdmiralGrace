@@ -10,6 +10,7 @@ mod catalog;
 mod docs;
 mod export;
 mod image;
+mod project;
 mod skill;
 
 #[derive(Parser)]
@@ -63,6 +64,13 @@ enum Cmd {
         binary: PathBuf,
         #[command(subcommand)]
         cmd: image::ImageCmd,
+    },
+    /// The portable project file: the analysis's identity and the analyst's changes.
+    Project {
+        /// The target binary the project describes.
+        binary: PathBuf,
+        #[command(subcommand)]
+        cmd: project::ProjectCmd,
     },
     /// The engine's options: every judgment call it makes, with its symptoms.
     Catalog {
@@ -240,6 +248,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
         Cmd::Image { binary, cmd } => image::run(&binary, cmd),
+        Cmd::Project { binary, cmd } => project::run(binary, cmd),
         Cmd::Catalog {
             json,
             markdown: _,

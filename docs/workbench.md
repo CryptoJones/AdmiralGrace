@@ -174,3 +174,17 @@ pseudocode, and a reference picked in the References tab all move the same selec
 The Problems panel holds what the analysis could not do: functions that failed to
 decompile, an export that is still being written, and the per-function diagnostics kuna
 reports.
+
+## The project file
+
+The workbench's Rename, Comment and Bookmark record the analyst's changes in a project
+file (`.agproj`): versioned JSON holding the target's path and SHA-256, the analysis
+options, and every annotation keyed by address. **File ▸ Open project file…** reads one
+back and applies its renames to the function list; **File ▸ Save project** (Ctrl+S) writes
+the changes out, and **Save project as…** prompts for a path. The same file is what
+`ag project` reads and writes, so a rename recorded in the workbench is visible to the CLI
+and to a script.
+
+A rename replaces the analysis's name wherever the workbench shows one. Returning the
+analysis's own name clears the annotation. A bookmark toggles. An annotation that carries
+nothing is dropped on save, so the file says only what the analyst changed.

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub mod kuna;
 pub mod objc;
+pub mod project;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyRange {

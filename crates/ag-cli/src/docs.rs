@@ -49,6 +49,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/corpus-format.md"),
     },
     Doc {
+        topic: "project-format",
+        summary: "The portable project file: the analysis's identity and the analyst's changes.",
+        readme_sections: &[],
+        body: include_str!("../../../docs/project-format.md"),
+    },
+    Doc {
         topic: "options",
         summary:
             "The engine's options, symptom index first: if the output shows X, try --option Y.",
