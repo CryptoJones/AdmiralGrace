@@ -545,6 +545,31 @@ fn a_mark_says_how_the_bytes_are_read_and_a_typo_is_refused() {
 }
 
 #[test]
+fn an_operand_format_is_recorded_and_hex_clears_it() {
+    let file = TempFile::new("operand");
+    let (ok, stdout, stderr) = project(&["operand", "--file", &file.text(), "0x1161", "Decimal"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now operands decimal"),
+        "{stdout}"
+    );
+
+    let (ok, _, stderr) = project(&["operand", "--file", &file.text(), "0x1161", "binary"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not an operand format"), "{stderr}");
+
+    let report = show_json(&file);
+    assert_eq!(
+        report["annotations"][0]["operand_format"],
+        serde_json::json!("decimal")
+    );
+
+    let (ok, stdout, stderr) = project(&["operand", "--file", &file.text(), "0x1161", "hex"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

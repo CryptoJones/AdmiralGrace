@@ -4,9 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`) so a script or an agent can build a
-//! project without editing JSON by hand, and reports the tags the analyst
-//! gave (`tags`).
+//! `tag`, `color`, `xref`, `mark`, `operand`) so a script or an agent can
+//! build a project without editing JSON by hand, and reports the tags the
+//! analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,8 @@ use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 
 use ag_corpus::project::{
-    parse_color, parse_tags, sha256_of, Annotation, ByteType, ProjectFile, Target, TargetKind,
+    parse_color, parse_tags, sha256_of, Annotation, ByteType, OperandFormat, ProjectFile, Target,
+    TargetKind,
 };
 
 /// What to do with a project file.
@@ -131,6 +132,17 @@ pub enum ProjectCmd {
         /// `undefined`, `data`, `data:W` for `W` of 1, 2, 4 or 8 bytes each,
         /// `data:W[N]` for an array of `N`, or `none` to take the mark off.
         kind: String,
+    },
+    /// Say how the constants in an instruction's operands are shown.
+    Operand {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The instruction's address, with its space when it names one.
+        address: String,
+        /// The format: `hex`, `signed`, `decimal`, `octal` or `address`;
+        /// `hex` is how the analysis prints them and clears the record.
+        format: String,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -268,6 +280,20 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 TargetKind::Address
             };
             edit(&target, &file, on, &address, |a| a.set_byte_type(mark))
+        }
+        ProjectCmd::Operand {
+            file,
+            address,
+            format,
+        } => {
+            let format = OperandFormat::parse(&format).with_context(|| {
+                format!(
+                    "{format:?} is not an operand format; use hex, signed, decimal, octal or address"
+                )
+            })?;
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_operand_format(Some(format))
+            })
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {
@@ -610,6 +636,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(byte_type) = &annotation.byte_type {
         parts.push(format!("type {byte_type}"));
+    }
+    if let Some(format) = &annotation.operand_format {
+        parts.push(format!("operands {format}"));
     }
     if parts.is_empty() {
         "(empty)".to_string()
