@@ -326,6 +326,13 @@ impl ProjectFile {
         match found {
             Some(index) => &mut self.annotations[index],
             None => {
+                // A register record is new to a file written before version
+                // 3: an older reader would misread it as the address's own
+                // record, so the file must name a version that reader
+                // refuses. Stamping the version this program writes is the
+                // safe direction — a newer file is refused with a notice,
+                // never misread.
+                self.format = FORMAT_VERSION;
                 self.annotations
                     .push(Annotation::for_register(&key, register));
                 self.annotations
@@ -613,6 +620,45 @@ mod tests {
         assert!(text.contains("\"kind\": \"register\""), "{text}");
         // A record that names no register writes no register field at all.
         assert_eq!(text.matches("\"register\":").count(), 1, "{text}");
+        let read = ProjectFile::from_json(&text).expect("the text reads back");
+        assert_eq!(read, project);
+    }
+
+    #[test]
+    fn a_variable_and_a_register_of_the_same_name_keep_their_own_records() {
+        // A pseudocode that names a local `rax` beside a renamed register
+        // `rax` is unusual but legal: the two records key on different
+        // fields and must not find one another.
+        let mut project = ProjectFile::new(Target::default());
+        project.variable_mut("0x1000", "rax").name = Some("count".into());
+        project.register_mut("0x1000", "rax").name = Some("total".into());
+        assert_eq!(project.annotations.len(), 2, "one name, two records");
+        assert_eq!(
+            project.variable_name("0x1000", "rax").as_deref(),
+            Some("count"),
+            "the variable record is the variable's"
+        );
+        assert_eq!(
+            project.register_name("0x1000", "rax").as_deref(),
+            Some("total"),
+            "the register record is the register's"
+        );
+    }
+
+    #[test]
+    fn a_version_2_file_that_gains_a_register_is_written_as_3() {
+        // A project written by the version that had variables but no
+        // register records keeps its declared version across a load; once
+        // the analyst renames a register, the file must name a version an
+        // older reader refuses rather than one it would misread.
+        let raw = r#"{"format": 2, "target": {}, "annotations": [
+            {"kind": "variable", "address": "0x1000", "variable": "local_14", "name": "count"}
+        ]}"#;
+        let mut project = ProjectFile::from_json(raw).expect("a v2 file reads");
+        assert_eq!(project.format, 2, "loading does not silently restamp");
+        project.register_mut("0x1000", "rax").name = Some("result".into());
+        let text = project.to_json().expect("json");
+        assert!(text.contains("\"format\": 3"), "{text}");
         let read = ProjectFile::from_json(&text).expect("the text reads back");
         assert_eq!(read, project);
     }

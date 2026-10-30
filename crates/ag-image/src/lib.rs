@@ -169,10 +169,11 @@ pub struct Instruction {
     ///
     /// A register the analyst renames is a token in the operand text; the
     /// view replaces it as a whole word, so it needs the spelling iced put
-    /// there rather than a guess from the id. Only the registers an operand
-    /// names outright are listed — a base or index inside `[rip+0x10]` is
-    /// part of the address, not a register the instruction names. Duplicates
-    /// (`test rax, rax`) are kept once, in the order first seen.
+    /// there rather than a guess from the id. A memory operand names its
+    /// base and index — `[rbp-0x8]` names `rbp` — but a RIP-relative
+    /// address prints as the address it points at, not as `rip`, so it
+    /// names no register. Duplicates (`test rax, rax`) are kept once, in
+    /// the order first seen.
     pub registers: Vec<String>,
     /// What the listing says beside the instruction.
     pub comment: Option<String>,
@@ -1505,14 +1506,19 @@ impl CpuContext for TextContext {
     }
 }
 
-/// The mnemonic, the operands, and the registers an operand names outright,
-/// all as iced spells them, read at the width of the program.
+/// The mnemonic, the operands, and the registers the operands name, all as
+/// iced spells them, read at the width of the program.
 ///
 /// The register spellings come from the same Intel formatter that writes the
 /// operand text, so a name the analyst gives a register replaces a token that
-/// is really there. Only `OpKind::Register` operands count; a base or index
-/// inside a memory operand is part of the address, not a named register.
-fn iced_text(bytes: &[u8], address: u64, bitness: Bitness) -> Option<(String, String, Vec<String>)> {
+/// is really there. A memory operand names its base and index, so a rename of
+/// `rbp` reaches `[rbp-0x8]`; a RIP-relative operand prints the address it
+/// points at rather than `rip`, so it names no register.
+fn iced_text(
+    bytes: &[u8],
+    address: u64,
+    bitness: Bitness,
+) -> Option<(String, String, Vec<String>)> {
     let mut decoder = iced_x86::Decoder::with_ip(
         bitness.bits(),
         bytes,
@@ -1549,10 +1555,14 @@ fn iced_text(bytes: &[u8], address: u64, bitness: Bitness) -> Option<(String, St
             continue;
         }
         // A memory operand prints its base and index — `[rbp-0x8]` — and a
-        // rename of `rbp` should reach there too. Any other operand names
-        // no register, and `Register::None` is dropped by `named`.
-        named(instruction.memory_base());
-        named(instruction.memory_index());
+        // rename of `rbp` should reach there too. A RIP-relative operand
+        // prints the address it points at, not `rip`, so it names nothing
+        // to replace. Any other operand names no register, and
+        // `Register::None` is dropped by `named`.
+        if !instruction.is_ip_rel_memory_operand() {
+            named(instruction.memory_base());
+            named(instruction.memory_index());
+        }
     }
 
     Some((mnemonic, operands, registers))
@@ -1991,5 +2001,64 @@ mod tests {
             binary.pseudocode(0x1149).unwrap_err().to_string(),
             "not lifted yet: rsi is read before it is written"
         );
+    }
+}
+
+#[cfg(test)]
+mod named_registers {
+    use super::*;
+
+    /// The registers one instruction's operands name.
+    fn named(bytes: &[u8], bitness: Bitness) -> Vec<String> {
+        let decoded = decode_section(bytes, 0x1000, bitness);
+        decoded
+            .text
+            .get(&0x1000)
+            .expect("the bytes decode")
+            .2
+            .clone()
+    }
+
+    #[test]
+    fn a_memory_operand_names_its_base() {
+        // mov rax,[rbp-0x8] : 48 8b 45 f8. The base is a register the
+        // listing prints, so a rename of `rbp` reaches `[frame-0x8]`.
+        assert_eq!(
+            named(&[0x48, 0x8b, 0x45, 0xf8], Bitness::Bits64),
+            ["rax", "rbp"],
+            "the base of a memory operand is a named register"
+        );
+    }
+
+    #[test]
+    fn a_rip_relative_operand_names_no_register() {
+        // mov rax,[rip+0x1234] : 48 8b 05 34 12 00 00. iced resolves the
+        // address and prints `000000000000223Bh`, not `rip`, so `rip` is
+        // not a token a rename could replace in the text.
+        let decoded =
+            decode_section(&[0x48, 0x8b, 0x05, 0x34, 0x12, 0x00, 0x00], 0x1000, Bitness::Bits64);
+        let (mnemonic, operands, registers) = decoded.text.get(&0x1000).expect("decoded").clone();
+        assert_eq!(mnemonic, "mov");
+        assert!(
+            !operands.contains("rip"),
+            "the address is resolved, not spelled `rip`: {operands}"
+        );
+        assert_eq!(
+            registers,
+            ["rax"],
+            "only the destination is a named register; the RIP base is not"
+        );
+    }
+
+    #[test]
+    fn a_direct_call_names_no_registers() {
+        // call rel32 : e8 00 00 00 00. The target is an immediate address.
+        assert!(named(&[0xe8, 0x00, 0x00, 0x00, 0x00], Bitness::Bits64).is_empty());
+    }
+
+    #[test]
+    fn an_indirect_call_through_a_register() {
+        // call rax : ff d0.
+        assert_eq!(named(&[0xff, 0xd0], Bitness::Bits64), ["rax"]);
     }
 }

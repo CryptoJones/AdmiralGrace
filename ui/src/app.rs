@@ -236,6 +236,12 @@ pub struct WorkSurface {
     pub pinned: bool,
     /// Detail of the selected function.
     pub detail: Option<FunctionDetail>,
+    /// The function the listing, graph and pseudocode were read for.
+    ///
+    /// The selection can move to a string or a piece of data without the
+    /// listing moving along; a register rename belongs to the function the
+    /// listing was read for, not to whatever the selection points at now.
+    pub listing_of: Option<u64>,
     /// Listing lines of the selected function.
     pub listing: Vec<ListingLine>,
     /// The control-flow graph of the selected function.
@@ -633,7 +639,8 @@ impl App {
     /// names its call target. (A spaced address like `EXTERNAL:0x1` keys as
     /// its bare value; no provider that writes listings also names a space,
     /// so no two rows collide today.)
-    pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {        let mut renamed: std::collections::HashMap<String, String> = self
+    pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {
+        let mut renamed: std::collections::HashMap<String, String> = self
             .provider
             .functions()
             .iter()
@@ -678,12 +685,17 @@ impl App {
     ///
     /// A register rename belongs to one function — `rax` in `add` is not
     /// `rax` in `main` — so the map is read against the function whose
-    /// listing, graph and pseudocode are on screen.
+    /// listing, graph and pseudocode are on screen. That is the function the
+    /// listing was read for, not the current selection: clicking a string
+    /// moves the selection but leaves the listing standing.
     pub(crate) fn renamed_registers(&self) -> std::collections::HashMap<String, String> {
-        let Some(function) = self.work.detail.as_ref().and_then(|detail| detail.start) else {
+        let Some(function) = self.work.listing_of else {
             return std::collections::HashMap::new();
         };
-        let key = self.annotation_key(function);
+        // Records are stored under the canonical spelling of the address;
+        // the provider row may write its space differently, so compare
+        // canonical to canonical.
+        let key = self.canonical_key(function);
         self.annotations
             .annotations
             .iter()
@@ -868,9 +880,13 @@ impl App {
                     pairs.push((variable, renamed));
                 }
             }
-            for (register, name) in self.renamed_registers() {
-                pairs.push((register, name));
-            }
+        }
+        // The register renames key on the function the listing was read
+        // for, so they keep drawing while the selection sits on a string
+        // or a piece of data; renamed_registers answers empty when no
+        // function is on screen.
+        for (register, name) in self.renamed_registers() {
+            pairs.push((register, name));
         }
         pairs
     }
@@ -902,6 +918,17 @@ impl App {
             .find(|row| row.address == address)
             .map(|row| row.display_address())
             .unwrap_or_else(|| format!("{address:#x}"))
+    }
+
+    /// The annotation key of `address` in the spelling records are stored
+    /// under.
+    ///
+    /// [`App::annotation_key`] answers as the source wrote the address; a
+    /// record is keyed on the canonical spelling, so a view that compares
+    /// keys directly rather than asking the format owner canonicalizes first.
+    pub(crate) fn canonical_key(&self, address: u64) -> String {
+        let written = self.annotation_key(address);
+        ag_corpus::project::canonical_address(&written).unwrap_or(written)
     }
 
     /// Write the analyst's changes to `path`, recording it as the project file.
@@ -953,6 +980,7 @@ impl App {
         self.data_selection = None;
 
         self.work.detail = self.provider.function_detail(address);
+        self.work.listing_of = Some(address);
         self.work.listing = self.provider.listing(address).unwrap_or_default();
         self.work.graph = self.provider.graph(address).unwrap_or_default();
         self.work.pseudocode = self.provider.pseudocode(address);
@@ -1563,11 +1591,10 @@ impl App {
                                 return Task::none();
                             }
                         };
-                        // The rename belongs to the function on screen; a
-                        // register means that register only within it.
-                        let Some(address) =
-                            self.work.detail.as_ref().and_then(|detail| detail.start)
-                        else {
+                        // The rename belongs to the function whose listing
+                        // is on screen; a register means that register only
+                        // within it.
+                        let Some(address) = self.work.listing_of else {
                             self.notice =
                                 Some("Open a function to rename its registers".into());
                             return Task::none();
@@ -1735,9 +1762,11 @@ impl App {
 
             Message::EditRenameRegister => {
                 // The registers to offer are the ones the function on screen
-                // prints, read from its listing rather than guessed.
-                let Some(address) = self.work.detail.as_ref().and_then(|detail| detail.start)
-                else {
+                // prints, read from its listing rather than guessed. The
+                // rename keys on that same function, not on the selection:
+                // clicking a string moves the selection but leaves the
+                // listing standing.
+                let Some(address) = self.work.listing_of else {
                     self.notice = Some("Open a function to rename its registers".into());
                     return Task::none();
                 };
@@ -3554,6 +3583,50 @@ mod tests {
         assert!(
             !pairs.contains(&(first, "counter".to_string())),
             "main's body does not borrow sum_to's name: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_register_rename_stays_with_its_function_when_the_selection_moves() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // Name a register of sum_to…
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let first = app.listing_registers()[0].clone();
+        let _ = app.update(Message::EditRenameRegister);
+        let _ = app.update(Message::PromptChanged(format!("{first}=counter")));
+        let _ = app.update(Message::PromptSubmit);
+
+        // …then click a string. The selection moves and the detail becomes
+        // the string's; the listing keeps standing, so the rename must keep
+        // drawing for the function the listing was read for, and the record
+        // must not key on the string's address.
+        let string = app
+            .provider
+            .strings()
+            .first()
+            .expect("the sample holds a string")
+            .address;
+        assert_ne!(string, 0x1161, "the string is elsewhere");
+        let _ = app.update(Message::StringSelected(string));
+
+        assert!(
+            app.renames().registers.contains_key(&first),
+            "the rename still reaches the listing on screen"
+        );
+        assert!(
+            app.annotations.register_for("0x1161", &first).is_some(),
+            "the record belongs to sum_to, not to the string at {string:#x}"
+        );
+        assert!(
+            app.annotations
+                .register_for(&format!("{string:#x}"), &first)
+                .is_none(),
+            "no record was keyed on the string's address"
         );
     }
 

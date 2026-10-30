@@ -30,7 +30,7 @@ regenerated, and the annotations stay.
 
 | Field | Meaning |
 |---|---|
-| `format` | The format version. This program writes and reads `3`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register. A reader of an older version would misread those records as the address's own. A file naming a newer version is refused with a notice, not misread. |
+| `format` | The format version. This program writes and reads `3`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register. A reader of an older version would misread those records as the address's own. A file naming a newer version is refused with a notice, not misread. An older file that gains a register record is written back at `3`, so a reader that would misread it refuses it instead. |
 | `target.path` | Where the target was when the project was written. |
 | `target.sha256` | The SHA-256 of the target, so a project can be checked against the binary it describes. |
 | `options` | The analysis options the run used, as name to value — the names `ag catalog` lists. |

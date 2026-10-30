@@ -70,11 +70,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 notes = notes.push(kv(label, renamed));
             }
         }
-        // The registers this function prints that the analyst has named.
-        for register in app.listing_registers() {
-            if let Some(renamed) = app.annotations.register_name(&function_key, &register) {
-                let label = format!("Register {register}");
-                notes = notes.push(kv(label, renamed));
+        // The registers the function on screen prints that the analyst has
+        // named: the function the listing was read for, which is where a
+        // register rename draws, not the current selection.
+        if let Some(listing_of) = app.work.listing_of {
+            let register_key = app.canonical_key(listing_of);
+            for register in app.listing_registers() {
+                if let Some(renamed) = app.annotations.register_name(&register_key, &register) {
+                    let label = format!("Register {register}");
+                    notes = notes.push(kv(label, renamed));
+                }
             }
         }
     }
