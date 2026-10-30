@@ -378,6 +378,23 @@ impl Provider for BinaryProvider {
             .map(|section| section.vma.saturating_add(section.size))
     }
 
+    fn write_patched(&self, out: &Path) -> Option<Result<usize, String>> {
+        let source = self.project.root.as_ref()?;
+        let write = || -> Result<usize, String> {
+            let original = std::fs::read(source)
+                .map_err(|error| format!("reading {}: {error}", source.display()))?;
+            let written = self
+                .binary
+                .patched_file(&original)
+                .map_err(|error| error.to_string())?;
+            // The copy runs as the program does, and is whole or not there.
+            ag_image::write_copy(source, out, &written)
+                .map_err(|error| format!("writing {}: {error}", out.display()))?;
+            Ok(written.len())
+        };
+        Some(write())
+    }
+
     fn references(&self, address: u64) -> Vec<Reference> {
         let mut references = Vec::new();
 

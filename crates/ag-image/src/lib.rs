@@ -600,6 +600,72 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// `original`, the bytes of the file the image was read from, with every
+    /// patch written where the file holds the bytes it changes.
+    ///
+    /// A patch is placed through the section it falls in: the file offset of
+    /// the section, plus the patch's distance into it. A patch over bytes the
+    /// file does not hold — a section with no bytes in the file, or past what
+    /// the file holds of one — has nowhere to go, and is refused by address.
+    pub fn patched_file(&self, original: &[u8]) -> Result<Vec<u8>, NotWritten> {
+        let mut out = original.to_vec();
+        for (&at, bytes) in self.patches().iter() {
+            let mut rest = bytes.as_slice();
+            let mut vma = at;
+            while !rest.is_empty() {
+                let refuse = |reason: &str| NotWritten {
+                    address: at,
+                    reason: reason.to_string(),
+                };
+                // A section that is not mapped into memory — the debug
+                // information of an ELF, say — sits at no address, so it
+                // holds none. Where mapped sections overlap — `.tbss` lies
+                // over the GOT in an image with thread-local storage — the
+                // one the file holds bytes for is the one written.
+                let mut holding = self.sections.iter().filter(|section| {
+                    section.vma != 0
+                        && section.vma <= vma
+                        && vma < section.vma.saturating_add(section.size)
+                });
+                let first = holding
+                    .next()
+                    .ok_or_else(|| refuse(&format!("no section holds {vma:#x}")))?;
+                let section = std::iter::once(first)
+                    .chain(holding)
+                    .find(|section| section.file_offset.is_some())
+                    .unwrap_or(first);
+                let Some(offset) = section.file_offset else {
+                    return Err(refuse(&format!(
+                        "the file holds no bytes for {} at {vma:#x}",
+                        section.name
+                    )));
+                };
+                // The file may hold fewer bytes than the section spans in
+                // memory — a PE's `.text` is padded out — and never more
+                // that count.
+                let held = section.file_size.unwrap_or(section.size).min(section.size);
+                let skip = vma - section.vma;
+                if skip >= held {
+                    return Err(refuse(&format!(
+                        "{vma:#x} is past the bytes the file holds for {}",
+                        section.name
+                    )));
+                }
+                let take = usize::try_from(held - skip)
+                    .unwrap_or(usize::MAX)
+                    .min(rest.len());
+                let start = usize::try_from(offset.saturating_add(skip))
+                    .ok()
+                    .filter(|start| start.saturating_add(take) <= out.len())
+                    .ok_or_else(|| refuse(&format!("{vma:#x} lies beyond the end of the file")))?;
+                out[start..start + take].copy_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                vma += take as u64;
+            }
+        }
+        Ok(out)
+    }
+
     /// `bytes`, which start at `base`, with the patches that fall in them
     /// written over.
     fn patched(&self, bytes: &[u8], base: u64) -> Vec<u8> {
@@ -1582,6 +1648,118 @@ impl Symbols for ImageSymbols<'_> {
             .map(|name| Pointee::Function(name.to_string()))
     }
 }
+
+/// Whether `a` and `b` name one file — the same file on the same device,
+/// however the two are spelled or linked — when both exist.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (meta_a, meta_b);
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Write `bytes` as the file `out`, with the permission bits of `source`,
+/// so that `out` is whole or untouched.
+///
+/// The bytes go into a new file beside `out`, which is then renamed over
+/// it. A rename replaces the name and never writes into the file it named,
+/// so a hard link to `source` under `out`'s name leaves `source` as it is,
+/// a write that fails part-way leaves no half-written `out`, and an `out`
+/// that is read-only is replaced all the same. The new file is created
+/// exclusively under a name no one can guess, so a link planted there
+/// beforehand is not followed: nothing but a file this call made is ever
+/// written or removed. The bits above the permissions — setuid, setgid —
+/// are not carried onto the copy.
+pub fn write_copy(source: &Path, out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = out.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
+    })?;
+    // A fresh name each try, and the file made only if nothing is there.
+    let (temp, mut file) = {
+        let mut attempt = 0u32;
+        loop {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.subsec_nanos())
+                .unwrap_or(0);
+            let temp = dir.join(format!(
+                ".{}.ag-write-{}-{nonce:08x}-{attempt}",
+                name.to_string_lossy(),
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => break (temp, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 32 => {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    let written = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(source)?.permissions().mode() & 0o777;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = source;
+        }
+        drop(file);
+        std::fs::rename(&temp, out)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Why a patch could not be written into the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotWritten {
+    /// The address the patch starts at.
+    pub address: u64,
+    /// What kept it out of the file.
+    pub reason: String,
+}
+
+impl std::fmt::Display for NotWritten {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the patch at {:#x} cannot be written: {}",
+            self.address, self.reason
+        )
+    }
+}
+
+impl std::error::Error for NotWritten {}
 
 /// The bytes of one section, as the file holds them.
 struct FileSection {

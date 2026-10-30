@@ -1048,6 +1048,22 @@ impl ProjectFile {
             .collect()
     }
 
+    /// The records whose patch is written, in address order: what the
+    /// Patch History lists, and what [`Self::patches`] writes — a record
+    /// whose bytes do not read as hex pairs is in neither, and two spellings
+    /// of one address are one patch, the later record's.
+    pub fn patch_records(&self) -> Vec<(u64, &Annotation)> {
+        let by_address: BTreeMap<u64, &Annotation> = self
+            .places()
+            .filter(|a| a.patch_bytes().is_some())
+            .filter_map(|a| {
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, a))
+            })
+            .collect();
+        by_address.into_iter().collect()
+    }
+
     /// The records that are on a place: an address, a function, a region.
     /// A variable or register record is a thing at a place and is skipped.
     fn places(&self) -> impl Iterator<Item = &Annotation> {

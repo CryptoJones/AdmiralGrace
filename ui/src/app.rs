@@ -67,6 +67,8 @@ pub enum Message {
     FileSaveProject,
     /// Prompt for a project file to save to.
     FileSaveProjectAs,
+    /// Write a copy of the program with the patches in it.
+    FileWritePatched,
     /// Reload the open project.
     FileReload,
     /// Close the open project.
@@ -208,6 +210,8 @@ pub enum PromptKind {
     ProjectOpen,
     /// A project file to save to.
     ProjectSave,
+    /// Where the copy of the program with the patches in it goes.
+    WritePatched,
     /// The new name of the selected function.
     Rename,
     /// The new name of the label at the selected address.
@@ -521,6 +525,9 @@ pub struct App {
     pub kuna_root: Option<PathBuf>,
     /// The program image currently open.
     pub binary_path: Option<PathBuf>,
+    /// The file the next submit of the patched-program prompt writes over,
+    /// once the analyst has been told it is there.
+    pub confirm_write: Option<PathBuf>,
     /// The engine's options, for the pseudocode of a program image.
     pub options: ag_image::Options,
     /// The Objective-C method map currently open.
@@ -614,6 +621,7 @@ impl App {
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
+            confirm_write: None,
             options: config.options,
             methods_path: config.methods.clone(),
             shift: config.shift,
@@ -1529,6 +1537,68 @@ impl App {
             value: current,
         });
         Task::none()
+    }
+
+    /// Write a copy of the program with the patches in it to `path`, and
+    /// say what was done. The program itself is never written, nor the
+    /// project file; a file already there is written over on a second
+    /// submit of the same path; and the copy is whole or not there.
+    fn write_patched_to(&mut self, path: &Path) {
+        let Some(binary) = self.binary_path.clone() else {
+            self.notice = Some("Writing a patched program needs a program image".into());
+            return;
+        };
+        if path == binary || ag_image::same_file(path, &binary) {
+            self.notice = Some(format!("{} is the program itself", path.display()));
+            return;
+        }
+        if self
+            .project_path
+            .as_deref()
+            .is_some_and(|project| project == path || ag_image::same_file(path, project))
+        {
+            self.notice = Some(format!("{} is the project file", path.display()));
+            return;
+        }
+        // Patches were made against the bytes the project hashed: written
+        // into a program rebuilt since, they would land on the wrong bytes.
+        if let Some(recorded) = self.annotations.target.sha256.as_deref() {
+            if ag_corpus::project::sha256_of(&binary).ok().as_deref() != Some(recorded) {
+                self.notice = Some(format!(
+                    "{} has changed since the project was made: its hash is not the one recorded",
+                    binary.display()
+                ));
+                return;
+            }
+        }
+        if path.exists() && self.confirm_write.as_deref() != Some(path) {
+            self.confirm_write = Some(path.to_path_buf());
+            self.prompt = Some(Prompt {
+                kind: PromptKind::WritePatched,
+                title: "Write the patched program to",
+                value: path.display().to_string(),
+            });
+            self.notice = Some(format!(
+                "{} exists; submit again to write over it",
+                path.display()
+            ));
+            return;
+        }
+        self.confirm_write = None;
+        let count = self.annotations.patches().len();
+        match self.provider.write_patched(path) {
+            Some(Ok(len)) => {
+                self.notice = Some(format!(
+                    "Wrote {} ({len} bytes, {count} patch{})",
+                    path.display(),
+                    if count == 1 { "" } else { "es" }
+                ));
+            }
+            Some(Err(error)) => self.notice = Some(error),
+            None => {
+                self.notice = Some("Writing a patched program needs a program image".into());
+            }
+        }
     }
 
     /// Write the analyst's changes to `path`, recording it as the project file.
@@ -2644,6 +2714,9 @@ impl App {
                     PromptKind::ProjectSave => {
                         self.save_project_to(&path);
                     }
+                    PromptKind::WritePatched => {
+                        self.write_patched_to(&path);
+                    }
                     PromptKind::Rename => {
                         let name = prompt.value.trim().to_string();
                         if let Some(address) = self.selection.address() {
@@ -3059,6 +3132,25 @@ impl App {
                 return Task::none();
             }
 
+            Message::FileWritePatched => {
+                let Some(binary) = self.binary_path.clone() else {
+                    self.notice = Some("Writing a patched program needs a program image".into());
+                    return Task::none();
+                };
+                if self.annotations.patches().is_empty() {
+                    self.notice = Some("No patches to write".into());
+                    return Task::none();
+                }
+                // A file already there takes a second submit of its path,
+                // and that starts over with every opening of the prompt.
+                self.confirm_write = None;
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::WritePatched,
+                    title: "Write the patched program to",
+                    value: format!("{}.patched", binary.display()),
+                });
+            }
+
             Message::FileSaveProjectAs => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::ProjectSave,
@@ -3073,6 +3165,7 @@ impl App {
 
             Message::PromptCancel => {
                 self.prompt = None;
+                self.confirm_write = None;
             }
 
             Message::FileReload => {
@@ -6343,6 +6436,107 @@ mod tests {
         let _ = app.update(Message::AddressSelected(add + 2));
         let _ = app.update(Message::EditBytes);
         assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("00"));
+    }
+
+    #[test]
+    fn the_patched_program_is_written_as_a_copy_and_the_patch_history_lists_the_patches() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let add = 0x1149;
+        let _ = app.update(Message::FunctionSelected(add));
+        let _ = app.update(Message::AddressSelected(add));
+
+        // Nothing to write before a patch.
+        let _ = app.update(Message::FileWritePatched);
+        assert_eq!(app.notice.as_deref(), Some("No patches to write"));
+        assert!(app.prompt.is_none());
+        assert!(app.annotations.patch_records().is_empty());
+
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("mov eax, 1".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let records = app.annotations.patch_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, add);
+        assert_eq!(records[0].1.patch_text.as_deref(), Some("mov eax, 1"));
+
+        // The prompt offers a path beside the program; the copy differs
+        // from it in the five bytes, and the program is untouched.
+        let out = std::env::temp_dir().join(format!(
+            "ag-ui-write-patched-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let _ = app.update(Message::FileWritePatched);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(format!("{}.patched", sample_elf().display()).as_str())
+        );
+        let _ = app.update(Message::PromptChanged(out.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Wrote ") && n.ends_with("1 patch)")),
+            "{:?}",
+            app.notice
+        );
+        let original = std::fs::read(sample_elf()).expect("the program");
+        let written = std::fs::read(&out).expect("the copy");
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(written.len(), original.len());
+        let differing = (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count();
+        assert_eq!(differing, 5);
+
+        // Writing over the program itself is refused, and so is the project
+        // file; a file already there takes a second submit, and the copy
+        // written over it is whole.
+        let _ = app.update(Message::FileWritePatched);
+        let _ = app.update(Message::PromptChanged(sample_elf().display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.ends_with("is the program itself")));
+        assert_eq!(std::fs::read(sample_elf()).expect("the program"), original);
+        let project = out.with_extension("agproj");
+        std::fs::write(&project, "{}").expect("a file standing for the project");
+        app.project_path = Some(project.clone());
+        let _ = app.update(Message::FileWritePatched);
+        let _ = app.update(Message::PromptChanged(project.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.ends_with("is the project file")));
+        assert_eq!(std::fs::read(&project).expect("the project"), b"{}");
+        let _ = std::fs::remove_file(&project);
+        std::fs::write(&out, b"stale").expect("a file in the way");
+        let _ = app.update(Message::FileWritePatched);
+        let _ = app.update(Message::PromptChanged(out.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("submit again")));
+        assert_eq!(std::fs::read(&out).expect("the file in the way"), b"stale");
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(out.display().to_string().as_str())
+        );
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Wrote ")));
+        assert_eq!(std::fs::read(&out).expect("the copy").len(), original.len());
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]

@@ -110,7 +110,7 @@ Filed 2026-10-26.
 - [x] Assembler: assemble an instruction in place — [#315](https://github.com/CryptoJones/AdmiralGrace/issues/315)
 - [x] NOP a region — [#316](https://github.com/CryptoJones/AdmiralGrace/issues/316)
 - [x] Editable Bytes pane — [#317](https://github.com/CryptoJones/AdmiralGrace/issues/317)
-- [ ] Write a patched executable — [#318](https://github.com/CryptoJones/AdmiralGrace/issues/318)
+- [x] Write a patched executable — [#318](https://github.com/CryptoJones/AdmiralGrace/issues/318)
 - [ ] Rebase the image, and create, delete and rename segments — [#319](https://github.com/CryptoJones/AdmiralGrace/issues/319)
 
 ### Architectures and formats

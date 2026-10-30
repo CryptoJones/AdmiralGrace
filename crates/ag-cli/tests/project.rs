@@ -760,3 +760,210 @@ fn show_says_when_the_target_no_longer_matches() {
     assert!(ok, "{stderr}");
     assert!(report.contains("now hashes to"), "{report}");
 }
+
+#[test]
+fn a_copy_of_the_target_is_written_with_the_patches_in_it() {
+    let file = TempFile::new("write-patched");
+    let out = TempFile::new("write-patched-out");
+    let target = fixture("sample.elf");
+
+    // Nothing to write yet.
+    let (ok, _, stderr) = project(&["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("holds no patches"), "{stderr}");
+
+    // Four no-ops over the start of `add`, and `ret` over `push rbp`
+    // after them: the copy differs from the target in those five bytes.
+    let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x1149", "--len", "4"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x114d", "c3"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("2 patches over 5 bytes"), "{stdout}");
+    let original = std::fs::read(&target).expect("the target");
+    let written = std::fs::read(out.path()).expect("the copy");
+    assert_eq!(written.len(), original.len());
+    let differing: Vec<(usize, u8)> = (0..original.len())
+        .filter(|&i| original[i] != written[i])
+        .map(|i| (i, written[i]))
+        .collect();
+    assert_eq!(differing.len(), 5, "{differing:?}");
+    assert!(differing[..4].iter().all(|&(_, byte)| byte == 0x90));
+    assert_eq!(differing[4].1, 0xc3);
+    assert!(differing.windows(2).all(|w| w[1].0 == w[0].0 + 1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+        };
+        assert_eq!(
+            mode(out.path()) & 0o111,
+            mode(&target) & 0o111,
+            "the copy runs as the target does"
+        );
+    }
+
+    // The copy is not written over without --force, and never over the target.
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("Pass --force"), "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &target.display().to_string(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("is the target itself"), "{stderr}");
+
+    // Nor over the project file.
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &file.text(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("is the project file"), "{stderr}");
+
+    // A hard link to the target is the target, however it is named: refused,
+    // and the target is as it was. The link can only be made when the
+    // scratch directory is on the target's file system.
+    #[cfg(unix)]
+    if std::fs::hard_link(&target, TempFile::new("write-patched-link").path()).is_ok() {
+        let link = TempFile::new("write-patched-link");
+        let (ok, _, stderr) = project(&[
+            "write-patched",
+            "--file",
+            &file.text(),
+            "--out",
+            &link.text(),
+            "--force",
+        ]);
+        assert!(!ok);
+        assert!(stderr.contains("is the target itself"), "{stderr}");
+        assert_eq!(std::fs::read(&target).expect("the target"), original);
+    }
+
+    // A read-only copy — the target's mode when the target is — is written
+    // over all the same.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(out.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let (ok, _, stderr) = project(&[
+            "write-patched",
+            "--file",
+            &file.text(),
+            "--out",
+            &out.text(),
+            "--force",
+        ]);
+        assert!(ok, "{stderr}");
+    }
+
+    // A patch over bytes the file does not hold cannot be placed in it: an
+    // address no section holds, or `.bss`.
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x4010", "90"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("holds no bytes for .bss"), "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x4010", "none"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x10", "90"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("the patch at 0x10 cannot be written"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x10", "none"]);
+    assert!(ok, "{stderr}");
+
+    // A target rebuilt since the project was made is not written into
+    // without --force: the patches would land on the wrong bytes.
+    let text = std::fs::read_to_string(file.path()).expect("the project");
+    let report = show_json(&file);
+    let recorded = report["target"]["sha256"]
+        .as_str()
+        .expect("a hash")
+        .to_string();
+    std::fs::write(file.path(), text.replace(&recorded, &"0".repeat(64))).unwrap();
+    // The copy from before is out of the way, so the hash alone decides.
+    let _ = std::fs::remove_file(out.path());
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("has changed since the project was made"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(ok, "{stderr}");
+}

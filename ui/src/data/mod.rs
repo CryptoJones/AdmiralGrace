@@ -12,6 +12,7 @@ pub mod kuna_json;
 pub mod sample;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::model::{Capabilities, Project};
 
@@ -445,6 +446,13 @@ pub trait Provider: Send + Sync {
     /// The address just past the section `address` is in, when the
     /// provider reads a program image: how far a patch can reach.
     fn section_end(&self, _address: u64) -> Option<u64> {
+        None
+    }
+
+    /// Write a copy of the program with the patches told to the provider
+    /// in it to `out`, when the provider reads a program image: how many
+    /// bytes were written, or why none were.
+    fn write_patched(&self, _out: &Path) -> Option<Result<usize, String>> {
         None
     }
 

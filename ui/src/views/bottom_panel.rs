@@ -77,7 +77,7 @@ fn tab_strip(app: &App) -> Element<'_, Message> {
             BottomTab::SearchResults => app.bottom.hits.len(),
             BottomTab::Problems => app.bottom.problems.len(),
             BottomTab::AnalysisLog => app.bottom.log.len(),
-            BottomTab::PatchHistory => 0,
+            BottomTab::PatchHistory => app.annotations.patch_records().len(),
         };
 
         let active = app.bottom.tab == tab;
@@ -225,6 +225,53 @@ fn content(app: &App) -> Element<'_, Message> {
 
             list.into()
         }
-        BottomTab::PatchHistory => subtle("No patches have been applied.").into(),
+        BottomTab::PatchHistory => {
+            let patches = app.annotations.patch_records();
+            if patches.is_empty() {
+                return subtle("No patches have been applied.").into();
+            }
+
+            // Each patch: where, the bytes, and the instruction they were
+            // assembled from when they were. Clicking one goes there.
+            let mut list = Column::new().spacing(2).width(Length::Fill);
+            for (address, record) in patches {
+                let selected = app.selection.address() == Some(address);
+                let row = Row::new()
+                    .align_y(Alignment::Center)
+                    .spacing(12)
+                    .push(
+                        Text::new(record.address.clone())
+                            .size(12)
+                            .color(color::ADDR)
+                            .font(MONO)
+                            .width(Length::Fixed(140.0)),
+                    )
+                    .push(
+                        Text::new(record.patch.clone().unwrap_or_default())
+                            .size(12)
+                            .color(color::AMBER)
+                            .font(MONO)
+                            .width(Length::Fill),
+                    )
+                    .push(subtle(record.patch_text.clone().unwrap_or_default()));
+                list = list.push(
+                    mouse_area(
+                        Container::new(row)
+                            .padding([2, 8])
+                            .width(Length::Fill)
+                            .style(move |_| container::Style {
+                                background: selected.then_some(Background::Color(color::FOCUS_BG)),
+                                ..container::Style::default()
+                            }),
+                    )
+                    .on_press(Message::AddressSelected(address)),
+                );
+            }
+
+            scrollable(list)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        }
     }
 }
