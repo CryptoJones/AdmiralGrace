@@ -465,6 +465,54 @@ fn a_color_is_set_normalized_and_cleared() {
 }
 
 #[test]
+fn a_manual_cross_reference_is_recorded_and_taken_back() {
+    let file = TempFile::new("xref");
+    let (ok, stdout, stderr) = project(&["xref", "--file", &file.text(), "0x1161", "0X1149"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now refs 0x1149"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&["xref", "--file", &file.text(), "0x1161", "0x1200"]);
+    assert!(ok, "{stderr}");
+
+    // A target that is not an address is refused before the file changes.
+    let (ok, _, stderr) = project(&["xref", "--file", &file.text(), "0x1161", "nowhere"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not an address"), "{stderr}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 1, "{report}");
+    assert_eq!(
+        annotations[0]["references"],
+        serde_json::json!(["0x1149", "0x1200"]),
+        "sorted, canonical"
+    );
+
+    let (ok, stdout, stderr) = project(&[
+        "xref",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1161",
+        "0x1149",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("now refs 0x1200"), "{stdout}");
+    let (ok, stdout, stderr) = project(&[
+        "xref",
+        "--file",
+        &file.text(),
+        "--remove",
+        "0x1161",
+        "0x1200",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

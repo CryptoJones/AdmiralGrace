@@ -272,6 +272,20 @@ painted outright, so the text on it stays legible; the selected row and block sh
 color instead, so a highlight shows once the selection moves on. The inspector shows the
 value the file holds beside a swatch. The same color is what `ag project color` records.
 
+A cross reference the analysis cannot see — a computed call, a jump through a table — is the
+analyst's to record:
+
+- **Add cross reference…** (Ctrl+X) records that the selected place reaches the address typed
+  into the prompt, as the listing prints it: a bare `0x1` reaches the import the analysis calls
+  `EXTERNAL:0x1`. **Remove cross reference…** (Ctrl+Shift+X) takes one back, offering the one
+  there is when there is only one.
+
+A manual reference shows in the inspector's References from both ends, under **Reaches
+(manual)** at the place it leaves from and **Reached from (manual)** at the place it reaches,
+each named by the place's name and address so a reference to a renamed function reads by the
+analyst's name; clicking one jumps there. The same reference is what `ag project xref`
+records.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
@@ -279,7 +293,8 @@ Every one of these changes can be taken back:
   `Undo: Renamed 0x1198`. A new change after an undo forgets what was taken back.
 
 Undo covers every mark the analyst makes — renames, labels, local variable and register
-names, comments, bookmarks, tags and highlights — in the order they were made, and the
+names, comments, bookmarks, tags, highlights and cross references — in the order they were
+made, and the
 navigator and every view follow. Opening a project file or a different analysis starts
 afresh: the marks those changes were made to are gone.
 

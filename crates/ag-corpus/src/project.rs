@@ -191,6 +191,17 @@ pub struct Annotation {
     /// The analyst's name for the target, replacing the analysis's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The addresses the target refers to that the analysis cannot see — a
+    /// computed call, a jump through a table — each in its canonical
+    /// spelling, sorted and unique.
+    ///
+    /// A reference is recorded on the place it leaves from, so what an
+    /// address refers to is read off its own record and what refers to an
+    /// address is found by looking through the others. A reader that does
+    /// not know the field shows the analysis's references alone and
+    /// misreads nothing, so the format version does not change for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
     /// The analyst's comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -228,6 +239,7 @@ impl Annotation {
             register: None,
             block: false,
             name: None,
+            references: Vec::new(),
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -247,6 +259,7 @@ impl Annotation {
             register: Some(register.to_string()),
             block: false,
             name: None,
+            references: Vec::new(),
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -265,6 +278,7 @@ impl Annotation {
             register: None,
             block: kind == TargetKind::Region,
             name: None,
+            references: Vec::new(),
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -335,6 +349,34 @@ impl Annotation {
         }
     }
 
+    /// Record that the target refers to `target`, an address the analysis
+    /// cannot see it reach. The address is stored in its canonical
+    /// spelling; one the record already names is not added twice, and one
+    /// that is not an address is not recorded, which the answer says.
+    pub fn add_reference(&mut self, target: &str) -> bool {
+        let Some(target) = canonical_address(target) else {
+            return false;
+        };
+        if !self.references.contains(&target) {
+            let at = self
+                .references
+                .iter()
+                .position(|t| *t > target)
+                .unwrap_or(self.references.len());
+            self.references.insert(at, target);
+        }
+        true
+    }
+
+    /// Take the reference to `target` off the record; one it does not
+    /// carry is left alone.
+    pub fn remove_reference(&mut self, target: &str) {
+        let Some(target) = canonical_address(target) else {
+            return;
+        };
+        self.references.retain(|t| *t != target);
+    }
+
     /// Whether the target carries the tag `tag`.
     pub fn has_tag(&self, tag: &str) -> bool {
         normalize_tag(tag).is_some_and(|tag| self.tags.contains(&tag))
@@ -344,6 +386,7 @@ impl Annotation {
     /// would say the analyst changed nothing.
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
+            && self.references.is_empty()
             && self.comment.is_none()
             && !self.bookmark
             && self.tags.is_empty()
@@ -577,6 +620,18 @@ impl ProjectFile {
         let mut places: Vec<&Annotation> = self.places().filter(|a| a.has_tag(tag)).collect();
         sort_by_address(&mut places);
         places
+    }
+
+    /// The places the analyst recorded as referring to `address`, in address
+    /// order: the sources of the references the analysis could not see.
+    pub fn referrers_of(&self, address: &str) -> Vec<&Annotation> {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        let mut sources: Vec<&Annotation> = self
+            .places()
+            .filter(|a| a.references.contains(&key))
+            .collect();
+        sort_by_address(&mut sources);
+        sources
     }
 
     /// The records that are on a place: an address, a function, a region.
@@ -951,6 +1006,41 @@ mod tests {
         let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
         assert_eq!(read, project);
         assert_eq!(read.tags().get("hot"), Some(&1));
+    }
+
+    #[test]
+    fn a_manual_reference_is_recorded_on_its_source_and_found_from_its_target() {
+        let mut project = ProjectFile::new(Target::default());
+        let source = project.annotation_mut(TargetKind::Address, "0x1010");
+        assert!(source.add_reference("0X2000"), "spelled any way");
+        assert!(source.add_reference("0x1800"));
+        assert!(source.add_reference("0x2000"), "the same one is one");
+        assert!(!source.add_reference("nowhere"), "not an address");
+        assert_eq!(source.references, ["0x1800", "0x2000"]);
+        project
+            .annotation_mut(TargetKind::Function, "0x3000")
+            .add_reference("0x2000");
+
+        let sources: Vec<&str> = project
+            .referrers_of("0x2000")
+            .iter()
+            .map(|a| a.address.as_str())
+            .collect();
+        assert_eq!(sources, ["0x1010", "0x3000"]);
+        assert_eq!(project.referrers_of("0x1800").len(), 1);
+        assert!(project.referrers_of("0x9999").is_empty());
+
+        // Taking the last reference off a record that carries nothing else
+        // leaves it empty, so it is pruned.
+        project
+            .annotation_mut(TargetKind::Function, "0x3000")
+            .remove_reference("0x2000");
+        project.prune();
+        assert!(project.annotation_for("0x3000").is_none());
+
+        // The references survive the file.
+        let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
+        assert_eq!(read, project);
     }
 
     #[test]
