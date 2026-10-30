@@ -2088,6 +2088,15 @@ impl App {
     /// Fill `len` bytes from `address` with the no-op, as a patch that says
     /// so, and say what was done.
     fn nop_at(&mut self, address: u64, len: usize) {
+        // A run that leaves the section has nothing to fill past its end,
+        // and a slip of the finger would fill gigabytes: refused.
+        let end = self.provider.section_end(address).unwrap_or(u64::MAX);
+        if address.saturating_add(len as u64) > end {
+            self.notice = Some(format!(
+                "{len} bytes from {address:#x} run past the end of the section at {end:#x}"
+            ));
+            return;
+        }
         let key = self.annotation_key(address);
         let kind = self.kind_at(address);
         let bytes = ag_image::no_ops(len);
@@ -2096,10 +2105,10 @@ impl App {
         } else {
             format!("nop x{len}")
         };
+        // Written through the same door as every patch, so one it overlaps
+        // comes off.
         self.annotations
-            .annotation_mut(kind, &key)
-            .set_patch(Some((&bytes, Some(&text))));
-        self.annotations.prune();
+            .write_patch(kind, &key, Some((&bytes, Some(&text))));
         self.notice = Some(format!(
             "Filled {len} byte{} at {key} with nop",
             if len == 1 { "" } else { "s" }
@@ -6149,10 +6158,30 @@ mod tests {
             .as_deref()
             .is_some_and(|n| n.starts_with("Not a reach")));
 
+        // A run past the section's end is refused before anything is
+        // written, and a nop run over an older patch takes it off.
+        let _ = app.update(Message::EditNopRange);
+        let _ = app.update(Message::PromptChanged("+100000000000".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("past the end of the section")));
+        let _ = app.update(Message::AddressSelected(second + 1));
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("int3".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::AddressSelected(second));
+        let _ = app.update(Message::EditNopRange);
+        let _ = app.update(Message::PromptChanged("+4".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for(&format!("{:#x}", second + 1)).is_none());
+        assert!(app.work.listing[4..8].iter().all(|line| line.mnemonic == "nop"));
+
         // Undo puts the instructions back.
-        let _ = app.update(Message::EditUndo);
-        let _ = app.update(Message::EditUndo);
-        let _ = app.update(Message::EditUndo);
+        while !app.undo.is_empty() {
+            let _ = app.update(Message::EditUndo);
+        }
         assert_ne!(app.work.listing[0].mnemonic, "nop");
         assert_eq!(app.work.listing.len(), before);
     }

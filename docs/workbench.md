@@ -355,7 +355,8 @@ Patching a binary starts with changing an instruction:
 - **NOP instruction** (Ctrl+Shift+O) fills the selected instruction, as long as it is, with
   the architecture's no-op; **NOP range…** (Ctrl+Shift+R) fills a run from the selection up to
   an address typed into the prompt, or `+N` bytes of it. On x86 the no-op is the one-byte
-  `nop`, repeated, so the run decodes as that many instructions that do nothing.
+  `nop`, repeated, so the run decodes as that many instructions that do nothing. A run that
+  would leave the section it starts in is refused.
 
 A patch written over another takes the other off: the bytes written last are the bytes. The
 file on disk is never changed. The patch is a record in the project file — the bytes, and

@@ -372,6 +372,12 @@ impl Provider for BinaryProvider {
         self.binary.instruction_length_at(address)
     }
 
+    fn section_end(&self, address: u64) -> Option<u64> {
+        self.binary
+            .section_of(address)
+            .map(|section| section.vma.saturating_add(section.size))
+    }
+
     fn references(&self, address: u64) -> Vec<Reference> {
         let mut references = Vec::new();
 

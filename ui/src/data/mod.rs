@@ -442,6 +442,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// The address just past the section `address` is in, when the
+    /// provider reads a program image: how far a patch can reach.
+    fn section_end(&self, _address: u64) -> Option<u64> {
+        None
+    }
+
     /// The strings the project holds.
     fn strings(&self) -> Vec<StringEntry> {
         Vec::new()

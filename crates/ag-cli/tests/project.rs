@@ -720,6 +720,23 @@ fn a_run_of_bytes_is_filled_with_no_ops() {
     let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x1160", "--to", "0x1150"]);
     assert!(!ok);
     assert!(stderr.contains("before the address"), "{stderr}");
+    let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x1160", "--len", "100000"]);
+    assert!(!ok);
+    assert!(stderr.contains("past the end of the section"), "{stderr}");
+
+    // A nop run over an older patch takes it off, so the run reads back
+    // whole.
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x114d", "c3"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x1149", "--len", "8"]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    let at_114d = report["annotations"]
+        .as_array()
+        .expect("the annotations")
+        .iter()
+        .any(|a| a["address"] == serde_json::json!("0x114d"));
+    assert!(!at_114d, "the overlapped patch is gone: {report}");
 }
 
 #[test]

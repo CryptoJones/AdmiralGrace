@@ -442,6 +442,10 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             let at = ag_corpus::parse_addr_space(&address)
                 .map(|(value, _)| value)
                 .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            // The image says how long the instruction is and where its
+            // section ends: a run past the end has nothing to fill.
+            let image = ag_image::Binary::open(&target)
+                .with_context(|| format!("reading {}", target.display()))?;
             let len = match (len, to) {
                 (Some(len), _) => len,
                 (None, Some(to)) => {
@@ -450,25 +454,26 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                         .map_err(|_| anyhow::anyhow!("{to:?} is not an address"))?;
                     usize::try_from(end.checked_sub(at).context("--to is before the address")?)?
                 }
-                (None, None) => {
-                    // The instruction at the address, as long as it is.
-                    let image = ag_image::Binary::open(&target)
-                        .with_context(|| format!("reading {}", target.display()))?;
-                    image.instruction_length_at(at).with_context(|| {
-                        format!("no instruction starts at {at:#x}; say --len or --to")
-                    })?
-                }
+                (None, None) => image.instruction_length_at(at).with_context(|| {
+                    format!("no instruction starts at {at:#x}; say --len or --to")
+                })?,
             };
             anyhow::ensure!(len > 0, "nothing to fill");
+            let section_end = image
+                .section_of(at)
+                .map(|section| section.vma.saturating_add(section.size))
+                .with_context(|| format!("{at:#x} is outside every section"))?;
+            anyhow::ensure!(
+                at.saturating_add(len as u64) <= section_end,
+                "{len} bytes from {at:#x} run past the end of the section at {section_end:#x}"
+            );
             let bytes = ag_image::no_ops(len);
             let text = if len == 1 {
                 "nop".to_string()
             } else {
                 format!("nop x{len}")
             };
-            edit(&target, &file, TargetKind::Address, &address, |a| {
-                a.set_patch(Some((&bytes, Some(&text))))
-            })
+            edit_patch(&target, &file, &address, Some((&bytes, Some(&text))))
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {
