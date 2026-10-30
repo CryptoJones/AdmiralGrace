@@ -39,11 +39,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 
     column = column.push(section_header("Analyst notes"));
+    let mut notes = Column::new().spacing(5);
+    if let Some(address) = selection.address() {
+        let key = app.annotation_key(address);
+        if let Some(annotation) = app
+            .annotations
+            .annotations
+            .iter()
+            .find(|a| a.address == key)
+        {
+            if let Some(name) = &annotation.name {
+                notes = notes.push(kv("Renamed to", name.clone()));
+            }
+            if let Some(comment) = &annotation.comment {
+                notes = notes.push(kv("Comment", comment.clone()));
+            }
+            if annotation.bookmark {
+                notes = notes.push(subtle("★ bookmarked"));
+            }
+        }
+    }
+    column = column.push(notes);
     column = column.push(
         Row::new()
             .spacing(8)
-            .push(note_button("＋ Add comment"))
-            .push(note_button("☆ Bookmark")),
+            .push(note_button("＋ Add comment", Message::EditComment))
+            .push(note_button("☆ Bookmark", Message::EditBookmark)),
     );
 
     scrollable(column)
@@ -235,9 +256,10 @@ fn provenance_card(app: &App) -> Element<'_, Message> {
     recessed(card.padding(10)).into()
 }
 
-/// A placeholder action button in the notes section.
-fn note_button(label: &str) -> Element<'_, Message> {
+/// An action button in the notes section.
+fn note_button(label: &str, message: Message) -> Element<'_, Message> {
     button::Button::new(Text::new(label.to_string()).size(12).color(color::MUTED))
+        .on_press(message)
         .padding([6, 10])
         .style(|_, status| button::Style {
             background: match status {

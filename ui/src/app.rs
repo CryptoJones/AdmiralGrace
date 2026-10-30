@@ -61,6 +61,12 @@ pub enum Message {
     FileOpenBinary,
     /// Prompt for an Objective-C method map.
     FileOpenMethods,
+    /// Prompt for a project file to open.
+    FileOpenProject,
+    /// Save the analyst's changes to the project file.
+    FileSaveProject,
+    /// Prompt for a project file to save to.
+    FileSaveProjectAs,
     /// Reload the open project.
     FileReload,
     /// Close the open project.
@@ -154,6 +160,14 @@ pub enum PromptKind {
     Binary,
     /// An Objective-C method map.
     Methods,
+    /// A project file to open.
+    ProjectOpen,
+    /// A project file to save to.
+    ProjectSave,
+    /// The new name of the selected function.
+    Rename,
+    /// A comment for the selection.
+    Comment,
 }
 
 /// An inline prompt for a filesystem path.
@@ -293,6 +307,14 @@ pub struct App {
     pub shift: u64,
     /// The kuna CLI of an open kuna project, and the answers it has given.
     pub kuna: Option<KunaState>,
+    /// The analyst's changes, keyed by the address as the source wrote it.
+    ///
+    /// These are the workbench's own annotations, held in the open project
+    /// file's shape so a save writes them out unchanged. A rename here wins
+    /// over the analysis's name wherever the workbench shows one.
+    pub annotations: ag_corpus::project::ProjectFile,
+    /// Where the open project file was last read from or written to.
+    pub project_path: Option<PathBuf>,
 }
 
 impl App {
@@ -341,6 +363,10 @@ impl App {
             methods_path: config.methods.clone(),
             shift: config.shift,
             kuna: None,
+            annotations: ag_corpus::project::ProjectFile::new(
+                ag_corpus::project::Target::default(),
+            ),
+            project_path: None,
         };
 
         let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
@@ -472,6 +498,9 @@ impl App {
         self.binary_path = None;
         self.methods_path = None;
         self.kuna = None;
+        self.annotations =
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+        self.project_path = None;
         self.notice = Some("Project closed".into());
         self.adopt_provider()
     }
@@ -498,17 +527,92 @@ impl App {
         self.provider.analysis_state()
     }
 
-    /// Reload the function list and apply the current filter.
+    /// Reload the function list, apply the analyst's renames, then the filter.
+    ///
+    /// A name the analyst recorded wins over the analysis's own wherever the
+    /// workbench shows one, so the rename is applied before the filter reads
+    /// it. The provider's row is otherwise untouched.
     fn refresh_functions(&mut self) {
         let filter = self.navigator.filter.trim().to_lowercase();
         let rows = self
             .provider
             .functions()
             .into_iter()
+            .map(|mut row| {
+                if let Some(name) = self.annotation_name(&row.display_address()) {
+                    row.name = name;
+                }
+                row
+            })
             .filter(|row| filter.is_empty() || row.name.to_lowercase().contains(&filter))
             .collect();
 
         self.navigator.rows = rows;
+    }
+
+    /// The analyst's recorded name for the address `key`, when there is one.
+    fn annotation_name(&self, key: &str) -> Option<String> {
+        self.annotations
+            .annotations
+            .iter()
+            .find(|a| a.address == key)
+            .and_then(|a| a.name.clone())
+    }
+
+    /// The navigator row the selection points at, when it points at one.
+    fn selected_row(&self) -> Option<crate::data::FunctionRow> {
+        let address = self.selection.address()?;
+        self.navigator.rows.iter().find(|row| row.address == address).cloned()
+    }
+
+    /// The key an annotation on `address` is stored under: the address as the
+    /// source wrote it, so a corpus function and its `EXTERNAL` twin key apart.
+    pub(crate) fn annotation_key(&self, address: u64) -> String {
+        self.navigator
+            .rows
+            .iter()
+            .find(|row| row.address == address)
+            .map(|row| row.display_address())
+            .unwrap_or_else(|| format!("{address:#x}"))
+    }
+
+    /// Write the analyst's changes to `path`, recording it as the project file.
+    fn save_project_to(&mut self, path: &Path) {
+        // The target identity comes from the open project, not the last save.
+        // A program image knows its own hash only when the reader computed
+        // one, so the save does it here rather than write a project that
+        // cannot say what it describes.
+        let sha256 = self.project.target_sha256.clone().or_else(|| {
+            self.project
+                .root
+                .as_ref()
+                .filter(|root| root.is_file())
+                .and_then(|root| std::fs::read(root).ok())
+                .map(|bytes| {
+                    use sha2::{Digest, Sha256};
+                    Sha256::digest(&bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect()
+                })
+        });
+        self.annotations.target = ag_corpus::project::Target {
+            path: self
+                .project
+                .root
+                .as_ref()
+                .map(|root| root.display().to_string()),
+            sha256,
+        };
+        match self.annotations.save(path) {
+            Ok(()) => {
+                self.project_path = Some(path.to_path_buf());
+                self.notice = Some(format!("Saved project {}", path.display()));
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not save {}: {error:#}", path.display()));
+            }
+        }
     }
 
     /// Select the first function in the list, if there is one.
@@ -1017,7 +1121,112 @@ impl App {
                             return self.load_project();
                         }
                     }
+                    PromptKind::ProjectOpen => {
+                        if !path.is_file() {
+                            self.notice =
+                                Some(format!("{} is not a file", path.display()));
+                        } else {
+                            match ag_corpus::project::ProjectFile::load(&path) {
+                                Ok(project) => {
+                                    self.annotations = project;
+                                    self.project_path = Some(path.clone());
+                                    self.refresh_functions();
+                                    self.notice = Some(format!(
+                                        "Opened project {}",
+                                        path.display()
+                                    ));
+                                }
+                                Err(error) => {
+                                    self.notice = Some(format!(
+                                        "Could not open {}: {error:#}",
+                                        path.display()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    PromptKind::ProjectSave => {
+                        self.save_project_to(&path);
+                    }
+                    PromptKind::Rename => {
+                        let name = prompt.value.trim().to_string();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            // The comparison is against the analysis's own
+                            // name, not the displayed one: re-entering the
+                            // analyst's own name keeps the rename rather
+                            // than erasing it.
+                            let original = self
+                                .provider
+                                .functions()
+                                .into_iter()
+                                .find(|row| row.address == address)
+                                .map(|row| row.name);
+                            if let Some(original) = original {
+                                let annotation = self.annotations.annotation_mut(
+                                    ag_corpus::project::TargetKind::Function,
+                                    &key,
+                                );
+                                annotation.name =
+                                    (!name.is_empty() && name != original).then_some(name);
+                                self.annotations.prune();
+                                self.refresh_functions();
+                                self.notice = Some(format!("Renamed {key}"));
+                            }
+                        }
+                    }
+                    PromptKind::Comment => {
+                        let text = prompt.value.trim().to_string();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            let annotation = self.annotations.annotation_mut(
+                                ag_corpus::project::TargetKind::Address,
+                                &key,
+                            );
+                            annotation.comment =
+                                (!text.is_empty()).then_some(text);
+                            self.annotations.prune();
+                            self.notice = Some(format!("Commented {key}"));
+                        }
+                    }
                 }
+            }
+
+            Message::FileOpenProject => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::ProjectOpen,
+                    title: "Open project file",
+                    value: self
+                        .project_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                });
+            }
+
+            Message::FileSaveProject => {
+                let Some(path) = self.project_path.clone() else {
+                    self.prompt = Some(Prompt {
+                        kind: PromptKind::ProjectSave,
+                        title: "Save project file",
+                        value: "project.agproj".into(),
+                    });
+                    return Task::none();
+                };
+                self.save_project_to(&path);
+                return Task::none();
+            }
+
+            Message::FileSaveProjectAs => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::ProjectSave,
+                    title: "Save project file",
+                    value: self
+                        .project_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "project.agproj".into()),
+                });
             }
 
             Message::PromptCancel => {
@@ -1048,15 +1257,57 @@ impl App {
             }
 
             Message::EditRename => {
-                self.notice = Some("Renaming lands with project persistence (milestone 3)".into());
+                let Some(row) = self.selected_row() else {
+                    self.notice = Some("Select a function to rename".into());
+                    return Task::none();
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Rename,
+                    title: "Rename function",
+                    value: row.name.clone(),
+                });
             }
 
             Message::EditComment => {
-                self.notice = Some("Comments land with project persistence (milestone 3)".into());
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select something to comment".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotations
+                    .iter()
+                    .find(|a| a.address == key)
+                    .and_then(|a| a.comment.clone())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Comment,
+                    title: "Add comment",
+                    value: current,
+                });
             }
 
             Message::EditBookmark => {
-                self.notice = Some("Bookmarks land with project persistence (milestone 3)".into());
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select something to bookmark".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let annotation = self
+                    .annotations
+                    .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                annotation.bookmark = !annotation.bookmark;
+                self.annotations.prune();
+                let on = self
+                    .annotations
+                    .annotations
+                    .iter()
+                    .any(|a| a.address == key && a.bookmark);
+                self.notice = Some(format!(
+                    "Bookmark {} {key}",
+                    if on { "added at" } else { "cleared at" }
+                ));
             }
 
             Message::ViewToggleNavigator => {
@@ -1242,6 +1493,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("j"), true) => Message::ViewToggleBottom,
         (Key::Character("/"), true) => Message::EditComment,
         (Key::Character("r"), true) => Message::FileReload,
+        (Key::Character("s"), true) => Message::FileSaveProject,
         (Key::Named(keyboard::key::Named::F2), _) => Message::EditRename,
         (Key::Named(keyboard::key::Named::F5), _) => Message::FileReload,
         (Key::Named(keyboard::key::Named::Escape), _) => Message::Dismiss,
@@ -2232,5 +2484,142 @@ mod tests {
             .expect("the cache")
             .xrefs(0x1000, Direction::From)
             .is_none());
+    }
+
+    #[test]
+    fn renaming_a_function_replaces_its_name_in_the_list() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let original = app.navigator.rows[0].name.clone();
+
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditRename);
+        assert_eq!(
+            app.prompt.as_ref().expect("a rename prompt").kind,
+            PromptKind::Rename
+        );
+
+        let _ = app.update(Message::PromptChanged("decode_frame".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert_eq!(app.navigator.rows[0].name, "decode_frame");
+        // The provider still reports its own name; the rename is the workbench's.
+        assert_eq!(app.provider.functions()[0].name, original);
+    }
+
+    #[test]
+    fn renaming_back_to_the_analysis_name_clears_the_annotation() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let original = app.navigator.rows[0].name.clone();
+
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode_frame".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.rows[0].name, "decode_frame");
+
+        // Re-entering the displayed name keeps the rename…
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode_frame".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.rows[0].name, "decode_frame");
+
+        // …and returning the analysis's own name clears it.
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged(original.clone()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.rows[0].name, original);
+        assert!(app.annotations.annotations.is_empty());
+    }
+
+    #[test]
+    fn a_bookmark_toggles_and_survives_a_save_and_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ui-project-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("bookmark.agproj");
+
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+
+        let _ = app.update(Message::EditBookmark);
+        assert!(app
+            .annotations
+            .annotations
+            .iter()
+            .any(|a| a.bookmark && a.address == format!("{address:#x}")));
+
+        app.save_project_to(&file);
+        assert!(file.is_file());
+
+        let read = ag_corpus::project::ProjectFile::load(&file).expect("the saved project");
+        assert!(read
+            .annotations
+            .iter()
+            .any(|a| a.bookmark && a.address == format!("{address:#x}")));
+
+        // Toggling again clears it, and the cleared annotation is pruned.
+        let _ = app.update(Message::EditBookmark);
+        app.save_project_to(&file);
+        let read = ag_corpus::project::ProjectFile::load(&file).expect("the saved project");
+        assert!(read.annotations.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_project_file_loads_its_annotations() {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ui-open-project-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("open.agproj");
+        fs::write(
+            &file,
+            r#"{"format":1,"target":{},"annotations":[{"kind":"function","address":"0x100084a20","name":"decode_frame"}]}"#,
+        )
+        .expect("write");
+
+        let mut app = app();
+        let _ = app.update(Message::FileOpenProject);
+        let _ = app.update(Message::PromptChanged(file.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert_eq!(app.navigator.rows[0].name, "decode_frame");
+        assert_eq!(app.project_path.as_deref(), Some(file.as_path()));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_project_format_is_refused_with_a_notice() {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ui-new-format-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("future.agproj");
+        fs::write(&file, r#"{"format": 99, "target": {}}"#).expect("write");
+
+        let mut app = app();
+        let _ = app.update(Message::FileOpenProject);
+        let _ = app.update(Message::PromptChanged(file.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("newer")));
+        assert!(app.project_path.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

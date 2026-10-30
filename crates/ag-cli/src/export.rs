@@ -333,7 +333,7 @@ fn prepare(dir: &Path, force: bool) -> Result<()> {
 }
 
 /// The SHA-256 of the file at `path`, as lowercase hex.
-fn sha256_of(path: &Path) -> Result<String> {
+pub(crate) fn sha256_of(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let digest = Sha256::digest(&bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
