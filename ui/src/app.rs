@@ -3175,14 +3175,19 @@ fn marked(
 
 /// The operand text `operands` with every constant shown as `format` says.
 ///
-/// A constant is a hexadecimal literal as the analysis prints one, `0x30`,
-/// with a `-` before it when the analysis printed one, as in `[rbp-0x8]`.
-/// Hex leaves the text as it is. Signed reads the value in the width it is
-/// printed in — two digits a byte, four a word, eight a double word, else a
-/// quad word — so `0xff` is `-0x1`. Decimal and octal print the value as a
-/// number. Address shows the name `name_of` gives the value, and leaves a
-/// value it names nothing for as it was. Anything that is not a constant —
-/// a register, a label, a mnemonic suffix — is left alone.
+/// A constant is a hexadecimal literal as a disassembler prints one: `0x30`
+/// as the sample and a kuna export spell it, or `30h` / `0Ch` as iced's
+/// Intel syntax spells it for a program image — a run of hex digits that
+/// starts with a decimal digit and ends in `h`. Either way no word character
+/// may run into it, so a label such as `loc_0x10` or `sub_1149h` is left
+/// whole. Hex leaves the text as it is. Signed reads a value in the width it
+/// is printed in — two digits a byte, four a word, eight a double word, else
+/// a quad word — so `0xff` is `-0x1`; a constant the analysis already
+/// printed with a sign, `[rbp-0x88]` or `[rbp+0x10]`, is signed already and
+/// is left as it is. Decimal and octal print the value as a number. Address
+/// shows the name `name_of` gives the value, and leaves a value it names
+/// nothing for as it was. Anything that is not a constant — a register, a
+/// label, a mnemonic suffix — is left alone.
 pub(crate) fn reformat_operands(
     operands: &str,
     format: ag_corpus::project::OperandFormat,
@@ -3192,39 +3197,68 @@ pub(crate) fn reformat_operands(
     if format == OperandFormat::Hex {
         return operands.to_string();
     }
-    let mut out = String::with_capacity(operands.len());
     let bytes = operands.as_bytes();
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut out = String::with_capacity(operands.len());
     let mut at = 0;
     while at < bytes.len() {
-        // A literal starts at `0x` that no word character runs into, so a
-        // label such as `loc_0x10` is left whole.
-        let starts_literal = bytes[at..].starts_with(b"0x")
-            && (at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'));
-        if !starts_literal {
+        let word_before = at > 0 && is_word(bytes[at - 1]);
+        // The literal at `at`, as (end, digits, spelled with `0x`), when
+        // one starts here and nothing runs into it on either side.
+        let literal = if word_before {
+            None
+        } else if bytes[at..].starts_with(b"0x") {
+            let mut end = at + 2;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let digits = &operands[at + 2..end];
+            (!digits.is_empty() && !(end < bytes.len() && is_word(bytes[end])))
+                .then_some((end, digits, true))
+        } else if bytes[at].is_ascii_digit() {
+            let mut end = at;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let suffixed = end < bytes.len()
+                && bytes[end] == b'h'
+                && !(end + 1 < bytes.len() && is_word(bytes[end + 1]));
+            suffixed.then_some((end + 1, &operands[at..end], false))
+        } else {
+            None
+        };
+        let Some((end, digits, prefixed)) = literal else {
             out.push(bytes[at] as char);
             at += 1;
             continue;
-        }
-        let digits_start = at + 2;
-        let mut end = digits_start;
-        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
-            end += 1;
-        }
-        let digits = &operands[digits_start..end];
+        };
         let Ok(value) = u64::from_str_radix(digits, 16) else {
             out.push_str(&operands[at..end]);
             at = end;
             continue;
         };
-        // A `-` the analysis printed before the literal is part of it.
-        let negative = out.ends_with('-');
-        if negative {
-            out.pop();
-        }
+        // A sign the analysis printed — `-0x88`, `+ 0x10` — makes the
+        // constant signed already: its value is what it says.
+        let signed_already = out.trim_end().ends_with(['-', '+']);
+        let hex = |value: u64| {
+            if prefixed {
+                format!("{value:#x}")
+            } else {
+                format!("{value:X}h")
+            }
+        };
         let shown = match format {
             OperandFormat::Hex => unreachable!("hex returns above"),
+            OperandFormat::Signed if signed_already => operands[at..end].to_string(),
             OperandFormat::Signed => {
-                let width_bits = match digits.len() {
+                // iced leads a constant that starts with a letter with a
+                // zero, `0FFh`, which is spelling, not width.
+                let printed = if prefixed {
+                    digits.len()
+                } else {
+                    digits.trim_start_matches('0').len().max(1)
+                };
+                let width_bits = match printed {
                     0..=2 => 8,
                     3..=4 => 16,
                     5..=8 => 32,
@@ -3232,30 +3266,22 @@ pub(crate) fn reformat_operands(
                 };
                 let signed = if width_bits == 64 {
                     value as i64
+                } else if value & (1u64 << (width_bits - 1)) != 0 {
+                    (value as i64) - (1i64 << width_bits)
                 } else {
-                    let sign = 1u64 << (width_bits - 1);
-                    if value & sign != 0 {
-                        (value as i64) - (1i64 << width_bits)
-                    } else {
-                        value as i64
-                    }
+                    value as i64
                 };
-                let signed = if negative { -signed } else { signed };
                 if signed < 0 {
-                    format!("-{:#x}", signed.unsigned_abs())
+                    format!("-{}", hex(signed.unsigned_abs()))
                 } else {
-                    format!("{signed:#x}")
+                    hex(value)
                 }
             }
-            OperandFormat::Decimal => {
-                format!("{}{value}", if negative { "-" } else { "" })
-            }
-            OperandFormat::Octal => {
-                format!("{}{value:#o}", if negative { "-" } else { "" })
-            }
+            OperandFormat::Decimal => value.to_string(),
+            OperandFormat::Octal => format!("{value:#o}"),
             OperandFormat::Address => match name_of(value) {
-                Some(name) if !negative => name,
-                _ => format!("{}{}", if negative { "-" } else { "" }, &operands[at..end]),
+                Some(name) if !signed_already => name,
+                _ => operands[at..end].to_string(),
             },
         };
         out.push_str(&shown);
@@ -5642,17 +5668,25 @@ mod tests {
             reformat_operands("rax, 0x8000000000000000", Signed, &none),
             "rax, -0x8000000000000000"
         );
-        // A `-` the analysis printed belongs to the constant.
+        assert_eq!(reformat_operands("al, 0x80", Signed, &none), "al, -0x80");
+        // A sign the analysis printed makes the constant signed already:
+        // it is what it says, under every format that keeps the base.
+        assert_eq!(reformat_operands("[rbp-0x88]", Signed, &none), "[rbp-0x88]");
+        assert_eq!(reformat_operands("[rbp+0x88]", Signed, &none), "[rbp+0x88]");
+        assert_eq!(
+            reformat_operands("[RBP + -0x88]", Signed, &none),
+            "[RBP + -0x88]"
+        );
         assert_eq!(reformat_operands("[rbp-0x8]", Decimal, &none), "[rbp-8]");
-        assert_eq!(reformat_operands("[rbp-0x8]", Signed, &none), "[rbp-0x8]");
         assert_eq!(reformat_operands("[rbp+0x10]", Octal, &none), "[rbp+0o20]");
         // Every constant in the line is shown the same way; labels are not
-        // constants.
+        // constants, and neither is a literal a word runs into.
         assert_eq!(reformat_operands("0x10, 0x20", Decimal, &none), "16, 32");
         assert_eq!(
             reformat_operands("x0, loc_0x10", Decimal, &none),
             "x0, loc_0x10"
         );
+        assert_eq!(reformat_operands("0x1Fh", Decimal, &none), "0x1Fh");
         assert_eq!(reformat_operands("0x", Decimal, &none), "0x");
         // An address shows the place's name when there is one.
         assert_eq!(
@@ -5663,6 +5697,39 @@ mod tests {
             reformat_operands("rdi, 0x1150", Address, &named),
             "rdi, 0x1150"
         );
+        assert_eq!(
+            reformat_operands("[rbp-0x1149]", Address, &named),
+            "[rbp-0x1149]"
+        );
+
+        // iced's Intel syntax, which a program image's listing is printed
+        // in, spells hex with an `h`: the same constants, read the same way
+        // and shown in the same spelling.
+        assert_eq!(
+            reformat_operands("eax,[ebp+0Ch]", Decimal, &none),
+            "eax,[ebp+12]"
+        );
+        assert_eq!(reformat_operands("eax,30h", Octal, &none), "eax,0o60");
+        assert_eq!(reformat_operands("eax,0FFh", Signed, &none), "eax,-1h");
+        assert_eq!(
+            reformat_operands("eax,0FFFFFFFFh", Signed, &none),
+            "eax,-1h"
+        );
+        assert_eq!(
+            reformat_operands("rax,[rbp-88h]", Signed, &none),
+            "rax,[rbp-88h]"
+        );
+        assert_eq!(
+            reformat_operands("qword ptr [1149h]", Address, &named),
+            "qword ptr [decode]"
+        );
+        assert_eq!(
+            reformat_operands("qword ptr [3FD0h]", Address, &named),
+            "qword ptr [3FD0h]"
+        );
+        assert_eq!(reformat_operands("sub_1149h", Decimal, &none), "sub_1149h");
+        assert_eq!(reformat_operands("1149hx", Decimal, &none), "1149hx");
+        assert_eq!(reformat_operands("eax,ebx", Decimal, &none), "eax,ebx");
     }
 
     #[test]

@@ -317,9 +317,11 @@ so the analyst chooses it per instruction:
   operands the next way round: hexadecimal as the analysis prints them, signed hexadecimal,
   decimal, octal, then as an address, and round to hexadecimal, which is the default and
   leaves no record. Signed reads a constant in the width it is printed in — two digits a
-  byte, four a word, eight a double word — so `0xff` is `-0x1`. An address shows the name of
-  the place the constant points at when the analysis or the analyst named one, and leaves a
-  constant that names nothing as it was.
+  byte, four a word, eight a double word — so `0xff` is `-0x1`; a constant the analysis
+  already printed with a sign, `[rbp-0x88]`, is signed already and stays. An address shows
+  the name of the place the constant points at when the analysis or the analyst named one,
+  and leaves a constant that names nothing as it was. A constant is read whether the listing
+  spells it `0x30` or, as a program image's does, `30h`, and keeps its spelling.
 
 The format reaches the listing and the graph, every constant of the one instruction alike; a
 `-` the analysis printed before a constant stays with it. `ag project operand` records the
