@@ -70,6 +70,12 @@ pub fn view(_app: &App) -> Element<'_, Message> {
                 Message::EditBookmark,
             )),
             Item::new(item_button("Tags…", "Ctrl+T", Message::EditTags)),
+            Item::new(item_button("Highlight…", "Ctrl+H", Message::EditColor)),
+            Item::new(item_button(
+                "Highlight block…",
+                "Ctrl+Shift+H",
+                Message::EditColorBlock,
+            )),
             Item::new(separator()),
             Item::new(disabled_item("Undo", "Ctrl+Z")),
             Item::new(disabled_item("Redo", "Ctrl+Shift+Z")),

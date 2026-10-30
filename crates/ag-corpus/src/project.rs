@@ -108,6 +108,49 @@ pub fn parse_tags(line: &str) -> Vec<String> {
     tags
 }
 
+/// The highlight colors an analyst can name instead of spelling a value,
+/// each with the `#rrggbb` it stands for.
+///
+/// The values are the workbench's own accents, so a named highlight sits in
+/// the palette the rest of the surface is drawn in.
+pub const NAMED_COLORS: &[(&str, &str)] = &[
+    ("red", "#e07a6a"),
+    ("orange", "#e49a6a"),
+    ("amber", "#e4ba6a"),
+    ("yellow", "#e4d86a"),
+    ("green", "#8bcf9c"),
+    ("cyan", "#68c5d2"),
+    ("blue", "#86aef3"),
+    ("purple", "#c1a4ed"),
+    ("pink", "#e39ac7"),
+    ("gray", "#8c9aa8"),
+];
+
+/// The `#rrggbb` a color the analyst wrote stands for, when it is one.
+///
+/// A color is a name from [`NAMED_COLORS`], or a hex value with or without
+/// its `#`, six digits or the three-digit short form; case does not matter.
+/// Anything else is not a color, and the caller says so rather than
+/// recording it.
+pub fn parse_color(text: &str) -> Option<String> {
+    let text = text.trim().to_ascii_lowercase();
+    if let Some((_, hex)) = NAMED_COLORS.iter().find(|(name, _)| *name == text) {
+        return Some((*hex).to_string());
+    }
+    let digits = text.strip_prefix('#').unwrap_or(&text);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match digits.len() {
+        6 => Some(format!("#{digits}")),
+        3 => Some(format!(
+            "#{}",
+            digits.chars().flat_map(|c| [c, c]).collect::<String>()
+        )),
+        _ => None,
+    }
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -825,6 +868,19 @@ mod tests {
             ["EXTERNAL:0x1", "0x100", "0x2000", "nowhere"],
             "in address order, the space first, the register skipped, the unparseable last"
         );
+    }
+
+    #[test]
+    fn a_color_is_a_name_or_a_hex_value() {
+        assert_eq!(parse_color("red").as_deref(), Some("#e07a6a"));
+        assert_eq!(parse_color(" Amber ").as_deref(), Some("#e4ba6a"));
+        assert_eq!(parse_color("#AABBCC").as_deref(), Some("#aabbcc"));
+        assert_eq!(parse_color("aabbcc").as_deref(), Some("#aabbcc"));
+        assert_eq!(parse_color("#abc").as_deref(), Some("#aabbcc"));
+        assert_eq!(parse_color("blurple"), None);
+        assert_eq!(parse_color("#12345"), None);
+        assert_eq!(parse_color("#"), None);
+        assert_eq!(parse_color(""), None);
     }
 
     #[test]

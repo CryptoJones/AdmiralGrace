@@ -381,6 +381,48 @@ fn tags_attach_detach_and_are_listed() {
 }
 
 #[test]
+fn a_color_is_set_normalized_and_cleared() {
+    let file = TempFile::new("color");
+    let (ok, stdout, stderr) = project(&[
+        "color",
+        "--file",
+        &file.text(),
+        "--on",
+        "function",
+        "0x1149",
+        "Red",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x1149 now color #e07a6a"),
+        "{stdout}"
+    );
+
+    let (ok, stdout, stderr) = project(&["color", "--file", &file.text(), "0x1161", "#ABC"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now color #aabbcc"),
+        "{stdout}"
+    );
+
+    // A typo is refused before the file changes.
+    let (ok, _, stderr) = project(&["color", "--file", &file.text(), "0x1161", "blurple"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not a color"), "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["annotations"].as_array().map(Vec::len), Some(2));
+
+    // `none` clears the color, and with it an otherwise empty record.
+    let (ok, stdout, stderr) = project(&["color", "--file", &file.text(), "0x1161", "none"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 1, "{report}");
+    assert_eq!(annotations[0]["color"], serde_json::json!("#e07a6a"));
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

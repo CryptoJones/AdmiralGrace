@@ -91,6 +91,10 @@ pub enum Message {
     BookmarkSelected(u64),
     /// Edit the tags on the selection.
     EditTags,
+    /// Set or clear the highlight color on the selection.
+    EditColor,
+    /// Set or clear the highlight color on the block holding the selection.
+    EditColorBlock,
     /// Filter the function list to the places carrying a tag.
     TagSelected(String),
     /// Show or hide the navigator.
@@ -193,6 +197,11 @@ pub enum PromptKind {
     },
     /// The tags on the selection, as words separated by spaces or commas.
     Tags,
+    /// A highlight color: on the selection, or on the block holding it.
+    Color {
+        /// Whether the color goes on the block rather than the one place.
+        block: bool,
+    },
 }
 
 /// An inline prompt for a filesystem path.
@@ -315,6 +324,25 @@ pub(crate) struct Renames {
     /// The analyst's comments, keyed by the bare hex address, each with
     /// whether it stands on the line above.
     comments: std::collections::HashMap<String, Comment>,
+    /// The analyst's highlights, keyed by the bare hex address, each with
+    /// what it is on.
+    colors: std::collections::HashMap<String, Highlight>,
+    /// The highlight on the function on screen, when the analyst gave it
+    /// one: the color every line of it falls back to.
+    function_color: Option<iced::Color>,
+}
+
+/// One analyst highlight, with what it is on.
+///
+/// The kind decides how far the color reaches: an address colors its one
+/// line, a region colors the block starting there, and a function colors
+/// every line of the function.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Highlight {
+    /// The color itself.
+    pub(crate) color: iced::Color,
+    /// What the analyst put it on.
+    pub(crate) kind: ag_corpus::project::TargetKind,
 }
 
 /// One analyst comment, with where it stands.
@@ -349,6 +377,60 @@ impl Renames {
     /// address a line maps to.
     pub(crate) fn comment_for(&self, address: u64) -> Option<&Comment> {
         self.comments.get(&format!("{address:#x}"))
+    }
+
+    /// A rename set carrying one highlight of kind `kind` at one address,
+    /// and taking the function color from it when it is a function's.
+    #[cfg(test)]
+    pub(crate) fn with_color(
+        address: u64,
+        hex: &str,
+        kind: ag_corpus::project::TargetKind,
+    ) -> Self {
+        let color = crate::theme::hex_color(hex).expect("a test color");
+        Self {
+            colors: std::collections::HashMap::from([(
+                format!("{address:#x}"),
+                Highlight { color, kind },
+            )]),
+            function_color: (kind == ag_corpus::project::TargetKind::Function).then_some(color),
+            ..Self::default()
+        }
+    }
+
+    /// The highlight of kind `kind` at `address`, when one is there.
+    fn highlight(&self, address: u64, kind: ag_corpus::project::TargetKind) -> Option<iced::Color> {
+        self.colors
+            .get(&format!("{address:#x}"))
+            .filter(|highlight| highlight.kind == kind)
+            .map(|highlight| highlight.color)
+    }
+
+    /// The analyst's highlight on the one line at `address`.
+    pub(crate) fn address_color(&self, address: u64) -> Option<iced::Color> {
+        self.highlight(address, ag_corpus::project::TargetKind::Address)
+    }
+
+    /// The analyst's highlight on the block starting at `from`.
+    pub(crate) fn block_color(&self, from: u64) -> Option<iced::Color> {
+        self.highlight(from, ag_corpus::project::TargetKind::Region)
+    }
+
+    /// The analyst's highlight on the function on screen.
+    pub(crate) fn function_color(&self) -> Option<iced::Color> {
+        self.function_color
+    }
+
+    /// The color a line at `address` is drawn in, given the block holding
+    /// it: its own highlight first, then its block's, then its function's.
+    ///
+    /// The nearest mark wins, so a block colored green with one red line in
+    /// it reads as the analyst meant: the block is green and that line is
+    /// red.
+    pub(crate) fn line_color(&self, address: u64, block: Option<u64>) -> Option<iced::Color> {
+        self.address_color(address)
+            .or_else(|| block.and_then(|from| self.block_color(from)))
+            .or(self.function_color)
     }
 }
 
@@ -861,11 +943,108 @@ impl App {
     /// A view that prints many rows builds this once per render rather than
     /// asking the provider row by row.
     pub(crate) fn renames(&self) -> Renames {
+        let colors = self.address_colors();
+        // The function's own color is the one on its entry record, when
+        // the analyst colored the function rather than its first line.
+        let function_color = self.work.listing_of.and_then(|function| {
+            colors
+                .get(&format!("{function:#x}"))
+                .filter(|highlight| highlight.kind == ag_corpus::project::TargetKind::Function)
+                .map(|highlight| highlight.color)
+        });
         Renames {
             addresses: self.renamed_names(),
             registers: self.renamed_registers(),
             comments: self.address_comments(),
+            colors,
+            function_color,
         }
+    }
+
+    /// Every highlight the analyst set, keyed by the bare hex address, each
+    /// with what it is on.
+    ///
+    /// A spaced record keys on its bare value, the way a comment does, so
+    /// a view asks by the address it prints. A record whose color is not a
+    /// `#rrggbb` — a hand-edited file — is skipped rather than drawn wrong.
+    pub(crate) fn address_colors(&self) -> std::collections::HashMap<String, Highlight> {
+        self.annotations
+            .annotations
+            .iter()
+            .filter(|a| a.variable.is_none() && a.register.is_none())
+            .filter_map(|annotation| {
+                let color = crate::theme::hex_color(annotation.color.as_deref()?)?;
+                let key = ag_corpus::parse_addr_space(&annotation.address)
+                    .map(|(value, _)| format!("{value:#x}"))
+                    .unwrap_or_else(|_| annotation.address.clone());
+                Some((
+                    key,
+                    Highlight {
+                        color,
+                        kind: annotation.kind,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The first address of the block of the function on screen that holds
+    /// `address`, when one does.
+    pub(crate) fn block_of(&self, address: u64) -> Option<u64> {
+        self.work
+            .graph
+            .blocks
+            .iter()
+            .find(|block| block.from <= address && address < block.to)
+            .map(|block| block.from)
+    }
+
+    /// What a mark at `address` is on: the function entered there, or the
+    /// one address anywhere else.
+    pub(crate) fn kind_at(&self, address: u64) -> ag_corpus::project::TargetKind {
+        if self
+            .provider
+            .functions()
+            .iter()
+            .any(|row| row.address == address)
+        {
+            ag_corpus::project::TargetKind::Function
+        } else {
+            ag_corpus::project::TargetKind::Address
+        }
+    }
+
+    /// Open the highlight prompt for the selection, or for the block
+    /// holding it.
+    fn color_prompt(&mut self, block: bool) -> Task<Message> {
+        let Some(address) = self.selection.address() else {
+            self.notice = Some("Select something to highlight".into());
+            return Task::none();
+        };
+        let key = if block {
+            let Some(from) = self.block_of(address) else {
+                self.notice = Some("No block of the function on screen holds the selection".into());
+                return Task::none();
+            };
+            self.annotation_key(from)
+        } else {
+            self.annotation_key(address)
+        };
+        let current = self
+            .annotations
+            .annotation_for(&key)
+            .and_then(|a| a.color.clone())
+            .unwrap_or_default();
+        self.prompt = Some(Prompt {
+            kind: PromptKind::Color { block },
+            title: if block {
+                "Highlight block (a color name, #rrggbb, or empty to clear)"
+            } else {
+                "Highlight (a color name, #rrggbb, or empty to clear)"
+            },
+            value: current,
+        });
+        Task::none()
     }
 
     /// Every comment the analyst left, keyed by the bare hex address.
@@ -1800,19 +1979,7 @@ impl App {
                     PromptKind::Tags => {
                         if let Some(address) = self.selection.address() {
                             let key = self.annotation_key(address);
-                            // The record's kind says what the tags are on:
-                            // the function at an entry, the address
-                            // anywhere else.
-                            let kind = if self
-                                .provider
-                                .functions()
-                                .iter()
-                                .any(|row| row.address == address)
-                            {
-                                ag_corpus::project::TargetKind::Function
-                            } else {
-                                ag_corpus::project::TargetKind::Address
-                            };
+                            let kind = self.kind_at(address);
                             let tags = ag_corpus::project::parse_tags(&prompt.value);
                             let annotation = self.annotations.annotation_mut(kind, &key);
                             annotation.set_tags(&tags);
@@ -1822,6 +1989,48 @@ impl App {
                                 format!("Tags cleared at {key}")
                             } else {
                                 format!("Tagged {key} {}", tags.join(" "))
+                            });
+                        }
+                    }
+                    PromptKind::Color { block } => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            let (key, kind) = if block {
+                                let Some(from) = self.block_of(address) else {
+                                    self.notice = Some(
+                                        "No block of the function on screen holds the selection"
+                                            .into(),
+                                    );
+                                    return Task::none();
+                                };
+                                (
+                                    self.annotation_key(from),
+                                    ag_corpus::project::TargetKind::Region,
+                                )
+                            } else {
+                                (self.annotation_key(address), self.kind_at(address))
+                            };
+                            // Nothing, or `none`, clears; anything else must
+                            // be a color before the record changes.
+                            let color = if text.is_empty() || text.eq_ignore_ascii_case("none") {
+                                None
+                            } else {
+                                match ag_corpus::project::parse_color(text) {
+                                    Some(color) => Some(color),
+                                    None => {
+                                        self.notice = Some(format!(
+                                            "Not a color: {text:?} (try red, amber, green, cyan, blue, purple, or #rrggbb)"
+                                        ));
+                                        return Task::none();
+                                    }
+                                }
+                            };
+                            let annotation = self.annotations.annotation_mut(kind, &key);
+                            annotation.color = color.clone();
+                            self.annotations.prune();
+                            self.notice = Some(match color {
+                                Some(color) => format!("Highlighted {key} {color}"),
+                                None => format!("Highlight cleared at {key}"),
                             });
                         }
                     }
@@ -2081,18 +2290,7 @@ impl App {
                     return Task::none();
                 };
                 let key = self.annotation_key(address);
-                // The record's kind says what the mark is on: the function
-                // at an entry, the address anywhere else.
-                let kind = if self
-                    .provider
-                    .functions()
-                    .iter()
-                    .any(|row| row.address == address)
-                {
-                    ag_corpus::project::TargetKind::Function
-                } else {
-                    ag_corpus::project::TargetKind::Address
-                };
+                let kind = self.kind_at(address);
                 let annotation = self.annotations.annotation_mut(kind, &key);
                 annotation.bookmark = !annotation.bookmark;
                 self.annotations.prune();
@@ -2141,6 +2339,10 @@ impl App {
                 });
             }
 
+            Message::EditColor => return self.color_prompt(false),
+
+            Message::EditColorBlock => return self.color_prompt(true),
+
             Message::TagSelected(tag) => {
                 // The tag becomes the filter, spelled the way the analyst
                 // could have typed it, and the function list shows the
@@ -2180,7 +2382,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+H highlight · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }
@@ -2429,6 +2631,10 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("i"), true, _) => Message::ViewToggleInspector,
         (Key::Character("j"), true, _) => Message::ViewToggleBottom,
         (Key::Character("t"), true, _) => Message::EditTags,
+        // The plain chord highlights the selection; Shift highlights the
+        // block holding it.
+        (Key::Character("h"), true, false) => Message::EditColor,
+        (Key::Character("h"), true, true) => Message::EditColorBlock,
         // The plain chord comments inline; Shift stands the note on its
         // own line above the instruction.
         (Key::Character("/"), true, false) => Message::EditComment,
@@ -3257,6 +3463,21 @@ mod tests {
             repeat: false,
         };
         assert!(matches!(shortcut(t), Message::EditTags));
+
+        let h = |modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("h".into()),
+            modified_key: Key::Character("H".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyH),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(shortcut(h(ctrl)), Message::EditColor));
+        assert!(matches!(
+            shortcut(h(ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditColorBlock
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -3832,6 +4053,111 @@ mod tests {
         let _ = app.update(Message::TagSelected("Loop".into()));
         assert_eq!(app.navigator.rows.len(), 1);
         assert_eq!(app.navigator.rows[0].address, 0x100084A20);
+    }
+
+    #[test]
+    fn a_highlight_is_recorded_as_a_normalized_color() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditColor);
+        assert!(matches!(
+            app.prompt.as_ref().map(|p| &p.kind),
+            Some(PromptKind::Color { block: false })
+        ));
+        let _ = app.update(Message::PromptChanged("Red".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let key = app.annotation_key(address);
+        let record = app.annotations.annotation_for(&key).expect("the record");
+        assert_eq!(record.color.as_deref(), Some("#e07a6a"), "the name's value");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Function);
+
+        // A function's color reaches every line of it.
+        let renamed = app.renames();
+        assert!(renamed.function_color().is_some());
+        assert!(renamed.line_color(address + 8, None).is_some());
+        assert!(
+            renamed.address_color(address).is_none(),
+            "the function's, not the line's"
+        );
+
+        // The prompt prefills the color; a hex value is normalized; a typo
+        // is refused and changes nothing.
+        let _ = app.update(Message::EditColor);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("#e07a6a")
+        );
+        let _ = app.update(Message::PromptChanged("#ABC".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for(&key)
+                .and_then(|a| a.color.clone())
+                .as_deref(),
+            Some("#aabbcc")
+        );
+        let _ = app.update(Message::EditColor);
+        let _ = app.update(Message::PromptChanged("blurple".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not a color")));
+        assert_eq!(
+            app.annotations
+                .annotation_for(&key)
+                .and_then(|a| a.color.clone())
+                .as_deref(),
+            Some("#aabbcc")
+        );
+
+        // An empty submit clears it, and the empty record goes with it.
+        let _ = app.update(Message::EditColor);
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for(&key).is_none());
+        assert!(app.renames().function_color().is_none());
+    }
+
+    #[test]
+    fn a_block_highlight_reaches_every_line_of_the_block() {
+        let mut app = app();
+        let function = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(function));
+        let inside = 0x100084A28;
+        let from = app
+            .block_of(inside)
+            .expect("the sample's graph holds the address");
+        let _ = app.update(Message::AddressSelected(inside));
+        let _ = app.update(Message::EditColorBlock);
+        let _ = app.update(Message::PromptChanged("green".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let record = app
+            .annotations
+            .annotation_for(&app.annotation_key(from))
+            .expect("the block's record");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Region);
+        assert_eq!(record.color.as_deref(), Some("#8bcf9c"));
+
+        let renamed = app.renames();
+        assert!(renamed.block_color(from).is_some());
+        assert!(renamed.line_color(inside, Some(from)).is_some());
+        assert!(
+            renamed.line_color(inside, None).is_none(),
+            "not the line's own"
+        );
+
+        // A line's own color wins over its block's.
+        let _ = app.update(Message::EditColor);
+        let _ = app.update(Message::PromptChanged("red".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let renamed = app.renames();
+        let own = renamed.address_color(inside).expect("the line's color");
+        assert_eq!(renamed.line_color(inside, Some(from)), Some(own));
+        assert_ne!(renamed.block_color(from), Some(own));
     }
 
     #[test]

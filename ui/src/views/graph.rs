@@ -11,11 +11,11 @@ use std::collections::{HashMap, HashSet};
 use iced::mouse;
 use iced::widget::canvas;
 use iced::widget::text::{Alignment, LineHeight, Shaping};
-use iced::{Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{Color, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
 
 use crate::app::{App, Message};
 use crate::data::{Graph, GraphBlock, ListingLine};
-use crate::theme::{color, MONO};
+use crate::theme::{color, tinted, MONO};
 
 /// The width of a block, in graph units.
 pub const NODE_WIDTH: f32 = 570.0;
@@ -41,7 +41,7 @@ pub const MAX_ZOOM: f32 = 4.0;
 const CLICK_SLOP: f32 = 4.0;
 
 /// One line of a block, as the graph draws it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GraphLine {
     /// The address of the instruction.
     pub address: String,
@@ -59,6 +59,8 @@ pub struct GraphLine {
     /// The row the instruction is drawn on, counting the comment lines the
     /// block inserts above it.
     pub row: usize,
+    /// The analyst's highlight on this one line, when there is one.
+    pub color: Option<Color>,
 }
 
 impl GraphLine {
@@ -77,6 +79,7 @@ impl GraphLine {
             comment: note.map(|note| note.text.clone()),
             comment_above: note.is_some_and(|note| note.above),
             row: 0,
+            color: renamed.address_color(line.address),
         }
     }
 
@@ -138,6 +141,9 @@ pub struct GraphNode {
     pub lines: Vec<GraphLine>,
     /// Whether the block goes on in more than one way.
     pub branching: bool,
+    /// The analyst's highlight on the block — its own, or its function's —
+    /// when there is one.
+    pub color: Option<Color>,
 }
 
 /// An edge between two blocks.
@@ -247,6 +253,9 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
                 height,
                 lines,
                 branching: block.successors.len() > 1,
+                // The block's own color, or the function's for every
+                // block the analyst did not color apart.
+                color: renamed.block_color(block.from).or(renamed.function_color()),
             }
         })
         .collect();
@@ -657,14 +666,12 @@ impl GraphProgram {
             (4.0 * scale).min(6.0).into(),
         );
 
-        frame.fill(
-            &path,
-            if focused {
-                color::FOCUS_BG
-            } else {
-                color::CARD
-            },
-        );
+        let surface = match (focused, node.color) {
+            (true, _) => color::FOCUS_BG,
+            (false, Some(tint)) => tinted(color::CARD, tint, 0.28),
+            (false, None) => color::CARD,
+        };
+        frame.fill(&path, surface);
         frame.stroke(
             &path,
             canvas::Stroke::default()
@@ -684,6 +691,17 @@ impl GraphProgram {
 
         for line in &node.lines {
             let line_y = y + (HEADER_HEIGHT + PADDING + line.row as f32 * LINE_HEIGHT) * scale;
+
+            // A line's own highlight is a band across the block behind its
+            // text, mixed stronger than the block's so it stands out from
+            // the surface around it.
+            if let Some(tint) = line.color {
+                frame.fill_rectangle(
+                    Point::new(x + 2.0 * scale, line_y - 2.0 * scale),
+                    Size::new(width - 4.0 * scale, LINE_HEIGHT * scale),
+                    tinted(surface, tint, 0.45),
+                );
+            }
 
             // A note that stands above its instruction is drawn on the row
             // just over it, indented to the operands so it reads as
@@ -1175,6 +1193,44 @@ mod tests {
             HEADER_HEIGHT + PADDING * 2.0 + 3.0 * LINE_HEIGHT,
             "two instructions and the note between them"
         );
+    }
+
+    #[test]
+    fn a_highlight_colors_its_line_its_block_or_the_function() {
+        use ag_corpus::project::TargetKind;
+        let blocks = || {
+            vec![
+                block(0x1000, 0x1010, vec![0x1010], 2),
+                block(0x1010, 0x1020, vec![], 2),
+            ]
+        };
+
+        // On one address: that line, and nothing else.
+        let renamed = crate::app::Renames::with_color(0x1001, "#e07a6a", TargetKind::Address);
+        let laid = layout(&graph_of(blocks()), &renamed);
+        let first = laid.nodes.iter().find(|n| n.from == 0x1000).unwrap();
+        assert!(first.color.is_none());
+        assert!(first.lines[0].color.is_none());
+        assert!(first.lines[1].color.is_some());
+
+        // On a block: the block, and no line apart.
+        let renamed = crate::app::Renames::with_color(0x1010, "#8bcf9c", TargetKind::Region);
+        let laid = layout(&graph_of(blocks()), &renamed);
+        assert!(laid
+            .nodes
+            .iter()
+            .find(|n| n.from == 0x1000)
+            .unwrap()
+            .color
+            .is_none());
+        let second = laid.nodes.iter().find(|n| n.from == 0x1010).unwrap();
+        assert!(second.color.is_some());
+        assert!(second.lines.iter().all(|line| line.color.is_none()));
+
+        // On the function: every block.
+        let renamed = crate::app::Renames::with_color(0x1000, "#86aef3", TargetKind::Function);
+        let laid = layout(&graph_of(blocks()), &renamed);
+        assert!(laid.nodes.iter().all(|n| n.color.is_some()));
     }
 
     #[test]

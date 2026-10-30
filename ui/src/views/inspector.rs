@@ -52,6 +52,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if annotation.bookmark {
                 notes = notes.push(subtle("★ bookmarked"));
             }
+            if let Some(hex) = &annotation.color {
+                // The swatch is the color itself; the value beside it is
+                // what the file holds.
+                let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+                if let Some(tint) = crate::theme::hex_color(hex) {
+                    row = row.push(pill("■", tint));
+                }
+                row = row.push(kv("Highlight", hex.clone()));
+                notes = notes.push(row);
+            }
         }
         // The tags on the place: the analyst's own and the ones the
         // analysis implies, the entry point and an Objective-C class.
@@ -92,7 +102,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .spacing(8)
             .push(note_button("＋ Add comment", Message::EditComment))
             .push(note_button("☆ Bookmark", Message::EditBookmark))
-            .push(note_button("# Tags", Message::EditTags)),
+            .push(note_button("# Tags", Message::EditTags))
+            .push(note_button("◆ Highlight", Message::EditColor)),
     );
 
     scrollable(column)

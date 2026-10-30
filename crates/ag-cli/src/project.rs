@@ -4,15 +4,17 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`) so a script or an agent can build a project without editing JSON
-//! by hand, and reports the tags the analyst gave (`tags`).
+//! `tag`, `color`) so a script or an agent can build a project without
+//! editing JSON by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 
-use ag_corpus::project::{parse_tags, sha256_of, Annotation, ProjectFile, Target, TargetKind};
+use ag_corpus::project::{
+    parse_color, parse_tags, sha256_of, Annotation, ProjectFile, Target, TargetKind,
+};
 
 /// What to do with a project file.
 #[derive(Subcommand)]
@@ -85,8 +87,23 @@ pub enum ProjectCmd {
         remove: bool,
         /// What the tags are on: the function entered at the address, the
         /// block of bytes starting there, or the one address.
-        #[arg(long, value_enum, default_value_t = TagOn::Address)]
-        on: TagOn,
+        #[arg(long, value_enum, default_value_t = On::Address)]
+        on: On,
+    },
+    /// Set or clear a highlight color on the thing at an address.
+    Color {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address, with its space when it names one.
+        address: String,
+        /// The color: a name such as `red` or `amber`, `#rrggbb`, or `none`
+        /// to clear it.
+        color: String,
+        /// What the color is on: the function entered at the address, the
+        /// block of bytes starting there, or the one address.
+        #[arg(long, value_enum, default_value_t = On::Address)]
+        on: On,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -184,6 +201,23 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             }
         }),
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
+        ProjectCmd::Color {
+            file,
+            address,
+            color,
+            on,
+        } => {
+            // `none` clears; anything else must be a color before the file
+            // is touched, so a typo is refused rather than recorded.
+            let value = if color.trim().is_empty() || color.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(parse_color(&color).with_context(|| {
+                    format!("{color:?} is not a color; use a name such as red or amber, or #rrggbb")
+                })?)
+            };
+            edit(&target, &file, on.into(), &address, |a| a.color = value)
+        }
         ProjectCmd::Label {
             file,
             address,
@@ -220,9 +254,10 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
     }
 }
 
-/// What a tag is on: the record's kind, as the command line names it.
+/// What a tag or a color is on: the record's kind, as the command line
+/// names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum TagOn {
+pub enum On {
     /// The one address.
     Address,
     /// The function entered at the address.
@@ -231,12 +266,12 @@ pub enum TagOn {
     Block,
 }
 
-impl From<TagOn> for TargetKind {
-    fn from(on: TagOn) -> TargetKind {
+impl From<On> for TargetKind {
+    fn from(on: On) -> TargetKind {
         match on {
-            TagOn::Address => TargetKind::Address,
-            TagOn::Function => TargetKind::Function,
-            TagOn::Block => TargetKind::Region,
+            On::Address => TargetKind::Address,
+            On::Function => TargetKind::Function,
+            On::Block => TargetKind::Region,
         }
     }
 }

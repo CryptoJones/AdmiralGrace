@@ -10,7 +10,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 use crate::app::{replace_words, App, Message};
 use crate::data::{ByteLine, ListingLine, StringEntry};
 use crate::model::Selection;
-use crate::theme::{color, MONO};
+use crate::theme::{color, tinted, MONO};
 use crate::views::{empty_state, pill, subtle};
 
 /// The top tabs of the work surface.
@@ -283,6 +283,9 @@ fn listing_row<'a>(
         .comment_for(line.address)
         .filter(|comment| !comment.above)
         .map(|comment| comment.text.clone());
+    // The analyst's highlight: the line's own, its block's, or its
+    // function's, mixed into the row's surface so the text stays legible.
+    let tint = renamed.line_color(line.address, app.block_of(line.address));
 
     let row = Container::new(
         Row::new()
@@ -339,13 +342,17 @@ fn listing_row<'a>(
     )
     .width(Length::Fill)
     .style(move |_| container::Style {
-        background: Some(Background::Color(if focused {
-            color::FOCUS_BG
-        } else {
-            color::PANEL
+        background: Some(Background::Color(match (focused, tint) {
+            (true, _) => color::FOCUS_BG,
+            (false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
+            (false, None) => color::PANEL,
         })),
         border: Border {
-            color: if focused { color::CYAN } else { color::PANEL },
+            color: match (focused, tint) {
+                (true, _) => color::CYAN,
+                (false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
+                (false, None) => color::PANEL,
+            },
             width: 1.0,
             radius: 0.0.into(),
         },
