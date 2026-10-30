@@ -115,6 +115,15 @@ pub struct Annotation {
     /// The analyst's comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Whether the comment stands on its own line above the instruction.
+    ///
+    /// A comment is attached to one address either way; this only says where
+    /// a view should print it — inline at the end of the line, which is the
+    /// default, or on the line above it. A reader that does not know the
+    /// field prints every comment inline, which loses placement but misreads
+    /// nothing, so the format version does not change for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub comment_above: bool,
     /// Whether the target is bookmarked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bookmark: bool,
@@ -140,6 +149,7 @@ impl Annotation {
             register: None,
             name: None,
             comment: None,
+            comment_above: false,
             bookmark: false,
             tags: Vec::new(),
             color: None,
@@ -157,6 +167,7 @@ impl Annotation {
             register: Some(register.to_string()),
             name: None,
             comment: None,
+            comment_above: false,
             bookmark: false,
             tags: Vec::new(),
             color: None,
@@ -173,11 +184,22 @@ impl Annotation {
             register: None,
             name: None,
             comment: None,
+            comment_above: false,
             bookmark: false,
             tags: Vec::new(),
             color: None,
             byte_type: None,
         }
+    }
+
+    /// Record the analyst's note, or clear it with `None`.
+    ///
+    /// The placement says where a note stands, so it exists only with one:
+    /// clearing the comment clears the placement too, and a saved record
+    /// never carries `comment_above` for a note that is not there.
+    pub fn set_comment(&mut self, comment: Option<String>, above: bool) {
+        self.comment = comment;
+        self.comment_above = self.comment.is_some() && above;
     }
 
     /// Whether this annotation carries nothing; a carried-empty annotation
@@ -622,6 +644,55 @@ mod tests {
         assert_eq!(text.matches("\"register\":").count(), 1, "{text}");
         let read = ProjectFile::from_json(&text).expect("the text reads back");
         assert_eq!(read, project);
+    }
+
+    #[test]
+    fn a_line_comment_keeps_its_placement() {
+        let mut project = ProjectFile::new(Target::default());
+        let annotation = project.annotation_mut(TargetKind::Address, "0x1000");
+        annotation.set_comment(Some("the loop head".into()), true);
+        let text = project.to_json().expect("json");
+        assert!(text.contains("\"comment_above\": true"), "{text}");
+        let read = ProjectFile::from_json(&text).expect("the text reads back");
+        assert_eq!(read, project);
+    }
+
+    #[test]
+    fn clearing_a_comment_clears_its_placement() {
+        // The placement says where a note stands; with no note it must not
+        // survive in the file, or a reader would see a placement for a
+        // comment that is not there.
+        let mut project = ProjectFile::new(Target::default());
+        {
+            let annotation = project.annotation_mut(TargetKind::Address, "0x1000");
+            annotation.set_comment(Some("the loop head".into()), true);
+            annotation.name = Some("keep".into());
+            annotation.set_comment(None, true);
+            assert!(!annotation.comment_above, "no note, no placement");
+            // The record survives on its name alone, and is not empty.
+            assert!(!annotation.is_empty(), "the name keeps the record alive");
+        }
+        let text = project.to_json().expect("json");
+        assert!(
+            !text.contains("comment_above"),
+            "the cleared note writes no placement: {text}"
+        );
+    }
+
+    #[test]
+    fn an_older_comment_reads_as_inline() {
+        // A file written before placement existed carries no comment_above;
+        // the reader says inline rather than failing or guessing above.
+        let raw = r#"{"format": 2, "target": {}, "annotations": [
+            {"kind": "address", "address": "0x1000", "comment": "the entry"}
+        ]}"#;
+        let project = ProjectFile::from_json(raw).expect("an old file reads");
+        let annotation = &project.annotations[0];
+        assert_eq!(annotation.comment.as_deref(), Some("the entry"));
+        assert!(!annotation.comment_above, "no placement means inline");
+        // An inline comment writes no comment_above field at all.
+        let text = project.to_json().expect("json");
+        assert!(!text.contains("comment_above"), "{text}");
     }
 
     #[test]

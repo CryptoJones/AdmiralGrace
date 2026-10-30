@@ -396,7 +396,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET label --file FILE ADDRESS NAME` | Records a name for the label at `ADDRESS`. The entry label of a function and the function's name are the same record. |
 | `ag project TARGET var --file FILE ADDRESS VARIABLE NAME` | Records a name for the local variable `VARIABLE` of the function at `ADDRESS`, as the pseudocode declares it. |
 | `ag project TARGET reg --file FILE ADDRESS REGISTER NAME` | Records a name for the register `REGISTER` within the function at `ADDRESS`, spelled as the listing spells it. The rename reaches that function's pseudocode and listing alone. |
-| `ag project TARGET comment --file FILE ADDRESS TEXT` | Records a comment at `ADDRESS`. |
+| `ag project TARGET comment --file FILE ADDRESS TEXT` | Records a comment at `ADDRESS`; `--above` stands it on its own line over the instruction instead of inline. Empty `TEXT` clears the comment, placement and all. |
 | `ag project TARGET bookmark --file FILE ADDRESS` | Flips a bookmark on the function at `ADDRESS`. |
 
 ## `ag catalog`: the engine's options

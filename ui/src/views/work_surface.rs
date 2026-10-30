@@ -245,6 +245,15 @@ fn listing_content(app: &App) -> Element<'_, Message> {
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for line in &app.work.listing {
+        // A comment the analyst chose to stand above the instruction gets
+        // its own line, indented to where the operands start; an inline
+        // comment rides at the end of the instruction row itself.
+        if let Some(comment) = renamed
+            .comment_for(line.address)
+            .filter(|comment| comment.above)
+        {
+            list = list.push(comment_row(&comment.text));
+        }
         list = list.push(listing_row(app, line, &renamed));
     }
 
@@ -265,6 +274,15 @@ fn listing_row<'a>(
 ) -> Element<'a, Message> {
     let focused = matches!(app.selection, Selection::Address(a) if a == line.address);
     let operands = App::shown_operands(line, renamed);
+    // The disassembler's own comment (what the bytes point at) and the
+    // analyst's note are different things and both keep their place: the
+    // disassembler's shows in its usual slot, and an inline analyst note
+    // rides after it in its own color. An above-comment already has its
+    // own row, so it does not repeat here.
+    let analyst_inline = renamed
+        .comment_for(line.address)
+        .filter(|comment| !comment.above)
+        .map(|comment| comment.text.clone());
 
     let row = Container::new(
         Row::new()
@@ -307,6 +325,16 @@ fn listing_row<'a>(
                             .font(MONO)
                     })
                     .unwrap_or(Text::new("")),
+            )
+            .push(
+                analyst_inline
+                    .map(|c| {
+                        Text::new(format!("; {c}"))
+                            .size(12)
+                            .color(color::AMBER)
+                            .font(MONO)
+                    })
+                    .unwrap_or(Text::new("")),
             ),
     )
     .width(Length::Fill)
@@ -329,6 +357,32 @@ fn listing_row<'a>(
         .into();
 
     element
+}
+
+/// A comment standing on its own line above an instruction.
+///
+/// The note is indented to where the operands start, so it reads as
+/// belonging to the instruction below it rather than floating at the left
+/// edge with the addresses.
+fn comment_row(text: &str) -> Element<'static, Message> {
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(10)
+            // The operands of a listing row start at 1 (the row's border)
+            // + 88 + 10 + 120 + 10 + 58 + 10 = 297. This row's own spacing
+            // adds 10 before the note, so the spacer is 287 to land it on
+            // that column.
+            .push(Space::new().width(Length::Fixed(287.0)))
+            .push(
+                Text::new(format!("; {text}"))
+                    .size(12)
+                    .color(color::AMBER)
+                    .font(MONO),
+            ),
+    )
+    .width(Length::Fill)
+    .into()
 }
 
 /// The pseudocode view.
@@ -361,18 +415,62 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
         .iter()
         .map(|(original, renamed)| (original.as_str(), renamed.as_str()))
         .collect();
+    // The analyst's comments, so a note made at an address shows on the
+    // pseudocode line that maps to it. A line maps to several addresses;
+    // the first that carries a note wins, in the order the addresses come.
+    let renamed = app.renames();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for (index, line) in body.lines().enumerate() {
         let addresses = app.work.line_addresses.get(&index).cloned();
+        let comment = addresses
+            .as_ref()
+            .and_then(|addresses| addresses.iter().find_map(|a| renamed.comment_for(*a)));
         let text = replace_words(line, &pairs);
-        list = list.push(pseudocode_row(index, text, addresses, selection));
+        // An above-comment stands on its own line over the one it maps to;
+        // an inline note rides at the end of it.
+        if let Some(note) = comment.filter(|note| note.above) {
+            list = list.push(pseudocode_comment_row(&note.text));
+        }
+        let shown = match comment.filter(|note| !note.above) {
+            Some(note) => format!("{text}  ; {}", note.text),
+            None => text,
+        };
+        list = list.push(pseudocode_row(index, shown, addresses, selection));
     }
 
     scrollable(list)
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// A comment standing on its own line above a pseudocode line.
+///
+/// The line number is left blank: the note belongs to the numbered line
+/// below it, and repeating the number would read as two lines of code.
+fn pseudocode_comment_row(text: &str) -> Element<'static, Message> {
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(10)
+            .push(
+                Text::new(" ".repeat(4))
+                    .size(11)
+                    .color(color::DIM)
+                    .font(MONO)
+                    .width(Length::Fixed(38.0)),
+            )
+            .push(
+                Text::new(format!("; {text}"))
+                    .size(12)
+                    .color(color::AMBER)
+                    .font(MONO)
+                    .width(Length::Fill),
+            ),
+    )
+    .width(Length::Fill)
+    .into()
 }
 
 /// One line of pseudocode.
