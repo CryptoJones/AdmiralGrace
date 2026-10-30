@@ -3141,6 +3141,9 @@ impl App {
                     self.notice = Some("No patches to write".into());
                     return Task::none();
                 }
+                // A file already there takes a second submit of its path,
+                // and that starts over with every opening of the prompt.
+                self.confirm_write = None;
                 self.prompt = Some(Prompt {
                     kind: PromptKind::WritePatched,
                     title: "Write the patched program to",
@@ -6535,6 +6538,7 @@ mod tests {
         assert_eq!(std::fs::read(&out).expect("the copy").len(), original.len());
         let _ = std::fs::remove_file(&out);
     }
+
     #[test]
     fn editing_bytes_needs_a_program_image() {
         let mut app = App::boot(Config::default()).0;

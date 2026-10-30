@@ -1677,9 +1677,14 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// it. A rename replaces the name and never writes into the file it named,
 /// so a hard link to `source` under `out`'s name leaves `source` as it is,
 /// a write that fails part-way leaves no half-written `out`, and an `out`
-/// that is read-only is replaced all the same. The bits above the
-/// permissions — setuid, setgid — are not carried onto the copy.
+/// that is read-only is replaced all the same. The new file is created
+/// exclusively under a name no one can guess, so a link planted there
+/// beforehand is not followed: nothing but a file this call made is ever
+/// written or removed. The bits above the permissions — setuid, setgid —
+/// are not carried onto the copy.
 pub fn write_copy(source: &Path, out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
     let dir = out
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1687,23 +1692,46 @@ pub fn write_copy(source: &Path, out: &Path, bytes: &[u8]) -> std::io::Result<()
     let name = out.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
     })?;
-    let temp = dir.join(format!(
-        ".{}.ag-write-{}",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
+    // A fresh name each try, and the file made only if nothing is there.
+    let (temp, mut file) = {
+        let mut attempt = 0u32;
+        loop {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.subsec_nanos())
+                .unwrap_or(0);
+            let temp = dir.join(format!(
+                ".{}.ag-write-{}-{nonce:08x}-{attempt}",
+                name.to_string_lossy(),
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => break (temp, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 32 => {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
     let written = (|| {
-        std::fs::write(&temp, bytes)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(source)?.permissions().mode() & 0o777;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode))?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
         #[cfg(not(unix))]
         {
             let _ = source;
         }
+        drop(file);
         std::fs::rename(&temp, out)
     })();
     if written.is_err() {
