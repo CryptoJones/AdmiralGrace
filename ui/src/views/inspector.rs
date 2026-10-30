@@ -55,6 +55,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if annotation.bookmark {
                 notes = notes.push(subtle("★ bookmarked"));
             }
+            if let Some(mark) = &annotation.byte_type {
+                notes = notes.push(kv("Marked as", mark.clone()));
+            }
             if let Some(hex) = &annotation.color {
                 // The swatch is the color itself; the value beside it is
                 // what the file holds.

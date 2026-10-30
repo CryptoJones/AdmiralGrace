@@ -286,6 +286,30 @@ each named by the place's name and address so a reference to a renamed function 
 analyst's name; clicking one jumps there. The same reference is what `ag project xref`
 records.
 
+The automatic split of code and data is sometimes wrong, and the analyst corrects it
+directly:
+
+- **Mark as data** (Ctrl+Shift+D) shows the bytes at the selection as one item of data;
+  marking again makes the item wider, a byte to a word to a double word to a quad word and
+  round again. **Mark as string** (Ctrl+Shift+A) shows them as a string up to its zero.
+  **Mark undefined** (Ctrl+Shift+U) shows them one by one. **Mark as code** (Ctrl+Shift+C)
+  puts the instruction back and takes the mark off. A mark stands where the analysis decoded
+  an instruction; the selection must be one, not a byte inside one.
+- **Mark as function** (Ctrl+Shift+F) says a function starts at the selection. It joins the
+  function list as `sub_` and its address — the analyst's name for it when there is one —
+  and opening it reads the function from there; where the analysis found none, the inspector
+  says the mark is the analyst's.
+
+A data, string or undefined mark stands in place of the instructions it covers, in the
+listing and the graph alike, and the bytes it shows are the ones the analysis decoded there:
+a mark that reaches past one instruction takes the next ones' bytes too, as long as each
+follows the last with no gap and none starts a block, and what is left of the last
+instruction a data mark cut into follows as bytes. A string with no zero runs 256 bytes at
+most. The line that stands in keeps the header of the one it replaced. A function the analyst
+marked is the function the addresses after it belong to, until the next. An array — `data:4[8]` — is
+recorded with `ag project mark`; the workbench cycles the width of one item. The inspector
+shows the mark as the file holds it.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
@@ -293,8 +317,8 @@ Every one of these changes can be taken back:
   `Undo: Renamed 0x1198`. A new change after an undo forgets what was taken back.
 
 Undo covers every mark the analyst makes — renames, labels, local variable and register
-names, comments, bookmarks, tags, highlights and cross references — in the order they were
-made, and the
+names, comments, bookmarks, tags, highlights, cross references and byte marks — in the order
+they were made, and the
 navigator and every view follow. Opening a project file or a different analysis starts
 afresh: the marks those changes were made to are gone.
 

@@ -7,7 +7,7 @@ use iced::widget::{button, container, Container, Row, Space, Text};
 use iced::{Alignment, Background, Border, Element, Length};
 use iced_aw::menu::{Item, Menu, MenuBar};
 
-use crate::app::{App, Message};
+use crate::app::{App, Mark, Message};
 use crate::theme::color;
 
 /// Build the menu bar.
@@ -95,6 +95,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Remove cross reference…",
                 "Ctrl+Shift+X",
                 Message::EditReferenceRemove,
+            )),
+            Item::new(separator()),
+            Item::new(item_button(
+                "Mark as code",
+                "Ctrl+Shift+C",
+                Message::EditMark(Mark::Code),
+            )),
+            Item::new(item_button(
+                "Mark as function",
+                "Ctrl+Shift+F",
+                Message::EditMark(Mark::Function),
+            )),
+            Item::new(item_button(
+                "Mark as data (wider each time)",
+                "Ctrl+Shift+D",
+                Message::EditMark(Mark::Data),
+            )),
+            Item::new(item_button(
+                "Mark as string",
+                "Ctrl+Shift+A",
+                Message::EditMark(Mark::String),
+            )),
+            Item::new(item_button(
+                "Mark undefined",
+                "Ctrl+Shift+U",
+                Message::EditMark(Mark::Undefined),
             )),
             Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),

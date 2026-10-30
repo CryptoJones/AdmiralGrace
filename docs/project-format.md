@@ -55,7 +55,7 @@ An annotation is one address's worth of the analyst's decisions.
 | `bookmark` | Whether the target is bookmarked. |
 | `tags` | Tags carried by the target. |
 | `color` | A color for the target, as `#rrggbb`. |
-| `byte_type` | How the bytes at the target are classified: `code`, `function`, `data`, `string` or `undefined`. |
+| `byte_type` | How the bytes at the target are read, as the analyst said: `code`, `function`, `string`, `undefined`, or `data:W` for items of `W` bytes (1, 2, 4 or 8) with `[N]` after it for an array of `N` — `data:4[8]`. A reader that does not know a spelling keeps it and shows nothing for it. |
 
 Every field but `kind` and `address` is optional and is left out when it carries nothing. An
 annotation that has come to carry nothing at all is dropped on save, so the file says only

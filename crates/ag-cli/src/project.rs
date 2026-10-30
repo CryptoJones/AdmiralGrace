@@ -4,9 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`) so a script or an agent can build a project
-//! without editing JSON by hand, and reports the tags the analyst gave
-//! (`tags`).
+//! `tag`, `color`, `xref`, `mark`) so a script or an agent can build a
+//! project without editing JSON by hand, and reports the tags the analyst
+//! gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 
 use ag_corpus::project::{
-    parse_color, parse_tags, sha256_of, Annotation, ProjectFile, Target, TargetKind,
+    parse_color, parse_tags, sha256_of, Annotation, ByteType, ProjectFile, Target, TargetKind,
 };
 
 /// What to do with a project file.
@@ -119,6 +119,18 @@ pub enum ProjectCmd {
         /// Take the reference back instead of recording it.
         #[arg(long)]
         remove: bool,
+    },
+    /// Say how the bytes at an address are read, correcting the analysis.
+    Mark {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address, with its space when it names one.
+        address: String,
+        /// How the bytes are read: `code`, `function`, `string`,
+        /// `undefined`, `data`, `data:W` for `W` of 1, 2, 4 or 8 bytes each,
+        /// `data:W[N]` for an array of `N`, or `none` to take the mark off.
+        kind: String,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -231,6 +243,31 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                     a.add_reference(&reaches);
                 }
             })
+        }
+        ProjectCmd::Mark {
+            file,
+            address,
+            kind,
+        } => {
+            // The mark must be one this program reads before the file is
+            // touched, so a typo is refused rather than recorded.
+            let mark = if kind.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(ByteType::parse(&kind).with_context(|| {
+                    format!(
+                        "{kind:?} is not a byte type; use code, function, string, undefined, data, data:W or data:W[N]"
+                    )
+                })?)
+            };
+            // A function mark says what the place is; any other mark is on
+            // the address.
+            let on = if mark == Some(ByteType::Function) {
+                TargetKind::Function
+            } else {
+                TargetKind::Address
+            };
+            edit(&target, &file, on, &address, |a| a.set_byte_type(mark))
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {

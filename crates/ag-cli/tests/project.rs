@@ -513,6 +513,38 @@ fn a_manual_cross_reference_is_recorded_and_taken_back() {
 }
 
 #[test]
+fn a_mark_says_how_the_bytes_are_read_and_a_typo_is_refused() {
+    let file = TempFile::new("mark");
+    let (ok, stdout, stderr) = project(&["mark", "--file", &file.text(), "0x1161", "Data:4[8]"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now type data:4[8]"),
+        "{stdout}"
+    );
+
+    // A function mark makes the record a function's.
+    let (ok, stdout, stderr) = project(&["mark", "--file", &file.text(), "0x1200", "function"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x1200 now type function"),
+        "{stdout}"
+    );
+
+    let (ok, _, stderr) = project(&["mark", "--file", &file.text(), "0x1161", "data:3"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not a byte type"), "{stderr}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 2, "{report}");
+    assert_eq!(annotations[0]["byte_type"], serde_json::json!("data:4[8]"));
+
+    let (ok, stdout, stderr) = project(&["mark", "--file", &file.text(), "0x1161", "none"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

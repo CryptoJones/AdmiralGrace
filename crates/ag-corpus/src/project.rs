@@ -151,6 +151,109 @@ pub fn parse_color(text: &str) -> Option<String> {
     }
 }
 
+/// How the analyst says the bytes at a place are to be read.
+///
+/// The automatic split of code and data is sometimes wrong; this is the
+/// analyst's correction. It is stored on the record as text — `code`,
+/// `function`, `string`, `undefined`, or `data:W` for `W` bytes each with
+/// `[N]` after it for an array of `N` — so a reader that does not know a
+/// spelling keeps it and shows nothing for it rather than misreading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteType {
+    /// An instruction.
+    Code,
+    /// The entry of a function.
+    Function,
+    /// A string of bytes ending in a zero.
+    String,
+    /// Bytes with no meaning given, shown one by one.
+    Undefined,
+    /// `count` items of data, `width` bytes each.
+    Data {
+        /// How many bytes one item takes: 1, 2, 4 or 8.
+        width: u8,
+        /// How many items there are; one is not an array.
+        count: u32,
+    },
+}
+
+impl ByteType {
+    /// The widths data cycles through, in order.
+    pub const WIDTHS: [u8; 4] = [1, 2, 4, 8];
+
+    /// Read a byte type as it is stored or typed: `code`, `function`,
+    /// `string`, `undefined`, `data`, `data:4`, `data:4[16]`, `data[16]`.
+    /// Case and the spaces around do not matter.
+    pub fn parse(text: &str) -> Option<ByteType> {
+        let text = text.trim().to_ascii_lowercase();
+        match text.as_str() {
+            "code" => return Some(ByteType::Code),
+            "function" => return Some(ByteType::Function),
+            "string" => return Some(ByteType::String),
+            "undefined" => return Some(ByteType::Undefined),
+            _ => {}
+        }
+        let rest = text.strip_prefix("data")?;
+        let (width, count) = match rest.split_once('[') {
+            Some((width, count)) => (width, Some(count.strip_suffix(']')?)),
+            None => (rest, None),
+        };
+        let width: u8 = match width.strip_prefix(':') {
+            Some(width) => width.parse().ok()?,
+            None if width.is_empty() => 1,
+            None => return None,
+        };
+        if !Self::WIDTHS.contains(&width) {
+            return None;
+        }
+        let count: u32 = match count {
+            Some(count) => count.parse().ok().filter(|count| *count >= 1)?,
+            None => 1,
+        };
+        Some(ByteType::Data { width, count })
+    }
+
+    /// The byte type as it is stored: the canonical spelling [`parse`]
+    /// reads back.
+    ///
+    /// [`parse`]: ByteType::parse
+    pub fn label(self) -> String {
+        match self {
+            ByteType::Code => "code".into(),
+            ByteType::Function => "function".into(),
+            ByteType::String => "string".into(),
+            ByteType::Undefined => "undefined".into(),
+            ByteType::Data { width, count: 1 } => format!("data:{width}"),
+            ByteType::Data { width, count } => format!("data:{width}[{count}]"),
+        }
+    }
+
+    /// The data type one step wider: a byte to a word to a double word to a
+    /// quad word and round to a byte, the count kept. Anything that is not
+    /// data becomes one byte.
+    pub fn next_width(self) -> ByteType {
+        match self {
+            ByteType::Data { width, count } => {
+                let at = Self::WIDTHS.iter().position(|w| *w == width).unwrap_or(0);
+                ByteType::Data {
+                    width: Self::WIDTHS[(at + 1) % Self::WIDTHS.len()],
+                    count,
+                }
+            }
+            _ => ByteType::Data { width: 1, count: 1 },
+        }
+    }
+
+    /// How many bytes the type covers when that is fixed: data does, the
+    /// others reach as far as the bytes say.
+    pub fn span(self) -> Option<usize> {
+        match self {
+            ByteType::Data { width, count } => Some(width as usize * count as usize),
+            _ => None,
+        }
+    }
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -375,6 +478,17 @@ impl Annotation {
             return;
         };
         self.references.retain(|t| *t != target);
+    }
+
+    /// How the analyst says the bytes at the target are read, when the
+    /// record says and this program reads the spelling.
+    pub fn byte_type(&self) -> Option<ByteType> {
+        self.byte_type.as_deref().and_then(ByteType::parse)
+    }
+
+    /// Record how the bytes at the target are read, or clear it with `None`.
+    pub fn set_byte_type(&mut self, byte_type: Option<ByteType>) {
+        self.byte_type = byte_type.map(ByteType::label);
     }
 
     /// Whether the target carries the tag `tag`.
@@ -1041,6 +1155,57 @@ mod tests {
         // The references survive the file.
         let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
         assert_eq!(read, project);
+    }
+
+    #[test]
+    fn a_byte_type_reads_and_writes_its_spelling_and_data_cycles_its_width() {
+        assert_eq!(ByteType::parse("code"), Some(ByteType::Code));
+        assert_eq!(ByteType::parse(" Function "), Some(ByteType::Function));
+        assert_eq!(ByteType::parse("string"), Some(ByteType::String));
+        assert_eq!(ByteType::parse("undefined"), Some(ByteType::Undefined));
+        let bytes = |width, count| ByteType::Data { width, count };
+        assert_eq!(ByteType::parse("data"), Some(bytes(1, 1)));
+        assert_eq!(ByteType::parse("data:4"), Some(bytes(4, 1)));
+        assert_eq!(ByteType::parse("data:8[16]"), Some(bytes(8, 16)));
+        assert_eq!(ByteType::parse("data[3]"), Some(bytes(1, 3)));
+        assert_eq!(ByteType::parse("data:3"), None, "no such width");
+        assert_eq!(ByteType::parse("data:4[0]"), None, "no empty array");
+        assert_eq!(ByteType::parse("data:4[x]"), None);
+        assert_eq!(ByteType::parse("bytes"), None);
+
+        assert_eq!(bytes(4, 1).label(), "data:4");
+        assert_eq!(bytes(2, 5).label(), "data:2[5]");
+        for text in [
+            "code",
+            "function",
+            "string",
+            "undefined",
+            "data:1",
+            "data:8[2]",
+        ] {
+            assert_eq!(ByteType::parse(text).unwrap().label(), text, "round trip");
+        }
+
+        assert_eq!(bytes(1, 3).next_width(), bytes(2, 3));
+        assert_eq!(bytes(2, 3).next_width(), bytes(4, 3));
+        assert_eq!(bytes(4, 3).next_width(), bytes(8, 3));
+        assert_eq!(bytes(8, 3).next_width(), bytes(1, 3), "round again");
+        assert_eq!(ByteType::Code.next_width(), bytes(1, 1));
+        assert_eq!(bytes(4, 3).span(), Some(12));
+        assert_eq!(ByteType::String.span(), None);
+
+        let mut record = Annotation::new(TargetKind::Address, "0x10");
+        record.set_byte_type(Some(bytes(4, 2)));
+        assert_eq!(record.byte_type.as_deref(), Some("data:4[2]"));
+        assert_eq!(record.byte_type(), Some(bytes(4, 2)));
+        record.byte_type = Some("struct foo".into());
+        assert_eq!(
+            record.byte_type(),
+            None,
+            "a spelling this program does not read"
+        );
+        record.set_byte_type(None);
+        assert!(record.is_empty());
     }
 
     #[test]
