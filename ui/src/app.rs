@@ -1935,9 +1935,19 @@ impl App {
                     return Task::none();
                 };
                 let key = self.annotation_key(address);
-                let annotation = self
-                    .annotations
-                    .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                // The record's kind says what the mark is on: the function
+                // at an entry, the address anywhere else.
+                let kind = if self
+                    .provider
+                    .functions()
+                    .iter()
+                    .any(|row| row.address == address)
+                {
+                    ag_corpus::project::TargetKind::Function
+                } else {
+                    ag_corpus::project::TargetKind::Address
+                };
+                let annotation = self.annotations.annotation_mut(kind, &key);
                 annotation.bookmark = !annotation.bookmark;
                 self.annotations.prune();
                 let on = self

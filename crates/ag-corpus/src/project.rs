@@ -393,12 +393,12 @@ impl ProjectFile {
             .filter(|a| a.bookmark && a.variable.is_none() && a.register.is_none())
             .collect();
         marked.sort_by_key(|a| {
-            (
-                crate::parse_addr_space(&a.address)
-                    .map(|(value, _)| value)
-                    .ok(),
-                a.address.clone(),
-            )
+            // `None` orders before `Some`, so the parse failure is keyed
+            // separately to send an unparseable address to the end.
+            let value = crate::parse_addr_space(&a.address)
+                .map(|(value, _)| value)
+                .ok();
+            (value.is_none(), value.unwrap_or(0), a.address.clone())
         });
         marked
     }
@@ -685,6 +685,8 @@ mod tests {
         project.register_mut("0x3000", "rax").bookmark = true;
         // An unmarked address is not a bookmark either.
         project.annotation_mut(TargetKind::Address, "0x999").name = Some("x".into());
+        // An address that parses to no value keeps its spelling and sorts last.
+        project.annotation_mut(TargetKind::Address, "nowhere").bookmark = true;
 
         let marked: Vec<&str> = project
             .bookmarks()
@@ -693,8 +695,8 @@ mod tests {
             .collect();
         assert_eq!(
             marked,
-            ["EXTERNAL:0x1", "0x100", "0x2000"],
-            "in address order, the space first, the register skipped"
+            ["EXTERNAL:0x1", "0x100", "0x2000", "nowhere"],
+            "in address order, the space first, the register skipped, the unparseable last"
         );
     }
 
