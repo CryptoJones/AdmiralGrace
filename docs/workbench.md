@@ -185,6 +185,23 @@ the changes out, and **Save project as…** prompts for a path. The same file is
 `ag project` reads and writes, so a rename recorded in the workbench is visible to the CLI
 and to a script.
 
-A rename replaces the analysis's name wherever the workbench shows one. Returning the
-analysis's own name clears the annotation. A bookmark toggles. An annotation that carries
-nothing is dropped on save, so the file says only what the analyst changed.
+Three names are the analyst's to give:
+
+- **Rename function…** (F2) names the selected function.
+- **Rename label…** (F3) names the label at the selected address. The entry label of a
+  function and the function's name are the same record, so the two agree by construction.
+- **Rename local variable…** (Ctrl+F2) names one of the locals the function on screen
+  declares. The prompt reads `declared=new name`, the declared name as the pseudocode
+  writes it; an empty right side returns the declared name.
+
+A rename replaces the analysis's name wherever the workbench shows one: the navigator, the
+header, the inspector, the call operands in the listing and the graph, the reference labels,
+and the pseudocode — where a renamed function or local is replaced as a whole word, so
+`add` never reaches into `address`. The provider's own text is never rewritten; the names
+are applied as the views draw. Returning the analysis's own name clears the annotation. A
+bookmark toggles. An annotation that carries nothing is dropped on save, so the file says
+only what the analyst changed.
+
+Annotations belong to the analysis they were made against. Opening a different binary or
+corpus drops them — a rename of `0x1198` means that address in the other file — while a
+reload of the same one keeps them.

@@ -89,7 +89,7 @@ Filed 2026-10-26.
 ### Annotation and persistence
 
 - [x] Project file: save the analysis and the analyst's annotations in a portable format — [#302](https://github.com/CryptoJones/AdmiralGrace/issues/302)
-- [ ] Rename functions, labels and local variables, in the CLI and the workbench — [#303](https://github.com/CryptoJones/AdmiralGrace/issues/303)
+- [x] Rename functions, labels and local variables, in the CLI and the workbench — [#303](https://github.com/CryptoJones/AdmiralGrace/issues/303)
 - [ ] Rename a register within one function's pseudocode — [#304](https://github.com/CryptoJones/AdmiralGrace/issues/304)
 - [ ] Comments: line and inline comments at an address — [#305](https://github.com/CryptoJones/AdmiralGrace/issues/305)
 - [ ] Bookmarks: named places of interest, listed and navigable — [#306](https://github.com/CryptoJones/AdmiralGrace/issues/306)

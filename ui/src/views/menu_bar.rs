@@ -43,6 +43,12 @@ pub fn view(_app: &App) -> Element<'_, Message> {
         root_button("Edit"),
         Menu::new(vec![
             Item::new(item_button("Rename function…", "F2", Message::EditRename)),
+            Item::new(item_button("Rename label…", "F3", Message::EditRenameLabel)),
+            Item::new(item_button(
+                "Rename local variable…",
+                "Ctrl+F2",
+                Message::EditRenameVariable,
+            )),
             Item::new(item_button("Add comment", "Ctrl+/", Message::EditComment)),
             Item::new(item_button("Toggle bookmark", "", Message::EditBookmark)),
             Item::new(separator()),

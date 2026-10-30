@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -37,6 +37,9 @@ pub enum TargetKind {
     Address,
     /// A run of bytes, keyed by its first address.
     Region,
+    /// A local variable of the function at the address, keyed by its
+    /// declared name.
+    Variable,
 }
 
 impl TargetKind {
@@ -46,6 +49,7 @@ impl TargetKind {
             TargetKind::Function => "function",
             TargetKind::Address => "address",
             TargetKind::Region => "region",
+            TargetKind::Variable => "variable",
         }
     }
 }
@@ -81,6 +85,15 @@ pub struct Annotation {
     pub kind: TargetKind,
     /// The address the annotation is attached to.
     pub address: String,
+    /// The local variable this record names, when it names one.
+    ///
+    /// A function's entry and a label share one address and one record: the
+    /// entry label *is* the function's name. A local variable is a different
+    /// thing at that same address, so it carries its declared name here and
+    /// gets a record of its own. Two records at one address are told apart
+    /// by this field, never by the order they were written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variable: Option<String>,
     /// The analyst's name for the target, replacing the analysis's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -102,11 +115,28 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// An empty annotation for the local variable `variable` of the function
+    /// at `address`.
+    pub fn for_variable(address: &str, variable: &str) -> Self {
+        Self {
+            kind: TargetKind::Variable,
+            address: address.to_string(),
+            variable: Some(variable.to_string()),
+            name: None,
+            comment: None,
+            bookmark: false,
+            tags: Vec::new(),
+            color: None,
+            byte_type: None,
+        }
+    }
+
     /// An empty annotation at the address `address`, of kind `kind`.
     pub fn new(kind: TargetKind, address: &str) -> Self {
         Self {
             kind,
             address: address.to_string(),
+            variable: None,
             name: None,
             comment: None,
             bookmark: false,
@@ -175,7 +205,10 @@ impl ProjectFile {
     /// record's `kind` says what the most recent change was attached to.
     pub fn annotation_mut(&mut self, kind: TargetKind, address: &str) -> &mut Annotation {
         let key = canonical_address(address).unwrap_or_else(|| address.to_string());
-        let found = self.annotations.iter().position(|a| a.address == key);
+        let found = self
+            .annotations
+            .iter()
+            .position(|a| a.address == key && a.variable.is_none());
         match found {
             Some(index) => {
                 let annotation = &mut self.annotations[index];
@@ -194,10 +227,52 @@ impl ProjectFile {
     /// The annotation for the address `address`, when one is there.
     ///
     /// The lookup canonicalizes, so a caller holding any spelling of the
-    /// address — `0X10`, `external:0x1` — finds the one record.
+    /// address — `0X10`, `external:0x1` — finds the one record. A record
+    /// that names a local variable belongs to a variable, not the address,
+    /// and is not found here; see [`ProjectFile::variable_for`].
     pub fn annotation_for(&self, address: &str) -> Option<&Annotation> {
         let key = canonical_address(address).unwrap_or_else(|| address.to_string());
-        self.annotations.iter().find(|a| a.address == key)
+        self.annotations
+            .iter()
+            .find(|a| a.address == key && a.variable.is_none())
+    }
+
+    /// The record naming the local variable `variable` at `address`, added
+    /// when none is there.
+    ///
+    /// A variable is a different thing from the function or label at its
+    /// function's entry, so it keys on its declared name beside the address
+    /// and never shares the address's record.
+    pub fn variable_mut(&mut self, address: &str, variable: &str) -> &mut Annotation {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        let found = self
+            .annotations
+            .iter()
+            .position(|a| a.address == key && a.variable.as_deref() == Some(variable));
+        match found {
+            Some(index) => &mut self.annotations[index],
+            None => {
+                self.annotations
+                    .push(Annotation::for_variable(&key, variable));
+                self.annotations
+                    .last_mut()
+                    .expect("the annotation was just pushed")
+            }
+        }
+    }
+
+    /// The record naming the local variable `variable` at `address`.
+    pub fn variable_for(&self, address: &str, variable: &str) -> Option<&Annotation> {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        self.annotations
+            .iter()
+            .find(|a| a.address == key && a.variable.as_deref() == Some(variable))
+    }
+
+    /// The analyst's name for the local variable `variable` at `address`.
+    pub fn variable_name(&self, address: &str, variable: &str) -> Option<String> {
+        self.variable_for(address, variable)
+            .and_then(|a| a.name.clone())
     }
 
     /// Drop every annotation that carries nothing.
@@ -371,13 +446,69 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_record_does_not_share_the_address_record() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x1000")
+            .name = Some("decode_frame".into());
+        // The entry label and a local of the function at that entry are
+        // different things: each keeps its own name.
+        project
+            .variable_mut("0x1000", "local_10")
+            .name = Some("envelope".into());
+        assert_eq!(project.annotations.len(), 2, "one address, two records");
+        assert_eq!(
+            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
+            Some("decode_frame"),
+            "the address record is the function's"
+        );
+        assert_eq!(
+            project.variable_name("0x1000", "local_10").as_deref(),
+            Some("envelope")
+        );
+        // A second spelling of the address finds the same variable record.
+        project.variable_mut("0X1000", "local_10").bookmark = true;
+        assert_eq!(project.annotations.len(), 2);
+        assert!(project.variable_for("0x1000", "local_10").is_some_and(|a| a.bookmark));
+    }
+
+    #[test]
+    fn two_variables_at_one_address_key_apart_by_name() {
+        let mut project = ProjectFile::new(Target::default());
+        project.variable_mut("0x1000", "local_10").name = Some("envelope".into());
+        project.variable_mut("0x1000", "local_14").name = Some("count".into());
+        assert_eq!(project.annotations.len(), 2, "one record per variable");
+        assert_eq!(
+            project.variable_name("0x1000", "local_14").as_deref(),
+            Some("count")
+        );
+        // An unnamed variable is pruned like any empty record.
+        project.variable_mut("0x1000", "local_18");
+        project.prune();
+        assert_eq!(project.annotations.len(), 2);
+    }
+
+    #[test]
+    fn a_variable_record_round_trips() {
+        let mut project = ProjectFile::new(Target::default());
+        project.variable_mut("0x1000", "local_10").name = Some("envelope".into());
+        let text = project.to_json().expect("json");
+        assert!(text.contains("\"variable\": \"local_10\""), "{text}");
+        // A record that names no variable writes no variable field at all;
+        // the kind's own value is not the field.
+        assert_eq!(text.matches("\"variable\":").count(), 1, "{text}");
+        let read = ProjectFile::from_json(&text).expect("the text reads back");
+        assert_eq!(read, project);
+    }
+
+    #[test]
     fn the_saved_file_is_readable_json() {
         let mut project = ProjectFile::new(Target::default());
         project
             .annotation_mut(TargetKind::Function, "0x1000")
             .bookmark = true;
         let text = project.to_json().expect("json");
-        assert!(text.contains("\"format\": 1"), "{text}");
+        assert!(text.contains("\"format\": 2"), "{text}");
         assert!(text.contains("\"bookmark\": true"), "{text}");
         // An empty name is not written at all.
         assert!(!text.contains("\"name\""), "{text}");

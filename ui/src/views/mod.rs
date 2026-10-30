@@ -109,11 +109,11 @@ pub fn count_or_indexing(count: Option<usize>) -> String {
 }
 
 /// A key/value row for inspector cards.
-pub fn kv<'a>(key: &'a str, value: impl Into<String>) -> Row<'a, Message> {
+pub fn kv(key: impl Into<String>, value: impl Into<String>) -> Row<'static, Message> {
     Row::new()
         .align_y(iced::Alignment::Center)
         .push(
-            Text::new(key)
+            Text::new(key.into())
                 .size(11)
                 .color(color::MUTED)
                 .width(Length::Fixed(84.0)),

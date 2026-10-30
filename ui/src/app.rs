@@ -75,6 +75,10 @@ pub enum Message {
     FileQuit,
     /// Rename the selected function.
     EditRename,
+    /// Rename the label at the selected address.
+    EditRenameLabel,
+    /// Rename a local variable of the function at the selection.
+    EditRenameVariable,
     /// Comment the selected function.
     EditComment,
     /// Toggle a bookmark on the selection.
@@ -166,6 +170,10 @@ pub enum PromptKind {
     ProjectSave,
     /// The new name of the selected function.
     Rename,
+    /// The new name of the label at the selected address.
+    Label,
+    /// The new name of a local variable, as `DECLARED=NAME`.
+    Variable,
     /// A comment for the selection.
     Comment,
 }
@@ -586,6 +594,201 @@ impl App {
         self.annotations
             .annotation_for(key)
             .and_then(|a| a.name.clone())
+    }
+
+    /// The name to show for the function or label at `address`: the
+    /// analyst's rename when there is one, the provider's own name otherwise.
+    ///
+    /// Every view that prints one function name asks here, so a rename made
+    /// once shows in the navigator, the listing, the graph, the pseudocode
+    /// and the references together.
+    pub(crate) fn shown_name(&self, address: u64, fallback: &str) -> String {
+        let key = self.annotation_key(address);
+        self.annotation_name(&key)
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    /// Every rename of a function or label, keyed by the bare hex address.
+    ///
+    /// A view that prints many names builds this once per render rather
+    /// than asking the provider row by row. A label at an address the
+    /// analysis named no function for still carries a record, so it is
+    /// keyed here too — the way a listing line names its call target.
+    /// (A spaced address like `EXTERNAL:0x1` keys as its bare value; no
+    /// provider that writes listings also names a space, so no two rows
+    /// collide today.)
+    pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {
+        let mut renamed: std::collections::HashMap<String, String> = self
+            .provider
+            .functions()
+            .iter()
+            .filter_map(|row| {
+                let key = format!("{:#x}", row.address);
+                self.annotation_name(&row.display_address())
+                    .map(|name| (key, name))
+            })
+            .collect();
+        for annotation in &self.annotations.annotations {
+            if annotation.variable.is_some()
+                || annotation.address.contains(':')
+                || annotation.name.is_none()
+            {
+                continue;
+            }
+            if let Some(name) = &annotation.name {
+                renamed
+                    .entry(annotation.address.clone())
+                    .or_insert_with(|| name.clone());
+            }
+        }
+        renamed
+    }
+
+    /// The operand text of a listing line, with the callee's rename in place.
+    ///
+    /// A call names one function; the analyst's name for it replaces the
+    /// analysis's own, so the listing and the graph read as one. Any other
+    /// line keeps the operands the provider wrote.
+    pub(crate) fn shown_operands(
+        line: &ListingLine,
+        renamed: &std::collections::HashMap<String, String>,
+    ) -> String {
+        match line.call_target {
+            Some(target) => {
+                let key = format!("{target:#x}");
+                renamed.get(&key).cloned().unwrap_or_else(|| line.operands.clone())
+            }
+            None => line.operands.clone(),
+        }
+    }
+
+    /// The reference labels with the analyst's renames in place.
+    ///
+    /// A reference is labeled by the name of the function it points at, or
+    /// by the address when the analysis had no name; a rename replaces that
+    /// stem and keeps whatever the provider added after it — the stem must
+    /// end where a word ends, so renaming `add` does not touch `address`.
+    /// A label that names something else is left alone.
+    pub(crate) fn shown_reference_labels(&self, references: &[Reference]) -> Vec<String> {
+        references
+            .iter()
+            .map(|reference| {
+                let row = self.provider_row(reference.address);
+                let key = row
+                    .as_ref()
+                    .map(|row| row.display_address())
+                    .unwrap_or_else(|| format!("{:#x}", reference.address));
+                let Some(renamed) = self.annotation_name(&key) else {
+                    return reference.label.clone();
+                };
+                let stem = row
+                    .map(|row| row.name)
+                    .unwrap_or_else(|| format!("{:#x}", reference.address));
+                let hex = format!("{:#x}", reference.address);
+                match Self::stem_suffix(&reference.label, &stem).or_else(|| {
+                    Self::stem_suffix(&reference.label, &hex)
+                }) {
+                    Some(suffix) => format!("{renamed}{suffix}"),
+                    None => reference.label.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// The part of `label` after `stem`, when the label is the stem plus a
+    /// non-word tail — `add (tail call)` after `add`, never `address`
+    /// after `add`.
+    fn stem_suffix<'a>(label: &'a str, stem: &str) -> Option<&'a str> {
+        label.strip_prefix(stem).filter(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        })
+    }
+
+    /// The declared local variables of the function on screen, as the
+    /// pseudocode writes them.
+    ///
+    /// The declaration lines are the ones the lifter prints — `long v2;`,
+    /// `int local_14;` — so the names come from the body the analyst is
+    /// reading, not from a guess. A pointer or array declaration names its
+    /// variable through a `*` or a `[4]`; both are stripped. A provider
+    /// whose pseudocode declares nothing offers nothing to rename.
+    pub(crate) fn declared_variables(&self) -> Vec<String> {
+        let Some(body) = self.work.pseudocode.as_deref() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        for line in body.lines() {
+            let Some(rest) = line.trim().strip_suffix(';') else {
+                continue;
+            };
+            // A declaration is exactly two words: a type and a name.
+            // `x = 5;` is three, and its last word is a value, not a name.
+            let mut words = rest.split_whitespace();
+            let (Some(type_name), Some(declared), None) =
+                (words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            // `return x;` reads as a declaration of `x` by type; the known
+            // statement keywords are not locals.
+            if matches!(type_name, "return" | "if" | "for" | "while" | "else" | "goto") {
+                continue;
+            }
+            let name = declared
+                .strip_prefix('*')
+                .unwrap_or(declared)
+                .split('[')
+                .next()
+                .unwrap_or("");
+            if name.is_empty()
+                || !name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || !type_name.contains(char::is_alphabetic)
+                || type_name.contains('(')
+            {
+                continue;
+            }
+            if !names.contains(&name.to_string()) {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    /// The name pairs the pseudocode view replaces: every renamed function
+    /// or label — the one on screen and every callee it names — and every
+    /// renamed local of the function on screen.
+    ///
+    /// The body text is the provider's and is never rewritten in place;
+    /// this is display only.
+    pub(crate) fn rename_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for row in self.provider.functions() {
+            if let Some(name) = self.annotation_name(&row.display_address()) {
+                if !row.name.is_empty() && row.name != name {
+                    pairs.push((row.name, name));
+                }
+            }
+        }
+        if let Some(function) = self.work.detail.as_ref().and_then(|d| d.start) {
+            let key = self.annotation_key(function);
+            for variable in self.declared_variables() {
+                if let Some(renamed) = self.annotations.variable_name(&key, &variable) {
+                    pairs.push((variable, renamed));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// The provider's row for `address`, when the analysis has one.
+    fn provider_row(&self, address: u64) -> Option<crate::data::FunctionRow> {
+        self.provider
+            .functions()
+            .into_iter()
+            .find(|row| row.address == address)
     }
 
     /// The navigator row the selection points at, when it points at one.
@@ -1201,6 +1404,61 @@ impl App {
                             }
                         }
                     }
+                    PromptKind::Label => {
+                        let name = prompt.value.trim().to_string();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            let original = self
+                                .provider
+                                .functions()
+                                .into_iter()
+                                .find(|row| row.address == address)
+                                .map(|row| row.name);
+                            let annotation = self.annotations.annotation_mut(
+                                ag_corpus::project::TargetKind::Address,
+                                &key,
+                            );
+                            // Returning the analysis's own name clears the
+                            // rename, as a function rename does.
+                            annotation.name = (!name.is_empty()
+                                && Some(&name) != original.as_ref())
+                                .then_some(name);
+                            self.annotations.prune();
+                            self.refresh_functions();
+                            self.notice = Some(format!("Renamed {key}"));
+                        }
+                    }
+                    PromptKind::Variable => {
+                        // `DECLARED=NAME`: the declared name the pseudocode
+                        // writes, and the name to show for it. An empty
+                        // right side returns the declared name.
+                        let (declared, name) = match prompt.value.split_once('=') {
+                            Some((declared, name)) => (declared.trim(), name.trim()),
+                            None => {
+                                self.notice = Some(
+                                    "A variable rename reads name=new name".into(),
+                                );
+                                return Task::none();
+                            }
+                        };
+                        // The variable belongs to the function whose body
+                        // declares it, which is the function on screen.
+                        let Some(address) =
+                            self.work.detail.as_ref().and_then(|detail| detail.start)
+                        else {
+                            self.notice = Some("Open a function to rename its variables".into());
+                            return Task::none();
+                        };
+                        if declared.is_empty() {
+                            self.notice = Some("Name which variable to rename".into());
+                            return Task::none();
+                        }
+                        let key = self.annotation_key(address);
+                        let annotation = self.annotations.variable_mut(&key, declared);
+                        annotation.name = (!name.is_empty()).then_some(name.to_string());
+                        self.annotations.prune();
+                        self.notice = Some(format!("Renamed {declared} of {key}"));
+                    }
                     PromptKind::Comment => {
                         let text = prompt.value.trim().to_string();
                         if let Some(address) = self.selection.address() {
@@ -1291,6 +1549,64 @@ impl App {
                     kind: PromptKind::Rename,
                     title: "Rename function",
                     value: row.name.clone(),
+                });
+            }
+
+            Message::EditRenameLabel => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select an address to rename".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.name.clone())
+                    .or_else(|| {
+                        self.provider
+                            .functions()
+                            .iter()
+                            .find(|row| row.address == address)
+                            .map(|row| row.name.clone())
+                    })
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Label,
+                    title: "Rename label",
+                    value: current,
+                });
+            }
+
+            Message::EditRenameVariable => {
+                // The variables to offer are the ones the function on screen
+                // declares, wherever in it the selection sits.
+                let Some(address) = self.work.detail.as_ref().and_then(|detail| detail.start)
+                else {
+                    self.notice = Some("Open a function to rename its variables".into());
+                    return Task::none();
+                };
+                let declared = self.declared_variables();
+                if declared.is_empty() {
+                    self.notice =
+                        Some("This function declares no local variables to rename".into());
+                    return Task::none();
+                }
+                let key = self.annotation_key(address);
+                // Offer the first declared local the analyst has not named
+                // yet; the prompt takes `DECLARED=NAME`.
+                let next = declared
+                    .iter()
+                    .find(|name| self.annotations.variable_for(&key, name).is_none())
+                    .cloned()
+                    .unwrap_or_else(|| declared[0].clone());
+                let current = match self.annotations.variable_for(&key, &next) {
+                    Some(a) => format!("{next}={}", a.name.clone().unwrap_or_default()),
+                    None => format!("{next}="),
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Variable,
+                    title: "Rename local variable (declared=new name)",
+                    value: current,
                 });
             }
 
@@ -1502,6 +1818,68 @@ impl App {
     }
 }
 
+/// `text` with every whole-word use of each name replaced in one pass.
+///
+/// A whole word is bounded by characters that cannot spell an identifier,
+/// so renaming `add` does not reach into `address` or `dadd`. The scan
+/// never reads what it already wrote, so a name that itself contains the
+/// word — `add` to `addX` — is not reached into twice.
+///
+/// One pass matters when two renames are in flight at once: renaming
+/// `local_10` to `count` and `local_14` to `local_10` must render the
+/// first as `count` and the second as `local_10`, not both as `count`.
+/// The earliest match is taken first, and among matches starting at the
+/// same point the longest word wins, so a declared name that starts with
+/// another — `v1` and `v10` — still keys on the whole word it found.
+pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
+    let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
+    if pairs.is_empty() {
+        return text.to_string();
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // The character of the original text just before `rest`, so a word
+    // boundary is read from what the provider wrote, never from what the
+    // replacement put down.
+    let mut prev: Option<char> = None;
+    'scan: while !rest.is_empty() {
+        // The earliest whole-word match, longest word among equals.
+        let best = pairs
+            .iter()
+            .filter_map(|(word, name)| rest.find(word).map(|found| (found, *word, *name)))
+            .min_by(|(left_found, left_word, _), (right_found, right_word, _)| {
+                left_found.cmp(right_found).then(right_word.len().cmp(&left_word.len()))
+            });
+        if let Some((found, word, name)) = best {
+            let before = rest[..found]
+                .chars()
+                .next_back()
+                .or(prev)
+                .is_none_or(|c| !is_word(c));
+            let after_index = found + word.len();
+            let after = rest[after_index..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_word(c));
+            out.push_str(&rest[..found]);
+            if before && after {
+                out.push_str(name);
+            } else {
+                out.push_str(word);
+            }
+            prev = word.chars().next_back();
+            rest = &rest[after_index..];
+            continue 'scan;
+        }
+        let width = rest.chars().next().expect("nonempty").len_utf8();
+        out.push_str(&rest[..width]);
+        prev = rest.chars().next();
+        rest = &rest[width..];
+    }
+    out
+}
+
 /// Map a key press onto a workbench command.
 fn shortcut(event: keyboard::Event) -> Message {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
@@ -1517,7 +1895,9 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("/"), true) => Message::EditComment,
         (Key::Character("r"), true) => Message::FileReload,
         (Key::Character("s"), true) => Message::FileSaveProject,
-        (Key::Named(keyboard::key::Named::F2), _) => Message::EditRename,
+        (Key::Named(keyboard::key::Named::F2), true) => Message::EditRenameVariable,
+        (Key::Named(keyboard::key::Named::F2), false) => Message::EditRename,
+        (Key::Named(keyboard::key::Named::F3), false) => Message::EditRenameLabel,
         (Key::Named(keyboard::key::Named::F5), _) => Message::FileReload,
         (Key::Named(keyboard::key::Named::Escape), _) => Message::Dismiss,
         _ => Message::Ignore,
@@ -2259,6 +2639,32 @@ mod tests {
         };
 
         assert!(matches!(shortcut(event), Message::FileOpenCorpus));
+
+        let named = |key: keyboard::key::Named, modifiers: keyboard::Modifiers| {
+            keyboard::Event::KeyPressed {
+                key: Key::Named(key),
+                modified_key: Key::Named(key),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::F2),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            }
+        };
+
+        let none = keyboard::Modifiers::empty();
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F2, none)),
+            Message::EditRename
+        ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F2, ctrl)),
+            Message::EditRenameVariable
+        ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F3, none)),
+            Message::EditRenameLabel
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -2731,6 +3137,275 @@ mod tests {
         assert_eq!(kept.comment.as_deref(), Some("imported"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_replaces_the_callee_name_in_the_listing() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // main calls add at 0x1149; the listing shows the callee by name.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let calls_add: Vec<&ListingLine> = app
+            .work
+            .listing
+            .iter()
+            .filter(|line| line.call_target == Some(0x1149))
+            .collect();
+        assert!(!calls_add.is_empty(), "main calls add");
+        assert_eq!(calls_add[0].operands, "add");
+
+        // Rename add; the listing of its CALLER follows without a reload.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // The listing resolves the callee's name as it draws, from the
+        // same map the graph reads.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let renamed = app.renamed_names();
+        let calls: Vec<String> = app
+            .work
+            .listing
+            .iter()
+            .filter(|line| line.call_target == Some(0x1149))
+            .map(|line| App::shown_operands(line, &renamed))
+            .collect();
+        assert_eq!(calls, vec!["decode".to_string()], "the rename reaches the listing");
+    }
+
+    #[test]
+    fn a_rename_replaces_the_reference_label() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1198));
+
+        let before = app.shown_reference_labels(&app.work.references);
+        assert!(before.iter().any(|label| label == "add"), "{before:?}");
+
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // Back at main: its references still point at the renamed function.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let after = app.shown_reference_labels(&app.work.references);
+        assert!(after.iter().any(|label| label == "decode"), "{after:?}");
+        assert!(!after.iter().any(|label| label == "add"), "{after:?}");
+    }
+
+    #[test]
+    fn renaming_a_local_variable_renames_its_uses_in_the_pseudocode() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // sum_to declares local_10 and local_14.
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let declared = app.declared_variables();
+        assert!(declared.contains(&"local_14".to_string()), "{declared:?}");
+
+        let _ = app.update(Message::EditRenameVariable);
+        assert_eq!(
+            app.prompt.as_ref().expect("a variable prompt").kind,
+            PromptKind::Variable
+        );
+        let _ = app.update(Message::PromptChanged("local_14=count".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none());
+
+        // The pseudocode view shows the new name wherever the old one stood.
+        let pairs = app.rename_pairs();
+        assert!(pairs.contains(&("local_14".to_string(), "count".to_string())), "{pairs:?}");
+        let pairs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(original, renamed)| (original.as_str(), renamed.as_str()))
+            .collect();
+        let line = "  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {";
+        assert_eq!(
+            replace_words(line, &pairs),
+            "  for (count = 1; count <= a; count = count + 1) {"
+        );
+    }
+
+    #[test]
+    fn clearing_a_variable_rename_returns_the_declared_name() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("local_14=count".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.variable_for("0x1161", "local_14").is_some());
+
+        // An empty right side is the analyst taking the name back.
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("local_14=".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.annotations.variable_for("0x1161", "local_14").is_none(),
+            "an empty rename leaves no record behind"
+        );
+    }
+
+    #[test]
+    fn a_callee_rename_shows_in_the_callers_pseudocode() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // Rename add while standing on add.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // main's body calls add; its pairs carry the callee's rename too,
+        // so the call line reads with the analyst's name.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let pairs = app.rename_pairs();
+        assert!(
+            pairs.contains(&("add".to_string(), "decode".to_string())),
+            "the callee's rename reaches the caller's body: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_label_at_an_unnamed_address_reaches_the_listing() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // An address the analysis named no function for; the analyst still
+        // names its label, and a call to it must read with that name.
+        let _ = app.update(Message::FunctionSelected(0x1180));
+        let _ = app.update(Message::EditRenameLabel);
+        let _ = app.update(Message::PromptChanged("add_one".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let renamed = app.renamed_names();
+        let line = ListingLine {
+            address: 0x11a0,
+            bytes: "e8 a4 ff ff ff".into(),
+            mnemonic: "call".into(),
+            operands: "funct_1180".into(),
+            call_target: Some(0x1180),
+            comment: None,
+        };
+        assert_eq!(
+            App::shown_operands(&line, &renamed),
+            "add_one",
+            "a label at an address with no provider row still keys the listing"
+        );
+    }
+
+    #[test]
+    fn a_reference_label_must_end_its_stem_at_a_word_end() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let references = vec![
+            Reference {
+                address: 0x1149,
+                label: "add (tail call)".into(),
+                kind: ReferenceKind::Calls,
+            },
+            Reference {
+                address: 0x1149,
+                label: "address".into(),
+                kind: ReferenceKind::Data,
+            },
+        ];
+        assert_eq!(
+            app.shown_reference_labels(&references),
+            vec!["decode (tail call)".to_string(), "address".to_string()],
+            "the tail the provider added is kept; a longer word is not a stem"
+        );
+    }
+
+    #[test]
+    fn renaming_a_function_renames_its_own_pseudocode_header() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1149));
+
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let pairs = app.rename_pairs();
+        assert!(pairs.contains(&("add".to_string(), "decode".to_string())), "{pairs:?}");
+        let shown = replace_words("int add(int a, int b)", &[("add", "decode")]);
+        assert_eq!(shown, "int decode(int a, int b)");
+    }
+
+    #[test]
+    fn replace_words_only_reaches_whole_words() {
+        let one = &[("add", "X")][..];
+        assert_eq!(replace_words("call add", &[("add", "decode")]), "call decode");
+        assert_eq!(replace_words("address", one), "address");
+        assert_eq!(replace_words("dadd + add_", one), "dadd + add_");
+        assert_eq!(replace_words("add(add(1))", &[("add", "f")]), "f(f(1))");
+        assert_eq!(replace_words("local_14", &[("local_1", "X")]), "local_14");
+        assert_eq!(replace_words("a.b", &[("a", "X")]), "X.b");
+        // A name that contains the word is not reached into twice.
+        assert_eq!(replace_words("add + add;", &[("add", "addX")]), "addX + addX;");
+    }
+
+    #[test]
+    fn replace_words_applies_two_renames_in_one_pass() {
+        // local_14 becomes local_10 while local_10 becomes count: each
+        // renders as its own new name, never as the other's.
+        let pairs = &[("local_10", "count"), ("local_14", "local_10")][..];
+        assert_eq!(
+            replace_words("local_10 = local_14 + local_10;", pairs),
+            "count = local_10 + count;"
+        );
+        // A declared name that starts with another keys on the whole word.
+        let named = &[("v1", "one"), ("v10", "ten")][..];
+        assert_eq!(replace_words("v1 = v10 + v1;", named), "one = ten + one;");
+    }
+
+    #[test]
+    fn a_label_rename_shares_the_address_record_with_the_function() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+
+        let _ = app.update(Message::EditRenameLabel);
+        let _ = app.update(Message::PromptChanged("entry_point".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert_eq!(app.navigator.rows[0].name, "entry_point");
+        assert_eq!(app.annotations.annotations.len(), 1, "one record for one address");
     }
 
     #[test]

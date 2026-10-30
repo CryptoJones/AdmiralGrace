@@ -100,6 +100,13 @@ pub struct ListingLine {
     pub mnemonic: String,
     /// Operand text.
     pub operands: String,
+    /// The function the operands name, when the line is a call to one.
+    ///
+    /// The listing shows a callee by name; the analyst's rename replaces
+    /// that name, so the view needs to know which address the operand text
+    /// stands for. A call through a GOT slot names the slot, not a
+    /// function, and carries none.
+    pub call_target: Option<u64>,
     /// Optional trailing comment.
     pub comment: Option<String>,
 }

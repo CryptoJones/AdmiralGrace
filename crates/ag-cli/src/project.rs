@@ -66,6 +66,32 @@ pub enum ProjectCmd {
         /// The function's address, with its space when it names one.
         address: String,
     },
+    /// Record a name for the label at an address.
+    ///
+    /// The entry label of a function and the function's name are the same
+    /// record; `label` is the spelling for a name at an address that is not
+    /// a function entry.
+    Label {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address, with its space when it names one.
+        address: String,
+        /// The name to record.
+        name: String,
+    },
+    /// Record a name for a local variable of the function at an address.
+    Var {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function's address, with its space when it names one.
+        address: String,
+        /// The variable's declared name, as the pseudocode writes it.
+        variable: String,
+        /// The name to record.
+        name: String,
+    },
 }
 
 /// Run `ag project <target> …`: the target is the binary the project describes.
@@ -96,6 +122,21 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 a.bookmark = !a.bookmark;
             })
         }
+        ProjectCmd::Label {
+            file,
+            address,
+            name,
+        } => edit(&target, &file, TargetKind::Address, &address, |a| {
+            a.name = Some(name);
+        }),
+        ProjectCmd::Var {
+            file,
+            address,
+            variable,
+            name,
+        } => edit_variable(&target, &file, &address, &variable, |a| {
+            a.name = Some(name);
+        }),
     }
 }
 
@@ -152,10 +193,16 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
         println!("  option  {name} = {value}");
     }
     for annotation in &project.annotations {
+        // A variable record says which variable it names; the address alone
+        // would not tell it from the function's own record.
+        let target = match &annotation.variable {
+            Some(variable) => format!("{}::{variable}", annotation.address),
+            None => annotation.address.clone(),
+        };
         println!(
             "  {:9} {:>16}  {}",
             annotation.kind.label(),
-            annotation.address,
+            target,
             summarize(annotation)
         );
     }
@@ -184,24 +231,7 @@ fn edit(
     address: &str,
     change: impl FnOnce(&mut Annotation),
 ) -> Result<i32> {
-    // The project may not exist yet: the first edit creates it from the target.
-    let mut project = match ProjectFile::load(file) {
-        Ok(project) => project,
-        Err(_) if !file.exists() => {
-            let sha256 = match sha256_of(target) {
-                Ok(sha) => Some(sha),
-                Err(error) => {
-                    eprintln!("note: {target:?} cannot be hashed to record: {error:#}");
-                    None
-                }
-            };
-            ProjectFile::new(Target {
-                path: Some(target.display().to_string()),
-                sha256,
-            })
-        }
-        Err(error) => return Err(error),
-    };
+    let mut project = open_project(target, file)?;
     change(project.annotation_mut(kind, address));
     project.prune();
     project.save(file)?;
@@ -218,6 +248,54 @@ fn edit(
         None => println!("{}: {} {key} cleared", file.display(), kind.label()),
     }
     Ok(0)
+}
+
+/// Change the record naming the local variable `variable` at `address`.
+fn edit_variable(
+    target: &Path,
+    file: &Path,
+    address: &str,
+    variable: &str,
+    change: impl FnOnce(&mut Annotation),
+) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    change(project.variable_mut(address, variable));
+    project.prune();
+    project.save(file)?;
+    let key = ag_corpus::project::canonical_address(address)
+        .unwrap_or_else(|| address.to_string());
+    let kept = project.variable_for(&key, variable);
+    match kept {
+        Some(a) => println!(
+            "{}: variable {key}::{variable} now {}",
+            file.display(),
+            summarize(a)
+        ),
+        None => println!("{}: variable {key}::{variable} cleared", file.display()),
+    }
+    Ok(0)
+}
+
+/// The project of `file`, created from `target` when the file is not there.
+fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
+    // The project may not exist yet: the first edit creates it from the target.
+    match ProjectFile::load(file) {
+        Ok(project) => Ok(project),
+        Err(_) if !file.exists() => {
+            let sha256 = match sha256_of(target) {
+                Ok(sha) => Some(sha),
+                Err(error) => {
+                    eprintln!("note: {target:?} cannot be hashed to record: {error:#}");
+                    None
+                }
+            };
+            Ok(ProjectFile::new(Target {
+                path: Some(target.display().to_string()),
+                sha256,
+            }))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// What an annotation carries, as one comma-separated line.

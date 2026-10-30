@@ -7,8 +7,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
-use crate::app::{App, Message};
-use crate::data::{ByteLine, ListingLine, Reference, StringEntry};
+use crate::app::{replace_words, App, Message};
+use crate::data::{ByteLine, ListingLine, StringEntry};
 use crate::model::Selection;
 use crate::theme::{color, MONO};
 use crate::views::{empty_state, pill, subtle};
@@ -124,7 +124,10 @@ fn file_bar(app: &App) -> Element<'_, Message> {
     let detail = app.work.detail.as_ref();
 
     let name = detail
-        .map(|d| d.name.clone())
+        .map(|d| match d.start {
+            Some(start) => app.shown_name(start, &d.name),
+            None => d.name.clone(),
+        })
         .unwrap_or_else(|| "No selection".to_string());
     let address = detail.and_then(|d| d.start);
     let size = detail
@@ -237,10 +240,12 @@ fn listing_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
+    // The analyst's names, resolved once for the whole listing.
+    let renamed = app.renamed_names();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for line in &app.work.listing {
-        list = list.push(listing_row(app, line));
+        list = list.push(listing_row(app, line, &renamed));
     }
 
     scrollable(list)
@@ -250,8 +255,16 @@ fn listing_content(app: &App) -> Element<'_, Message> {
 }
 
 /// One instruction row.
-fn listing_row<'a>(app: &'a App, line: &'a ListingLine) -> Element<'a, Message> {
+///
+/// A call shows the callee by the analyst's name when it has one, so a
+/// rename made once reaches the listing as it reaches every other view.
+fn listing_row<'a>(
+    app: &'a App,
+    line: &'a ListingLine,
+    renamed: &std::collections::HashMap<String, String>,
+) -> Element<'a, Message> {
     let focused = matches!(app.selection, Selection::Address(a) if a == line.address);
+    let operands = App::shown_operands(line, renamed);
 
     let row = Container::new(
         Row::new()
@@ -279,7 +292,7 @@ fn listing_row<'a>(app: &'a App, line: &'a ListingLine) -> Element<'a, Message> 
                     .width(Length::Fixed(58.0)),
             )
             .push(
-                Text::new(line.operands.clone())
+                Text::new(operands)
                     .size(12)
                     .color(color::TEXT)
                     .font(MONO),
@@ -339,16 +352,21 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
     }
 
     let selection = app.selection.address();
+    // The analyst's names, resolved once for the whole body rather than
+    // row by row.
+    let pairs = app.rename_pairs();
+    // Applied in one pass, so two renames in flight at once never reach
+    // into each other's output.
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(original, renamed)| (original.as_str(), renamed.as_str()))
+        .collect();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for (index, line) in body.lines().enumerate() {
         let addresses = app.work.line_addresses.get(&index).cloned();
-        list = list.push(pseudocode_row(
-            index,
-            line.to_string(),
-            addresses,
-            selection,
-        ));
+        let text = replace_words(line, &pairs);
+        list = list.push(pseudocode_row(index, text, addresses, selection));
     }
 
     scrollable(list)
@@ -484,7 +502,7 @@ fn references_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    reference_table(&app.work.references)
+    reference_table(app)
 }
 
 /// The lower tab strip.
@@ -551,7 +569,7 @@ fn lower_content(app: &App) -> Element<'_, Message> {
             } else if app.work.references.is_empty() {
                 empty_state("No references in view", "Nothing refers to this selection.").into()
             } else {
-                reference_table(&app.work.references)
+                reference_table(app)
             }
         }
         LowerTab::Problems => {
@@ -803,10 +821,11 @@ fn string_row(
 }
 
 /// A table of cross references.
-fn reference_table(references: &[Reference]) -> Element<'_, Message> {
+fn reference_table(app: &App) -> Element<'_, Message> {
+    let labels = app.shown_reference_labels(&app.work.references);
     let mut list = Column::new().spacing(2).width(Length::Fill);
 
-    for reference in references {
+    for (reference, label) in app.work.references.iter().zip(labels) {
         list = list.push(
             Row::new()
                 .align_y(Alignment::Center)
@@ -818,11 +837,7 @@ fn reference_table(references: &[Reference]) -> Element<'_, Message> {
                         .font(MONO)
                         .width(Length::Fixed(96.0)),
                 )
-                .push(
-                    Text::new(reference.label.clone())
-                        .size(12)
-                        .color(color::BLUE),
-                )
+                .push(Text::new(label).size(12).color(color::BLUE))
                 .push(Space::new().width(Length::Fill))
                 .push(subtle(reference.kind.label())),
         );
