@@ -551,7 +551,10 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         _ => None,
     };
     if let Some(project) = project {
-        let notes = ag_corpus::project::ProjectFile::load(&project)?.jump_tables();
+        let project = ag_corpus::project::ProjectFile::load(&project)?;
+        // The analyst's patches are the bytes the image is read with.
+        image.set_patches(project.patches());
+        let notes = project.jump_tables();
         let hints = notes
             .into_iter()
             .map(|(site, note)| {

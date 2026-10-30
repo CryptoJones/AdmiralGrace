@@ -1223,3 +1223,30 @@ fn a_branch_that_leaves_lifts_by_address_and_padding_starts_no_procedure() {
     assert!(report.contains("0x8049010 sub_8049010\n"), "{report}");
     assert!(!report.contains("0x804900d"), "{report}");
 }
+
+#[test]
+fn ag_asm_prints_the_bytes_of_an_instruction() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["asm", "jmp 0x401010", "--at", "0x401000"])
+        .output()
+        .expect("the ag binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "EB 0E\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["asm", "mov eax, [ebp+8]", "--bits", "32"])
+        .output()
+        .expect("the ag binary runs");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "8B 45 08\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["asm", "frob eax"])
+        .output()
+        .expect("the ag binary runs");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not assembled"));
+}

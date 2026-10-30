@@ -72,6 +72,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: project::ProjectCmd,
     },
+    /// Assemble one instruction to its bytes, as it would sit at an address.
+    Asm {
+        /// The instruction, in Intel syntax: `mov eax, 1`, `jmp 0x401010`.
+        text: String,
+        /// The address the instruction sits at, which a branch is encoded
+        /// against.
+        #[arg(long, default_value = "0")]
+        at: String,
+        /// The width of the program: 64 or 32.
+        #[arg(long, default_value_t = 64)]
+        bits: u32,
+    },
     /// The engine's options: every judgment call it makes, with its symptoms.
     Catalog {
         /// Print the rows as JSON.
@@ -248,6 +260,17 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
         Cmd::Image { binary, cmd } => image::run(&binary, cmd),
+        Cmd::Asm { text, at, bits } => {
+            let address = ag_corpus::parse_addr(&at)?;
+            let bitness = match bits {
+                64 => ag_image::Bitness::Bits64,
+                32 => ag_image::Bitness::Bits32,
+                _ => anyhow::bail!("--bits takes 64 or 32"),
+            };
+            let bytes = ag_image::assemble(&text, address, bitness)?;
+            println!("{}", ag_corpus::project::hex_of_bytes(&bytes));
+            Ok(0)
+        }
         Cmd::Project { binary, cmd } => project::run(binary, cmd),
         Cmd::Catalog {
             json,

@@ -627,6 +627,57 @@ fn a_jump_table_note_is_recorded_and_told_to_the_image() {
 }
 
 #[test]
+fn a_patch_is_written_over_the_image_and_assembled_from_text() {
+    let file = TempFile::new("patch");
+    // Bytes straight in: a short jump over the add in main.
+    let (ok, stdout, stderr) = project(&["patch", "--file", &file.text(), "0x1198", "90 90"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1198 now patch 90 90"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x1198", "9"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not hex pairs"), "{stderr}");
+
+    // An instruction, assembled at the target's width, with a warning
+    // when it outgrows the one it replaces.
+    let (ok, stdout, stderr) = project(&["asm", "--file", &file.text(), "0x1149", "mov eax, 7"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1149 now patch B8 07 00 00 00 (mov eax, 7)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("warning") && stderr.contains("overwritten"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = project(&["asm", "--file", &file.text(), "0x1149", "frob eax"]);
+    assert!(!ok);
+    assert!(stderr.contains("not assembled"), "{stderr}");
+
+    // The image is read with the patch: add's first instruction is the mov.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["disasm", "add", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("mov eax,7"), "{report}");
+
+    // Taking the patch off reads the file as it is again.
+    let (ok, stdout, stderr) = project(&["patch", "--file", &file.text(), "0x1149", "none"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1149 cleared"), "{stdout}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

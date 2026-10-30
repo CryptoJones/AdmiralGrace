@@ -50,6 +50,8 @@ An annotation is one address's worth of the analyst's decisions.
 | `references` | The addresses the target refers to that the analysis cannot see — a computed call, a jump through a table — each in its canonical spelling, sorted and unique. A reference is recorded on the place it leaves from. |
 | `operand_format` | How the constants in the instruction's operands are shown: `signed`, `decimal`, `octal` or `address`. Hexadecimal is how the analysis prints them, so it is never recorded. |
 | `jump_table` | Where the jump table the instruction at the address reads is, as the analyst said: the table's address, the width of an entry in bytes and the number of entries — `0x402000 8 6` — with ` rel` after for entries that are offsets from the table. Told to the analysis where its own recovery fails. |
+| `patch` | The bytes the analyst wrote over the image's, starting at the address, as hex pairs: `B8 01 00 00 00`. The file on disk is never changed; a reader applies the patch as it reads the image. |
+| `patch_text` | What the analyst typed to make the patch, when it was an instruction: `mov eax, 1`. |
 | `register` | The register the record renames, spelled as the listing spells it — `rax`, `ebp`. A register belongs to no one address; it is printed across one function's pseudocode and listing, so the record keys on the register's name beside the function's entry address and the rename reaches that function alone. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `comment` | The analyst's note. |

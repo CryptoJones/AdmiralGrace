@@ -133,6 +133,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditSwitch,
             )),
             Item::new(separator()),
+            Item::new(item_button(
+                "Assemble over bytes…",
+                "Ctrl+Shift+E",
+                Message::EditAssemble,
+            )),
+            Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
             Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),
         ])

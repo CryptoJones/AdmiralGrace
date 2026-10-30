@@ -423,6 +423,25 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Read the analysis with the analyst's `patches` written over the
+    /// image's bytes, by the address of each, and say whether that changed
+    /// anything. A provider with no bytes of its own has nothing to patch.
+    fn set_patches(&self, _patches: BTreeMap<u64, Vec<u8>>) -> bool {
+        false
+    }
+
+    /// The width of the program's code in bits, when the provider reads a
+    /// program image and knows: what an instruction is assembled for.
+    fn bitness(&self) -> Option<ag_image::Bitness> {
+        None
+    }
+
+    /// How long the instruction at `address` is, in bytes, when the
+    /// provider reads a program image and the address starts one.
+    fn instruction_length_at(&self, _address: u64) -> Option<usize> {
+        None
+    }
+
     /// The strings the project holds.
     fn strings(&self) -> Vec<StringEntry> {
         Vec::new()

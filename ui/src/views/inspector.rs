@@ -64,6 +64,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if let Some(table) = &annotation.jump_table {
                 notes = notes.push(kv("Jump table", table.clone()));
             }
+            if let Some(patch) = &annotation.patch {
+                let shown = match &annotation.patch_text {
+                    Some(text) => format!("{patch}  ({text})"),
+                    None => patch.clone(),
+                };
+                notes = notes.push(kv("Patched", shown));
+            }
             if let Some(hex) = &annotation.color {
                 // The swatch is the color itself; the value beside it is
                 // what the file holds.

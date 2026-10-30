@@ -356,6 +356,18 @@ takes; the whole-image files are never limited. A function the decoder cannot re
 symbol in no code section — gets no files, and a warning on stderr names it. An image the
 decoder does not read is refused, like `disasm`. An error names the file it could not write.
 
+## Assembling one instruction: `ag asm`
+
+```sh
+ag asm "mov eax, 1"
+ag asm "jmp 0x401010" --at 0x401000
+ag asm "mov eax, [ebp+8]" --bits 32
+```
+
+Prints the bytes of one instruction, in Intel syntax, as it would sit at `--at` (a branch is
+encoded against it) in a program of `--bits` 64 or 32. The assembler knows the instructions
+patching reaches for and refuses anything else by name.
+
 ## The project file: `ag project`
 
 A project file (`.agproj`) records what was analysed — the target's path and SHA-256 — the
@@ -382,6 +394,9 @@ ag project ./bin/ls mark --file ls.agproj 0x2010 data:4[8]
 ag project ./bin/ls mark --file ls.agproj 0x1300 function
 ag project ./bin/ls operand --file ls.agproj 0x1170 decimal
 ag project ./bin/ls switch --file ls.agproj 0x1207 0x2000 6 --relative
+ag project ./bin/ls asm --file ls.agproj 0x1198 "mov eax, 1"
+ag project ./bin/ls patch --file ls.agproj 0x11a0 "90 90"
+ag asm "jmp 0x401010" --at 0x401000
 ag image ./bin/ls cfg 0x1200 --project ls.agproj
 
 # Name a label at an address, a local variable, or a register of the function there
@@ -416,6 +431,8 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET mark --file FILE ADDRESS KIND` | Says how the bytes at `ADDRESS` are read, correcting the analysis: `code`, `function`, `string`, `undefined`, `data`, `data:W` for items of 1, 2, 4 or 8 bytes, `data:W[N]` for an array of `N`; `none` takes the mark off. The workbench shows a data, string or undefined mark in place of the instructions it covers, and lists a function mark as a function. |
 | `ag project TARGET operand --file FILE ADDRESS FORMAT` | Says how the constants in the operands of the instruction at `ADDRESS` are shown: `hex`, `signed`, `decimal`, `octal` or `address`. `hex` is how the analysis prints them, so it clears the record. |
 | `ag project TARGET switch --file FILE ADDRESS TABLE COUNT [--width 4\|8] [--relative]` | Says where the jump table the indirect `jmp` at `ADDRESS` reads is — its first entry and how many — when the analysis cannot read it from the code; `--relative` for entries that are offsets from the table, whose width is then 4 unless said. `TABLE` of `none` takes the note off. `ag image disasm\|cfg\|pseudocode … --project FILE` reads the notes. |
+| `ag project TARGET asm --file FILE ADDRESS TEXT` | Assembles the instruction `TEXT` (Intel syntax) as it would sit at `ADDRESS`, at the target's width, and records its bytes as a patch there; warns on stderr when it is longer than the instruction it replaces. |
+| `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
 ## `ag catalog`: the engine's options

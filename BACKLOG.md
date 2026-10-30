@@ -107,7 +107,7 @@ Filed 2026-10-26.
 
 ### Modifying the binary
 
-- [ ] Assembler: assemble an instruction in place — [#315](https://github.com/CryptoJones/AdmiralGrace/issues/315)
+- [x] Assembler: assemble an instruction in place — [#315](https://github.com/CryptoJones/AdmiralGrace/issues/315)
 - [ ] NOP a region — [#316](https://github.com/CryptoJones/AdmiralGrace/issues/316)
 - [ ] Editable Bytes pane — [#317](https://github.com/CryptoJones/AdmiralGrace/issues/317)
 - [ ] Write a patched executable — [#318](https://github.com/CryptoJones/AdmiralGrace/issues/318)

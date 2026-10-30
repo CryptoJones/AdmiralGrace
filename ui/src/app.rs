@@ -106,6 +106,8 @@ pub enum Message {
     EditMark(Mark),
     /// Say where the jump table the selected `jmp` reads is.
     EditSwitch,
+    /// Assemble an instruction over the bytes at the selection.
+    EditAssemble,
     /// Show the constants in the selected instruction's operands the next
     /// way round: hex, signed, decimal, octal, as an address.
     EditOperandFormat,
@@ -228,6 +230,8 @@ pub enum PromptKind {
     /// Where the jump table the selected `jmp` reads is: `TABLE [WIDTH]
     /// COUNT [rel]`.
     Switch,
+    /// An instruction to assemble over the bytes at the selection.
+    Assemble,
 }
 
 /// How the analyst marks the bytes at the selection.
@@ -2045,6 +2049,7 @@ impl App {
                         | PromptKind::Color { .. }
                         | PromptKind::Reference { .. }
                         | PromptKind::Switch
+                        | PromptKind::Assemble
                 )
             }),
             _ => false,
@@ -2054,10 +2059,27 @@ impl App {
         if let Some(before) = before {
             if before != self.annotations.annotations {
                 self.record_change(before);
+                self.tell_patches();
                 self.tell_jump_tables();
             }
         }
         task
+    }
+
+    /// Tell the analysis which bytes the analyst wrote over the image's,
+    /// and read the function on screen again when that changed anything:
+    /// a patch changes the instructions, so every view follows.
+    fn tell_patches(&mut self) {
+        if !self.provider.set_patches(self.annotations.patches()) {
+            return;
+        }
+        self.refresh_functions();
+        self.refresh_listing();
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+        }
+        self.refresh_bytes();
     }
 
     /// Tell the analysis where the analyst's jump tables are, and read the
@@ -2115,6 +2137,30 @@ impl App {
     /// Carry out one message.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EditAssemble => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the instruction to write over".into());
+                    return Task::none();
+                };
+                if self.provider.bitness().is_none() {
+                    self.notice = Some("Assembling needs a program image".into());
+                    return Task::none();
+                }
+                let key = self.annotation_key(address);
+                // The prompt offers the instruction the analyst wrote here
+                // before, so a patch is edited rather than retyped.
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.patch_text.clone())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Assemble,
+                    title: "Assemble over the bytes here (Intel syntax; empty takes the patch off)",
+                    value: current,
+                });
+            }
+
             Message::EditSwitch => {
                 let Some(address) = self.selection.address() else {
                     self.notice = Some("Select the jmp that reads the table".into());
@@ -2220,6 +2266,7 @@ impl App {
                 self.redo.push(change);
                 self.refresh_functions();
                 self.refresh_listing();
+                self.tell_patches();
                 self.tell_jump_tables();
             }
 
@@ -2236,6 +2283,7 @@ impl App {
                 self.undo.push(change);
                 self.refresh_functions();
                 self.refresh_listing();
+                self.tell_patches();
                 self.tell_jump_tables();
             }
 
@@ -2439,6 +2487,7 @@ impl App {
                                 Ok(project) => {
                                     self.annotations = project;
                                     self.forget_changes();
+                                    self.tell_patches();
                                     self.tell_jump_tables();
                                     self.project_path = Some(path.clone());
                                     self.refresh_functions();
@@ -2609,6 +2658,49 @@ impl App {
                             } else {
                                 format!("Referenced {key} → {target}")
                             });
+                        }
+                    }
+                    PromptKind::Assemble => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            let kind = self.kind_at(address);
+                            if text.is_empty() {
+                                self.annotations.annotation_mut(kind, &key).set_patch(None);
+                                self.annotations.prune();
+                                self.notice = Some(format!("Patch taken off {key}"));
+                            } else {
+                                let Some(bitness) = self.provider.bitness() else {
+                                    self.notice = Some("Assembling needs a program image".into());
+                                    return Task::none();
+                                };
+                                let bytes = match ag_image::assemble(text, address, bitness) {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        self.notice = Some(error.to_string());
+                                        return Task::none();
+                                    }
+                                };
+                                // Longer than the instruction it replaces,
+                                // the patch runs into the next one: said,
+                                // not refused — that may be what is meant.
+                                let replaced = self.provider.instruction_length_at(address);
+                                let warning = match replaced {
+                                    Some(replaced) if bytes.len() > replaced => format!(
+                                        "; {} bytes longer than the {replaced}-byte instruction it replaces, so the next instruction is overwritten",
+                                        bytes.len() - replaced
+                                    ),
+                                    _ => String::new(),
+                                };
+                                self.notice = Some(format!(
+                                    "Wrote {} at {key}{warning}",
+                                    ag_corpus::project::hex_of_bytes(&bytes)
+                                ));
+                                self.annotations
+                                    .annotation_mut(kind, &key)
+                                    .set_patch(Some((&bytes, Some(text))));
+                                self.annotations.prune();
+                            }
                         }
                     }
                     PromptKind::Switch => {
@@ -3560,6 +3652,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("n"), true, true) => Message::EditOperandFormat,
         // Where the jump table the selected jmp reads is.
         (Key::Character("j"), true, true) => Message::EditSwitch,
+        // An instruction written over the bytes at the selection.
+        (Key::Character("e"), true, true) => Message::EditAssemble,
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -4454,6 +4548,10 @@ mod tests {
         assert!(matches!(
             shortcut(chord("j", "J", keyboard::key::Code::KeyJ)),
             Message::EditSwitch
+        ));
+        assert!(matches!(
+            shortcut(chord("e", "E", keyboard::key::Code::KeyE)),
+            Message::EditAssemble
         ));
         assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
         assert!(matches!(
@@ -5877,6 +5975,92 @@ mod tests {
 
     fn switch_elf() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/switch.elf")
+    }
+
+    #[test]
+    fn an_instruction_assembled_over_the_bytes_changes_what_every_view_reads() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let add = 0x1149;
+        let _ = app.update(Message::FunctionSelected(add));
+        let first = app.work.listing[0].clone();
+        assert_eq!(first.address, add);
+        assert_ne!(first.mnemonic, "mov");
+        let before = app.work.listing.len();
+
+        // The sample has no bytes to patch: nothing offered.
+        let mut sample = App::boot(Config::default()).0;
+        let _ = sample.update(Message::FunctionSelected(0x100084A20));
+        let _ = sample.update(Message::EditAssemble);
+        assert_eq!(
+            sample.notice.as_deref(),
+            Some("Assembling needs a program image")
+        );
+
+        // `push rbp` (1 byte) becomes `mov eax, 7` (5 bytes): the listing,
+        // the bytes and the pseudocode follow, and the notice says what
+        // was overwritten.
+        let _ = app.update(Message::AddressSelected(add));
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("mov eax, 7".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(
+            notice.starts_with("Wrote B8 07 00 00 00 at 0x1149"),
+            "{notice}"
+        );
+        assert!(notice.contains("overwritten"), "{notice}");
+        let record = app
+            .annotations
+            .annotation_for("0x1149")
+            .expect("the record");
+        assert_eq!(record.patch.as_deref(), Some("B8 07 00 00 00"));
+        assert_eq!(record.patch_text.as_deref(), Some("mov eax, 7"));
+        assert_eq!(app.work.listing[0].mnemonic, "mov");
+        assert_eq!(app.work.listing[0].bytes, "B8 07 00 00 00");
+        assert!(
+            app.work.listing.len() < before,
+            "the next instruction went under the patch"
+        );
+        let row = app
+            .work
+            .bytes
+            .iter()
+            .find(|row| row.address <= add && add < row.address + row.bytes.len() as u64)
+            .expect("the bytes pane shows the address");
+        assert_eq!(row.bytes[(add - row.address) as usize], 0xb8);
+        assert_eq!(app.undo.len(), 1);
+
+        // A typo is refused by the assembler's reason and records nothing.
+        let _ = app.update(Message::EditAssemble);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("mov eax, 7")
+        );
+        let _ = app.update(Message::PromptChanged("frob eax".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("not assembled")));
+        assert_eq!(app.undo.len(), 1);
+
+        // Undo puts the file's bytes back in every view.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.work.listing[0].mnemonic, first.mnemonic);
+        assert_eq!(app.work.listing.len(), before);
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(app.work.listing[0].mnemonic, "mov");
+
+        // An empty submit takes the patch off.
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged(String::new()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x1149").is_none());
+        assert_eq!(app.work.listing[0].mnemonic, first.mnemonic);
     }
 
     #[test]

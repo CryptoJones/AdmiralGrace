@@ -37,7 +37,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 // The trait that spells one register the way the operand text does.
 use iced_x86::Formatter as _;
@@ -49,13 +49,15 @@ use ag_engine::lift::{lift_function, Pointee, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
 use ag_engine::ProcedureCfg;
-use ag_engine::{Abi, Bitness, Image};
+use ag_engine::{Abi, Image};
 use anyhow::{Context, Result};
 
+pub use ag_engine::asm::{assemble, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
+pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
 /// One section of the image.
@@ -375,6 +377,10 @@ pub struct Binary {
     /// What the analyst said about the jump tables the image's indirect
     /// jumps read, by the address of the jump.
     table_hints: Mutex<BTreeMap<u64, TableHint>>,
+    /// The bytes the analyst wrote over the image's, by the address of the
+    /// first: a patch. The file is not changed; the image is read as if it
+    /// had been.
+    patches: Mutex<BTreeMap<u64, Vec<u8>>>,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
@@ -481,7 +487,7 @@ impl Binary {
                     // An image the decoder does not read is never decoded,
                     // so the width it would be decoded at does not matter.
                     bitness: bitness.unwrap_or(Bitness::Bits64),
-                    decoded: OnceLock::new(),
+                    decoded: Mutex::new(None),
                 })
             })
             .collect();
@@ -503,6 +509,7 @@ impl Binary {
             wide_strings,
             options: Options::default(),
             table_hints: Mutex::new(BTreeMap::new()),
+            patches: Mutex::new(BTreeMap::new()),
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
@@ -548,6 +555,101 @@ impl Binary {
         self
     }
 
+    /// Write the analyst's `patches` over the image's bytes, by the address
+    /// of each patch's first byte, and say whether that changed anything.
+    ///
+    /// The file on disk is not touched: the image is read — decoded,
+    /// walked, lifted — as if its bytes were the patched ones, so every
+    /// view follows a patch at once. A patch that reaches past a section's
+    /// end is cut at the section. What was decoded, walked and indexed
+    /// before is forgotten, since any of it may have read the old bytes.
+    pub fn set_patches(&self, patches: BTreeMap<u64, Vec<u8>>) -> bool {
+        if let Ok(mut held) = self.patches.lock() {
+            if *held == patches {
+                return false;
+            }
+            *held = patches;
+        }
+        for code in &self.file {
+            if let Ok(mut cache) = code.decoded.lock() {
+                *cache = None;
+            }
+        }
+        if let Ok(mut cache) = self.disassembly.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        for index in [&self.string_users, &self.data_users] {
+            if let Ok(mut held) = index.lock() {
+                *held = None;
+            }
+        }
+        if let Ok(mut held) = self.graph.lock() {
+            *held = None;
+        }
+        true
+    }
+
+    /// The bytes the analyst wrote over the image's, by address.
+    pub fn patches(&self) -> BTreeMap<u64, Vec<u8>> {
+        self.patches
+            .lock()
+            .map(|held| held.clone())
+            .unwrap_or_default()
+    }
+
+    /// `bytes`, which start at `base`, with the patches that fall in them
+    /// written over.
+    fn patched(&self, bytes: &[u8], base: u64) -> Vec<u8> {
+        let mut bytes = bytes.to_vec();
+        if let Ok(patches) = self.patches.lock() {
+            let end = base + bytes.len() as u64;
+            for (&at, patch) in patches.iter() {
+                let patch_end = at + patch.len() as u64;
+                if patch_end <= base || at >= end {
+                    continue;
+                }
+                for (i, byte) in patch.iter().enumerate() {
+                    let address = at + i as u64;
+                    if address >= base && address < end {
+                        bytes[(address - base) as usize] = *byte;
+                    }
+                }
+            }
+        }
+        bytes
+    }
+
+    /// The instructions of the section `code`, decoded from its bytes with
+    /// the patches written over them, once per set of patches.
+    fn decoded_of(&self, code: &FileSection) -> Arc<Decoded> {
+        if let Some(decoded) = code.decoded.lock().ok().and_then(|held| held.clone()) {
+            return decoded;
+        }
+        let bytes = self.patched(&code.bytes, code.section.vma);
+        let decoded = Arc::new(decode_section(&bytes, code.section.vma, code.bitness));
+        if let Ok(mut held) = code.decoded.lock() {
+            *held = Some(Arc::clone(&decoded));
+        }
+        decoded
+    }
+
+    /// How long the instruction starting at `address` is, in bytes, when
+    /// the address is in a code section and the bytes there decode: what
+    /// a patch written there replaces.
+    pub fn instruction_length_at(&self, address: u64) -> Option<usize> {
+        let code = self.code_at(address)?;
+        let decoded = self.decoded_of(code);
+        decoded
+            .disasm
+            .instructions
+            .iter()
+            .find(|ins| ins.address == address)
+            .map(|ins| ins.length)
+    }
+
     /// The entry of the next function the image knows after `address`.
     fn next_function_after(&self, address: u64) -> Option<u64> {
         self.functions
@@ -576,7 +678,7 @@ impl Binary {
         // The instructions are in address order, so a block's run of them
         // is found by a binary search for its start and read to its end.
         let cover = |covered: &mut BTreeSet<u64>, entry: u64, code: &FileSection| {
-            let decoded = code.decoded();
+            let decoded = self.decoded_of(code);
             let cfg = self.walk(&decoded.disasm, entry);
             let instructions = &decoded.disasm.instructions;
             for block in &cfg.blocks {
@@ -625,7 +727,7 @@ impl Binary {
                     cover(&mut covered, function.address, code);
                 }
             }
-            let decoded = code.decoded();
+            let decoded = self.decoded_of(code);
             let mut at = 0;
             while at < decoded.disasm.instructions.len() {
                 let ins = &decoded.disasm.instructions[at];
@@ -759,7 +861,9 @@ impl Binary {
             return None;
         }
 
-        Some(file.bytes[offset..end].to_vec())
+        // The bytes as the image is read: with the analyst's patches over
+        // them.
+        Some(self.patched(&file.bytes[offset..end], vma))
     }
 
     /// The strings the image holds.
@@ -1023,7 +1127,7 @@ impl Binary {
             reason: format!("no code at {address:#x}"),
         })?;
 
-        let decoded = code.decoded();
+        let decoded = self.decoded_of(code);
         let cfg = self.walk(&decoded.disasm, address);
         let name = self
             .function_name(address)
@@ -1218,7 +1322,7 @@ impl Binary {
             let Some(code) = self.code_at(caller) else {
                 continue;
             };
-            let decoded = code.decoded();
+            let decoded = self.decoded_of(code);
             let cfg = self.walk(&decoded.disasm, caller);
             let caller_name = self
                 .function_name(caller)
@@ -1249,7 +1353,7 @@ impl Binary {
     fn build_disassembly(&self, address: u64) -> Option<Disassembly> {
         let code = self.code_at(address)?;
 
-        let decoded = code.decoded();
+        let decoded = self.decoded_of(code);
         let cfg = self.walk(&decoded.disasm, address);
 
         // The direct calls are gathered first: a listing says which symbol a
@@ -1487,8 +1591,8 @@ struct FileSection {
     bytes: Vec<u8>,
     /// The width the section's code is decoded at.
     bitness: Bitness,
-    /// The instructions of the section, decoded once.
-    decoded: OnceLock<Decoded>,
+    /// The instructions of the section, decoded once per set of patches.
+    decoded: Mutex<Option<Arc<Decoded>>>,
 }
 
 /// The shortest string the scanner reports, in bytes, the terminator included.
@@ -1630,14 +1734,6 @@ fn escape(bytes: &[u8]) -> String {
     }
 
     out
-}
-
-impl FileSection {
-    /// The instructions of the section, decoded once.
-    fn decoded(&self) -> &Decoded {
-        self.decoded
-            .get_or_init(|| decode_section(&self.bytes, self.section.vma, self.bitness))
-    }
 }
 
 /// The instructions of a section, and their text.
