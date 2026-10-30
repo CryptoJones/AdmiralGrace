@@ -45,6 +45,11 @@ pub fn view(_app: &App) -> Element<'_, Message> {
             Item::new(item_button("Rename function…", "F2", Message::EditRename)),
             Item::new(item_button("Rename label…", "F3", Message::EditRenameLabel)),
             Item::new(item_button(
+                "Rename register…",
+                "Ctrl+F3",
+                Message::EditRenameRegister,
+            )),
+            Item::new(item_button(
                 "Rename local variable…",
                 "Ctrl+F2",
                 Message::EditRenameVariable,

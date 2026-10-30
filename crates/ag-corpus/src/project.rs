@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -40,6 +40,9 @@ pub enum TargetKind {
     /// A local variable of the function at the address, keyed by its
     /// declared name.
     Variable,
+    /// A register as one function's pseudocode and listing print it, keyed
+    /// by the register's own name.
+    Register,
 }
 
 impl TargetKind {
@@ -50,6 +53,7 @@ impl TargetKind {
             TargetKind::Address => "address",
             TargetKind::Region => "region",
             TargetKind::Variable => "variable",
+            TargetKind::Register => "register",
         }
     }
 }
@@ -94,6 +98,17 @@ pub struct Annotation {
     /// by this field, never by the order they were written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variable: Option<String>,
+    /// The register this record renames within one function, when it names
+    /// one.
+    ///
+    /// A register is not a thing at an address the way a function or a label
+    /// is; it is a name the one function's pseudocode and listing print. So a
+    /// register record keys on the register's own name beside the function's
+    /// entry address, and the rename reaches only that function — the same
+    /// shape as a local variable's record, and told apart from it by which
+    /// field is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register: Option<String>,
     /// The analyst's name for the target, replacing the analysis's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -122,6 +137,24 @@ impl Annotation {
             kind: TargetKind::Variable,
             address: address.to_string(),
             variable: Some(variable.to_string()),
+            register: None,
+            name: None,
+            comment: None,
+            bookmark: false,
+            tags: Vec::new(),
+            color: None,
+            byte_type: None,
+        }
+    }
+
+    /// An empty annotation for the register `register` of the function at
+    /// `address`.
+    pub fn for_register(address: &str, register: &str) -> Self {
+        Self {
+            kind: TargetKind::Register,
+            address: address.to_string(),
+            variable: None,
+            register: Some(register.to_string()),
             name: None,
             comment: None,
             bookmark: false,
@@ -137,6 +170,7 @@ impl Annotation {
             kind,
             address: address.to_string(),
             variable: None,
+            register: None,
             name: None,
             comment: None,
             bookmark: false,
@@ -208,7 +242,7 @@ impl ProjectFile {
         let found = self
             .annotations
             .iter()
-            .position(|a| a.address == key && a.variable.is_none());
+            .position(|a| a.address == key && a.variable.is_none() && a.register.is_none());
         match found {
             Some(index) => {
                 let annotation = &mut self.annotations[index];
@@ -228,13 +262,14 @@ impl ProjectFile {
     ///
     /// The lookup canonicalizes, so a caller holding any spelling of the
     /// address — `0X10`, `external:0x1` — finds the one record. A record
-    /// that names a local variable belongs to a variable, not the address,
-    /// and is not found here; see [`ProjectFile::variable_for`].
+    /// that names a local variable or a register belongs to that thing, not
+    /// the address, and is not found here; see [`ProjectFile::variable_for`]
+    /// and [`ProjectFile::register_for`].
     pub fn annotation_for(&self, address: &str) -> Option<&Annotation> {
         let key = canonical_address(address).unwrap_or_else(|| address.to_string());
         self.annotations
             .iter()
-            .find(|a| a.address == key && a.variable.is_none())
+            .find(|a| a.address == key && a.variable.is_none() && a.register.is_none())
     }
 
     /// The record naming the local variable `variable` at `address`, added
@@ -272,6 +307,47 @@ impl ProjectFile {
     /// The analyst's name for the local variable `variable` at `address`.
     pub fn variable_name(&self, address: &str, variable: &str) -> Option<String> {
         self.variable_for(address, variable)
+            .and_then(|a| a.name.clone())
+    }
+
+    /// The record renaming the register `register` within the function at
+    /// `address`, added when none is there.
+    ///
+    /// A register belongs to no single address; it is printed across one
+    /// function's pseudocode and listing. The record keys on the register's
+    /// own name beside the function's entry address, so the rename reaches
+    /// that function and no other.
+    pub fn register_mut(&mut self, address: &str, register: &str) -> &mut Annotation {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        let found = self
+            .annotations
+            .iter()
+            .position(|a| a.address == key && a.register.as_deref() == Some(register));
+        match found {
+            Some(index) => &mut self.annotations[index],
+            None => {
+                self.annotations
+                    .push(Annotation::for_register(&key, register));
+                self.annotations
+                    .last_mut()
+                    .expect("the annotation was just pushed")
+            }
+        }
+    }
+
+    /// The record renaming the register `register` within the function at
+    /// `address`.
+    pub fn register_for(&self, address: &str, register: &str) -> Option<&Annotation> {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        self.annotations
+            .iter()
+            .find(|a| a.address == key && a.register.as_deref() == Some(register))
+    }
+
+    /// The analyst's name for the register `register` within the function at
+    /// `address`.
+    pub fn register_name(&self, address: &str, register: &str) -> Option<String> {
+        self.register_for(address, register)
             .and_then(|a| a.name.clone())
     }
 
@@ -502,13 +578,53 @@ mod tests {
     }
 
     #[test]
+    fn a_register_record_keys_on_the_register_not_the_address() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x1000")
+            .name = Some("decode_frame".into());
+        // The register is a third thing at the entry address: its own
+        // record, keyed on the register's name.
+        project.register_mut("0x1000", "rax").name = Some("result".into());
+        assert_eq!(project.annotations.len(), 2, "one address, two records");
+        assert_eq!(
+            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
+            Some("decode_frame"),
+            "the address record is still the function's"
+        );
+        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
+        // A second spelling of the address finds the same register record.
+        project.register_mut("0X1000", "rax").bookmark = true;
+        assert_eq!(project.annotations.len(), 2);
+        assert!(project.register_for("0x1000", "rax").is_some_and(|a| a.bookmark));
+        // A register of another function keys apart, and so does a register
+        // of the same function from another name.
+        project.register_mut("0x2000", "rax").name = Some("total".into());
+        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
+        assert_eq!(project.register_name("0x2000", "rax").as_deref(), Some("total"));
+    }
+
+    #[test]
+    fn a_register_record_round_trips() {
+        let mut project = ProjectFile::new(Target::default());
+        project.register_mut("0x1000", "rax").name = Some("result".into());
+        let text = project.to_json().expect("json");
+        assert!(text.contains("\"register\": \"rax\""), "{text}");
+        assert!(text.contains("\"kind\": \"register\""), "{text}");
+        // A record that names no register writes no register field at all.
+        assert_eq!(text.matches("\"register\":").count(), 1, "{text}");
+        let read = ProjectFile::from_json(&text).expect("the text reads back");
+        assert_eq!(read, project);
+    }
+
+    #[test]
     fn the_saved_file_is_readable_json() {
         let mut project = ProjectFile::new(Target::default());
         project
             .annotation_mut(TargetKind::Function, "0x1000")
             .bookmark = true;
         let text = project.to_json().expect("json");
-        assert!(text.contains("\"format\": 2"), "{text}");
+        assert!(text.contains("\"format\": 3"), "{text}");
         assert!(text.contains("\"bookmark\": true"), "{text}");
         // An empty name is not written at all.
         assert!(!text.contains("\"name\""), "{text}");

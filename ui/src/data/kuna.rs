@@ -243,6 +243,7 @@ impl Provider for KunaProvider {
                 mnemonic: line.mnemonic.clone(),
                 operands: line.operands.clone(),
                 call_target: None,
+                registers: Vec::new(),
                 comment: None,
             })
             .collect();

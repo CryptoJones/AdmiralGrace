@@ -107,6 +107,14 @@ pub struct ListingLine {
     /// stands for. A call through a GOT slot names the slot, not a
     /// function, and carries none.
     pub call_target: Option<u64>,
+    /// The registers the operands name, spelled as they are spelled in
+    /// `operands`.
+    ///
+    /// The analyst can rename a register within one function; the view
+    /// replaces each name as a whole word, so it needs the spellings the
+    /// disassembler put in the text rather than a guess from the id. A
+    /// provider that names no registers leaves this empty.
+    pub registers: Vec<String>,
     /// Optional trailing comment.
     pub comment: Option<String>,
 }

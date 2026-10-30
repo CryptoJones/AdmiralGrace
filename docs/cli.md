@@ -372,9 +372,10 @@ ag project ./bin/ls rename --file ls.agproj 0x1198 main
 ag project ./bin/ls comment --file ls.agproj EXTERNAL:0x1 "imported qsort"
 ag project ./bin/ls bookmark --file ls.agproj 0x1198
 
-# Name a label at an address, or a local variable of the function there
+# Name a label at an address, a local variable, or a register of the function there
 ag project ./bin/ls label --file ls.agproj 0x1198 start_here
 ag project ./bin/ls var --file ls.agproj 0x1161 local_14 count
+ag project ./bin/ls reg --file ls.agproj 0x1161 rax total
 
 # Report what it holds, as text or JSON
 ag project ./bin/ls show ls.agproj
@@ -394,6 +395,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET rename --file FILE ADDRESS NAME` | Records a name for the function at `ADDRESS`. |
 | `ag project TARGET label --file FILE ADDRESS NAME` | Records a name for the label at `ADDRESS`. The entry label of a function and the function's name are the same record. |
 | `ag project TARGET var --file FILE ADDRESS VARIABLE NAME` | Records a name for the local variable `VARIABLE` of the function at `ADDRESS`, as the pseudocode declares it. |
+| `ag project TARGET reg --file FILE ADDRESS REGISTER NAME` | Records a name for the register `REGISTER` within the function at `ADDRESS`, spelled as the listing spells it. The rename reaches that function's pseudocode and listing alone. |
 | `ag project TARGET comment --file FILE ADDRESS TEXT` | Records a comment at `ADDRESS`. |
 | `ag project TARGET bookmark --file FILE ADDRESS` | Flips a bookmark on the function at `ADDRESS`. |
 

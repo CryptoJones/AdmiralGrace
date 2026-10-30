@@ -79,6 +79,8 @@ pub enum Message {
     EditRenameLabel,
     /// Rename a local variable of the function at the selection.
     EditRenameVariable,
+    /// Rename a register as the function at the selection prints it.
+    EditRenameRegister,
     /// Comment the selected function.
     EditComment,
     /// Toggle a bookmark on the selection.
@@ -174,6 +176,8 @@ pub enum PromptKind {
     Label,
     /// The new name of a local variable, as `DECLARED=NAME`.
     Variable,
+    /// The new name of a register within one function, as `REGISTER=NAME`.
+    Register,
     /// A comment for the selection.
     Comment,
 }
@@ -262,6 +266,20 @@ pub struct BottomPanel {
     pub problems: Vec<Problem>,
     /// Analysis log lines.
     pub log: Vec<String>,
+}
+
+/// The names a view replaces as it draws.
+///
+/// Function and label renames key on the address; a register rename keys
+/// on the register's spelling and belongs to the function on screen,
+/// because the same register means something different in the next
+/// function.
+#[derive(Debug, Default)]
+pub(crate) struct Renames {
+    /// Function and label renames, keyed by the bare hex address.
+    addresses: std::collections::HashMap<String, String>,
+    /// The register renames of the function on screen, by spelling.
+    registers: std::collections::HashMap<String, String>,
 }
 
 /// The whole workbench.
@@ -610,15 +628,12 @@ impl App {
 
     /// Every rename of a function or label, keyed by the bare hex address.
     ///
-    /// A view that prints many names builds this once per render rather
-    /// than asking the provider row by row. A label at an address the
-    /// analysis named no function for still carries a record, so it is
-    /// keyed here too — the way a listing line names its call target.
-    /// (A spaced address like `EXTERNAL:0x1` keys as its bare value; no
-    /// provider that writes listings also names a space, so no two rows
-    /// collide today.)
-    pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {
-        let mut renamed: std::collections::HashMap<String, String> = self
+    /// A label at an address the analysis named no function for still
+    /// carries a record, so it is keyed here too — the way a listing line
+    /// names its call target. (A spaced address like `EXTERNAL:0x1` keys as
+    /// its bare value; no provider that writes listings also names a space,
+    /// so no two rows collide today.)
+    pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {        let mut renamed: std::collections::HashMap<String, String> = self
             .provider
             .functions()
             .iter()
@@ -630,6 +645,7 @@ impl App {
             .collect();
         for annotation in &self.annotations.annotations {
             if annotation.variable.is_some()
+                || annotation.register.is_some()
                 || annotation.address.contains(':')
                 || annotation.name.is_none()
             {
@@ -644,22 +660,77 @@ impl App {
         renamed
     }
 
-    /// The operand text of a listing line, with the callee's rename in place.
+    /// The names a listing, graph, or reference view replaces as it draws:
+    /// every function and label rename by address, and the register renames
+    /// of the function on screen.
+    ///
+    /// A view that prints many names builds this once per render rather
+    /// than asking the provider row by row.
+    pub(crate) fn renames(&self) -> Renames {
+        Renames {
+            addresses: self.renamed_names(),
+            registers: self.renamed_registers(),
+        }
+    }
+
+    /// The register renames of the function on screen, keyed by the
+    /// register's own spelling.
+    ///
+    /// A register rename belongs to one function — `rax` in `add` is not
+    /// `rax` in `main` — so the map is read against the function whose
+    /// listing, graph and pseudocode are on screen.
+    pub(crate) fn renamed_registers(&self) -> std::collections::HashMap<String, String> {
+        let Some(function) = self.work.detail.as_ref().and_then(|detail| detail.start) else {
+            return std::collections::HashMap::new();
+        };
+        let key = self.annotation_key(function);
+        self.annotations
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                annotation.register.is_some() && annotation.address == key
+            })
+            .filter_map(|annotation| {
+                let name = annotation.name.as_ref()?;
+                Some((annotation.register.clone()?, name.clone()))
+            })
+            .collect()
+    }
+
+    /// The operand text of a listing line, with the callee's rename and the
+    /// function's register renames in place.
     ///
     /// A call names one function; the analyst's name for it replaces the
-    /// analysis's own, so the listing and the graph read as one. Any other
-    /// line keeps the operands the provider wrote.
-    pub(crate) fn shown_operands(
-        line: &ListingLine,
-        renamed: &std::collections::HashMap<String, String>,
-    ) -> String {
-        match line.call_target {
+    /// analysis's own, so the listing and the graph read as one. The
+    /// registers the line names — in an operand or inside `[rbp-0x8]` —
+    /// are then replaced as whole words, so a renamed `rbp` reads
+    /// `[frame-0x8]`. Any other text the provider wrote is kept.
+    pub(crate) fn shown_operands(line: &ListingLine, renamed: &Renames) -> String {
+        let base = match line.call_target {
             Some(target) => {
                 let key = format!("{target:#x}");
-                renamed.get(&key).cloned().unwrap_or_else(|| line.operands.clone())
+                renamed
+                    .addresses
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| line.operands.clone())
             }
             None => line.operands.clone(),
+        };
+        if line.registers.is_empty() || renamed.registers.is_empty() {
+            return base;
         }
+        let pairs: Vec<(&str, &str)> = line
+            .registers
+            .iter()
+            .filter_map(|spelled| {
+                renamed
+                    .registers
+                    .get(spelled)
+                    .map(|name| (spelled.as_str(), name.as_str()))
+            })
+            .collect();
+        replace_words(&base, &pairs)
     }
 
     /// The reference labels with the analyst's renames in place.
@@ -757,9 +828,27 @@ impl App {
         names
     }
 
+    /// The registers the function on screen prints, in the order its
+    /// listing first names them.
+    ///
+    /// The disassembler spells each register the way the operand text does,
+    /// so what the analyst types matches what the listing shows. A provider
+    /// that names no registers offers nothing to rename.
+    pub(crate) fn listing_registers(&self) -> Vec<String> {
+        let mut named: Vec<String> = Vec::new();
+        for line in &self.work.listing {
+            for register in &line.registers {
+                if !named.contains(register) {
+                    named.push(register.clone());
+                }
+            }
+        }
+        named
+    }
+
     /// The name pairs the pseudocode view replaces: every renamed function
     /// or label — the one on screen and every callee it names — and every
-    /// renamed local of the function on screen.
+    /// renamed local and register of the function on screen.
     ///
     /// The body text is the provider's and is never rewritten in place;
     /// this is display only.
@@ -778,6 +867,9 @@ impl App {
                 if let Some(renamed) = self.annotations.variable_name(&key, &variable) {
                     pairs.push((variable, renamed));
                 }
+            }
+            for (register, name) in self.renamed_registers() {
+                pairs.push((register, name));
             }
         }
         pairs
@@ -1459,6 +1551,37 @@ impl App {
                         self.annotations.prune();
                         self.notice = Some(format!("Renamed {declared} of {key}"));
                     }
+                    PromptKind::Register => {
+                        // `REGISTER=NAME`, the same shape a variable rename
+                        // takes: the register the listing spells, and the
+                        // name to show for it. An empty right side clears.
+                        let (register, name) = match prompt.value.split_once('=') {
+                            Some((register, name)) => (register.trim(), name.trim()),
+                            None => {
+                                self.notice =
+                                    Some("A register rename reads register=new name".into());
+                                return Task::none();
+                            }
+                        };
+                        // The rename belongs to the function on screen; a
+                        // register means that register only within it.
+                        let Some(address) =
+                            self.work.detail.as_ref().and_then(|detail| detail.start)
+                        else {
+                            self.notice =
+                                Some("Open a function to rename its registers".into());
+                            return Task::none();
+                        };
+                        if register.is_empty() {
+                            self.notice = Some("Name which register to rename".into());
+                            return Task::none();
+                        }
+                        let key = self.annotation_key(address);
+                        let annotation = self.annotations.register_mut(&key, register);
+                        annotation.name = (!name.is_empty()).then_some(name.to_string());
+                        self.annotations.prune();
+                        self.notice = Some(format!("Renamed {register} in {key}"));
+                    }
                     PromptKind::Comment => {
                         let text = prompt.value.trim().to_string();
                         if let Some(address) = self.selection.address() {
@@ -1606,6 +1729,36 @@ impl App {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Variable,
                     title: "Rename local variable (declared=new name)",
+                    value: current,
+                });
+            }
+
+            Message::EditRenameRegister => {
+                // The registers to offer are the ones the function on screen
+                // prints, read from its listing rather than guessed.
+                let Some(address) = self.work.detail.as_ref().and_then(|detail| detail.start)
+                else {
+                    self.notice = Some("Open a function to rename its registers".into());
+                    return Task::none();
+                };
+                let named = self.listing_registers();
+                if named.is_empty() {
+                    self.notice = Some("This function names no registers to rename".into());
+                    return Task::none();
+                }
+                let key = self.annotation_key(address);
+                let next = named
+                    .iter()
+                    .find(|register| self.annotations.register_for(&key, register).is_none())
+                    .cloned()
+                    .unwrap_or_else(|| named[0].clone());
+                let current = match self.annotations.register_for(&key, &next) {
+                    Some(a) => format!("{next}={}", a.name.clone().unwrap_or_default()),
+                    None => format!("{next}="),
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Register,
+                    title: "Rename register (register=new name)",
                     value: current,
                 });
             }
@@ -1897,6 +2050,7 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("s"), true) => Message::FileSaveProject,
         (Key::Named(keyboard::key::Named::F2), true) => Message::EditRenameVariable,
         (Key::Named(keyboard::key::Named::F2), false) => Message::EditRename,
+        (Key::Named(keyboard::key::Named::F3), true) => Message::EditRenameRegister,
         (Key::Named(keyboard::key::Named::F3), false) => Message::EditRenameLabel,
         (Key::Named(keyboard::key::Named::F5), _) => Message::FileReload,
         (Key::Named(keyboard::key::Named::Escape), _) => Message::Dismiss,
@@ -2665,6 +2819,10 @@ mod tests {
             shortcut(named(keyboard::key::Named::F3, none)),
             Message::EditRenameLabel
         ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F3, ctrl)),
+            Message::EditRenameRegister
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -3167,7 +3325,7 @@ mod tests {
         // The listing resolves the callee's name as it draws, from the
         // same map the graph reads.
         let _ = app.update(Message::FunctionSelected(0x1198));
-        let renamed = app.renamed_names();
+        let renamed = app.renames();
         let calls: Vec<String> = app
             .work
             .listing
@@ -3301,19 +3459,125 @@ mod tests {
         let _ = app.update(Message::PromptChanged("add_one".into()));
         let _ = app.update(Message::PromptSubmit);
 
-        let renamed = app.renamed_names();
+        let renamed = app.renames();
         let line = ListingLine {
             address: 0x11a0,
             bytes: "e8 a4 ff ff ff".into(),
             mnemonic: "call".into(),
             operands: "funct_1180".into(),
             call_target: Some(0x1180),
+            registers: Vec::new(),
             comment: None,
         };
         assert_eq!(
             App::shown_operands(&line, &renamed),
             "add_one",
             "a label at an address with no provider row still keys the listing"
+        );
+    }
+
+    #[test]
+    fn a_register_rename_reaches_the_listing_and_the_pseudocode() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // sum_to names its registers in the listing; the analyst can see
+        // what the function prints before naming any of it.
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let named = app.listing_registers();
+        assert!(!named.is_empty(), "the listing names registers: {named:?}");
+
+        let _ = app.update(Message::EditRenameRegister);
+        assert_eq!(
+            app.prompt.as_ref().expect("a register prompt").kind,
+            PromptKind::Register
+        );
+        let first = named[0].clone();
+        let _ = app.update(Message::PromptChanged(format!("{first}=counter")));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none());
+
+        // The listing draws the new name wherever the register stood.
+        let renamed = app.renames();
+        let shown: Vec<String> = app
+            .work
+            .listing
+            .iter()
+            .filter(|line| line.registers.contains(&first))
+            .map(|line| App::shown_operands(line, &renamed))
+            .collect();
+        assert!(!shown.is_empty(), "the register is printed in the listing");
+        assert!(
+            shown.iter().all(|text| !text.contains(&first)),
+            "the old spelling is gone from every line that named it: {shown:?}"
+        );
+        assert!(
+            shown.iter().all(|text| text.contains("counter")),
+            "the new name stands in: {shown:?}"
+        );
+
+        // The pseudocode pairs carry it too, so the body reads the same.
+        let pairs = app.rename_pairs();
+        assert!(
+            pairs.contains(&(first.clone(), "counter".to_string())),
+            "the register rename reaches the pseudocode: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_register_rename_belongs_to_one_function_only() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // Name a register of sum_to…
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let named = app.listing_registers();
+        let first = named[0].clone();
+        let _ = app.update(Message::EditRenameRegister);
+        let _ = app.update(Message::PromptChanged(format!("{first}=counter")));
+        let _ = app.update(Message::PromptSubmit);
+
+        // …and the same register in main, another function, is its own.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(
+            !app.renames().registers.contains_key(&first)
+                || app.renames().registers[&first] != "counter",
+            "sum_to's rename does not follow into main"
+        );
+        let pairs = app.rename_pairs();
+        assert!(
+            !pairs.contains(&(first, "counter".to_string())),
+            "main's body does not borrow sum_to's name: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn clearing_a_register_rename_returns_the_register_name() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let first = app.listing_registers()[0].clone();
+
+        let _ = app.update(Message::EditRenameRegister);
+        let _ = app.update(Message::PromptChanged(format!("{first}=counter")));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.register_for("0x1161", &first).is_some());
+
+        let _ = app.update(Message::EditRenameRegister);
+        let _ = app.update(Message::PromptChanged(format!("{first}=")));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.annotations.register_for("0x1161", &first).is_none(),
+            "an empty rename leaves no record behind"
         );
     }
 

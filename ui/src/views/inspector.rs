@@ -67,7 +67,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         for variable in app.declared_variables() {
             if let Some(renamed) = app.annotations.variable_name(&function_key, &variable) {
                 let label = format!("Local {variable}");
-                notes = notes.push(kv(&label, renamed));
+                notes = notes.push(kv(label, renamed));
+            }
+        }
+        // The registers this function prints that the analyst has named.
+        for register in app.listing_registers() {
+            if let Some(renamed) = app.annotations.register_name(&function_key, &register) {
+                let label = format!("Register {register}");
+                notes = notes.push(kv(label, renamed));
             }
         }
     }
