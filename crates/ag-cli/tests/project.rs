@@ -315,6 +315,9 @@ fn tags_attach_detach_and_are_listed() {
         "tag",
         "--file",
         &file.text(),
+        // The block's record is its own: taking the tags off names the block.
+        "--on",
+        "block",
         "--remove",
         "0x1200",
         "data,table",
@@ -378,6 +381,87 @@ fn tags_attach_detach_and_are_listed() {
     let (ok, report, stderr) = project(&["tags", &file.text(), "parser"]);
     assert!(ok, "{stderr}");
     assert!(report.contains("nothing carries the tag"), "{report}");
+}
+
+#[test]
+fn a_color_is_set_normalized_and_cleared() {
+    let file = TempFile::new("color");
+    let (ok, stdout, stderr) = project(&[
+        "color",
+        "--file",
+        &file.text(),
+        "--on",
+        "function",
+        "0x1149",
+        "Red",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x1149 now color #e07a6a"),
+        "{stdout}"
+    );
+
+    let (ok, stdout, stderr) = project(&["color", "--file", &file.text(), "0x1161", "#ABC"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now color #aabbcc"),
+        "{stdout}"
+    );
+
+    // A typo is refused before the file changes.
+    let (ok, _, stderr) = project(&["color", "--file", &file.text(), "0x1161", "blurple"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not a color"), "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["annotations"].as_array().map(Vec::len), Some(2));
+
+    // A block's color is its own record beside the address's.
+    let (ok, stdout, stderr) = project(&[
+        "color",
+        "--file",
+        &file.text(),
+        "--on",
+        "block",
+        "0x1161",
+        "green",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("region 0x1161 now color #8bcf9c"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["format"],
+        serde_json::json!(4),
+        "a block record names the version"
+    );
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 3, "{report}");
+    let block = annotations
+        .iter()
+        .find(|a| a["block"] == serde_json::json!(true))
+        .expect("the block record");
+    assert_eq!(block["color"], serde_json::json!("#8bcf9c"));
+    let (ok, _, stderr) = project(&[
+        "color",
+        "--file",
+        &file.text(),
+        "--on",
+        "block",
+        "0x1161",
+        "none",
+    ]);
+    assert!(ok, "{stderr}");
+
+    // `none` clears the color, and with it an otherwise empty record.
+    let (ok, stdout, stderr) = project(&["color", "--file", &file.text(), "0x1161", "none"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 1, "{report}");
+    assert_eq!(annotations[0]["color"], serde_json::json!("#e07a6a"));
 }
 
 #[test]

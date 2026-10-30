@@ -177,7 +177,7 @@ reports.
 
 ## The project file
 
-The workbench's Rename, Comment, Bookmark and Tags record the analyst's changes in a project
+The workbench's Rename, Comment, Bookmark, Tags and Highlight record the analyst's changes in a project
 file (`.agproj`): versioned JSON holding the target's path and SHA-256, the analysis
 options, and every annotation keyed by address. **File ▸ Open project file…** reads one
 back and applies its renames to the function list; **File ▸ Save project** (Ctrl+S) writes
@@ -250,6 +250,27 @@ hand: `entry` marks the function the program starts in, and `objc:Class` marks e
 the Objective-C method map named, by its class, so one class's methods gather under one tag.
 Automatic tags are read off the analysis as the views draw, not written to the project file,
 and the inspector's **Tags** line shows both kinds together.
+
+A highlight is a color on a place, so what has been reviewed and what has not is told at a
+glance:
+
+- **Highlight…** (Ctrl+H) colors the selected place: the function, when the selection is a
+  function entry, or the one address otherwise. The prompt reads a color name — `red`,
+  `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or a
+  `#rrggbb` value, prefills the color already there, and an empty submit clears it.
+- **Highlight block…** (Ctrl+Shift+H) colors the basic block of the function on screen that
+  holds the selection.
+
+A color reaches the listing and the graph. A color on a function's entry is the function's:
+it tints every line of the function and every block of its graph. A block's color is a record
+of its own, apart from the entry's, and tints that block and its lines; a line's own color
+tints that one row, and in the graph a band behind the line. The nearest mark wins, so a
+green block with one red line in it reads as the analyst meant, and the entry block colored
+apart from its function keeps both colors. One address holds one color, so an entry line
+cannot be colored apart from its function. The color is mixed into the surface rather than
+painted outright, so the text on it stays legible; the selected row and block show the focus
+color instead, so a highlight shows once the selection moves on. The inspector shows the
+value the file holds beside a swatch. The same color is what `ag project color` records.
 
 Annotations belong to the analysis they were made against. Opening a different binary or
 corpus drops them — a rename of `0x1198` means that address in the other file — while a

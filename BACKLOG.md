@@ -94,7 +94,7 @@ Filed 2026-10-26.
 - [x] Comments: line and inline comments at an address — [#305](https://github.com/CryptoJones/AdmiralGrace/issues/305)
 - [x] Bookmarks: named places of interest, listed and navigable — [#306](https://github.com/CryptoJones/AdmiralGrace/issues/306)
 - [x] Tags on addresses, blocks and functions, with filtering by tag — [#307](https://github.com/CryptoJones/AdmiralGrace/issues/307)
-- [ ] Colors on addresses, blocks and functions — [#308](https://github.com/CryptoJones/AdmiralGrace/issues/308)
+- [x] Colors on addresses, blocks and functions — [#308](https://github.com/CryptoJones/AdmiralGrace/issues/308)
 - [ ] Undo and redo for every analyst change — [#309](https://github.com/CryptoJones/AdmiralGrace/issues/309)
 - [ ] Manually add and remove cross references — [#310](https://github.com/CryptoJones/AdmiralGrace/issues/310)
 

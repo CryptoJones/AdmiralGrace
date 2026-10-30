@@ -374,6 +374,8 @@ ag project ./bin/ls bookmark --file ls.agproj 0x1198
 ag project ./bin/ls tag --file ls.agproj --on function 0x1198 crypto parser
 ag project ./bin/ls tags ls.agproj
 ag project ./bin/ls tags ls.agproj crypto
+ag project ./bin/ls color --file ls.agproj --on function 0x1198 amber
+ag project ./bin/ls color --file ls.agproj 0x11a0 none
 
 # Name a label at an address, a local variable, or a register of the function there
 ag project ./bin/ls label --file ls.agproj 0x1198 start_here
@@ -403,6 +405,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET bookmark --file FILE ADDRESS` | Flips a bookmark on the function at `ADDRESS`. |
 | `ag project TARGET tag --file FILE ADDRESS TAG…` | Attaches one or more tags to the address; `--remove` takes them off, and `--on function` or `--on block` puts them on the function entered there or the block of bytes starting there. A tag is one word: it is trimmed, a space inside one becomes a hyphen, and `a,b` is two tags. |
 | `ag project TARGET tags FILE [TAG]` | Prints every tag with how many places carry it; with `TAG`, the places carrying it, in address order. |
+| `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
 ## `ag catalog`: the engine's options
 

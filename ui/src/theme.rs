@@ -9,6 +9,36 @@ use iced::{Color, Font};
 /// Monospace face used for addresses, bytes, and code.
 pub const MONO: Font = Font::MONOSPACE;
 
+/// The color a `#rrggbb` value names, when it is one.
+pub fn hex_color(hex: &str) -> Option<Color> {
+    let digits = hex.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    Some(Color::from_rgb8(
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    ))
+}
+
+/// `base` with `tint` mixed over it by `strength`, from none at 0 to the
+/// tint itself at 1.
+///
+/// A highlight is read against the dark surface it sits on, so the view
+/// mixes the analyst's color into the surface rather than painting it
+/// outright, and the text on it stays legible.
+pub fn tinted(base: Color, tint: Color, strength: f32) -> Color {
+    let k = strength.clamp(0.0, 1.0);
+    Color {
+        r: base.r * (1.0 - k) + tint.r * k,
+        g: base.g * (1.0 - k) + tint.g * k,
+        b: base.b * (1.0 - k) + tint.b * k,
+        a: 1.0,
+    }
+}
+
 /// The workbench palette.
 pub mod color {
     use super::Color;
