@@ -106,6 +106,41 @@ pub fn assemble(text: &str, address: u64, bitness: Bitness) -> Result<Vec<u8>, N
         Bitness::Bits32 => 32,
         Bitness::Bits16 => return Err(NotAssembled::new("16-bit code is not assembled")),
     };
+    // A branch reaches at most 2 GiB either way, as a 32-bit displacement;
+    // farther than that there is no one instruction to write.
+    if let [Operand::Imm(target)] = operands.as_slice() {
+        if matches!(
+            mnemonic,
+            "jmp"
+                | "call"
+                | "je"
+                | "jz"
+                | "jne"
+                | "jnz"
+                | "jl"
+                | "jge"
+                | "jle"
+                | "jg"
+                | "jb"
+                | "jae"
+                | "jbe"
+                | "ja"
+                | "js"
+                | "jns"
+        ) {
+            let reach = (*target as i128) - (address as i128);
+            if reach < i32::MIN as i128 || reach > i32::MAX as i128 {
+                return Err(NotAssembled::new(format!(
+                    "{mnemonic} to {target:#x} from {address:#x} is farther than a branch reaches"
+                )));
+            }
+            if bits == 32 && u32::try_from(*target).is_err() {
+                return Err(NotAssembled::new(format!(
+                    "{target:#x} is not a 32-bit address"
+                )));
+            }
+        }
+    }
     let mut a = CodeAssembler::new(bits)?;
     encode(&mut a, mnemonic, &operands, bits)?;
     Ok(a.assemble(address)?)
@@ -379,6 +414,20 @@ fn memory(operand: &Operand, bits: u32, width: u32) -> Result<AsmMemoryOperand, 
     })
 }
 
+/// Refuse a memory operand whose stated width is not the register's: `mov
+/// eax, byte ptr [rax]` would quietly load a dword.
+fn same_width(register: Register, memory: &Operand) -> Result<(), NotAssembled> {
+    if let Operand::Mem { size, .. } = memory {
+        let width = register.size() as u32;
+        if *size != 0 && *size != width {
+            return Err(NotAssembled::new(format!(
+                "{register:?} is {width} bytes wide but the memory operand says {size}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The width in bytes of a register operand, or 0.
 fn width_of(operand: &Operand) -> u32 {
     match operand {
@@ -388,21 +437,42 @@ fn width_of(operand: &Operand) -> u32 {
     }
 }
 
-/// An immediate that fits the instruction's immediate field.
-fn imm32(value: i64) -> Result<i32, NotAssembled> {
-    i32::try_from(value)
-        .or_else(|_| u32::try_from(value).map(|v| v as i32))
-        .map_err(|_| NotAssembled::new(format!("{value:#x} does not fit a 32-bit immediate")))
+/// A constant that fits a destination `width` bytes wide, as the 32-bit
+/// immediate field carries it.
+///
+/// A 64-bit destination takes a 32-bit immediate sign-extended, so only a
+/// value that is already a signed 32-bit number is accepted: `0xffffffff`
+/// into `rax` would become -1, not what was typed, and is refused. A
+/// narrower destination takes any value its own width holds, signed or
+/// unsigned, so `mov eax, 0xffffffff` is fine.
+fn imm_for(value: i64, width: u32) -> Result<i32, NotAssembled> {
+    let bits = width * 8;
+    if bits >= 64 {
+        return i32::try_from(value).map_err(|_| {
+            NotAssembled::new(format!(
+                "{value:#x} does not fit the signed 32-bit immediate a 64-bit operand takes; it would sign-extend to {:#x}",
+                value as i32 as i64
+            ))
+        });
+    }
+    let signed_min = -(1i64 << (bits - 1));
+    let unsigned_max = (1i64 << bits) - 1;
+    if value < signed_min || value > unsigned_max {
+        return Err(NotAssembled::new(format!(
+            "{value:#x} does not fit a {bits}-bit operand"
+        )));
+    }
+    Ok(value as i32)
 }
 
 /// A register and a constant that fits the instruction's 32-bit field.
 macro_rules! with_imm {
     ($a:expr, $m:ident, $reg:expr, $v:expr) => {{
         match typed($reg)? {
-            Typed::R64(d) => $a.$m(d, imm32($v)?)?,
-            Typed::R32(d) => $a.$m(d, imm32($v)?)?,
-            Typed::R16(d) => $a.$m(d, imm32($v)?)?,
-            Typed::R8(d) => $a.$m(d, imm32($v)?)?,
+            Typed::R64(d) => $a.$m(d, imm_for($v, 8)?)?,
+            Typed::R32(d) => $a.$m(d, imm_for($v, 4)?)?,
+            Typed::R16(d) => $a.$m(d, imm_for($v, 2)?)?,
+            Typed::R8(d) => $a.$m(d, imm_for($v, 1)?)?,
         }
     }};
 }
@@ -421,25 +491,31 @@ macro_rules! two {
                 _ => return Err(NotAssembled::new(format!("{d:?} and {s:?} are not one width"))),
             },
             (Operand::Reg(d), Operand::Imm(v)) => with_imm!($a, $m, *d, *v),
-            (Operand::Reg(d), m @ Operand::Mem { .. }) => match typed(*d)? {
-                Typed::R64(d) => $a.$m(d, memory(m, $bits, 8)?)?,
-                Typed::R32(d) => $a.$m(d, memory(m, $bits, 4)?)?,
-                Typed::R16(d) => $a.$m(d, memory(m, $bits, 2)?)?,
-                Typed::R8(d) => $a.$m(d, memory(m, $bits, 1)?)?,
-            },
-            (m @ Operand::Mem { .. }, Operand::Reg(s)) => match typed(*s)? {
-                Typed::R64(s) => $a.$m(memory(m, $bits, 8)?, s)?,
-                Typed::R32(s) => $a.$m(memory(m, $bits, 4)?, s)?,
-                Typed::R16(s) => $a.$m(memory(m, $bits, 2)?, s)?,
-                Typed::R8(s) => $a.$m(memory(m, $bits, 1)?, s)?,
-            },
+            (Operand::Reg(d), m @ Operand::Mem { .. }) => {
+                same_width(*d, m)?;
+                match typed(*d)? {
+                    Typed::R64(d) => $a.$m(d, memory(m, $bits, 8)?)?,
+                    Typed::R32(d) => $a.$m(d, memory(m, $bits, 4)?)?,
+                    Typed::R16(d) => $a.$m(d, memory(m, $bits, 2)?)?,
+                    Typed::R8(d) => $a.$m(d, memory(m, $bits, 1)?)?,
+                }
+            }
+            (m @ Operand::Mem { .. }, Operand::Reg(s)) => {
+                same_width(*s, m)?;
+                match typed(*s)? {
+                    Typed::R64(s) => $a.$m(memory(m, $bits, 8)?, s)?,
+                    Typed::R32(s) => $a.$m(memory(m, $bits, 4)?, s)?,
+                    Typed::R16(s) => $a.$m(memory(m, $bits, 2)?, s)?,
+                    Typed::R8(s) => $a.$m(memory(m, $bits, 1)?, s)?,
+                }
+            }
             (m @ Operand::Mem { size, .. }, Operand::Imm(v)) => {
                 if *size == 0 {
                     return Err(NotAssembled::new(
                         "a constant written to memory needs the width: byte, word, dword or qword ptr",
                     ));
                 }
-                $a.$m(memory(m, $bits, *size)?, imm32(*v)?)?
+                $a.$m(memory(m, $bits, *size)?, imm_for(*v, *size)?)?
             }
             _ => return Err(NotAssembled::new(format!("{} does not take these operands", stringify!($m)))),
         }
@@ -460,25 +536,31 @@ macro_rules! two_noimm {
                 (Typed::R8(d), Typed::R8(s)) => $a.$m(d, s)?,
                 _ => return Err(NotAssembled::new(format!("{d:?} and {s:?} are not one width"))),
             },
-            (Operand::Reg(d), m @ Operand::Mem { .. }) => match typed(*d)? {
-                Typed::R64(d) => $a.$m(d, memory(m, $bits, 8)?)?,
-                Typed::R32(d) => $a.$m(d, memory(m, $bits, 4)?)?,
-                Typed::R16(d) => $a.$m(d, memory(m, $bits, 2)?)?,
-                Typed::R8(d) => $a.$m(d, memory(m, $bits, 1)?)?,
-            },
-            (m @ Operand::Mem { .. }, Operand::Reg(s)) => match typed(*s)? {
-                Typed::R64(s) => $a.$m(memory(m, $bits, 8)?, s)?,
-                Typed::R32(s) => $a.$m(memory(m, $bits, 4)?, s)?,
-                Typed::R16(s) => $a.$m(memory(m, $bits, 2)?, s)?,
-                Typed::R8(s) => $a.$m(memory(m, $bits, 1)?, s)?,
-            },
+            (Operand::Reg(d), m @ Operand::Mem { .. }) => {
+                same_width(*d, m)?;
+                match typed(*d)? {
+                    Typed::R64(d) => $a.$m(d, memory(m, $bits, 8)?)?,
+                    Typed::R32(d) => $a.$m(d, memory(m, $bits, 4)?)?,
+                    Typed::R16(d) => $a.$m(d, memory(m, $bits, 2)?)?,
+                    Typed::R8(d) => $a.$m(d, memory(m, $bits, 1)?)?,
+                }
+            }
+            (m @ Operand::Mem { .. }, Operand::Reg(s)) => {
+                same_width(*s, m)?;
+                match typed(*s)? {
+                    Typed::R64(s) => $a.$m(memory(m, $bits, 8)?, s)?,
+                    Typed::R32(s) => $a.$m(memory(m, $bits, 4)?, s)?,
+                    Typed::R16(s) => $a.$m(memory(m, $bits, 2)?, s)?,
+                    Typed::R8(s) => $a.$m(memory(m, $bits, 1)?, s)?,
+                }
+            }
             (m @ Operand::Mem { size, .. }, Operand::Imm(v)) => {
                 if *size == 0 {
                     return Err(NotAssembled::new(
                         "a constant written to memory needs the width: byte, word, dword or qword ptr",
                     ));
                 }
-                $a.$m(memory(m, $bits, *size)?, imm32(*v)?)?
+                $a.$m(memory(m, $bits, *size)?, imm_for(*v, *size)?)?
             }
             _ => return Err(NotAssembled::new(format!("{} does not take these operands", stringify!($m)))),
         }
@@ -600,7 +682,7 @@ fn encode(
         "js" => jcc!(a, js, ops),
         "jns" => jcc!(a, jns, ops),
         "push" => match one_op()? {
-            Operand::Imm(v) => a.push(imm32(*v)?)?,
+            Operand::Imm(v) => a.push(imm_for(*v, if bits == 64 { 8 } else { 4 })?)?,
             Operand::Reg(r) => match typed(*r)? {
                 Typed::R64(r) => a.push(r)?,
                 Typed::R32(r) => a.push(r)?,
@@ -654,9 +736,9 @@ fn encode(
                         )?)?,
                         Err(_) => a.mov(r64, *v)?,
                     },
-                    Typed::R32(r) => a.mov(r, imm32(*v)?)?,
-                    Typed::R16(r) => a.mov(r, imm32(*v)?)?,
-                    Typed::R8(r) => a.mov(r, imm32(*v)?)?,
+                    Typed::R32(r) => a.mov(r, imm_for(*v, 4)?)?,
+                    Typed::R16(r) => a.mov(r, imm_for(*v, 2)?)?,
+                    Typed::R8(r) => a.mov(r, imm_for(*v, 1)?)?,
                 }
                 return Ok(());
             }
@@ -719,7 +801,7 @@ fn encode(
                             "a constant tested against memory needs the width: byte, word, dword or qword ptr",
                         ));
                     }
-                    a.test(memory(m, bits, *size)?, imm32(*v)?)?
+                    a.test(memory(m, bits, *size)?, imm_for(*v, *size)?)?
                 }
                 _ => return Err(NotAssembled::new("test does not take these operands")),
             }
@@ -930,6 +1012,43 @@ mod tests {
         assert_eq!(asm("call 0x401000"), [0xe8, 0xfb, 0xff, 0xff, 0xff]);
         assert_eq!(asm("jmp rax"), [0xff, 0xe0]);
         assert!(refused("jmp").contains("the address"));
+    }
+
+    #[test]
+    fn a_constant_fits_the_destination_it_goes_to() {
+        // A 64-bit operand takes a signed 32-bit immediate, sign-extended;
+        // a value that would change on the way is refused.
+        assert!(refused("and rax, 0xffffffff").contains("would sign-extend"));
+        assert!(refused("cmp rax, 0x80000000").contains("would sign-extend"));
+        assert!(refused("add qword ptr [rax], 0xffffffff").contains("would sign-extend"));
+        assert!(refused("mov qword ptr [rax], 0xffffffff").contains("would sign-extend"));
+        assert_eq!(asm("and rax, -1"), [0x48, 0x25, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            asm("cmp rax, 0x7fffffff"),
+            [0x48, 0x3d, 0xff, 0xff, 0xff, 0x7f]
+        );
+        // A narrower one takes what it holds, signed or unsigned.
+        assert_eq!(asm("and eax, 0xffffffff"), [0x25, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(asm("mov eax, 0xffffffff"), [0xb8, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(asm("mov al, 0xff"), [0xb0, 0xff]);
+        assert!(refused("mov al, 0x1ff").contains("does not fit a 8-bit operand"));
+        assert!(refused("add ax, 0x10000").contains("does not fit a 16-bit operand"));
+        assert!(refused("push 0x100000000").contains("would sign-extend"));
+        // A stated width that is not the register's is refused.
+        assert!(refused("mov eax, byte ptr [rax]")
+            .contains("is 4 bytes wide but the memory operand says 1"));
+        assert!(refused("mov qword ptr [rax], ecx")
+            .contains("is 4 bytes wide but the memory operand says 8"));
+        assert_eq!(asm("mov eax, dword ptr [rax]"), [0x8b, 0x00]);
+        // A branch reaches 2 GiB and no farther.
+        assert!(refused("jmp 0x10000000000").contains("farther than a branch reaches"));
+        assert!(refused("call 0x200401000").contains("farther than a branch reaches"));
+        assert_eq!(
+            assemble("jmp 0x1ffffffff", 0x8049000, Bitness::Bits32)
+                .expect_err("not a 32-bit address")
+                .reason,
+            "jmp to 0x1ffffffff from 0x8049000 is farther than a branch reaches"
+        );
     }
 
     #[test]

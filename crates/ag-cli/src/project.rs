@@ -383,9 +383,12 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                         .with_context(|| format!("{bytes:?} is not hex pairs"))?,
                 )
             };
-            edit(&target, &file, TargetKind::Address, &address, |a| {
-                a.set_patch(patch.as_deref().map(|bytes| (bytes, None)))
-            })
+            edit_patch(
+                &target,
+                &file,
+                &address,
+                patch.as_deref().map(|bytes| (bytes, None)),
+            )
         }
         ProjectCmd::Asm {
             file,
@@ -412,9 +415,7 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                     );
                 }
             }
-            edit(&target, &file, TargetKind::Address, &address, |a| {
-                a.set_patch(Some((&bytes, Some(text.trim()))))
-            })
+            edit_patch(&target, &file, &address, Some((&bytes, Some(text.trim()))))
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {
@@ -628,6 +629,25 @@ fn tags(file: &Path, tag: Option<&str>) -> Result<i32> {
                 println!("  (nothing carries the tag {tag:?})");
             }
         }
+    }
+    Ok(0)
+}
+
+/// Write a patch into the project of `target` — taking off the patches it
+/// overlaps, as the workbench does — then save it back and report.
+fn edit_patch(
+    target: &Path,
+    file: &Path,
+    address: &str,
+    patch: Option<(&[u8], Option<&str>)>,
+) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    project.write_patch(TargetKind::Address, address, patch);
+    project.save(file)?;
+    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
+    match project.annotation_for(&key) {
+        Some(a) => println!("{}: address {key} now {}", file.display(), summarize(a)),
+        None => println!("{}: address {key} cleared", file.display()),
     }
     Ok(0)
 }

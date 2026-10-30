@@ -352,7 +352,8 @@ Patching a binary starts with changing an instruction:
   overwritten; the patch is written all the same, since that may be what is meant. The prompt
   offers the instruction written there before; an empty submit takes the patch off.
 
-The file on disk is never changed. The patch is a record in the project file — the bytes, and
+A patch written over another takes the other off: the bytes written last are the bytes. The
+file on disk is never changed. The patch is a record in the project file — the bytes, and
 the instruction they came from — and the image is read as if its bytes were the patched ones,
 so the listing, the graph, the pseudocode and the bytes pane follow at once; the bytes pane
 shows a patch's bytes in the analyst's color. Undo and redo cover a patch like every other

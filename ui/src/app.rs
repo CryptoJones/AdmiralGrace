@@ -769,7 +769,8 @@ impl App {
         // them: saving onto the old file after a switch would overwrite the
         // wrong project.
         let root = self.analysis_root();
-        if root != self.annotations_root {
+        let kept = root == self.annotations_root;
+        if !kept {
             self.annotations =
                 ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
             self.forget_changes();
@@ -777,7 +778,14 @@ impl App {
             self.annotations_root = root;
         }
         self.refresh_functions();
-        self.select_first_function()
+        let task = self.select_first_function();
+        // A reload of the same analysis is a new image that knows nothing
+        // of the analyst's patches and notes: it is told them again.
+        if kept {
+            self.tell_patches();
+            self.tell_jump_tables();
+        }
+        task
     }
 
     /// The root of the open analysis, the identity annotations belong to.
@@ -2666,8 +2674,7 @@ impl App {
                             let key = self.annotation_key(address);
                             let kind = self.kind_at(address);
                             if text.is_empty() {
-                                self.annotations.annotation_mut(kind, &key).set_patch(None);
-                                self.annotations.prune();
+                                self.annotations.write_patch(kind, &key, None);
                                 self.notice = Some(format!("Patch taken off {key}"));
                             } else {
                                 let Some(bitness) = self.provider.bitness() else {
@@ -2697,9 +2704,7 @@ impl App {
                                     ag_corpus::project::hex_of_bytes(&bytes)
                                 ));
                                 self.annotations
-                                    .annotation_mut(kind, &key)
-                                    .set_patch(Some((&bytes, Some(text))));
-                                self.annotations.prune();
+                                    .write_patch(kind, &key, Some((&bytes, Some(text))));
                             }
                         }
                     }
@@ -6054,6 +6059,26 @@ mod tests {
         assert_eq!(app.work.listing.len(), before);
         let _ = app.update(Message::EditRedo);
         assert_eq!(app.work.listing[0].mnemonic, "mov");
+
+        // A reload of the same binary keeps the patch and shows it.
+        let _ = app.update(Message::FileReload);
+        let _ = app.update(Message::FunctionSelected(add));
+        assert_eq!(
+            app.work.listing[0].mnemonic, "mov",
+            "the new image was told the patch"
+        );
+
+        // A patch written over another takes it off.
+        let _ = app.update(Message::AddressSelected(add + 1));
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("int3".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::AddressSelected(add));
+        let _ = app.update(Message::EditAssemble);
+        let _ = app.update(Message::PromptChanged("mov eax, 9".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x114a").is_none());
+        assert_eq!(app.work.listing[0].bytes, "B8 09 00 00 00");
 
         // An empty submit takes the patch off.
         let _ = app.update(Message::EditAssemble);

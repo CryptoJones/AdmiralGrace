@@ -605,9 +605,9 @@ impl Binary {
     fn patched(&self, bytes: &[u8], base: u64) -> Vec<u8> {
         let mut bytes = bytes.to_vec();
         if let Ok(patches) = self.patches.lock() {
-            let end = base + bytes.len() as u64;
+            let end = base.saturating_add(bytes.len() as u64);
             for (&at, patch) in patches.iter() {
-                let patch_end = at + patch.len() as u64;
+                let patch_end = at.saturating_add(patch.len() as u64);
                 if patch_end <= base || at >= end {
                     continue;
                 }

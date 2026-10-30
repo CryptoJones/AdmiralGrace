@@ -1001,6 +1001,41 @@ impl ProjectFile {
             .collect()
     }
 
+    /// Write the patch `bytes` at `address` as the record of kind `kind`
+    /// says, taking off every patch it overlaps: the bytes the analyst
+    /// wrote last are the bytes, not the ones that happened to sit at a
+    /// higher address. `None` takes the patch at `address` off alone.
+    pub fn write_patch(
+        &mut self,
+        kind: TargetKind,
+        address: &str,
+        patch: Option<(&[u8], Option<&str>)>,
+    ) {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        if let Some((bytes, _)) = patch {
+            if let Ok((start, _)) = crate::parse_addr_space(&key) {
+                let end = start.saturating_add(bytes.len() as u64);
+                for record in &mut self.annotations {
+                    if record.variable.is_some() || record.register.is_some() || record.block {
+                        continue;
+                    }
+                    let (Some(other), Ok((at, _))) = (
+                        record.patch_bytes(),
+                        crate::parse_addr_space(&record.address),
+                    ) else {
+                        continue;
+                    };
+                    let other_end = at.saturating_add(other.len() as u64);
+                    if at != start && at < end && start < other_end {
+                        record.set_patch(None);
+                    }
+                }
+            }
+        }
+        self.annotation_mut(kind, &key).set_patch(patch);
+        self.prune();
+    }
+
     /// Every patch the analyst wrote, by the value of the address of its
     /// first byte: what an image is told to read as its bytes.
     pub fn patches(&self) -> BTreeMap<u64, Vec<u8>> {
@@ -1605,6 +1640,27 @@ mod tests {
         record.set_patch(Some((&[0x90], None)));
         record.set_patch(None);
         assert!(record.is_empty());
+
+        // A patch written over another takes it off, whatever their order
+        // in memory; one beside it stays.
+        let mut project = ProjectFile::new(Target::default());
+        project.write_patch(TargetKind::Address, "0x114a", Some((&[0x90], None)));
+        project.write_patch(TargetKind::Address, "0x1150", Some((&[0xcc], None)));
+        project.write_patch(
+            TargetKind::Address,
+            "0x1149",
+            Some((&[0xb8, 7, 0, 0, 0], Some("mov eax, 7"))),
+        );
+        let patches = project.patches();
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        assert_eq!(patches.get(&0x1149), Some(&vec![0xb8, 7, 0, 0, 0]));
+        assert_eq!(patches.get(&0x1150), Some(&vec![0xcc]));
+        assert!(
+            project.annotation_for("0x114a").is_none(),
+            "the overlapped patch is gone"
+        );
+        project.write_patch(TargetKind::Address, "0x1149", None);
+        assert_eq!(project.patches().len(), 1);
     }
 
     #[test]

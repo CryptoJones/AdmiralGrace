@@ -671,6 +671,22 @@ fn a_patch_is_written_over_the_image_and_assembled_from_text() {
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(report.contains("mov eax,7"), "{report}");
 
+    // A patch written over another takes it off: the bytes typed last are
+    // the bytes, wherever the other sat.
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x114a", "cc"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["asm", "--file", &file.text(), "0x1149", "mov eax, 7"]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    let patched: Vec<&str> = report["annotations"]
+        .as_array()
+        .expect("the annotations")
+        .iter()
+        .filter(|a| !a["patch"].is_null())
+        .map(|a| a["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(patched, ["0x1198", "0x1149"], "{report}");
+
     // Taking the patch off reads the file as it is again.
     let (ok, stdout, stderr) = project(&["patch", "--file", &file.text(), "0x1149", "none"]);
     assert!(ok, "{stderr}");
