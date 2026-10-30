@@ -138,6 +138,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+E",
                 Message::EditAssemble,
             )),
+            Item::new(item_button(
+                "NOP instruction",
+                "Ctrl+Shift+O",
+                Message::EditNop,
+            )),
+            Item::new(item_button(
+                "NOP range…",
+                "Ctrl+Shift+R",
+                Message::EditNopRange,
+            )),
             Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
             Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),
