@@ -167,35 +167,37 @@ fn filter_input(app: &App) -> Element<'_, Message> {
 
 /// The heading above the navigator's list.
 ///
-/// The Segments section lists the sections of the program image; every other
-/// section lists the functions.
+/// The Segments section lists the sections of the program image and the
+/// Bookmarks section the analyst's marked places; every other section lists
+/// the functions.
 fn list_heading(app: &App) -> &'static str {
-    if app.navigator.section == Section::Segments {
-        "Segments"
-    } else {
-        "Functions"
+    match app.navigator.section {
+        Section::Segments => "Segments",
+        Section::Bookmarks => "Bookmarks",
+        _ => "Functions",
     }
 }
 
 /// How many rows the navigator's list holds.
 fn list_count(app: &App) -> usize {
-    if app.navigator.section == Section::Segments {
-        app.provider.segments().len() + app.provider.data_symbols().len()
-    } else {
-        app.navigator.rows.len()
+    match app.navigator.section {
+        Section::Segments => app.provider.segments().len() + app.provider.data_symbols().len(),
+        Section::Bookmarks => app.annotations.bookmarks().len(),
+        _ => app.navigator.rows.len(),
     }
 }
 
 /// The list the navigator shows.
 ///
-/// The Segments section holds the sections of the program image; every other
-/// section holds the functions.
+/// The Segments section holds the sections of the program image and the
+/// Bookmarks section the analyst's marked places; every other section holds
+/// the functions.
 fn list_contents(app: &App) -> Column<'_, Message> {
-    if app.navigator.section == Section::Segments {
-        return segment_list(app);
+    match app.navigator.section {
+        Section::Segments => segment_list(app),
+        Section::Bookmarks => bookmark_list(app),
+        _ => function_list(app),
     }
-
-    function_list(app)
 }
 
 /// The sections of the program image, and the named data in it.
@@ -365,19 +367,112 @@ fn function_row<'a>(app: &'a App, row: &'a FunctionRow) -> Element<'a, Message> 
     element
 }
 
+/// The places the analyst marked, in address order.
+///
+/// A bookmark row shows the place's name and its address, and clicking it
+/// jumps there. A place the analyst named (a label) shows that name; a
+/// function entry shows the function's name; a bare address shows the
+/// address.
+fn bookmark_list(app: &App) -> Column<'_, Message> {
+    let marked = app.annotations.bookmarks();
+
+    if marked.is_empty() {
+        return Column::new()
+            .spacing(3)
+            .push(Text::new("No bookmarks").size(12).color(color::MUTED))
+            .push(
+                Text::new("Select a place and press Ctrl+Shift+B to mark it.")
+                    .size(11)
+                    .color(color::DIM),
+            );
+    }
+
+    let mut list = Column::new().spacing(1).width(Length::Fill);
+
+    for annotation in marked {
+        // The stored address is canonical; a place in a named space keys on
+        // its value, the way every other view asks for it. A record whose
+        // address parses to no value — a hand-edited file, say — is still
+        // listed, so the count and the list agree, but there is nowhere to
+        // jump, so its row does not press.
+        let address = ag_corpus::parse_addr_space(&annotation.address)
+            .map(|(value, _)| value)
+            .ok();
+
+        let selected = address.is_some_and(|address| {
+            matches!(app.selection, crate::model::Selection::Address(a) if a == address)
+                || app.navigator.selected == Some(address)
+        });
+
+        // A place named only by its address shows the address once.
+        let name = address.map(|address| app.place_name(address));
+        let shows_address = name.as_deref() != Some(annotation.address.as_str());
+
+        let mut content = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(6)
+            .push(Text::new("★").size(11).color(color::AMBER))
+            .push(
+                Text::new(name.unwrap_or_else(|| annotation.address.clone()))
+                    .size(12)
+                    .color(color::TEXT)
+                    .width(Length::Fill),
+            );
+        if shows_address {
+            content = content.push(
+                Text::new(annotation.address.clone())
+                    .size(11)
+                    .color(color::MUTED)
+                    .font(MONO),
+            );
+        }
+
+        let surface = Container::new(content)
+            .padding([5, 7])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if selected {
+                    color::SELECT_BG
+                } else {
+                    color::PANEL
+                })),
+                border: Border {
+                    color: color::PANEL,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+        let element: Element<'_, Message> = match address {
+            Some(address) => mouse_area(surface)
+                .on_press(Message::BookmarkSelected(address))
+                .into(),
+            None => surface.into(),
+        };
+
+        list = list.push(element);
+    }
+
+    list
+}
+
 /// The explore sections with their counts.
 fn explore_list(app: &App) -> Column<'_, Message> {
     let counts = &app.navigator.counts;
     let mut list = Column::new().spacing(1).width(Length::Fill);
 
     for section in Section::ALL {
+        // A bookmark is the analyst's own mark, not something the analysis
+        // reported, so its count comes from the annotation set rather than
+        // the provider's section counts.
         let total = match section {
             Section::Imports => counts.imports,
             Section::Exports => counts.exports,
             Section::Strings => counts.strings,
             Section::Segments => counts.segments,
             Section::Types => counts.types,
-            Section::Bookmarks => counts.bookmarks,
+            Section::Bookmarks => app.annotations.bookmarks().len(),
             Section::Functions => counts.functions,
         };
 

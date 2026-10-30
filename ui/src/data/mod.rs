@@ -310,8 +310,6 @@ pub struct SectionCounts {
     pub segments: usize,
     /// Number of recovered types.
     pub types: usize,
-    /// Number of bookmarks.
-    pub bookmarks: usize,
 }
 
 /// One section of the program image.

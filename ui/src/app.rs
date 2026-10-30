@@ -87,6 +87,8 @@ pub enum Message {
     EditCommentAbove,
     /// Toggle a bookmark on the selection.
     EditBookmark,
+    /// Jump to a bookmarked place from the navigator's list.
+    BookmarkSelected(u64),
     /// Show or hide the navigator.
     ViewToggleNavigator,
     /// Show or hide the inspector.
@@ -661,6 +663,30 @@ impl App {
         self.annotations
             .annotation_for(key)
             .and_then(|a| a.name.clone())
+    }
+
+    /// The name to show for a bookmarked place: the analyst's own name for
+    /// the address when there is one, the analysis's name for the function
+    /// there when the address is a function entry, and the address itself
+    /// when nothing names the place.
+    ///
+    /// A bookmark is a mark on a place, so it borrows the place's name;
+    /// naming a bookmark means naming the place, which is what a label
+    /// (F3) does for an address the analysis named nothing at.
+    pub(crate) fn place_name(&self, address: u64) -> String {
+        let key = self.annotation_key(address);
+        if let Some(name) = self.annotation_name(&key) {
+            return name;
+        }
+        if let Some(row) = self
+            .provider
+            .functions()
+            .iter()
+            .find(|row| row.address == address)
+        {
+            return row.name.clone();
+        }
+        format!("{address:#x}")
     }
 
     /// The name to show for the function or label at `address`: the
@@ -1909,9 +1935,19 @@ impl App {
                     return Task::none();
                 };
                 let key = self.annotation_key(address);
-                let annotation = self
-                    .annotations
-                    .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                // The record's kind says what the mark is on: the function
+                // at an entry, the address anywhere else.
+                let kind = if self
+                    .provider
+                    .functions()
+                    .iter()
+                    .any(|row| row.address == address)
+                {
+                    ag_corpus::project::TargetKind::Function
+                } else {
+                    ag_corpus::project::TargetKind::Address
+                };
+                let annotation = self.annotations.annotation_mut(kind, &key);
                 annotation.bookmark = !annotation.bookmark;
                 self.annotations.prune();
                 let on = self
@@ -1922,6 +1958,21 @@ impl App {
                     "Bookmark {} {key}",
                     if on { "added at" } else { "cleared at" }
                 ));
+            }
+
+            Message::BookmarkSelected(address) => {
+                // A bookmark marks a place. If that place is a function
+                // entry, open the function the way the navigator does; if
+                // it is any other address, move the selection there. The
+                // two are different because a function fills the work
+                // surface while a bare address only moves the panes that
+                // follow the selection.
+                if self.provider.function_detail(address).is_some() {
+                    return self.select_function(address, true);
+                }
+                self.selection = Selection::Address(address);
+                self.history.push(self.selection);
+                self.refresh_bytes();
             }
 
             Message::ViewToggleNavigator => {
@@ -1954,7 +2005,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }
@@ -2164,7 +2215,10 @@ fn shortcut(event: keyboard::Event) -> Message {
     match (key.as_ref(), modifiers.command(), modifiers.shift()) {
         (Key::Character("o"), true, _) => Message::FileOpenCorpus,
         (Key::Character("q"), true, _) => Message::FileQuit,
-        (Key::Character("b"), true, _) => Message::ViewToggleNavigator,
+        // The plain chord shows or hides the navigator; Shift marks the
+        // selection with a bookmark.
+        (Key::Character("b"), true, false) => Message::ViewToggleNavigator,
+        (Key::Character("b"), true, true) => Message::EditBookmark,
         (Key::Character("i"), true, _) => Message::ViewToggleInspector,
         (Key::Character("j"), true, _) => Message::ViewToggleBottom,
         // The plain chord comments inline; Shift stands the note on its
@@ -2966,6 +3020,24 @@ mod tests {
             shortcut(slash(ctrl | keyboard::Modifiers::SHIFT)),
             Message::EditCommentAbove
         ));
+
+        let b = |modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("b".into()),
+            modified_key: Key::Character("B".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyB),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(
+            shortcut(b(ctrl)),
+            Message::ViewToggleNavigator
+        ));
+        assert!(matches!(
+            shortcut(b(ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditBookmark
+        ));
     }
 
     /// A workbench holding a kuna export, whose CLI has no binary to work on.
@@ -3300,6 +3372,64 @@ mod tests {
         assert!(read.annotations.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bookmarked_function_is_listed_by_its_name_and_jumps() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditBookmark);
+
+        // The explore count is the analyst's own marks, not a provider claim.
+        assert_eq!(app.annotations.bookmarks().len(), 1);
+
+        // The place is named by the function that lives there.
+        let name = app.place_name(address);
+        let row = app
+            .provider
+            .functions()
+            .into_iter()
+            .find(|row| row.address == address)
+            .expect("the sample has a function there");
+        assert_eq!(name, row.name, "the function's own name");
+
+        // Jumping to it opens the function.
+        let _ = app.update(Message::FunctionSelected(0x100084A00));
+        let _ = app.update(Message::BookmarkSelected(address));
+        assert!(matches!(app.selection, Selection::Function(a) if a == address));
+        assert_eq!(app.work.listing_of, Some(address));
+    }
+
+    #[test]
+    fn a_bookmark_at_a_bare_address_moves_the_selection() {
+        let mut app = app();
+        // A place that is not a function entry: the bytes of the image, say.
+        let address = 0x100084A28;
+        let _ = app.update(Message::AddressSelected(address));
+        let _ = app.update(Message::EditBookmark);
+        assert!(app.annotations.bookmarks().iter().any(|a| a.address == format!("{address:#x}")));
+
+        // Nothing names the place, so it is named by its address.
+        assert_eq!(app.place_name(address), format!("{address:#x}"));
+
+        // Jumping to it moves the selection rather than opening a function.
+        let _ = app.update(Message::FunctionSelected(0x100084A00));
+        let _ = app.update(Message::BookmarkSelected(address));
+        assert!(matches!(app.selection, Selection::Address(a) if a == address));
+    }
+
+    #[test]
+    fn a_named_bookmark_shows_the_analysts_name() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditBookmark);
+        // Naming the place is naming its label; the bookmark shows that name.
+        let _ = app.update(Message::EditRenameLabel);
+        let _ = app.update(Message::PromptChanged("loop_head".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.place_name(address), "loop_head");
     }
 
     #[test]
