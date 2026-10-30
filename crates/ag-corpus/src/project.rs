@@ -1048,19 +1048,20 @@ impl ProjectFile {
             .collect()
     }
 
-    /// The records that carry a patch, in address order: what the Patch
-    /// History lists.
+    /// The records whose patch is written, in address order: what the
+    /// Patch History lists, and what [`Self::patches`] writes — a record
+    /// whose bytes do not read as hex pairs is in neither, and two spellings
+    /// of one address are one patch, the later record's.
     pub fn patch_records(&self) -> Vec<(u64, &Annotation)> {
-        let mut records: Vec<(u64, &Annotation)> = self
+        let by_address: BTreeMap<u64, &Annotation> = self
             .places()
-            .filter(|a| a.patch.is_some())
+            .filter(|a| a.patch_bytes().is_some())
             .filter_map(|a| {
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, a))
             })
             .collect();
-        records.sort_by_key(|(address, _)| *address);
-        records
+        by_address.into_iter().collect()
     }
 
     /// The records that are on a place: an address, a function, a region.

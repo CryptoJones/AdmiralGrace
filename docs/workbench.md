@@ -367,8 +367,11 @@ Patching a binary starts with changing an instruction:
 
 - **Write patched program…** (File menu) writes a copy of the program with every patch in it,
   wherever the file holds the bytes a patch changes, and leaves the program itself as it is.
-  The prompt offers a path beside the program. A patch over bytes the file does not hold — an
-  address no section holds, or a section with no bytes in the file — is refused by address.
+  The prompt offers a path beside the program; a file already there is written over on a
+  second submit of the same path, and never the program or the project file. A patch over
+  bytes the file does not hold — an address no section holds, or a section with no bytes in
+  the file — is refused by address, and so is writing into a program that has changed since
+  the project recorded its hash. The copy is written whole or not at all.
 - The **Patch History** tab of the bottom panel lists the patches in address order: the
   address, the bytes, and the instruction they were assembled from when they were. Clicking
   one goes there.

@@ -387,12 +387,9 @@ impl Provider for BinaryProvider {
                 .binary
                 .patched_file(&original)
                 .map_err(|error| error.to_string())?;
-            std::fs::write(out, &written)
+            // The copy runs as the program does, and is whole or not there.
+            ag_image::write_copy(source, out, &written)
                 .map_err(|error| format!("writing {}: {error}", out.display()))?;
-            // The copy runs as the program does.
-            if let Ok(metadata) = std::fs::metadata(source) {
-                let _ = std::fs::set_permissions(out, metadata.permissions());
-            }
             Ok(written.len())
         };
         Some(write())

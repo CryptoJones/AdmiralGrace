@@ -1263,3 +1263,114 @@ fn the_file_is_written_with_the_patches_in_it_and_a_patch_outside_it_is_refused(
     let refused = binary.patched_file(&original).expect_err("refused");
     assert_eq!(refused.address, bss.vma);
 }
+
+#[test]
+fn a_patch_lands_by_file_offset_in_a_pe_and_crosses_sections_in_a_macho() {
+    // In the PE the file holds fewer bytes of `.text` than it spans in
+    // memory: a patch is placed by the bytes the file holds, and one that
+    // reaches past them is refused whole, whatever lies past them.
+    let pe = pe();
+    let original = std::fs::read(pe_path()).expect("the PE's bytes");
+    let text = pe
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect(".text");
+    // The file holds `.text` as the loader reports it; the bytes written
+    // are placed by that count, and never past the section's size in
+    // memory.
+    let held = text.file_size.expect("in the file").min(text.size);
+    let last = text.vma + held - 1;
+    assert!(pe.set_patches(BTreeMap::from([(last, vec![0xcc])])));
+    let written = pe.patched_file(&original).expect("written");
+    let offset = (text.file_offset.expect("offset") + held - 1) as usize;
+    assert_eq!(written[offset], 0xcc);
+    assert_eq!(
+        (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count(),
+        1
+    );
+    pe.set_patches(BTreeMap::from([(last, vec![0xcc, 0xcc])]));
+    let refused = pe
+        .patched_file(&original)
+        .expect_err("past the file's bytes");
+    assert_eq!(refused.address, last, "{refused}");
+
+    // In the Mach-O two sections meet in memory: a patch over the seam
+    // is placed section by section, each at its own file offset.
+    let macho = macho();
+    let original = std::fs::read(macho_path()).expect("the Mach-O's bytes");
+    let sections: Vec<_> = macho
+        .sections()
+        .iter()
+        .filter(|section| section.vma != 0 && section.file_offset.is_some())
+        .collect();
+    let (first, second) = sections
+        .iter()
+        .find_map(|first| {
+            let seam = first.vma + first.size;
+            sections
+                .iter()
+                .find(|second| second.vma == seam)
+                .map(|second| (*first, *second))
+        })
+        .expect("two sections that meet");
+    let seam = first.vma + first.size;
+    assert!(macho.set_patches(BTreeMap::from([(seam - 1, vec![0xaa, 0xbb])])));
+    let written = macho.patched_file(&original).expect("written");
+    let end_of_first = (first.file_offset.unwrap() + first.size - 1) as usize;
+    let start_of_second = second.file_offset.unwrap() as usize;
+    assert_eq!(written[end_of_first], 0xaa);
+    assert_eq!(written[start_of_second], 0xbb);
+    assert_eq!(
+        (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_copy_is_written_whole_with_the_sources_mode_and_never_into_a_link_to_it() {
+    let dir = std::env::temp_dir().join(format!(
+        "ag-image-write-copy-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let source = dir.join("source");
+    std::fs::write(&source, b"original").expect("the source");
+    let out = dir.join("out");
+
+    ag_image::write_copy(&source, &out, b"copy").expect("written");
+    assert_eq!(std::fs::read(&out).expect("the copy"), b"copy");
+    assert!(!ag_image::same_file(&source, &out));
+    assert!(ag_image::same_file(&out, &dir.join("./out")));
+
+    // A read-only copy is replaced all the same, and keeps the source's
+    // permission bits, not its own.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ag_image::write_copy(&source, &out, b"second").expect("written again");
+        assert_eq!(std::fs::read(&out).expect("the copy"), b"second");
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    // A hard link to the source is the source: the rename leaves it as it was.
+    let link = dir.join("link");
+    if std::fs::hard_link(&source, &link).is_ok() {
+        assert!(ag_image::same_file(&source, &link));
+        ag_image::write_copy(&source, &link, b"copy").expect("written");
+        assert_eq!(std::fs::read(&source).expect("the source"), b"original");
+        assert_eq!(std::fs::read(&link).expect("the new file"), b"copy");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

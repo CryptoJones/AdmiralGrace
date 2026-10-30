@@ -619,22 +619,31 @@ impl Binary {
                 };
                 // A section that is not mapped into memory — the debug
                 // information of an ELF, say — sits at no address, so it
-                // holds none.
-                let section = self
-                    .sections
-                    .iter()
-                    .filter(|section| section.vma != 0)
-                    .find(|section| {
-                        section.vma <= vma && vma < section.vma.saturating_add(section.size)
-                    })
+                // holds none. Where mapped sections overlap — `.tbss` lies
+                // over the GOT in an image with thread-local storage — the
+                // one the file holds bytes for is the one written.
+                let mut holding = self.sections.iter().filter(|section| {
+                    section.vma != 0
+                        && section.vma <= vma
+                        && vma < section.vma.saturating_add(section.size)
+                });
+                let first = holding
+                    .next()
                     .ok_or_else(|| refuse(&format!("no section holds {vma:#x}")))?;
+                let section = std::iter::once(first)
+                    .chain(holding)
+                    .find(|section| section.file_offset.is_some())
+                    .unwrap_or(first);
                 let Some(offset) = section.file_offset else {
                     return Err(refuse(&format!(
                         "the file holds no bytes for {} at {vma:#x}",
                         section.name
                     )));
                 };
-                let held = section.file_size.unwrap_or(section.size);
+                // The file may hold fewer bytes than the section spans in
+                // memory — a PE's `.text` is padded out — and never more
+                // that count.
+                let held = section.file_size.unwrap_or(section.size).min(section.size);
                 let skip = vma - section.vma;
                 if skip >= held {
                     return Err(refuse(&format!(
@@ -1638,6 +1647,69 @@ impl Symbols for ImageSymbols<'_> {
             .function_name(address)
             .map(|name| Pointee::Function(name.to_string()))
     }
+}
+
+/// Whether `a` and `b` name one file — the same file on the same device,
+/// however the two are spelled or linked — when both exist.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (meta_a, meta_b);
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Write `bytes` as the file `out`, with the permission bits of `source`,
+/// so that `out` is whole or untouched.
+///
+/// The bytes go into a new file beside `out`, which is then renamed over
+/// it. A rename replaces the name and never writes into the file it named,
+/// so a hard link to `source` under `out`'s name leaves `source` as it is,
+/// a write that fails part-way leaves no half-written `out`, and an `out`
+/// that is read-only is replaced all the same. The bits above the
+/// permissions — setuid, setgid — are not carried onto the copy.
+pub fn write_copy(source: &Path, out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = out.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
+    })?;
+    let temp = dir.join(format!(
+        ".{}.ag-write-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let written = (|| {
+        std::fs::write(&temp, bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(source)?.permissions().mode() & 0o777;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = source;
+        }
+        std::fs::rename(&temp, out)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 /// Why a patch could not be written into the file.

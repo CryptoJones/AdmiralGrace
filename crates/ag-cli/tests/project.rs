@@ -852,7 +852,70 @@ fn a_copy_of_the_target_is_written_with_the_patches_in_it() {
     assert!(!ok);
     assert!(stderr.contains("is the target itself"), "{stderr}");
 
-    // A patch at an address no section holds cannot be placed in the file.
+    // Nor over the project file.
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &file.text(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("is the project file"), "{stderr}");
+
+    // A hard link to the target is the target, however it is named: refused,
+    // and the target is as it was. The link can only be made when the
+    // scratch directory is on the target's file system.
+    #[cfg(unix)]
+    if std::fs::hard_link(&target, TempFile::new("write-patched-link").path()).is_ok() {
+        let link = TempFile::new("write-patched-link");
+        let (ok, _, stderr) = project(&[
+            "write-patched",
+            "--file",
+            &file.text(),
+            "--out",
+            &link.text(),
+            "--force",
+        ]);
+        assert!(!ok);
+        assert!(stderr.contains("is the target itself"), "{stderr}");
+        assert_eq!(std::fs::read(&target).expect("the target"), original);
+    }
+
+    // A read-only copy — the target's mode when the target is — is written
+    // over all the same.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(out.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let (ok, _, stderr) = project(&[
+            "write-patched",
+            "--file",
+            &file.text(),
+            "--out",
+            &out.text(),
+            "--force",
+        ]);
+        assert!(ok, "{stderr}");
+    }
+
+    // A patch over bytes the file does not hold cannot be placed in it: an
+    // address no section holds, or `.bss`.
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x4010", "90"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("holds no bytes for .bss"), "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x4010", "none"]);
+    assert!(ok, "{stderr}");
     let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x10", "90"]);
     assert!(ok, "{stderr}");
     let (ok, _, stderr) = project(&[
@@ -868,4 +931,39 @@ fn a_copy_of_the_target_is_written_with_the_patches_in_it() {
         stderr.contains("the patch at 0x10 cannot be written"),
         "{stderr}"
     );
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x10", "none"]);
+    assert!(ok, "{stderr}");
+
+    // A target rebuilt since the project was made is not written into
+    // without --force: the patches would land on the wrong bytes.
+    let text = std::fs::read_to_string(file.path()).expect("the project");
+    let report = show_json(&file);
+    let recorded = report["target"]["sha256"]
+        .as_str()
+        .expect("a hash")
+        .to_string();
+    std::fs::write(file.path(), text.replace(&recorded, &"0".repeat(64))).unwrap();
+    // The copy from before is out of the way, so the hash alone decides.
+    let _ = std::fs::remove_file(out.path());
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("has changed since the project was made"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+        "--force",
+    ]);
+    assert!(ok, "{stderr}");
 }

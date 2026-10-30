@@ -621,12 +621,30 @@ fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<
     let project = ProjectFile::load(file)?;
     let patches = project.patches();
     anyhow::ensure!(!patches.is_empty(), "{} holds no patches", file.display());
-    // The target is never written: the copy goes somewhere else.
-    let same =
-        out.exists() && std::fs::canonicalize(out).ok() == std::fs::canonicalize(target).ok();
-    anyhow::ensure!(!same, "{} is the target itself", out.display());
+    // The target is never written, nor the project file: the copy goes
+    // somewhere else. A link to either is the same file.
+    anyhow::ensure!(
+        out != target && !ag_image::same_file(out, target),
+        "{} is the target itself",
+        out.display()
+    );
+    anyhow::ensure!(
+        out != file && !ag_image::same_file(out, file),
+        "{} is the project file",
+        out.display()
+    );
     if out.exists() && !force {
         anyhow::bail!("{} exists. Pass --force to write over it.", out.display());
+    }
+    // Patches were made against the bytes the project hashed: written into
+    // a target rebuilt since, they would land on the wrong bytes.
+    if let (Some(recorded), false) = (project.target.sha256.as_deref(), force) {
+        let now = sha256_of(target)?;
+        anyhow::ensure!(
+            now == recorded,
+            "{} has changed since the project was made: its SHA-256 is not the one recorded. Pass --force to write anyway.",
+            target.display()
+        );
     }
     let image =
         ag_image::Binary::open(target).with_context(|| format!("reading {}", target.display()))?;
@@ -636,10 +654,9 @@ fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<
     let original =
         std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
     let written = image.patched_file(&original)?;
-    std::fs::write(out, &written).with_context(|| format!("writing {}", out.display()))?;
-    // The copy runs as the target does.
-    std::fs::set_permissions(out, std::fs::metadata(target)?.permissions())
-        .with_context(|| format!("setting the mode of {}", out.display()))?;
+    // The copy runs as the target does, and is whole or not there.
+    ag_image::write_copy(target, out, &written)
+        .with_context(|| format!("writing {}", out.display()))?;
     println!(
         "wrote {} ({} bytes; {count} patch{} over {bytes} byte{})",
         out.display(),
