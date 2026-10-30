@@ -29,7 +29,7 @@ regenerated, and the annotations stay.
 
 | Field | Meaning |
 |---|---|
-| `format` | The format version. This program writes and reads `1`. A file naming a newer version is refused with a notice, not misread. |
+| `format` | The format version. This program writes and reads `2`. Version 2 lets one address carry a record per local variable as well as its own; a version 1 reader would misread the pair. A file naming a newer version is refused with a notice, not misread. |
 | `target.path` | Where the target was when the project was written. |
 | `target.sha256` | The SHA-256 of the target, so a project can be checked against the binary it describes. |
 | `options` | The analysis options the run used, as name to value — the names `ag catalog` lists. |

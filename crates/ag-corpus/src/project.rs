@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -508,7 +508,7 @@ mod tests {
             .annotation_mut(TargetKind::Function, "0x1000")
             .bookmark = true;
         let text = project.to_json().expect("json");
-        assert!(text.contains("\"format\": 1"), "{text}");
+        assert!(text.contains("\"format\": 2"), "{text}");
         assert!(text.contains("\"bookmark\": true"), "{text}");
         // An empty name is not written at all.
         assert!(!text.contains("\"name\""), "{text}");

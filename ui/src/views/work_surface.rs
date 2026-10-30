@@ -7,7 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
-use crate::app::{replace_word, App, Message};
+use crate::app::{replace_words, App, Message};
 use crate::data::{ByteLine, ListingLine, StringEntry};
 use crate::model::Selection;
 use crate::theme::{color, MONO};
@@ -355,14 +355,17 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
     // The analyst's names, resolved once for the whole body rather than
     // row by row.
     let pairs = app.rename_pairs();
+    // Applied in one pass, so two renames in flight at once never reach
+    // into each other's output.
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(original, renamed)| (original.as_str(), renamed.as_str()))
+        .collect();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for (index, line) in body.lines().enumerate() {
         let addresses = app.work.line_addresses.get(&index).cloned();
-        let mut text = line.to_string();
-        for (original, renamed) in &pairs {
-            text = replace_word(&text, original, renamed);
-        }
+        let text = replace_words(line, &pairs);
         list = list.push(pseudocode_row(index, text, addresses, selection));
     }
 

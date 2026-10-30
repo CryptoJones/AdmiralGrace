@@ -608,20 +608,40 @@ impl App {
             .unwrap_or_else(|| fallback.to_string())
     }
 
-    /// Every rename of a function or label, keyed by the address as the
-    /// provider writes it.
+    /// Every rename of a function or label, keyed by the bare hex address.
     ///
     /// A view that prints many names builds this once per render rather
-    /// than asking the provider row by row.
+    /// than asking the provider row by row. A label at an address the
+    /// analysis named no function for still carries a record, so it is
+    /// keyed here too — the way a listing line names its call target.
+    /// (A spaced address like `EXTERNAL:0x1` keys as its bare value; no
+    /// provider that writes listings also names a space, so no two rows
+    /// collide today.)
     pub(crate) fn renamed_names(&self) -> std::collections::HashMap<String, String> {
-        self.provider
+        let mut renamed: std::collections::HashMap<String, String> = self
+            .provider
             .functions()
             .iter()
             .filter_map(|row| {
+                let key = format!("{:#x}", row.address);
                 self.annotation_name(&row.display_address())
-                    .map(|name| (row.display_address(), name))
+                    .map(|name| (key, name))
             })
-            .collect()
+            .collect();
+        for annotation in &self.annotations.annotations {
+            if annotation.variable.is_some()
+                || annotation.address.contains(':')
+                || annotation.name.is_none()
+            {
+                continue;
+            }
+            if let Some(name) = &annotation.name {
+                renamed
+                    .entry(annotation.address.clone())
+                    .or_insert_with(|| name.clone());
+            }
+        }
+        renamed
     }
 
     /// The operand text of a listing line, with the callee's rename in place.
@@ -646,33 +666,44 @@ impl App {
     ///
     /// A reference is labeled by the name of the function it points at, or
     /// by the address when the analysis had no name; a rename replaces that
-    /// stem and keeps whatever the provider added after it. A label that
-    /// names something else — a piece of data, a string — is left alone.
+    /// stem and keeps whatever the provider added after it — the stem must
+    /// end where a word ends, so renaming `add` does not touch `address`.
+    /// A label that names something else is left alone.
     pub(crate) fn shown_reference_labels(&self, references: &[Reference]) -> Vec<String> {
-        let rows = self.provider.functions();
         references
             .iter()
             .map(|reference| {
-                let row = rows.iter().find(|row| row.address == reference.address);
+                let row = self.provider_row(reference.address);
                 let key = row
+                    .as_ref()
                     .map(|row| row.display_address())
                     .unwrap_or_else(|| format!("{:#x}", reference.address));
                 let Some(renamed) = self.annotation_name(&key) else {
                     return reference.label.clone();
                 };
                 let stem = row
-                    .map(|row| row.name.clone())
+                    .map(|row| row.name)
                     .unwrap_or_else(|| format!("{:#x}", reference.address));
                 let hex = format!("{:#x}", reference.address);
-                if reference.label == stem || reference.label.starts_with(&stem) {
-                    format!("{renamed}{}", &reference.label[stem.len()..])
-                } else if reference.label == hex || reference.label.starts_with(&hex) {
-                    format!("{renamed}{}", &reference.label[hex.len()..])
-                } else {
-                    reference.label.clone()
+                match Self::stem_suffix(&reference.label, &stem).or_else(|| {
+                    Self::stem_suffix(&reference.label, &hex)
+                }) {
+                    Some(suffix) => format!("{renamed}{suffix}"),
+                    None => reference.label.clone(),
                 }
             })
             .collect()
+    }
+
+    /// The part of `label` after `stem`, when the label is the stem plus a
+    /// non-word tail — `add (tail call)` after `add`, never `address`
+    /// after `add`.
+    fn stem_suffix<'a>(label: &'a str, stem: &str) -> Option<&'a str> {
+        label.strip_prefix(stem).filter(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        })
     }
 
     /// The declared local variables of the function on screen, as the
@@ -680,81 +711,84 @@ impl App {
     ///
     /// The declaration lines are the ones the lifter prints — `long v2;`,
     /// `int local_14;` — so the names come from the body the analyst is
-    /// reading, not from a guess. A provider whose pseudocode declares
-    /// nothing offers nothing to rename.
+    /// reading, not from a guess. A pointer or array declaration names its
+    /// variable through a `*` or a `[4]`; both are stripped. A provider
+    /// whose pseudocode declares nothing offers nothing to rename.
     pub(crate) fn declared_variables(&self) -> Vec<String> {
         let Some(body) = self.work.pseudocode.as_deref() else {
             return Vec::new();
         };
         let mut names = Vec::new();
         for line in body.lines() {
-            let line = line.trim();
-            // A declaration is `TYPE NAME;`: two words, the second an
-            // identifier, with no call or assignment in the line.
-            let Some(rest) = line.strip_suffix(';') else {
+            let Some(rest) = line.trim().strip_suffix(';') else {
                 continue;
             };
-            let Some((type_name, variable)) = rest.trim().rsplit_once(char::is_whitespace) else {
+            // A declaration is exactly two words: a type and a name.
+            // `x = 5;` is three, and its last word is a value, not a name.
+            let mut words = rest.split_whitespace();
+            let (Some(type_name), Some(declared), None) =
+                (words.next(), words.next(), words.next())
+            else {
                 continue;
             };
-            if variable.is_empty()
-                || !variable.chars().all(|c| c.is_alphanumeric() || c == '_')
-                || !type_name.contains(char::is_alphabetic)
-                || type_name.contains('(')
-            {
-                continue;
-            }
             // `return x;` reads as a declaration of `x` by type; the known
             // statement keywords are not locals.
             if matches!(type_name, "return" | "if" | "for" | "while" | "else" | "goto") {
                 continue;
             }
-            names.push(variable.to_string());
+            let name = declared
+                .strip_prefix('*')
+                .unwrap_or(declared)
+                .split('[')
+                .next()
+                .unwrap_or("");
+            if name.is_empty()
+                || !name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || !type_name.contains(char::is_alphabetic)
+                || type_name.contains('(')
+            {
+                continue;
+            }
+            if !names.contains(&name.to_string()) {
+                names.push(name.to_string());
+            }
         }
         names
     }
 
-    /// The name pairs the pseudocode view replaces on the function on
-    /// screen: the analysis's own name for each thing, and the analyst's.
+    /// The name pairs the pseudocode view replaces: every renamed function
+    /// or label — the one on screen and every callee it names — and every
+    /// renamed local of the function on screen.
     ///
     /// The body text is the provider's and is never rewritten in place;
     /// this is display only.
     pub(crate) fn rename_pairs(&self) -> Vec<(String, String)> {
-        let Some(function) = self.work.detail.as_ref().and_then(|d| d.start) else {
-            return Vec::new();
-        };
-        let key = self.annotation_key(function);
-        let mut pairs = Vec::new();
-        if let Some(name) = self.annotation_name(&key) {
-            let original = self.analysis_name_of(function);
-            if !original.is_empty() {
-                pairs.push((original, name));
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for row in self.provider.functions() {
+            if let Some(name) = self.annotation_name(&row.display_address()) {
+                if !row.name.is_empty() && row.name != name {
+                    pairs.push((row.name, name));
+                }
             }
         }
-        for variable in self.declared_variables() {
-            if let Some(renamed) = self.annotations.variable_name(&key, &variable) {
-                pairs.push((variable, renamed));
+        if let Some(function) = self.work.detail.as_ref().and_then(|d| d.start) {
+            let key = self.annotation_key(function);
+            for variable in self.declared_variables() {
+                if let Some(renamed) = self.annotations.variable_name(&key, &variable) {
+                    pairs.push((variable, renamed));
+                }
             }
         }
         pairs
     }
 
-    /// The analysis's own name for the function `address` names, for the
-    /// token replacement to look for.
-    fn analysis_name_of(&self, address: u64) -> String {
-        self.work
-            .detail
-            .as_ref()
-            .filter(|detail| detail.start == Some(address))
-            .map(|detail| detail.name.clone())
-            .or_else(|| {
-                self.provider
-                    .functions()
-                    .into_iter()
-                    .find(|row| row.address == address)
-                    .map(|row| row.name)
-            })
-            .unwrap_or_default()
+    /// The provider's row for `address`, when the analysis has one.
+    fn provider_row(&self, address: u64) -> Option<crate::data::FunctionRow> {
+        self.provider
+            .functions()
+            .into_iter()
+            .find(|row| row.address == address)
     }
 
     /// The navigator row the selection points at, when it points at one.
@@ -1784,29 +1818,65 @@ impl App {
     }
 }
 
-/// `text` with every whole-word use of `word` replaced by `name`.
+/// `text` with every whole-word use of each name replaced in one pass.
 ///
 /// A whole word is bounded by characters that cannot spell an identifier,
-/// so renaming `add` does not reach into `address` or `dadd`.
-pub(crate) fn replace_word(text: &str, word: &str, name: &str) -> String {
-    if word.is_empty() {
+/// so renaming `add` does not reach into `address` or `dadd`. The scan
+/// never reads what it already wrote, so a name that itself contains the
+/// word — `add` to `addX` — is not reached into twice.
+///
+/// One pass matters when two renames are in flight at once: renaming
+/// `local_10` to `count` and `local_14` to `local_10` must render the
+/// first as `count` and the second as `local_10`, not both as `count`.
+/// The earliest match is taken first, and among matches starting at the
+/// same point the longest word wins, so a declared name that starts with
+/// another — `v1` and `v10` — still keys on the whole word it found.
+pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
+    let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
+    if pairs.is_empty() {
         return text.to_string();
     }
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(found) = rest.find(word) {
-        let before = found == 0 || !is_word(rest[..found].chars().next_back().expect("nonempty"));
-        let after_index = found + word.len();
-        let after = rest[after_index..]
-            .chars()
-            .next()
-            .is_none_or(|c| !is_word(c));
-        out.push_str(&rest[..found]);
-        out.push_str(if before && after { name } else { word });
-        rest = &rest[after_index..];
+    // The character of the original text just before `rest`, so a word
+    // boundary is read from what the provider wrote, never from what the
+    // replacement put down.
+    let mut prev: Option<char> = None;
+    'scan: while !rest.is_empty() {
+        // The earliest whole-word match, longest word among equals.
+        let best = pairs
+            .iter()
+            .filter_map(|(word, name)| rest.find(word).map(|found| (found, *word, *name)))
+            .min_by(|(left_found, left_word, _), (right_found, right_word, _)| {
+                left_found.cmp(right_found).then(right_word.len().cmp(&left_word.len()))
+            });
+        if let Some((found, word, name)) = best {
+            let before = rest[..found]
+                .chars()
+                .next_back()
+                .or(prev)
+                .is_none_or(|c| !is_word(c));
+            let after_index = found + word.len();
+            let after = rest[after_index..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_word(c));
+            out.push_str(&rest[..found]);
+            if before && after {
+                out.push_str(name);
+            } else {
+                out.push_str(word);
+            }
+            prev = word.chars().next_back();
+            rest = &rest[after_index..];
+            continue 'scan;
+        }
+        let width = rest.chars().next().expect("nonempty").len_utf8();
+        out.push_str(&rest[..width]);
+        prev = rest.chars().next();
+        rest = &rest[width..];
     }
-    out.push_str(rest);
     out
 }
 
@@ -3157,14 +3227,124 @@ mod tests {
         // The pseudocode view shows the new name wherever the old one stood.
         let pairs = app.rename_pairs();
         assert!(pairs.contains(&("local_14".to_string(), "count".to_string())), "{pairs:?}");
+        let pairs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(original, renamed)| (original.as_str(), renamed.as_str()))
+            .collect();
         let line = "  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {";
-        let mut shown = line.to_string();
-        for (original, renamed) in &pairs {
-            shown = replace_word(&shown, original, renamed);
-        }
         assert_eq!(
-            shown,
+            replace_words(line, &pairs),
             "  for (count = 1; count <= a; count = count + 1) {"
+        );
+    }
+
+    #[test]
+    fn clearing_a_variable_rename_returns_the_declared_name() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("local_14=count".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.variable_for("0x1161", "local_14").is_some());
+
+        // An empty right side is the analyst taking the name back.
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("local_14=".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.annotations.variable_for("0x1161", "local_14").is_none(),
+            "an empty rename leaves no record behind"
+        );
+    }
+
+    #[test]
+    fn a_callee_rename_shows_in_the_callers_pseudocode() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // Rename add while standing on add.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // main's body calls add; its pairs carry the callee's rename too,
+        // so the call line reads with the analyst's name.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let pairs = app.rename_pairs();
+        assert!(
+            pairs.contains(&("add".to_string(), "decode".to_string())),
+            "the callee's rename reaches the caller's body: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_label_at_an_unnamed_address_reaches_the_listing() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // An address the analysis named no function for; the analyst still
+        // names its label, and a call to it must read with that name.
+        let _ = app.update(Message::FunctionSelected(0x1180));
+        let _ = app.update(Message::EditRenameLabel);
+        let _ = app.update(Message::PromptChanged("add_one".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let renamed = app.renamed_names();
+        let line = ListingLine {
+            address: 0x11a0,
+            bytes: "e8 a4 ff ff ff".into(),
+            mnemonic: "call".into(),
+            operands: "funct_1180".into(),
+            call_target: Some(0x1180),
+            comment: None,
+        };
+        assert_eq!(
+            App::shown_operands(&line, &renamed),
+            "add_one",
+            "a label at an address with no provider row still keys the listing"
+        );
+    }
+
+    #[test]
+    fn a_reference_label_must_end_its_stem_at_a_word_end() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let references = vec![
+            Reference {
+                address: 0x1149,
+                label: "add (tail call)".into(),
+                kind: ReferenceKind::Calls,
+            },
+            Reference {
+                address: 0x1149,
+                label: "address".into(),
+                kind: ReferenceKind::Data,
+            },
+        ];
+        assert_eq!(
+            app.shown_reference_labels(&references),
+            vec!["decode (tail call)".to_string(), "address".to_string()],
+            "the tail the provider added is kept; a longer word is not a stem"
         );
     }
 
@@ -3183,18 +3363,35 @@ mod tests {
 
         let pairs = app.rename_pairs();
         assert!(pairs.contains(&("add".to_string(), "decode".to_string())), "{pairs:?}");
-        let shown = replace_word("int add(int a, int b)", "add", "decode");
+        let shown = replace_words("int add(int a, int b)", &[("add", "decode")]);
         assert_eq!(shown, "int decode(int a, int b)");
     }
 
     #[test]
-    fn replace_word_only_reaches_whole_words() {
-        assert_eq!(replace_word("call add", "add", "decode"), "call decode");
-        assert_eq!(replace_word("address", "add", "X"), "address");
-        assert_eq!(replace_word("dadd + add_", "add", "X"), "dadd + add_");
-        assert_eq!(replace_word("add(add(1))", "add", "f"), "f(f(1))");
-        assert_eq!(replace_word("local_14", "local_1", "X"), "local_14");
-        assert_eq!(replace_word("a.b", "a", "X"), "X.b");
+    fn replace_words_only_reaches_whole_words() {
+        let one = &[("add", "X")][..];
+        assert_eq!(replace_words("call add", &[("add", "decode")]), "call decode");
+        assert_eq!(replace_words("address", one), "address");
+        assert_eq!(replace_words("dadd + add_", one), "dadd + add_");
+        assert_eq!(replace_words("add(add(1))", &[("add", "f")]), "f(f(1))");
+        assert_eq!(replace_words("local_14", &[("local_1", "X")]), "local_14");
+        assert_eq!(replace_words("a.b", &[("a", "X")]), "X.b");
+        // A name that contains the word is not reached into twice.
+        assert_eq!(replace_words("add + add;", &[("add", "addX")]), "addX + addX;");
+    }
+
+    #[test]
+    fn replace_words_applies_two_renames_in_one_pass() {
+        // local_14 becomes local_10 while local_10 becomes count: each
+        // renders as its own new name, never as the other's.
+        let pairs = &[("local_10", "count"), ("local_14", "local_10")][..];
+        assert_eq!(
+            replace_words("local_10 = local_14 + local_10;", pairs),
+            "count = local_10 + count;"
+        );
+        // A declared name that starts with another keys on the whole word.
+        let named = &[("v1", "one"), ("v10", "ten")][..];
+        assert_eq!(replace_words("v1 = v10 + v1;", named), "one = ten + one;");
     }
 
     #[test]
