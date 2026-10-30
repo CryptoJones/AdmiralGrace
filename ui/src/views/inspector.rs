@@ -42,12 +42,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut notes = Column::new().spacing(5);
     if let Some(address) = selection.address() {
         let key = app.annotation_key(address);
-        if let Some(annotation) = app
-            .annotations
-            .annotations
-            .iter()
-            .find(|a| a.address == key)
-        {
+        if let Some(annotation) = app.annotations.annotation_for(&key) {
             if let Some(name) = &annotation.name {
                 notes = notes.push(kv("Renamed to", name.clone()));
             }
@@ -56,6 +51,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
             if annotation.bookmark {
                 notes = notes.push(subtle("★ bookmarked"));
+            }
+            if !annotation.tags.is_empty() {
+                notes = notes.push(kv("Tags", annotation.tags.join(", ")));
             }
         }
     }

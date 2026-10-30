@@ -19,4 +19,3 @@ iced_aw = "0.14"
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"

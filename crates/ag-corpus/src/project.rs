@@ -39,6 +39,41 @@ pub enum TargetKind {
     Region,
 }
 
+impl TargetKind {
+    /// The kind's label, as the CLI prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            TargetKind::Function => "function",
+            TargetKind::Address => "address",
+            TargetKind::Region => "region",
+        }
+    }
+}
+
+/// The SHA-256 of the file at `path`, as lowercase hex.
+///
+/// The project file records the target's hash, so the format owner computes
+/// it; the CLI and the workbench ask rather than each carrying a copy.
+pub fn sha256_of(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The canonical spelling of an annotation address.
+///
+/// `0X10`, `0x10` and `10` all key the same function, and `external:0x1` and
+/// `EXTERNAL:0x1` key the same import — the space is upper-cased and the
+/// value printed as `{:#x}`, the way a corpus writes it. `None` when the
+/// text names no address at all; such an address is keyed as written.
+pub fn canonical_address(raw: &str) -> Option<String> {
+    let (value, space) = crate::parse_addr_space(raw).ok()?;
+    Some(match space {
+        Some(space) => format!("{}:{value:#x}", space.to_ascii_uppercase()),
+        None => format!("{value:#x}"),
+    })
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -91,12 +126,6 @@ impl Annotation {
             && self.color.is_none()
             && self.byte_type.is_none()
     }
-
-    /// The address and space this annotation is keyed on.
-    pub fn parse(&self) -> Result<(u64, Option<String>)> {
-        crate::parse_addr_space(&self.address)
-            .with_context(|| format!("the annotation address {:?}", self.address))
-    }
 }
 
 /// The identity of the target the analysis ran on.
@@ -137,21 +166,38 @@ impl ProjectFile {
         }
     }
 
-    /// The annotation keyed on `kind` at `address`, added when none is there.
+    /// The annotation for the address `address`, added when none is there.
+    ///
+    /// One address carries one record: the lookup keys on the canonical
+    /// spelling of the address (see [`canonical_address`]), so `0X10` and
+    /// `0x10` reach the same record and a rename, a comment and a bookmark
+    /// at one address live together rather than masking one another. The
+    /// record's `kind` says what the most recent change was attached to.
     pub fn annotation_mut(&mut self, kind: TargetKind, address: &str) -> &mut Annotation {
-        let found = self
-            .annotations
-            .iter()
-            .position(|a| a.kind == kind && a.address == address);
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        let found = self.annotations.iter().position(|a| a.address == key);
         match found {
-            Some(index) => &mut self.annotations[index],
+            Some(index) => {
+                let annotation = &mut self.annotations[index];
+                annotation.kind = kind;
+                annotation
+            }
             None => {
-                self.annotations.push(Annotation::new(kind, address));
+                self.annotations.push(Annotation::new(kind, &key));
                 self.annotations
                     .last_mut()
                     .expect("the annotation was just pushed")
             }
         }
+    }
+
+    /// The annotation for the address `address`, when one is there.
+    ///
+    /// The lookup canonicalizes, so a caller holding any spelling of the
+    /// address — `0X10`, `external:0x1` — finds the one record.
+    pub fn annotation_for(&self, address: &str) -> Option<&Annotation> {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        self.annotations.iter().find(|a| a.address == key)
     }
 
     /// Drop every annotation that carries nothing.
@@ -264,18 +310,64 @@ mod tests {
         project
             .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
             .name = Some("qsort".into());
-        let (address, space) = project.annotations[0].parse().expect("parses");
+        let (address, space) = crate::parse_addr_space(&project.annotations[0].address)
+            .expect("the stored address parses");
         assert_eq!(address, 0x1);
         assert_eq!(space.as_deref(), Some("EXTERNAL"));
     }
 
     #[test]
-    fn a_malformed_annotation_address_is_refused() {
+    fn a_malformed_annotation_address_is_keyed_as_written() {
         let mut project = ProjectFile::new(Target::default());
         project
             .annotation_mut(TargetKind::Address, "not-an-address")
             .comment = Some("here".into());
-        assert!(project.annotations[0].parse().is_err());
+        // A text that names no address is kept verbatim rather than dropped.
+        assert_eq!(project.annotations[0].address, "not-an-address");
+        assert!(canonical_address("not-an-address").is_none());
+    }
+
+    #[test]
+    fn one_address_carries_one_record_whatever_the_spelling() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0X10")
+            .name = Some("main".into());
+        // A comment at the same address, spelled differently, lands on the
+        // same record rather than masking the rename.
+        project
+            .annotation_mut(TargetKind::Address, "0x10")
+            .comment = Some("the entry".into());
+        assert_eq!(project.annotations.len(), 1, "one record for one address");
+        assert_eq!(project.annotations[0].address, "0x10", "stored canonical");
+        let found = project.annotation_for("10").expect("any spelling finds it");
+        assert_eq!(found.name.as_deref(), Some("main"));
+        assert_eq!(found.comment.as_deref(), Some("the entry"));
+    }
+
+    #[test]
+    fn a_spaced_address_keys_apart_from_the_bare_value() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x1")
+            .name = Some("local".into());
+        project
+            .annotation_mut(TargetKind::Function, "external:0x1")
+            .name = Some("qsort".into());
+        assert_eq!(project.annotations.len(), 2, "the space keys apart");
+        // The space is canonicalized, so a second spelling finds the import.
+        project
+            .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
+            .bookmark = true;
+        assert_eq!(project.annotations.len(), 2);
+        assert_eq!(
+            project.annotation_for("EXTERNAL:0x1").and_then(|a| a.name.as_deref()),
+            Some("qsort")
+        );
+        assert_eq!(
+            project.annotation_for("0x1").and_then(|a| a.name.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]

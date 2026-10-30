@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
-use ag_corpus::project::{Annotation, ProjectFile, Target, TargetKind};
-
-use crate::export::sha256_of;
+use ag_corpus::project::{sha256_of, Annotation, ProjectFile, Target, TargetKind};
 
 /// What to do with a project file.
 #[derive(Subcommand)]
@@ -27,6 +25,10 @@ pub enum ProjectCmd {
         /// The analysis options to record, as `NAME=VALUE` (repeatable).
         #[arg(long = "option-pair")]
         options: Vec<String>,
+        /// Write over an existing file, which `save` would otherwise replace
+        /// without warning.
+        #[arg(long)]
+        force: bool,
     },
     /// Report what a project file holds.
     Show {
@@ -69,7 +71,11 @@ pub enum ProjectCmd {
 /// Run `ag project <target> …`: the target is the binary the project describes.
 pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
     match cmd {
-        ProjectCmd::Save { out, options } => save(&target, &out, options),
+        ProjectCmd::Save {
+            out,
+            options,
+            force,
+        } => save(&target, &out, options, force),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
         ProjectCmd::Rename {
             file,
@@ -94,7 +100,17 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
 }
 
 /// Create a project file for `target`, recording the option pairs.
-fn save(target: &Path, out: &Path, options: Vec<String>) -> Result<i32> {
+///
+/// A `save` onto an existing file replaces it — and with it every annotation
+/// it holds — so the file is refused unless `--force` says the analyst meant
+/// it, the way `ag image export` refuses a non-empty directory.
+fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<i32> {
+    if out.exists() && !force {
+        anyhow::bail!(
+            "{} exists; its annotations would be replaced. Pass --force to write it anyway.",
+            out.display()
+        );
+    }
     let sha256 = sha256_of(target)?;
     let mut project = ProjectFile::new(Target {
         path: Some(target.display().to_string()),
@@ -136,30 +152,11 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
         println!("  option  {name} = {value}");
     }
     for annotation in &project.annotations {
-        let mut parts = Vec::new();
-        if let Some(name) = &annotation.name {
-            parts.push(format!("name {name}"));
-        }
-        if let Some(comment) = &annotation.comment {
-            parts.push(format!("comment {comment:?}"));
-        }
-        if annotation.bookmark {
-            parts.push("bookmark".to_string());
-        }
-        if !annotation.tags.is_empty() {
-            parts.push(format!("tags {}", annotation.tags.join(",")));
-        }
-        if let Some(color) = &annotation.color {
-            parts.push(format!("color {color}"));
-        }
-        if let Some(byte_type) = &annotation.byte_type {
-            parts.push(format!("type {byte_type}"));
-        }
         println!(
             "  {:9} {:>16}  {}",
-            kind_label(annotation.kind),
+            annotation.kind.label(),
             annotation.address,
-            parts.join(", ")
+            summarize(annotation)
         );
     }
     if project.annotations.is_empty() {
@@ -190,34 +187,43 @@ fn edit(
     // The project may not exist yet: the first edit creates it from the target.
     let mut project = match ProjectFile::load(file) {
         Ok(project) => project,
-        Err(_) if !file.exists() => ProjectFile::new(Target {
-            path: Some(target.display().to_string()),
-            sha256: sha256_of(target).ok(),
-        }),
+        Err(_) if !file.exists() => {
+            let sha256 = match sha256_of(target) {
+                Ok(sha) => Some(sha),
+                Err(error) => {
+                    eprintln!("note: {target:?} cannot be hashed to record: {error:#}");
+                    None
+                }
+            };
+            ProjectFile::new(Target {
+                path: Some(target.display().to_string()),
+                sha256,
+            })
+        }
         Err(error) => return Err(error),
     };
     change(project.annotation_mut(kind, address));
     project.prune();
     project.save(file)?;
-    let kept = project
-        .annotations
-        .iter()
-        .find(|a| a.kind == kind && a.address == address);
+    let key = ag_corpus::project::canonical_address(address)
+        .unwrap_or_else(|| address.to_string());
+    let kept = project.annotation_for(&key);
     match kept {
         Some(a) => println!(
-            "{file}: {kind} {address} now {}",
+            "{}: {} {key} now {}",
+            file.display(),
+            kind.label(),
             summarize(a)
-        , file = file.display(), kind = kind_label(kind)),
-        None => println!(
-            "{file}: {kind} {address} cleared",
-            file = file.display(),
-            kind = kind_label(kind)
         ),
+        None => println!("{}: {} {key} cleared", file.display(), kind.label()),
     }
     Ok(0)
 }
 
-/// One line on what an annotation carries.
+/// What an annotation carries, as one comma-separated line.
+///
+/// `show` prints an annotation with this, and `edit` confirms with it, so the
+/// two can never disagree about what a record holds.
 fn summarize(annotation: &Annotation) -> String {
     let mut parts = Vec::new();
     if let Some(name) = &annotation.name {
@@ -229,18 +235,18 @@ fn summarize(annotation: &Annotation) -> String {
     if annotation.bookmark {
         parts.push("bookmark".to_string());
     }
+    if !annotation.tags.is_empty() {
+        parts.push(format!("tags {}", annotation.tags.join(",")));
+    }
+    if let Some(color) = &annotation.color {
+        parts.push(format!("color {color}"));
+    }
+    if let Some(byte_type) = &annotation.byte_type {
+        parts.push(format!("type {byte_type}"));
+    }
     if parts.is_empty() {
         "(empty)".to_string()
     } else {
         parts.join(", ")
-    }
-}
-
-/// The kind's label, as printed.
-fn kind_label(kind: TargetKind) -> &'static str {
-    match kind {
-        TargetKind::Function => "function",
-        TargetKind::Address => "address",
-        TargetKind::Region => "region",
     }
 }

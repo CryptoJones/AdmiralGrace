@@ -315,6 +315,14 @@ pub struct App {
     pub annotations: ag_corpus::project::ProjectFile,
     /// Where the open project file was last read from or written to.
     pub project_path: Option<PathBuf>,
+    /// The analysis root the annotations belong to.
+    ///
+    /// An annotation is about one analysis: a rename of `0x1198` means that
+    /// address in *this* binary. Opening a different analysis drops the
+    /// annotations rather than carry them onto a binary they never described;
+    /// reloading the same one keeps them. `None` is the sample project, which
+    /// has no root of its own.
+    pub annotations_root: Option<PathBuf>,
 }
 
 impl App {
@@ -367,6 +375,7 @@ impl App {
                 ag_corpus::project::Target::default(),
             ),
             project_path: None,
+            annotations_root: None,
         };
 
         let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
@@ -501,6 +510,7 @@ impl App {
         self.annotations =
             ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
         self.project_path = None;
+        self.annotations_root = None;
         self.notice = Some("Project closed".into());
         self.adopt_provider()
     }
@@ -513,8 +523,29 @@ impl App {
         self.bottom.problems = self.provider.problems();
         self.selection = Selection::None;
         self.work = WorkSurface::default();
+        // Annotations belong to the analysis they were made against. Opening
+        // a different binary or corpus drops them — a rename of `0x1198`
+        // means that address in the other file, not this one — while a
+        // reload of the same root keeps them. The project file path goes with
+        // them: saving onto the old file after a switch would overwrite the
+        // wrong project.
+        let root = self.analysis_root();
+        if root != self.annotations_root {
+            self.annotations =
+                ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+            self.project_path = None;
+            self.annotations_root = root;
+        }
         self.refresh_functions();
         self.select_first_function()
+    }
+
+    /// The root of the open analysis, the identity annotations belong to.
+    fn analysis_root(&self) -> Option<PathBuf> {
+        self.corpus_root
+            .clone()
+            .or_else(|| self.kuna_root.clone())
+            .or_else(|| self.binary_path.clone())
     }
 
     /// The window title.
@@ -553,9 +584,7 @@ impl App {
     /// The analyst's recorded name for the address `key`, when there is one.
     fn annotation_name(&self, key: &str) -> Option<String> {
         self.annotations
-            .annotations
-            .iter()
-            .find(|a| a.address == key)
+            .annotation_for(key)
             .and_then(|a| a.name.clone())
     }
 
@@ -567,9 +596,13 @@ impl App {
 
     /// The key an annotation on `address` is stored under: the address as the
     /// source wrote it, so a corpus function and its `EXTERNAL` twin key apart.
+    ///
+    /// The space comes from the provider's own rows, not the filtered
+    /// navigator: a comment made while a filter hides the row must still key
+    /// on the row's space, or it would be lost once the filter clears.
     pub(crate) fn annotation_key(&self, address: u64) -> String {
-        self.navigator
-            .rows
+        self.provider
+            .functions()
             .iter()
             .find(|row| row.address == address)
             .map(|row| row.display_address())
@@ -580,21 +613,14 @@ impl App {
     fn save_project_to(&mut self, path: &Path) {
         // The target identity comes from the open project, not the last save.
         // A program image knows its own hash only when the reader computed
-        // one, so the save does it here rather than write a project that
-        // cannot say what it describes.
+        // one, so the save asks the format owner for it here rather than
+        // write a project that cannot say what it describes.
         let sha256 = self.project.target_sha256.clone().or_else(|| {
             self.project
                 .root
                 .as_ref()
                 .filter(|root| root.is_file())
-                .and_then(|root| std::fs::read(root).ok())
-                .map(|bytes| {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest(&bytes)
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect()
-                })
+                .and_then(|root| ag_corpus::project::sha256_of(root).ok())
         });
         self.annotations.target = ag_corpus::project::Target {
             path: self
@@ -1276,9 +1302,7 @@ impl App {
                 let key = self.annotation_key(address);
                 let current = self
                     .annotations
-                    .annotations
-                    .iter()
-                    .find(|a| a.address == key)
+                    .annotation_for(&key)
                     .and_then(|a| a.comment.clone())
                     .unwrap_or_default();
                 self.prompt = Some(Prompt {
@@ -1301,9 +1325,8 @@ impl App {
                 self.annotations.prune();
                 let on = self
                     .annotations
-                    .annotations
-                    .iter()
-                    .any(|a| a.address == key && a.bookmark);
+                    .annotation_for(&key)
+                    .is_some_and(|a| a.bookmark);
                 self.notice = Some(format!(
                     "Bookmark {} {key}",
                     if on { "added at" } else { "cleared at" }
@@ -2621,5 +2644,123 @@ mod tests {
         assert!(app.project_path.is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_comment_and_a_rename_at_one_address_share_one_record() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+
+        // The comment is made as an address annotation and the rename as a
+        // function one; neither may mask the other.
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged("the entry".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode_frame".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert_eq!(
+            app.annotations.annotations.len(),
+            1,
+            "one record for one address"
+        );
+        let kept = app
+            .annotations
+            .annotation_for(&format!("{address:#x}"))
+            .expect("the record is there");
+        assert_eq!(kept.name.as_deref(), Some("decode_frame"));
+        assert_eq!(kept.comment.as_deref(), Some("the entry"));
+    }
+
+    /// A corpus whose index holds one plain function and one import, so a
+    /// row exists that only the provider's own list shows with its space.
+    fn temp_corpus(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ui-corpus-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(
+            dir.join("decompile-index.json"),
+            r#"{
+                "version": 1,
+                "target_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "provider": {"id": "test", "name": "test", "version": "0"},
+                "functions": [
+                    {"address": "0x1000", "name": "main", "status": "failed",
+                     "body": {"available": false, "ranges": [], "non_contiguous": false}},
+                    {"address": "EXTERNAL:0x1", "name": "qsort", "status": "failed",
+                     "body": {"available": false, "ranges": [], "non_contiguous": false}}
+                ]
+            }"#,
+        )
+        .expect("the index");
+        dir
+    }
+
+    #[test]
+    fn a_comment_on_a_filtered_out_row_keys_on_its_space() {
+        let dir = temp_corpus("filter-key");
+        let mut app = app();
+        let _ = app.update(Message::FileOpenCorpus);
+        let _ = app.update(Message::PromptChanged(dir.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.rows.len(), 2, "the corpus opened");
+
+        // The filter hides qsort; the analyst still selects it by address.
+        let _ = app.update(Message::NavigatorFilterChanged("main".into()));
+        assert_eq!(app.navigator.rows.len(), 1, "qsort is hidden");
+        let _ = app.update(Message::FunctionSelected(0x1));
+
+        let _ = app.update(Message::EditComment);
+        let _ = app.update(Message::PromptChanged("imported".into()));
+        let _ = app.update(Message::PromptSubmit);
+
+        // The key comes from the provider's row, not the filtered navigator,
+        // so the comment lands on the import rather than a bare 0x1.
+        let _ = app.update(Message::NavigatorFilterChanged(String::new()));
+        let kept = app
+            .annotations
+            .annotation_for("EXTERNAL:0x1")
+            .expect("the comment is keyed on the space");
+        assert_eq!(kept.comment.as_deref(), Some("imported"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_different_analysis_drops_the_annotations() {
+        let mut app = app();
+        let address = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(address));
+        let _ = app.update(Message::EditBookmark);
+        assert!(!app.annotations.annotations.is_empty(), "sample has a note");
+
+        // A rename of the sample's address means nothing to the ELF.
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged(sample_elf().display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+
+        assert!(
+            app.annotations.annotations.is_empty(),
+            "the sample's annotations do not follow the ELF"
+        );
+        assert!(app.project_path.is_none(), "the old file is not the target");
+
+        // A note made against the ELF survives a reload of the same file.
+        let elf_address = app.navigator.rows[0].address;
+        let _ = app.update(Message::FunctionSelected(elf_address));
+        let _ = app.update(Message::EditBookmark);
+        let _ = app.update(Message::FileReload);
+        assert_eq!(
+            app.annotations.annotations.len(),
+            1,
+            "a reload of the same analysis keeps its notes"
+        );
     }
 }

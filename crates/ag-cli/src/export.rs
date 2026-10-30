@@ -27,10 +27,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ag_image::Binary;
+use ag_corpus::project::sha256_of;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::image::{
     calls_json, cfg_json, data_json, function_calls_json, function_data_json, info_json,
@@ -330,13 +330,6 @@ fn prepare(dir: &Path, force: bool) -> Result<()> {
     );
 
     Ok(())
-}
-
-/// The SHA-256 of the file at `path`, as lowercase hex.
-pub(crate) fn sha256_of(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let digest = Sha256::digest(&bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// The README of the export.
