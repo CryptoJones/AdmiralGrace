@@ -184,6 +184,11 @@ pub enum ReferenceKind {
     String,
     /// The selection uses this string.
     UsedBy,
+    /// The analyst recorded that the selection reaches this address: a
+    /// computed call or jump the analysis cannot see.
+    Manual,
+    /// The analyst recorded that this address reaches the selection.
+    ManualFrom,
 }
 
 impl ReferenceKind {
@@ -195,6 +200,8 @@ impl ReferenceKind {
             ReferenceKind::Data => "DATA",
             ReferenceKind::String => "STRING",
             ReferenceKind::UsedBy => "USED BY",
+            ReferenceKind::Manual => "REACHES (MANUAL)",
+            ReferenceKind::ManualFrom => "REACHED FROM (MANUAL)",
         }
     }
 }

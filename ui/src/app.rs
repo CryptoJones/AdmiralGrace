@@ -95,6 +95,13 @@ pub enum Message {
     EditColor,
     /// Set or clear the highlight color on the block holding the selection.
     EditColorBlock,
+    /// Record a cross reference from the selection that the analysis
+    /// cannot see.
+    EditReference,
+    /// Take back a cross reference the analyst recorded from the selection.
+    EditReferenceRemove,
+    /// Jump to a place: a function opens, any other address is selected.
+    JumpTo(u64),
     /// Take back the analyst's last change.
     EditUndo,
     /// Put back the change last taken back.
@@ -205,6 +212,11 @@ pub enum PromptKind {
     Color {
         /// Whether the color goes on the block rather than the one place.
         block: bool,
+    },
+    /// The address a cross reference from the selection reaches.
+    Reference {
+        /// Whether the reference is being taken back rather than recorded.
+        remove: bool,
     },
 }
 
@@ -1044,6 +1056,78 @@ impl App {
         }
     }
 
+    /// Open the cross-reference prompt for the selection: the address the
+    /// selection reaches that the analysis cannot see, or, taking one
+    /// back, the one to forget.
+    fn reference_prompt(&mut self, remove: bool) -> Task<Message> {
+        let Some(address) = self.selection.address() else {
+            self.notice = Some("Select the place the reference leaves from".into());
+            return Task::none();
+        };
+        let key = self.annotation_key(address);
+        let recorded = self
+            .annotations
+            .annotation_for(&key)
+            .map(|a| a.references.clone())
+            .unwrap_or_default();
+        if remove && recorded.is_empty() {
+            self.notice = Some(format!("No manual reference leaves {key}"));
+            return Task::none();
+        }
+        // Taking one back, the prompt offers the one there is when there is
+        // only one; recording one, it starts empty.
+        let value = match (remove, recorded.as_slice()) {
+            (true, [only]) => only.clone(),
+            _ => String::new(),
+        };
+        self.prompt = Some(Prompt {
+            kind: PromptKind::Reference { remove },
+            title: if remove {
+                "Remove cross reference to (address)"
+            } else {
+                "Add cross reference to (address)"
+            },
+            value,
+        });
+        Task::none()
+    }
+
+    /// The cross references the analyst recorded at the selection: the
+    /// places it reaches that the analysis cannot see, and the places
+    /// recorded as reaching it.
+    ///
+    /// Each is labelled by the place's name and its address, the way a
+    /// bookmark names a place, so a reference to a renamed function reads
+    /// by the analyst's name.
+    pub(crate) fn manual_references(&self) -> Vec<Reference> {
+        let Some(address) = self.selection.address() else {
+            return Vec::new();
+        };
+        let key = self.annotation_key(address);
+        let mut references = Vec::new();
+        if let Some(record) = self.annotations.annotation_for(&key) {
+            for target in &record.references {
+                if let Ok((value, _)) = ag_corpus::parse_addr_space(target) {
+                    references.push(Reference {
+                        address: value,
+                        label: format!("{} {target}", self.place_name(value)),
+                        kind: ReferenceKind::Manual,
+                    });
+                }
+            }
+        }
+        for source in self.annotations.referrers_of(&key) {
+            if let Ok((value, _)) = ag_corpus::parse_addr_space(&source.address) {
+                references.push(Reference {
+                    address: value,
+                    label: format!("{} {}", self.place_name(value), source.address),
+                    kind: ReferenceKind::ManualFrom,
+                });
+            }
+        }
+        references
+    }
+
     /// Open the highlight prompt for the selection, or for the block
     /// holding it.
     fn color_prompt(&mut self, block: bool) -> Task<Message> {
@@ -1754,6 +1838,7 @@ impl App {
                         | PromptKind::Comment { .. }
                         | PromptKind::Tags
                         | PromptKind::Color { .. }
+                        | PromptKind::Reference { .. }
                 )
             }),
             _ => false,
@@ -2149,6 +2234,31 @@ impl App {
                             });
                         }
                     }
+                    PromptKind::Reference { remove } => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            // The address reached must be one before the
+                            // record changes.
+                            let Some(target) = ag_corpus::project::canonical_address(text) else {
+                                self.notice = Some(format!("Not an address: {text:?}"));
+                                return Task::none();
+                            };
+                            let key = self.annotation_key(address);
+                            let kind = self.kind_at(address);
+                            let annotation = self.annotations.annotation_mut(kind, &key);
+                            if remove {
+                                annotation.remove_reference(&target);
+                            } else {
+                                annotation.add_reference(&target);
+                            }
+                            self.annotations.prune();
+                            self.notice = Some(if remove {
+                                format!("Reference {key} → {target} removed")
+                            } else {
+                                format!("Referenced {key} → {target}")
+                            });
+                        }
+                    }
                     PromptKind::Variable => {
                         // `DECLARED=NAME`: the declared name the pseudocode
                         // writes, and the name to show for it. An empty
@@ -2419,7 +2529,7 @@ impl App {
                 ));
             }
 
-            Message::BookmarkSelected(address) => {
+            Message::BookmarkSelected(address) | Message::JumpTo(address) => {
                 // A bookmark marks a place. If that place is a function
                 // entry, open the function the way the navigator does; if
                 // it is any other address, move the selection there. The
@@ -2457,6 +2567,10 @@ impl App {
             Message::EditColor => return self.color_prompt(false),
 
             Message::EditColorBlock => return self.color_prompt(true),
+
+            Message::EditReference => return self.reference_prompt(false),
+
+            Message::EditReferenceRemove => return self.reference_prompt(true),
 
             Message::TagSelected(tag) => {
                 // The tag becomes the filter, spelled the way the analyst
@@ -2497,7 +2611,7 @@ impl App {
 
             Message::HelpShortcuts => {
                 self.notice = Some(
-                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+H highlight · Ctrl+Z undo · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
+                    "Ctrl+O open corpus · Ctrl+B navigator · Ctrl+Shift+B bookmark · Ctrl+T tags · Ctrl+H highlight · Ctrl+X xref · Ctrl+Z undo · Ctrl+I inspector · Ctrl+J bottom panel · F2 rename · F5 reload"
                         .into(),
                 );
             }
@@ -2750,6 +2864,10 @@ fn shortcut(event: keyboard::Event) -> Message {
         // block holding it.
         (Key::Character("h"), true, false) => Message::EditColor,
         (Key::Character("h"), true, true) => Message::EditColorBlock,
+        // The plain chord records a cross reference from the selection;
+        // Shift takes one back.
+        (Key::Character("x"), true, false) => Message::EditReference,
+        (Key::Character("x"), true, true) => Message::EditReferenceRemove,
         // The plain chord takes a change back; Shift puts it back.
         (Key::Character("z"), true, false) => Message::EditUndo,
         (Key::Character("z"), true, true) => Message::EditRedo,
@@ -3606,6 +3724,20 @@ mod tests {
             text: None,
             repeat: false,
         };
+        let x = |modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("x".into()),
+            modified_key: Key::Character("X".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(shortcut(x(ctrl)), Message::EditReference));
+        assert!(matches!(
+            shortcut(x(ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditReferenceRemove
+        ));
         assert!(matches!(shortcut(z(ctrl)), Message::EditUndo));
         assert!(matches!(
             shortcut(z(ctrl | keyboard::Modifiers::SHIFT)),
@@ -4474,6 +4606,79 @@ mod tests {
         assert_eq!(app.notice.as_deref(), Some("Nothing to undo"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manual_cross_reference_shows_from_both_ends_and_is_undone() {
+        let mut app = app();
+        let source = 0x100084A28;
+        let target = 0x100081D60;
+        let _ = app.update(Message::FunctionSelected(0x100084A20));
+        let _ = app.update(Message::AddressSelected(source));
+
+        // Not an address: refused, nothing recorded.
+        let _ = app.update(Message::EditReference);
+        let _ = app.update(Message::PromptChanged("nowhere".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not an address")));
+        assert!(app.undo.is_empty());
+
+        let _ = app.update(Message::EditReference);
+        let _ = app.update(Message::PromptChanged(format!("{target:#X}")));
+        let _ = app.update(Message::PromptSubmit);
+        let key = app.annotation_key(source);
+        let record = app.annotations.annotation_for(&key).expect("the record");
+        assert_eq!(record.references, [format!("{target:#x}")], "canonical");
+        assert_eq!(record.kind, ag_corpus::project::TargetKind::Address);
+        assert_eq!(app.undo.len(), 1, "a change undo remembers");
+
+        // From the source: the place it reaches, by the function's name.
+        let manual = app.manual_references();
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].kind, ReferenceKind::Manual);
+        assert_eq!(manual[0].address, target);
+        let name = app.place_name(target);
+        assert!(manual[0].label.starts_with(&name), "{}", manual[0].label);
+
+        // From the target: the place that reaches it.
+        let _ = app.update(Message::FunctionSelected(target));
+        let manual = app.manual_references();
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].kind, ReferenceKind::ManualFrom);
+        assert_eq!(manual[0].address, source);
+
+        // A renamed target reads by the analyst's name.
+        let _ = app.update(Message::EditRename);
+        let _ = app.update(Message::PromptChanged("decode".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::AddressSelected(source));
+        assert!(app.manual_references()[0].label.starts_with("decode"));
+
+        // Taking it back offers the one there is, and clears the record.
+        let _ = app.update(Message::EditReferenceRemove);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(&*format!("{target:#x}"))
+        );
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for(&key).is_none());
+        assert!(app.manual_references().is_empty());
+        let _ = app.update(Message::EditReferenceRemove);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("No manual reference")));
+
+        // Undo brings the reference back.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.manual_references().len(), 1);
+
+        // Jumping from a manual reference opens the function it names.
+        let _ = app.update(Message::JumpTo(target));
+        assert!(matches!(app.selection, Selection::Function(a) if a == target));
     }
 
     #[test]

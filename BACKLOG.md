@@ -96,7 +96,7 @@ Filed 2026-10-26.
 - [x] Tags on addresses, blocks and functions, with filtering by tag — [#307](https://github.com/CryptoJones/AdmiralGrace/issues/307)
 - [x] Colors on addresses, blocks and functions — [#308](https://github.com/CryptoJones/AdmiralGrace/issues/308)
 - [x] Undo and redo for every analyst change — [#309](https://github.com/CryptoJones/AdmiralGrace/issues/309)
-- [ ] Manually add and remove cross references — [#310](https://github.com/CryptoJones/AdmiralGrace/issues/310)
+- [x] Manually add and remove cross references — [#310](https://github.com/CryptoJones/AdmiralGrace/issues/310)
 
 ### Correcting the analysis
 

@@ -86,6 +86,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+H",
                 Message::EditColorBlock,
             )),
+            Item::new(item_button(
+                "Add cross reference…",
+                "Ctrl+X",
+                Message::EditReference,
+            )),
+            Item::new(item_button(
+                "Remove cross reference…",
+                "Ctrl+Shift+X",
+                Message::EditReferenceRemove,
+            )),
             Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
             Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),

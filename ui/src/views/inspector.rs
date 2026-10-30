@@ -1,10 +1,10 @@
 //! The right inspector: contextual details for the shared selection.
 
-use iced::widget::{button, scrollable, Column, Row, Text};
+use iced::widget::{button, mouse_area, scrollable, Column, Row, Text};
 use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
-use crate::data::ReferenceKind;
+use crate::data::{Reference, ReferenceKind};
 use crate::theme::{color, MONO};
 use crate::views::{count_or_indexing, kv, pill, recessed, section_header, subtle};
 
@@ -20,9 +20,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     column = column.push(selection_card(app));
 
-    if !app.work.references.is_empty() {
+    // The analysis's references, and the ones the analyst recorded that
+    // the analysis could not see.
+    let manual = app.manual_references();
+    if !app.work.references.is_empty() || !manual.is_empty() {
         column = column.push(section_header("References"));
-        column = column.push(reference_cards(app));
+        column = column.push(reference_cards(app, &manual));
     }
 
     column = column.push(section_header("Analysis provenance"));
@@ -147,7 +150,7 @@ fn selection_card(app: &App) -> Element<'_, Message> {
 }
 
 /// Cards of cross references, grouped by kind.
-fn reference_cards(app: &App) -> Element<'_, Message> {
+fn reference_cards(app: &App, manual: &[Reference]) -> Element<'static, Message> {
     let mut column = Column::new().spacing(8).width(Length::Fill);
 
     for kind in [
@@ -156,11 +159,14 @@ fn reference_cards(app: &App) -> Element<'_, Message> {
         ReferenceKind::Data,
         ReferenceKind::String,
         ReferenceKind::UsedBy,
+        ReferenceKind::Manual,
+        ReferenceKind::ManualFrom,
     ] {
         let matching: Vec<_> = app
             .work
             .references
             .iter()
+            .chain(manual.iter())
             .filter(|r| r.kind == kind)
             .collect();
 
@@ -172,11 +178,21 @@ fn reference_cards(app: &App) -> Element<'_, Message> {
         card = card.push(subtle(kind.label()));
 
         for reference in matching {
-            card = card.push(
-                Text::new(reference.label.clone())
-                    .size(12)
-                    .color(color::BLUE),
-            );
+            // A manual reference is the analyst's, drawn in the analyst's
+            // color, and jumps to the place it names.
+            let manual_kind = matches!(kind, ReferenceKind::Manual | ReferenceKind::ManualFrom);
+            let text = Text::new(reference.label.clone())
+                .size(12)
+                .color(if manual_kind {
+                    color::PURPLE
+                } else {
+                    color::BLUE
+                });
+            if manual_kind {
+                card = card.push(mouse_area(text).on_press(Message::JumpTo(reference.address)));
+            } else {
+                card = card.push(text);
+            }
         }
 
         column = column.push(recessed(card.padding(10)));

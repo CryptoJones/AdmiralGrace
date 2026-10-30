@@ -4,8 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`) so a script or an agent can build a project without
-//! editing JSON by hand, and reports the tags the analyst gave (`tags`).
+//! `tag`, `color`, `xref`) so a script or an agent can build a project
+//! without editing JSON by hand, and reports the tags the analyst gave
+//! (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -105,6 +106,20 @@ pub enum ProjectCmd {
         #[arg(long, value_enum, default_value_t = On::Address)]
         on: On,
     },
+    /// Record, or take back, a cross reference the analysis cannot see.
+    Xref {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address the reference leaves from, with its space when it
+        /// names one.
+        from: String,
+        /// The address it reaches.
+        to: String,
+        /// Take the reference back instead of recording it.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
         /// The project file to read.
@@ -200,6 +215,23 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 }
             }
         }),
+        ProjectCmd::Xref {
+            file,
+            from,
+            to,
+            remove,
+        } => {
+            // The address reached must be one before the file is touched.
+            let reaches = ag_corpus::project::canonical_address(&to)
+                .with_context(|| format!("{to:?} is not an address"))?;
+            edit(&target, &file, TargetKind::Address, &from, |a| {
+                if remove {
+                    a.remove_reference(&reaches);
+                } else {
+                    a.add_reference(&reaches);
+                }
+            })
+        }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {
             file,
@@ -532,6 +564,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if !annotation.tags.is_empty() {
         parts.push(format!("tags {}", annotation.tags.join(",")));
+    }
+    if !annotation.references.is_empty() {
+        parts.push(format!("refs {}", annotation.references.join(",")));
     }
     if let Some(color) = &annotation.color {
         parts.push(format!("color {color}"));

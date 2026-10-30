@@ -47,6 +47,7 @@ An annotation is one address's worth of the analyst's decisions.
 | `address` | The address, written the way a corpus writes it — `EXTERNAL:0x1` when the record names an address space. The space is part of the address's meaning, so a function and its `EXTERNAL` twin key apart. |
 | `variable` | The local variable the record names, as the pseudocode declares it. A variable is a different thing from the function or label at the same address, so it carries this field and gets a record of its own; a record without it belongs to the address. |
 | `block` | `true` on the record of the block of bytes starting at the address, as opposed to the address's own record. A block and its first instruction share an address but are two things — a color on the block tints every line of it, a color on the address one — so the block's record stands apart, and the two never overwrite each other. Always written with `kind` `region`. |
+| `references` | The addresses the target refers to that the analysis cannot see — a computed call, a jump through a table — each in its canonical spelling, sorted and unique. A reference is recorded on the place it leaves from. |
 | `register` | The register the record renames, spelled as the listing spells it — `rax`, `ebp`. A register belongs to no one address; it is printed across one function's pseudocode and listing, so the record keys on the register's name beside the function's entry address and the rename reaches that function alone. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `comment` | The analyst's note. |
