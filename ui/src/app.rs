@@ -6175,8 +6175,13 @@ mod tests {
         let _ = app.update(Message::EditNopRange);
         let _ = app.update(Message::PromptChanged("+4".into()));
         let _ = app.update(Message::PromptSubmit);
-        assert!(app.annotations.annotation_for(&format!("{:#x}", second + 1)).is_none());
-        assert!(app.work.listing[4..8].iter().all(|line| line.mnemonic == "nop"));
+        assert!(app
+            .annotations
+            .annotation_for(&format!("{:#x}", second + 1))
+            .is_none());
+        assert!(app.work.listing[4..8]
+            .iter()
+            .all(|line| line.mnemonic == "nop"));
 
         // Undo puts the instructions back.
         while !app.undo.is_empty() {
