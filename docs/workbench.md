@@ -276,7 +276,8 @@ A cross reference the analysis cannot see — a computed call, a jump through a 
 analyst's to record:
 
 - **Add cross reference…** (Ctrl+X) records that the selected place reaches the address typed
-  into the prompt. **Remove cross reference…** (Ctrl+Shift+X) takes one back, offering the one
+  into the prompt, as the listing prints it: a bare `0x1` reaches the import the analysis calls
+  `EXTERNAL:0x1`. **Remove cross reference…** (Ctrl+Shift+X) takes one back, offering the one
   there is when there is only one.
 
 A manual reference shows in the inspector's References from both ends, under **Reaches

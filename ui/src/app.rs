@@ -1116,7 +1116,8 @@ impl App {
                 }
             }
         }
-        for source in self.annotations.referrers_of(&key) {
+        // The place's own key, canonical, is what a source recorded.
+        for source in self.annotations.referrers_of(&self.canonical_key(address)) {
             if let Ok((value, _)) = ag_corpus::parse_addr_space(&source.address) {
                 references.push(Reference {
                     address: value,
@@ -2238,12 +2239,32 @@ impl App {
                         let text = prompt.value.trim();
                         if let Some(address) = self.selection.address() {
                             // The address reached must be one before the
-                            // record changes.
-                            let Some(target) = ag_corpus::project::canonical_address(text) else {
+                            // record changes. It is stored under the key the
+                            // place's own record uses: typed bare, as the
+                            // listing prints it, it takes the space the
+                            // analysis gave the place — `0x1` reaches the
+                            // import `EXTERNAL:0x1` — so the place finds it
+                            // from its own end.
+                            let Ok((value, space)) = ag_corpus::parse_addr_space(text) else {
                                 self.notice = Some(format!("Not an address: {text:?}"));
                                 return Task::none();
                             };
+                            let target = match space {
+                                Some(_) => ag_corpus::project::canonical_address(text)
+                                    .unwrap_or_else(|| text.to_string()),
+                                None => self.canonical_key(value),
+                            };
                             let key = self.annotation_key(address);
+                            if remove
+                                && !self
+                                    .annotations
+                                    .annotation_for(&key)
+                                    .is_some_and(|a| a.references.contains(&target))
+                            {
+                                self.notice =
+                                    Some(format!("No manual reference from {key} to {target}"));
+                                return Task::none();
+                            }
                             let kind = self.kind_at(address);
                             let annotation = self.annotations.annotation_mut(kind, &key);
                             if remove {
@@ -4679,6 +4700,58 @@ mod tests {
         // Jumping from a manual reference opens the function it names.
         let _ = app.update(Message::JumpTo(target));
         assert!(matches!(app.selection, Selection::Function(a) if a == target));
+    }
+
+    #[test]
+    fn a_reference_typed_bare_reaches_a_place_the_analysis_spaced() {
+        let dir = temp_corpus("xref-space");
+        let mut app = app();
+        let _ = app.update(Message::FileOpenCorpus);
+        let _ = app.update(Message::PromptChanged(dir.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.navigator.rows.len(), 2, "the corpus opened");
+        let main = app
+            .navigator
+            .rows
+            .iter()
+            .find(|row| row.address != 0x1)
+            .map(|row| row.address)
+            .expect("the other function");
+
+        // The analyst types the import's address as the listing prints it.
+        let _ = app.update(Message::FunctionSelected(main));
+        let _ = app.update(Message::EditReference);
+        let _ = app.update(Message::PromptChanged("0x1".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let record = app
+            .annotations
+            .annotation_for(&app.annotation_key(main))
+            .expect("the record");
+        assert_eq!(
+            record.references,
+            ["EXTERNAL:0x1"],
+            "stored under the import's key"
+        );
+
+        // The import finds it from its own end.
+        let _ = app.update(Message::FunctionSelected(0x1));
+        let manual = app.manual_references();
+        assert_eq!(manual.len(), 1, "{manual:?}");
+        assert_eq!(manual[0].kind, ReferenceKind::ManualFrom);
+        assert_eq!(manual[0].address, main);
+
+        // Taking back one that was never there says so and changes nothing.
+        let _ = app.update(Message::FunctionSelected(main));
+        let _ = app.update(Message::EditReferenceRemove);
+        let _ = app.update(Message::PromptChanged("0x9999".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("No manual reference")));
+        assert_eq!(app.undo.len(), 1, "nothing recorded");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
