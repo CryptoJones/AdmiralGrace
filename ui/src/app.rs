@@ -1584,72 +1584,52 @@ impl App {
             return;
         };
         let listing = self.provider.listing(function).unwrap_or_default();
-        self.work.listing = self.marked(listing);
         let mut graph = self.provider.graph(function).unwrap_or_default();
+        // The marks are read once for the whole function, keyed by the
+        // address value, so a long listing costs one pass over the marks
+        // and one over the lines.
+        let marks = self.marks_by_address();
+        // A block is where the graph cuts the listing, so a mark stops at a
+        // block's start the way the graph's does, and the two agree.
+        let stops: std::collections::HashSet<u64> =
+            graph.blocks.iter().map(|block| block.from).collect();
+        self.work.listing = marked(listing, &marks, &stops);
         for block in &mut graph.blocks {
-            block.instructions = self.marked(std::mem::take(&mut block.instructions));
+            block.instructions = marked(std::mem::take(&mut block.instructions), &marks, &stops);
         }
         self.work.graph = graph;
     }
 
-    /// The analyst's byte mark at `address`, when there is one.
-    fn mark_at(&self, address: u64) -> Option<ag_corpus::project::ByteType> {
+    /// The analyst's marks that stand in for instructions — data, a string,
+    /// undefined — by the value of the address they are at. A function or
+    /// code mark changes no line, so it is not here.
+    fn marks_by_address(&self) -> std::collections::HashMap<u64, ag_corpus::project::ByteType> {
+        use ag_corpus::project::ByteType;
         self.annotations
-            .annotation_for(&self.annotation_key(address))
-            .and_then(|a| a.byte_type())
+            .annotations
+            .iter()
+            .filter(|a| a.variable.is_none() && a.register.is_none() && !a.block)
+            .filter_map(|a| {
+                let mark = a.byte_type()?;
+                if !matches!(
+                    mark,
+                    ByteType::Data { .. } | ByteType::String | ByteType::Undefined
+                ) {
+                    return None;
+                }
+                let (value, _) = ag_corpus::parse_addr_space(&a.address).ok()?;
+                Some((value, mark))
+            })
+            .collect()
     }
 
-    /// The listing `lines` with the analyst's marks applied.
-    ///
-    /// A line whose address the analyst marked as data, a string or
-    /// undefined is replaced by what the mark says the bytes are, and the
-    /// bytes come from the instructions the analysis decoded there: a mark
-    /// that reaches past one instruction takes the next ones' bytes too. A
-    /// data mark takes exactly its span and leaves the rest of the last
-    /// instruction it touched as bytes; a string runs to its zero; an
-    /// undefined mark covers the one instruction. A code mark changes
-    /// nothing where the analysis already shows an instruction.
-    fn marked(&self, lines: Vec<ListingLine>) -> Vec<ListingLine> {
-        use ag_corpus::project::ByteType;
-        let mut out = Vec::with_capacity(lines.len());
-        let mut at = 0;
-        while at < lines.len() {
-            let line = &lines[at];
-            let mark = match self.mark_at(line.address) {
-                Some(mark @ (ByteType::Data { .. } | ByteType::String | ByteType::Undefined)) => {
-                    mark
-                }
-                _ => {
-                    out.push(line.clone());
-                    at += 1;
-                    continue;
-                }
-            };
-            // Gather the bytes the mark covers, instruction by instruction.
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut next = at;
-            let enough = |bytes: &[u8]| match mark {
-                ByteType::Data { .. } => bytes.len() >= mark.span().unwrap_or(0),
-                ByteType::String => bytes.contains(&0),
-                _ => true,
-            };
-            loop {
-                bytes.extend(hex_bytes(&lines[next].bytes));
-                next += 1;
-                if next >= lines.len() || enough(&bytes) {
-                    break;
-                }
-            }
-            if bytes.is_empty() {
-                // A provider that prints no bytes leaves nothing to re-read.
-                out.push(line.clone());
-                at += 1;
-                continue;
-            }
-            out.extend(data_lines(line.address, &bytes, mark));
-            at = next;
-        }
-        out
+    /// Whether the analysis decoded an instruction starting at `address` in
+    /// the function on screen: where a mark can stand.
+    fn instruction_starts_at(&self, address: u64) -> bool {
+        self.work
+            .listing_of
+            .and_then(|function| self.provider.listing(function))
+            .is_some_and(|lines| lines.iter().any(|line| line.address == address))
     }
 
     /// The detail of a function the analyst marked at `address`, when the
@@ -2043,33 +2023,46 @@ impl App {
                     self.notice = Some("Select the bytes to mark".into());
                     return Task::none();
                 };
+                // A mark that stands in for an instruction stands where the
+                // analysis decoded one; a function may start anywhere.
+                if mark != Mark::Function && !self.instruction_starts_at(address) {
+                    self.notice = Some(format!(
+                        "Marks start at an instruction; {address:#x} is not one"
+                    ));
+                    return Task::none();
+                }
                 let key = self.annotation_key(address);
                 let current = self
                     .annotations
                     .annotation_for(&key)
                     .and_then(|a| a.byte_type());
                 let next = match mark {
-                    Mark::Code => ByteType::Code,
-                    Mark::Function => ByteType::Function,
-                    Mark::String => ByteType::String,
-                    Mark::Undefined => ByteType::Undefined,
+                    // The analysis already shows an instruction here, so
+                    // code is the mark coming off, not a mark going on.
+                    Mark::Code => None,
+                    Mark::Function => Some(ByteType::Function),
+                    Mark::String => Some(ByteType::String),
+                    Mark::Undefined => Some(ByteType::Undefined),
                     // Marking data where data is marked makes each item one
                     // step wider; anywhere else it starts at a byte.
-                    Mark::Data => match current {
+                    Mark::Data => Some(match current {
                         Some(data @ ByteType::Data { .. }) => data.next_width(),
                         _ => ByteType::Data { width: 1, count: 1 },
-                    },
+                    }),
                 };
                 // A function mark says what the place is.
-                let kind = if next == ByteType::Function {
+                let kind = if next == Some(ByteType::Function) {
                     TargetKind::Function
                 } else {
                     self.kind_at(address)
                 };
                 let annotation = self.annotations.annotation_mut(kind, &key);
-                annotation.set_byte_type(Some(next));
+                annotation.set_byte_type(next);
                 self.annotations.prune();
-                self.notice = Some(format!("Marked {key} as {}", next.label()));
+                self.notice = Some(match next {
+                    Some(next) => format!("Marked {key} as {}", next.label()),
+                    None => format!("Mark taken off {key}: code"),
+                });
                 self.refresh_functions();
                 self.refresh_listing();
             }
@@ -3026,6 +3019,73 @@ pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
         out.push_str(&rest[..width]);
         prev = rest.chars().next();
         rest = &rest[width..];
+    }
+    out
+}
+
+/// How far a string mark reads when no zero ends it.
+const STRING_REACH: usize = 256;
+
+/// The listing `lines` with the analyst's `marks` applied.
+///
+/// A line whose address the analyst marked as data, a string or undefined
+/// is replaced by what the mark says the bytes are, and the bytes come
+/// from the instructions the analysis decoded there: a mark that reaches
+/// past one instruction takes the next ones' bytes too, as long as each
+/// starts where the last ended and none is a block's start in `stops` — a
+/// gap, a line with no bytes, or the next block ends the mark. A data mark
+/// takes exactly its span and leaves the rest of the last instruction it
+/// touched as bytes; a string runs to its zero, or as far as
+/// [`STRING_REACH`]; an undefined mark covers the one instruction. The
+/// first line that stands in keeps the comment of the line it replaced,
+/// so a block's header stays.
+fn marked(
+    lines: Vec<ListingLine>,
+    marks: &std::collections::HashMap<u64, ag_corpus::project::ByteType>,
+    stops: &std::collections::HashSet<u64>,
+) -> Vec<ListingLine> {
+    use ag_corpus::project::ByteType;
+    if marks.is_empty() {
+        return lines;
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    let mut at = 0;
+    while at < lines.len() {
+        let line = &lines[at];
+        let Some(&mark) = marks.get(&line.address) else {
+            out.push(line.clone());
+            at += 1;
+            continue;
+        };
+        let enough = |bytes: &[u8]| match mark {
+            ByteType::Data { .. } => bytes.len() >= mark.span().unwrap_or(0),
+            ByteType::String => bytes.contains(&0) || bytes.len() >= STRING_REACH,
+            _ => true,
+        };
+        let mut bytes: Vec<u8> = hex_bytes(&line.bytes);
+        let mut next = at + 1;
+        while !bytes.is_empty()
+            && !enough(&bytes)
+            && next < lines.len()
+            && lines[next].address == line.address + bytes.len() as u64
+            && !stops.contains(&lines[next].address)
+            && !hex_bytes(&lines[next].bytes).is_empty()
+        {
+            bytes.extend(hex_bytes(&lines[next].bytes));
+            next += 1;
+        }
+        if bytes.is_empty() {
+            // A provider that prints no bytes leaves nothing to re-read.
+            out.push(line.clone());
+            at += 1;
+            continue;
+        }
+        let mut shown = data_lines(line.address, &bytes, mark);
+        if let Some(first) = shown.first_mut() {
+            first.comment = line.comment.clone();
+        }
+        out.extend(shown);
+        at = next;
     }
     out
 }
@@ -5165,14 +5225,129 @@ mod tests {
             .expect("the graph has the line");
         assert_eq!(in_graph.mnemonic, "db");
 
-        // Code puts the instruction back; undo walks the marks back too.
+        // Code puts the instruction back and takes the mark off; undo
+        // walks the marks back too.
         let _ = app.update(Message::EditMark(Mark::Code));
         assert_eq!(app.work.listing.len(), before.len());
         assert_eq!(app.work.listing[at].mnemonic, before[at].mnemonic);
+        assert!(
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 4))
+                .is_none(),
+            "code is no mark"
+        );
         let _ = app.update(Message::EditUndo);
         assert_eq!(app.work.listing[at].mnemonic, "db");
         let _ = app.update(Message::EditRedo);
         assert_eq!(app.work.listing[at].mnemonic, before[at].mnemonic);
+    }
+
+    #[test]
+    fn a_mark_stops_at_a_gap_a_block_and_a_line_without_bytes() {
+        use ag_corpus::project::ByteType;
+        let line = |address: u64, bytes: &str| ListingLine {
+            address,
+            bytes: bytes.into(),
+            mnemonic: "nop".into(),
+            operands: String::new(),
+            call_target: None,
+            registers: Vec::new(),
+            comment: None,
+        };
+        let marks =
+            |address: u64, mark: ByteType| std::collections::HashMap::from([(address, mark)]);
+        let no_stops = std::collections::HashSet::new();
+        let quad = ByteType::Data { width: 8, count: 1 };
+
+        // A gap: the mark takes what is there and no more, and the line
+        // past the gap stays.
+        let lines = vec![line(0x5000, "AA BB CC DD"), line(0x6000, "11 22 33 44")];
+        let shown = marked(lines, &marks(0x5000, quad), &no_stops);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].mnemonic, "db");
+        assert_eq!(shown[0].operands, "0xaa, 0xbb, 0xcc, 0xdd");
+        assert_eq!(shown[1].address, 0x6000);
+
+        // Contiguous lines are taken until the mark is full.
+        let lines = vec![
+            line(0x5000, "AA BB CC DD"),
+            line(0x5004, "11 22 33 44"),
+            line(0x5008, "99"),
+        ];
+        let shown = marked(lines, &marks(0x5000, quad), &no_stops);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].mnemonic, "dq");
+        assert_eq!(shown[0].operands, "0x44332211ddccbbaa");
+        assert_eq!(shown[1].address, 0x5008);
+
+        // A block's start ends the mark, the way the graph cuts there.
+        let lines = vec![line(0x5000, "AA BB CC DD"), line(0x5004, "11 22 33 44")];
+        let stops = std::collections::HashSet::from([0x5004]);
+        let shown = marked(lines, &marks(0x5000, quad), &stops);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].mnemonic, "db");
+
+        // A string stops at a line without bytes, and never runs past its
+        // reach without a zero.
+        let lines = vec![
+            line(0x5000, "41 42"),
+            line(0x5002, ""),
+            line(0x5010, "43 44"),
+        ];
+        let shown = marked(lines, &marks(0x5000, ByteType::String), &no_stops);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown[0].operands, "\"AB\"");
+        assert_eq!(shown[1].address, 0x5002);
+        let long: Vec<ListingLine> = (0..40u64)
+            .map(|i| line(0x5000 + i * 8, "41 41 41 41 41 41 41 41"))
+            .collect();
+        let shown = marked(long, &marks(0x5000, ByteType::String), &no_stops);
+        assert_eq!(hex_bytes(&shown[0].bytes).len(), STRING_REACH);
+        assert_eq!(shown[1].address, 0x5000 + STRING_REACH as u64);
+
+        // The first line that stands in keeps the header of the one it
+        // replaced; a line with no bytes to re-read is left alone.
+        let mut headed = line(0x5000, "AA BB");
+        headed.comment = Some("block 0x5000".into());
+        let shown = marked(vec![headed], &marks(0x5000, ByteType::Undefined), &no_stops);
+        assert_eq!(shown[0].comment.as_deref(), Some("block 0x5000"));
+        let shown = marked(
+            vec![line(0x5000, "")],
+            &marks(0x5000, ByteType::Undefined),
+            &no_stops,
+        );
+        assert_eq!(shown[0].mnemonic, "nop");
+    }
+
+    #[test]
+    fn a_mark_off_an_instruction_is_refused() {
+        let mut app = app();
+        let start = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(start));
+        let before = app.work.listing.clone();
+        let _ = app.update(Message::AddressSelected(start + 4));
+        let _ = app.update(Message::EditMark(Mark::Data));
+        assert_eq!(app.work.listing.len(), before.len() + 1);
+
+        // The leftover line a mark produced is not an instruction start.
+        let _ = app.update(Message::AddressSelected(start + 5));
+        let _ = app.update(Message::EditMark(Mark::Data));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Marks start at an instruction")));
+        assert_eq!(app.undo.len(), 1, "nothing recorded");
+        assert!(app
+            .annotations
+            .annotation_for(&app.annotation_key(start + 5))
+            .is_none());
+
+        // A function may start anywhere.
+        let _ = app.update(Message::EditMark(Mark::Function));
+        assert!(app
+            .annotations
+            .annotation_for(&app.annotation_key(start + 5))
+            .is_some_and(|a| a.byte_type.as_deref() == Some("function")));
     }
 
     #[test]
