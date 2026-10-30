@@ -452,6 +452,7 @@ fn line(
         bytes: bytes.to_string(),
         mnemonic: mnemonic.to_string(),
         operands: operands.to_string(),
+        call_target: None,
         comment: comment.map(str::to_string),
     }
 }

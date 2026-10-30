@@ -56,6 +56,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 notes = notes.push(kv("Tags", annotation.tags.join(", ")));
             }
         }
+        // The locals of the function on screen that the analyst has named.
+        let function = app
+            .work
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.start)
+            .unwrap_or(address);
+        let function_key = app.annotation_key(function);
+        for variable in app.declared_variables() {
+            if let Some(renamed) = app.annotations.variable_name(&function_key, &variable) {
+                let label = format!("Local {variable}");
+                notes = notes.push(kv(&label, renamed));
+            }
+        }
     }
     column = column.push(notes);
     column = column.push(
@@ -77,7 +91,11 @@ fn selection_card(app: &App) -> Element<'_, Message> {
     let mut rows = Column::new().spacing(5);
 
     if let Some(detail) = &detail {
-        rows = rows.push(kv("Name", detail.name.clone()));
+        let name = match detail.start {
+            Some(start) => app.shown_name(start, &detail.name),
+            None => detail.name.clone(),
+        };
+        rows = rows.push(kv("Name", name));
         rows = rows.push(kv(
             "Selected",
             app.selection

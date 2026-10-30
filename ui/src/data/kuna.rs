@@ -242,6 +242,7 @@ impl Provider for KunaProvider {
                 bytes: line.bytes.clone(),
                 mnemonic: line.mnemonic.clone(),
                 operands: line.operands.clone(),
+                call_target: None,
                 comment: None,
             })
             .collect();

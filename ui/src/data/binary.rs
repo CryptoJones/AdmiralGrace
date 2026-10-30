@@ -124,6 +124,14 @@ impl BinaryProvider {
     /// A jump through a GOT slot keeps its operand: the slot is what the
     /// instruction names, and the import it holds is the reference's.
     fn listing_line(instruction: &ag_image::Instruction) -> ListingLine {
+        // A direct call names one function, whether or not the analysis had
+        // a symbol for it: the address is what the rename keys on, so the
+        // line carries it and the view can replace the name.
+        let call_target = instruction
+            .call
+            .as_ref()
+            .filter(|call| call.slot.is_none())
+            .map(|call| call.target);
         let operands = match instruction
             .call
             .as_ref()
@@ -144,6 +152,7 @@ impl BinaryProvider {
                 .join(" "),
             mnemonic: instruction.mnemonic.clone(),
             operands,
+            call_target,
             comment: instruction.comment.clone(),
         }
     }

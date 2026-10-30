@@ -167,6 +167,44 @@ fn a_spaced_address_keys_apart_from_the_bare_value() {
 }
 
 #[test]
+fn a_label_and_a_variable_name_their_own_records() {
+    let file = TempFile::new("names");
+    let (ok, _, stderr) = project(&["rename", "--file", &file.text(), "0x1149", "decode"]);
+    assert!(ok, "{stderr}");
+
+    // A local of the function at the entry is a different thing from the
+    // function: it keeps its own record beside it.
+    let (ok, stdout, stderr) =
+        project(&["var", "--file", &file.text(), "0x1149", "local_10", "envelope"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("variable 0x1149::local_10 now name envelope"), "{stdout}");
+
+    // A label at the same address shares the function's record: the entry
+    // label is the function's name.
+    let (ok, _, stderr) = project(&["label", "--file", &file.text(), "0x1149", "decode2"]);
+    assert!(ok, "{stderr}");
+
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 2, "one address record, one variable: {report}");
+    let address_record = annotations
+        .iter()
+        .find(|a| a["variable"].is_null())
+        .expect("the address record");
+    assert_eq!(address_record["name"], serde_json::json!("decode2"));
+    let variable_record = annotations
+        .iter()
+        .find(|a| a["variable"] == serde_json::json!("local_10"))
+        .expect("the variable record");
+    assert_eq!(variable_record["name"], serde_json::json!("envelope"));
+
+    // show prints the variable beside its address.
+    let (ok, report, stderr) = project(&["show", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(report.contains("0x1149::local_10"), "{report}");
+}
+
+#[test]
 fn a_newer_project_format_is_refused() {
     let file = TempFile::new("new-format");
     std::fs::write(file.path(), r#"{"format": 99, "target": {}}"#).expect("write");

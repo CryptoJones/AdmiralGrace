@@ -21,7 +21,8 @@ regenerated, and the annotations stay.
   "options": { "loop-form": "while" },
   "annotations": [
     { "kind": "function", "address": "0x1198", "name": "main", "bookmark": true },
-    { "kind": "address", "address": "EXTERNAL:0x1", "comment": "imported qsort" }
+    { "kind": "address", "address": "EXTERNAL:0x1", "comment": "imported qsort" },
+    { "kind": "variable", "address": "0x1161", "variable": "local_14", "name": "count" }
   ]
 }
 ```
@@ -40,8 +41,9 @@ An annotation is one address's worth of the analyst's decisions.
 
 | Field | Meaning |
 |---|---|
-| `kind` | What the annotation is attached to: `function`, `address` or `region`. |
+| `kind` | What the annotation is attached to: `function`, `address`, `region` or `variable`. |
 | `address` | The address, written the way a corpus writes it — `EXTERNAL:0x1` when the record names an address space. The space is part of the address's meaning, so a function and its `EXTERNAL` twin key apart. |
+| `variable` | The local variable the record names, as the pseudocode declares it. A variable is a different thing from the function or label at the same address, so it carries this field and gets a record of its own; a record without it belongs to the address. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `comment` | The analyst's note. |
 | `bookmark` | Whether the target is bookmarked. |

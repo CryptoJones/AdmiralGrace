@@ -55,12 +55,15 @@ pub struct GraphLine {
 
 impl GraphLine {
     /// The line of a listing instruction.
-    fn of(line: &ListingLine) -> Self {
+    ///
+    /// A call shows the callee by the analyst's name when it has one, so
+    /// the graph reads the same as the listing beside it.
+    fn of(line: &ListingLine, renamed: &std::collections::HashMap<String, String>) -> Self {
         Self {
             address: format!("{:08X}", line.address),
             bytes: short_bytes(&line.bytes),
             mnemonic: line.mnemonic.clone(),
-            operands: line.operands.clone(),
+            operands: crate::app::App::shown_operands(line, renamed),
         }
     }
 }
@@ -185,7 +188,7 @@ pub struct View {
 ///
 /// The edges come from the provider, with the kind each edge has, and are
 /// routed around the blocks they do not connect.
-pub fn layout(graph: &Graph) -> GraphLayout {
+pub fn layout(graph: &Graph, renamed: &std::collections::HashMap<String, String>) -> GraphLayout {
     let blocks = &graph.blocks;
 
     let mut nodes: Vec<GraphNode> = blocks
@@ -198,7 +201,11 @@ pub fn layout(graph: &Graph) -> GraphLayout {
             y: 0.0,
             width: NODE_WIDTH,
             height: height_of(block),
-            lines: block.instructions.iter().map(GraphLine::of).collect(),
+            lines: block
+                .instructions
+                .iter()
+                .map(|line| GraphLine::of(line, renamed))
+                .collect(),
             branching: block.successors.len() > 1,
         })
         .collect();
@@ -520,7 +527,7 @@ pub fn node_at(layout: &GraphLayout, view: View, point: Point) -> Option<u64> {
 /// The graph of the selected function, drawn on a canvas.
 pub fn view(app: &App) -> Element<'_, Message> {
     let program = GraphProgram {
-        layout: layout(&app.work.graph),
+        layout: layout(&app.work.graph, &app.renamed_names()),
         selected: app.selection.address(),
     };
 
@@ -1063,6 +1070,7 @@ mod tests {
                     bytes: "48 89 E5".into(),
                     mnemonic: "mov".into(),
                     operands: "rbp, rsp".into(),
+                    call_target: None,
                     comment: None,
                 })
                 .collect(),
@@ -1089,7 +1097,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         let rank = |from: u64| {
             layout
@@ -1114,7 +1122,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         let left = layout
             .nodes
@@ -1143,7 +1151,7 @@ mod tests {
             block(0x1020, 0x1030, vec![0x1010], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         let rank = |from: u64| {
             layout
@@ -1165,7 +1173,7 @@ mod tests {
             block(0x1010, 0x1020, vec![0x1000], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         assert_eq!(layout.nodes.len(), 2);
         assert!(layout.nodes.iter().all(|node| node.rank < 2));
@@ -1178,7 +1186,7 @@ mod tests {
             block(0x2000, 0x2010, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         let rank = |from: u64| {
             layout
@@ -1201,7 +1209,7 @@ mod tests {
             block(0x1030, 0x1040, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         let kind = |to: u64| {
             layout
@@ -1219,7 +1227,7 @@ mod tests {
     fn a_block_that_goes_on_in_one_way_falls_through() {
         let blocks = vec![block(0x1000, 0x1010, vec![0x1010], 1)];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         assert_eq!(layout.edges.len(), 1);
         assert_eq!(layout.edges[0].kind, ag_image::EdgeKind::Fallthrough);
@@ -1234,7 +1242,7 @@ mod tests {
             block(0x1020, 0x1030, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         assert!(layout.nodes[0].branching, "two ways is a branch");
 
@@ -1258,7 +1266,7 @@ mod tests {
             block(0x1020, 0x1030, vec![], 1),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
 
         assert_eq!(layout.edges[0].kind, ag_image::EdgeKind::Taken);
     }
@@ -1270,7 +1278,7 @@ mod tests {
             block(0x1010, 0x1020, vec![], 2),
         ];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
         let view = fit(&layout, Size::new(1000.0, 1000.0));
 
         assert!(view.scale <= 1.0);
@@ -1285,7 +1293,7 @@ mod tests {
     fn the_block_under_a_point_is_found() {
         let blocks = vec![block(0x1000, 0x1010, vec![], 2)];
 
-        let layout = layout(&graph_of(blocks));
+        let layout = layout(&graph_of(blocks), &std::collections::HashMap::new());
         let view = fit(&layout, Size::new(1000.0, 1000.0));
 
         let inside = Point::new(view.offset.x + 10.0, view.offset.y + 10.0);
@@ -1297,7 +1305,7 @@ mod tests {
 
     #[test]
     fn the_graph_of_nothing_is_empty() {
-        let layout = layout(&graph_of(Vec::new()));
+        let layout = layout(&graph_of(Vec::new()), &std::collections::HashMap::new());
 
         assert!(layout.nodes.is_empty());
         assert!(layout.edges.is_empty());
@@ -1385,7 +1393,7 @@ mod tests {
 
     #[test]
     fn the_route_of_an_edge_avoids_the_blocks_it_does_not_connect() {
-        let layout = layout(&graph_of(init_blocks()));
+        let layout = layout(&graph_of(init_blocks()), &std::collections::HashMap::new());
 
         for edge in &layout.edges {
             for node in &layout.nodes {
@@ -1406,7 +1414,7 @@ mod tests {
 
     #[test]
     fn an_edge_that_skips_a_row_goes_around_the_block_in_between() {
-        let layout = layout(&graph_of(init_blocks()));
+        let layout = layout(&graph_of(init_blocks()), &std::collections::HashMap::new());
 
         let edge = layout
             .edges
@@ -1434,7 +1442,7 @@ mod tests {
 
     #[test]
     fn the_labels_of_the_edges_leaving_a_block_are_apart() {
-        let layout = layout(&graph_of(init_blocks()));
+        let layout = layout(&graph_of(init_blocks()), &std::collections::HashMap::new());
 
         let anchors: Vec<Point> = layout
             .edges
