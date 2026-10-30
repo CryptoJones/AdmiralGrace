@@ -639,9 +639,14 @@ fn chains(
     // A `jmp` through a jump table the walk resolved stays in the function:
     // it is the function's own `switch`.
     let table_at = |site: u64| cfg.jump_tables.iter().find(|table| table.site == site);
+    // A branch the walk recorded as a tail call leaves too, whatever the
+    // image names at its target: under `branches-end-procedures` that is a
+    // jump into another routine's body.
+    let tail_call_at = |site: u64| cfg.tail_calls.iter().any(|tail| tail.site == site);
     let leaves = |ins: &DecodedInsn| match ins.flow {
         Flow::UnconditionalBranch(target) => {
-            target != entry && symbols.function_name(target).is_some()
+            target != entry
+                && (symbols.function_name(target).is_some() || tail_call_at(ins.address))
         }
         Flow::IndirectBranch => table_at(ins.address).is_none(),
         _ => false,
@@ -726,6 +731,15 @@ fn chains(
                     End::Switch { table, cases }
                 }
                 Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
+                // A conditional branch that leaves the function has no
+                // chain to go to on the taken side, and the lifter has no
+                // statement for "return a call, or go on": refused by name.
+                Flow::ConditionalBranch(target) if tail_call_at(last.address) => {
+                    return Err(NotLifted::new(format!(
+                        "a conditional branch leaves the function for {target:#x} at {:#x}",
+                        last.address
+                    )))
+                }
                 Flow::ConditionalBranch(target) if target == after => End::Jump(node_at(after)?),
                 Flow::ConditionalBranch(target) => End::Branch {
                     taken: node_at(target)?,
@@ -2760,11 +2774,15 @@ impl<'a> Lifter<'a> {
     /// through a value that is not a function as `an indirect jump at 0x…`.
     fn jump_target(&mut self, ins: &DecodedInsn) -> Result<(String, u64), NotLifted> {
         let at = ins.address;
-        let named = |this: &Self, target: u64| {
-            this.symbols
-                .function_name(target)
-                .map(|name| (name, target))
-                .ok_or_else(|| NotLifted::new(format!("jumps to {target:#x}")))
+        // A target the image names nothing at is a routine of its own all
+        // the same, called by its address.
+        let named = |this: &Self, target: u64| -> Result<(String, u64), NotLifted> {
+            Ok((
+                this.symbols
+                    .function_name(target)
+                    .unwrap_or_else(|| format!("sub_{target:x}")),
+                target,
+            ))
         };
         if let Flow::UnconditionalBranch(target) = ins.flow {
             return named(self, target);

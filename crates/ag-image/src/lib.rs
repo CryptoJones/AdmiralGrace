@@ -55,6 +55,7 @@ use anyhow::{Context, Result};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::options;
+use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
 /// One section of the image.
@@ -516,11 +517,132 @@ impl Binary {
     /// The options decide the lifter's, the structurer's and the emitter's
     /// judgment calls, so the pseudocode built so far is forgotten.
     pub fn with_options(mut self, options: Options) -> Self {
+        // The decode options change the walks themselves, so what was
+        // walked under the old ones is forgotten too.
+        let rewalk = options.branches_end_procedures != self.options.branches_end_procedures
+            || options.code_sections != self.options.code_sections;
         self.options = options;
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if rewalk {
+            if let Ok(mut cache) = self.disassembly.lock() {
+                cache.clear();
+            }
+        }
+        if self.options.code_sections == CodeSections::Procedures {
+            // Each procedure found is a function the next walks stop at —
+            // and, under `branches-end-procedures`, bound their branches
+            // by — so the list is worked out again until it stops growing.
+            loop {
+                let found = self.every_procedure();
+                if found == self.functions {
+                    break;
+                }
+                self.functions = found;
+                if let Ok(mut cache) = self.disassembly.lock() {
+                    cache.clear();
+                }
+            }
+        }
         self
+    }
+
+    /// The entry of the next function the image knows after `address`.
+    fn next_function_after(&self, address: u64) -> Option<u64> {
+        self.functions
+            .iter()
+            .map(|function| function.address)
+            .filter(|entry| *entry > address)
+            .min()
+    }
+
+    /// The functions of the image when its executable sections hold
+    /// procedures only: the ones it names, and after them every run of
+    /// instructions none of those reaches, each a procedure of its own
+    /// named `sub_` and its address. Padding — `nop`, `int3`, bytes that do
+    /// not decode — starts none.
+    ///
+    /// The sections are read in address order, and each procedure found is
+    /// walked before the next is looked for, so a routine that falls or
+    /// jumps into later code claims it and the later code is not a second
+    /// procedure.
+    fn every_procedure(&self) -> Vec<Function> {
+        let mut functions = self.functions.clone();
+        if !self.supports_disassembly() {
+            return functions;
+        }
+        let mut covered: BTreeSet<u64> = BTreeSet::new();
+        // The instructions are in address order, so a block's run of them
+        // is found by a binary search for its start and read to its end.
+        let cover = |covered: &mut BTreeSet<u64>, entry: u64, code: &FileSection| {
+            let decoded = code.decoded();
+            let cfg = self.walk(&decoded.disasm, entry);
+            let instructions = &decoded.disasm.instructions;
+            for block in &cfg.blocks {
+                let start = instructions.partition_point(|ins| ins.address < block.from);
+                covered.extend(
+                    instructions[start..]
+                        .iter()
+                        .take_while(|ins| ins.address < block.to)
+                        .map(|ins| ins.address),
+                );
+            }
+        };
+        // Padding is what an assembler fills alignment with: `nop` in its
+        // forms, `int3`, `ud2`, the `lea esi, [esi+0]` and `mov r, r` of
+        // 32-bit GNU code, and bytes that do not decode at all.
+        let is_padding = |ins: &DecodedInsn| {
+            use ag_engine::cpu_context::Operand;
+            if ins.flow == Flow::Invalid {
+                return true;
+            }
+            match iced_x86::Mnemonic::try_from(ins.mnemonic as usize) {
+                Ok(
+                    iced_x86::Mnemonic::Nop | iced_x86::Mnemonic::Int3 | iced_x86::Mnemonic::Ud2,
+                ) => true,
+                Ok(iced_x86::Mnemonic::Lea) => matches!(
+                    ins.operands.as_slice(),
+                    [Operand::Register(dst), Operand::Mem {
+                        base,
+                        index,
+                        disp: 0,
+                        ..
+                    }] if dst.class == base.class && dst.index == base.index && index.bit_size == 0
+                ),
+                Ok(iced_x86::Mnemonic::Mov) => matches!(
+                    ins.operands.as_slice(),
+                    [Operand::Register(dst), Operand::Register(src)] if dst == src
+                ),
+                _ => false,
+            }
+        };
+        for code in self.file.iter().filter(|code| code.section.executable) {
+            for function in &self.functions {
+                if code.section.vma <= function.address
+                    && function.address < code.section.vma + code.section.size
+                {
+                    cover(&mut covered, function.address, code);
+                }
+            }
+            let decoded = code.decoded();
+            let mut at = 0;
+            while at < decoded.disasm.instructions.len() {
+                let ins = &decoded.disasm.instructions[at];
+                at += 1;
+                if covered.contains(&ins.address) || is_padding(ins) {
+                    continue;
+                }
+                functions.push(Function {
+                    address: ins.address,
+                    name: format!("sub_{:x}", ins.address),
+                });
+                cover(&mut covered, ins.address, code);
+            }
+        }
+        functions.sort_by_key(|function| function.address);
+        functions.dedup_by_key(|function| function.address);
+        functions
     }
 
     /// Tell the image where the jump tables are that its code does not
@@ -1164,10 +1286,14 @@ impl Binary {
                 continue;
             };
             let call = match instruction.flow {
-                Flow::UnconditionalBranch(target) => self.function_name(target).map(|name| Call {
+                // A branch that leaves the procedure for an address the
+                // image names nothing at — under `branches-end-procedures`,
+                // a jump into another routine's body — is a tail call by
+                // address.
+                Flow::UnconditionalBranch(target) | Flow::ConditionalBranch(target) => Some(Call {
                     site: tail.site,
                     target,
-                    name: Some(name.to_string()),
+                    name: self.function_name(target).map(str::to_string),
                     tail: true,
                     slot: None,
                 }),
@@ -1287,6 +1413,19 @@ impl Entries for Binary {
 
     fn table_hint(&self, site: u64) -> Option<TableHint> {
         self.table_hints.lock().ok()?.get(&site).copied()
+    }
+
+    /// Under `branches-end-procedures yes`, a branch to an address before
+    /// the entry or at or past the next function the image knows leaves
+    /// the procedure.
+    fn branch_leaves(&self, entry: u64, target: u64) -> bool {
+        if self.options.branches_end_procedures != BranchesEndProcedures::Yes {
+            return false;
+        }
+        target < entry
+            || self
+                .next_function_after(entry)
+                .is_some_and(|next| target >= next)
     }
 }
 

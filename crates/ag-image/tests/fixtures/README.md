@@ -102,3 +102,23 @@ gcc -O1 -fpie -pie -fno-stack-protector -fcf-protection=none \
 before the guard) and `switch_loop.elf` (from `switch_loop.c`, a `switch` inside a `for` with
 an arm that leaves the loop) are built the non-position-independent way. `classify` and `scan`
 are at `0x401000`.
+
+## The boundaries fixture
+
+`crates/ag-engine/tests/fixtures/boundaries.elf` is hand-written code, from `boundaries.s`
+beside it: `main` jumps into `helper`'s tail, which no function symbol names, and a routine
+after the padding has no symbol at all. It is what the `branches-end-procedures` and
+`code-sections` options are tested against.
+
+```sh
+gcc -nostdlib -static -no-pie -Wl,-e,main -o boundaries.elf boundaries.s
+```
+
+`main` is at `0x401000`, `helper` at `0x401007`, the shared `ret` at `0x40100c` and the
+unnamed routine at `0x401010`. `boundaries32.elf` is the same source built `-m32`, where the
+assembler pads with `lea esi, [esi+0]` rather than `nop`: `main` at `0x8049000`, the padding
+at `0x804900d`, the unnamed routine at `0x8049010`.
+
+```sh
+gcc -m32 -nostdlib -static -no-pie -Wl,-e,main -o boundaries32.elf boundaries.s
+```

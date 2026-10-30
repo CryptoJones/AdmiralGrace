@@ -34,6 +34,15 @@ pub trait Entries {
     fn table_hint(&self, _site: u64) -> Option<TableHint> {
         None
     }
+
+    /// Whether a branch from the procedure entered at `entry` to `target`
+    /// leaves the procedure: under the `branches-end-procedures` option,
+    /// a target before the entry or at or past the next function the
+    /// image knows. The default never says so, and a branch is followed
+    /// wherever it lands.
+    fn branch_leaves(&self, _entry: u64, _target: u64) -> bool {
+        false
+    }
 }
 
 /// The analyst's word on a jump table: where it is and how long.
@@ -483,16 +492,29 @@ fn step_of(
         // A `jmp` to the entry of another function leaves this one: a tail
         // call, recorded and not followed. A `jmp` back to the entry is a
         // loop of this procedure's own.
-        Flow::UnconditionalBranch(t) if t != entry && entries.is_function(t) => Step {
-            falls_through: false,
-            ends_block: true,
-            tail_call: Some(t),
-            ..plain
-        },
+        Flow::UnconditionalBranch(t)
+            if t != entry && (entries.is_function(t) || entries.branch_leaves(entry, t)) =>
+        {
+            Step {
+                falls_through: false,
+                ends_block: true,
+                tail_call: Some(t),
+                ..plain
+            }
+        }
         Flow::UnconditionalBranch(t) => Step {
             targets: vec![t],
             falls_through: false,
             ends_block: true,
+            ..plain
+        },
+        // A conditional branch out of the procedure's range, where the
+        // image is told branches end procedures, leaves on the taken side
+        // and falls through on the other.
+        Flow::ConditionalBranch(t) if t != entry && entries.branch_leaves(entry, t) => Step {
+            falls_through: true,
+            ends_block: true,
+            tail_call: Some(t),
             ..plain
         },
         // An `xbegin` either falls through into the transaction or lands on

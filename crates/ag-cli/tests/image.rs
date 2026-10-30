@@ -1123,3 +1123,103 @@ fn a_switch_whose_cases_start_above_zero_keeps_the_sources_values() {
     );
     assert!(report.contains("do {\n"), "{report}");
 }
+
+#[test]
+fn the_analysis_options_bound_procedures_and_find_the_unnamed_ones() {
+    // main jumps into helper's tail: by default that is main's own block.
+    let report = image("boundaries.elf", &["cfg", "main"]);
+    assert!(report.contains("blocks: 2\n"), "{report}");
+    assert!(report.contains("block 0x40100c - 0x40100d\n"), "{report}");
+
+    // Told that branches end procedures, the jump is a tail call.
+    let report = image(
+        "boundaries.elf",
+        &["cfg", "main", "--option", "branches-end-procedures", "yes"],
+    );
+    assert!(report.contains("blocks: 1\n"), "{report}");
+    assert!(!report.contains("0x40100c - "), "{report}");
+    let report = image(
+        "boundaries.elf",
+        &[
+            "calls",
+            "main",
+            "--option",
+            "branches-end-procedures",
+            "yes",
+        ],
+    );
+    assert!(
+        report.contains("0x40100c") && report.contains("tail call"),
+        "{report}"
+    );
+
+    // The routine after the padding that nothing names is a procedure only
+    // when the code sections are said to hold nothing else.
+    let report = image("boundaries.elf", &["symbols"]);
+    assert!(!report.contains("sub_401010"), "{report}");
+    let report = image(
+        "boundaries.elf",
+        &["symbols", "--option", "code-sections", "procedures"],
+    );
+    assert!(report.contains("0x401010 sub_401010\n"), "{report}");
+    assert!(
+        !report.contains("0x40100d"),
+        "the padding starts no procedure: {report}"
+    );
+    assert!(
+        !report.contains("0x40100c sub_"),
+        "the shared ret is helper's: {report}"
+    );
+    let report = image(
+        "boundaries.elf",
+        &[
+            "pseudocode",
+            "sub_401010",
+            "--option",
+            "code-sections",
+            "procedures",
+        ],
+    );
+    assert!(report.contains("// sub_401010 at 0x401010\n"), "{report}");
+}
+
+#[test]
+fn a_branch_that_leaves_lifts_by_address_and_padding_starts_no_procedure() {
+    // Under the option main's jump into helper's tail is a tail call to a
+    // routine the image names nothing at: lifted by its address.
+    let report = image(
+        "boundaries.elf",
+        &[
+            "pseudocode",
+            "main",
+            "--option",
+            "branches-end-procedures",
+            "yes",
+        ],
+    );
+    assert!(report.contains("sub_40100c("), "{report}");
+
+    // Both options together: the same list, the same lift.
+    let report = image(
+        "boundaries.elf",
+        &[
+            "symbols",
+            "--option",
+            "branches-end-procedures",
+            "yes",
+            "--option",
+            "code-sections",
+            "procedures",
+        ],
+    );
+    assert!(report.contains("0x401010 sub_401010\n"), "{report}");
+    assert!(!report.contains("0x40100c sub_"), "{report}");
+
+    // 32-bit GNU padding — `lea esi, [esi+0]` — starts no procedure either.
+    let report = image(
+        "boundaries32.elf",
+        &["symbols", "--option", "code-sections", "procedures"],
+    );
+    assert!(report.contains("0x8049010 sub_8049010\n"), "{report}");
+    assert!(!report.contains("0x804900d"), "{report}");
+}
