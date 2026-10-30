@@ -4,9 +4,9 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`) so a script or an
-//! agent can build a project without editing JSON by hand, and reports the
-//! tags the analyst gave (`tags`).
+//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `patch`, `asm`) so
+//! a script or an agent can build a project without editing JSON by hand,
+//! and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -165,6 +165,30 @@ pub enum ProjectCmd {
         /// The entries are offsets from the table rather than addresses.
         #[arg(long)]
         relative: bool,
+    },
+    /// Write bytes over the image's at an address: a patch the image is
+    /// read with. The file on disk is not changed.
+    Patch {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address of the first byte, with its space when it names one.
+        address: String,
+        /// The bytes, as hex pairs — `B8 01 00 00 00` or `b801000000` — or
+        /// `none` to take the patch off.
+        bytes: String,
+    },
+    /// Assemble an instruction and write it over the image's bytes at an
+    /// address, warning when it is longer than the instruction it replaces.
+    Asm {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address the instruction goes at, with its space when it
+        /// names one.
+        address: String,
+        /// The instruction, in Intel syntax: `mov eax, 1`.
+        text: String,
     },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
@@ -345,6 +369,53 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             edit(&target, &file, TargetKind::Address, &address, |a| {
                 a.set_jump_table(note)
             })
+        }
+        ProjectCmd::Patch {
+            file,
+            address,
+            bytes,
+        } => {
+            let patch = if bytes.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(
+                    ag_corpus::project::bytes_of_hex(&bytes)
+                        .with_context(|| format!("{bytes:?} is not hex pairs"))?,
+                )
+            };
+            edit_patch(
+                &target,
+                &file,
+                &address,
+                patch.as_deref().map(|bytes| (bytes, None)),
+            )
+        }
+        ProjectCmd::Asm {
+            file,
+            address,
+            text,
+        } => {
+            // The target says how wide the code is and how long the
+            // instruction being replaced is; without it the patch cannot
+            // be assembled.
+            let image = ag_image::Binary::open(&target)
+                .with_context(|| format!("reading {}", target.display()))?;
+            let bitness = image
+                .bitness()
+                .context("the target is not x86, so nothing is assembled for it")?;
+            let at = ag_corpus::parse_addr_space(&address)
+                .map(|(value, _)| value)
+                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let bytes = ag_image::assemble(&text, at, bitness)?;
+            if let Some(replaced) = image.instruction_length_at(at) {
+                if bytes.len() > replaced {
+                    eprintln!(
+                        "warning: {} bytes written over a {replaced}-byte instruction at {at:#x}: the instruction after it is overwritten",
+                        bytes.len()
+                    );
+                }
+            }
+            edit_patch(&target, &file, &address, Some((&bytes, Some(text.trim()))))
         }
         ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
         ProjectCmd::Color {
@@ -562,6 +633,25 @@ fn tags(file: &Path, tag: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
+/// Write a patch into the project of `target` — taking off the patches it
+/// overlaps, as the workbench does — then save it back and report.
+fn edit_patch(
+    target: &Path,
+    file: &Path,
+    address: &str,
+    patch: Option<(&[u8], Option<&str>)>,
+) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    project.write_patch(TargetKind::Address, address, patch);
+    project.save(file)?;
+    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
+    match project.annotation_for(&key) {
+        Some(a) => println!("{}: address {key} now {}", file.display(), summarize(a)),
+        None => println!("{}: address {key} cleared", file.display()),
+    }
+    Ok(0)
+}
+
 /// Change one annotation of the project of `target`, then save it back.
 fn edit(
     target: &Path,
@@ -693,6 +783,12 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(table) = &annotation.jump_table {
         parts.push(format!("switch {table}"));
+    }
+    if let Some(patch) = &annotation.patch {
+        match &annotation.patch_text {
+            Some(text) => parts.push(format!("patch {patch} ({text})")),
+            None => parts.push(format!("patch {patch}")),
+        }
     }
     if parts.is_empty() {
         "(empty)".to_string()

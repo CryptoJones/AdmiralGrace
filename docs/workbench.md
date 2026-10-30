@@ -343,6 +343,26 @@ table is:
 The graph and the pseudocode follow the note at once, and so do undo and redo. The same note
 is what `ag project switch` records and `ag image … --project` reads.
 
+Patching a binary starts with changing an instruction:
+
+- **Assemble over bytes…** (Ctrl+Shift+E) takes an instruction in Intel syntax — `mov eax, 1`,
+  `jmp 0x401010`, `add qword ptr [rsp+8], 2` — encodes it as it would sit at the selected
+  address, and writes the bytes over the image's there. The notice says what was written, and
+  when the instruction is longer than the one it replaces, that the next instruction is
+  overwritten; the patch is written all the same, since that may be what is meant. The prompt
+  offers the instruction written there before; an empty submit takes the patch off.
+
+A patch written over another takes the other off: the bytes written last are the bytes. The
+file on disk is never changed. The patch is a record in the project file — the bytes, and
+the instruction they came from — and the image is read as if its bytes were the patched ones,
+so the listing, the graph, the pseudocode and the bytes pane follow at once; the bytes pane
+shows a patch's bytes in the analyst's color. Undo and redo cover a patch like every other
+mark. `ag project asm` and `ag project patch` record the same, and `ag image … --project`
+reads the image with the patches on; `ag asm` prints the bytes of an instruction on its own.
+The assembler knows the instructions patching reaches for — moves, arithmetic, compares, tests,
+pushes and pops, branches to an address, `nop`, `ret`, `int3` and their kin — and refuses
+anything else by name rather than guess.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
@@ -351,7 +371,7 @@ Every one of these changes can be taken back:
 
 Undo covers every mark the analyst makes — renames, labels, local variable and register
 names, comments, bookmarks, tags, highlights, cross references, byte marks, operand
-formats and jump-table notes — in the order they were made, and the
+formats, jump-table notes and patches — in the order they were made, and the
 navigator and every view follow. Opening a project file or a different analysis starts
 afresh: the marks those changes were made to are gone.
 

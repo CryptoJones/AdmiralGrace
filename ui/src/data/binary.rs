@@ -360,6 +360,18 @@ impl Provider for BinaryProvider {
         self.binary.set_jump_table_hints(hints)
     }
 
+    fn set_patches(&self, patches: BTreeMap<u64, Vec<u8>>) -> bool {
+        self.binary.set_patches(patches)
+    }
+
+    fn bitness(&self) -> Option<ag_image::Bitness> {
+        self.binary.bitness()
+    }
+
+    fn instruction_length_at(&self, address: u64) -> Option<usize> {
+        self.binary.instruction_length_at(address)
+    }
+
     fn references(&self, address: u64) -> Vec<Reference> {
         let mut references = Vec::new();
 

@@ -698,10 +698,18 @@ fn lower_content(app: &App) -> Element<'_, Message> {
 /// which bytes of the row the selection covers.
 fn hex_dump<'a>(app: &'a App, rows: &'a [ByteLine]) -> Element<'a, Message> {
     let selected = selected_instruction(app);
+    // The bytes the analyst wrote: shown in the analyst's color, so a
+    // patch is told from the file's own bytes at a glance.
+    let patched: Vec<(u64, usize)> = app
+        .annotations
+        .patches()
+        .into_iter()
+        .map(|(at, bytes)| (at, bytes.len()))
+        .collect();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
     for row in rows {
-        list = list.push(hex_row(row, selected));
+        list = list.push(hex_row(row, selected, &patched));
     }
 
     scrollable(list)
@@ -727,19 +735,32 @@ fn selected_instruction(app: &App) -> Option<(u64, usize)> {
 }
 
 /// One row of the hex dump.
-fn hex_row(row: &ByteLine, selected: Option<(u64, usize)>) -> Element<'_, Message> {
+fn hex_row<'a>(
+    row: &'a ByteLine,
+    selected: Option<(u64, usize)>,
+    patched: &[(u64, usize)],
+) -> Element<'a, Message> {
     let mut hex = Row::new().spacing(0);
 
     for (index, byte) in row.bytes.iter().enumerate() {
         let address = row.address + index as u64;
         let marked = selected
             .is_some_and(|(start, length)| address >= start && address < start + length as u64);
+        let written = patched
+            .iter()
+            .any(|&(start, length)| address >= start && address < start + length as u64);
 
         hex = hex.push(
             Container::new(
                 Text::new(format!("{byte:02X}"))
                     .size(12)
-                    .color(if marked { color::CYAN } else { color::BYTES })
+                    .color(if marked {
+                        color::CYAN
+                    } else if written {
+                        color::AMBER
+                    } else {
+                        color::BYTES
+                    })
                     .font(MONO),
             )
             .width(Length::Fixed(21.0))

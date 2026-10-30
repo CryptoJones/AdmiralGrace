@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 kuna-analysis.workspace = true
-iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info", "encoder", "code_asm"] }
 # The same object-file reader kuna-analysis parses with, for what the loader
 # does not hand on: the dynamic relocations that name an ELF's import slots.
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }

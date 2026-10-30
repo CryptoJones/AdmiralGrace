@@ -383,6 +383,30 @@ impl JumpTableNote {
     }
 }
 
+/// The bytes a patch writes, as the record spells them: hex pairs with a
+/// space between, `B8 01 00 00 00`.
+pub fn hex_of_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The bytes a patch's text spells: hex pairs, with spaces between or run
+/// together, `B8 01 00 00 00` or `b801000000`. Anything else is no patch.
+pub fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
+    let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if digits.is_empty() || !digits.len().is_multiple_of(2) || !digits.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    (0..digits.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&digits[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// A change the analyst made at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -468,6 +492,17 @@ pub struct Annotation {
     /// the field recovers what it can from the code, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump_table: Option<String>,
+    /// The bytes the analyst wrote over the image's, starting at the
+    /// address, as hex pairs — `B8 01 00 00 00` — see [`hex_of_bytes`]. The
+    /// file on disk is never changed; a reader applies the patch as it
+    /// reads, and one that does not know the field reads the file as it
+    /// is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// What the analyst typed to make the patch, when it was an
+    /// instruction: `mov eax, 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_text: Option<String>,
 }
 
 impl Annotation {
@@ -484,6 +519,8 @@ impl Annotation {
             references: Vec::new(),
             operand_format: None,
             jump_table: None,
+            patch: None,
+            patch_text: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -506,6 +543,8 @@ impl Annotation {
             references: Vec::new(),
             operand_format: None,
             jump_table: None,
+            patch: None,
+            patch_text: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -527,6 +566,8 @@ impl Annotation {
             references: Vec::new(),
             operand_format: None,
             jump_table: None,
+            patch: None,
+            patch_text: None,
             comment: None,
             comment_above: false,
             bookmark: false,
@@ -665,6 +706,28 @@ impl Annotation {
         self.jump_table = note.map(JumpTableNote::label);
     }
 
+    /// The bytes the patch at the target writes, when there is one and
+    /// this program reads its spelling.
+    pub fn patch_bytes(&self) -> Option<Vec<u8>> {
+        self.patch.as_deref().and_then(bytes_of_hex)
+    }
+
+    /// Record a patch at the target — the bytes, and the instruction they
+    /// came from when they did — or clear it with `None`. An empty patch is
+    /// no patch.
+    pub fn set_patch(&mut self, patch: Option<(&[u8], Option<&str>)>) {
+        match patch {
+            Some((bytes, text)) if !bytes.is_empty() => {
+                self.patch = Some(hex_of_bytes(bytes));
+                self.patch_text = text.map(str::to_string);
+            }
+            _ => {
+                self.patch = None;
+                self.patch_text = None;
+            }
+        }
+    }
+
     /// Whether the target carries the tag `tag`.
     pub fn has_tag(&self, tag: &str) -> bool {
         normalize_tag(tag).is_some_and(|tag| self.tags.contains(&tag))
@@ -676,6 +739,7 @@ impl Annotation {
         self.name.is_none()
             && self.operand_format.is_none()
             && self.jump_table.is_none()
+            && self.patch.is_none()
             && self.references.is_empty()
             && self.comment.is_none()
             && !self.bookmark
@@ -933,6 +997,53 @@ impl ProjectFile {
                 let note = a.jump_table()?;
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, note))
+            })
+            .collect()
+    }
+
+    /// Write the patch `bytes` at `address` as the record of kind `kind`
+    /// says, taking off every patch it overlaps: the bytes the analyst
+    /// wrote last are the bytes, not the ones that happened to sit at a
+    /// higher address. `None` takes the patch at `address` off alone.
+    pub fn write_patch(
+        &mut self,
+        kind: TargetKind,
+        address: &str,
+        patch: Option<(&[u8], Option<&str>)>,
+    ) {
+        let key = canonical_address(address).unwrap_or_else(|| address.to_string());
+        if let Some((bytes, _)) = patch {
+            if let Ok((start, _)) = crate::parse_addr_space(&key) {
+                let end = start.saturating_add(bytes.len() as u64);
+                for record in &mut self.annotations {
+                    if record.variable.is_some() || record.register.is_some() || record.block {
+                        continue;
+                    }
+                    let (Some(other), Ok((at, _))) = (
+                        record.patch_bytes(),
+                        crate::parse_addr_space(&record.address),
+                    ) else {
+                        continue;
+                    };
+                    let other_end = at.saturating_add(other.len() as u64);
+                    if at != start && at < end && start < other_end {
+                        record.set_patch(None);
+                    }
+                }
+            }
+        }
+        self.annotation_mut(kind, &key).set_patch(patch);
+        self.prune();
+    }
+
+    /// Every patch the analyst wrote, by the value of the address of its
+    /// first byte: what an image is told to read as its bytes.
+    pub fn patches(&self) -> BTreeMap<u64, Vec<u8>> {
+        self.places()
+            .filter_map(|a| {
+                let bytes = a.patch_bytes()?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, bytes))
             })
             .collect()
     }
@@ -1482,6 +1593,74 @@ mod tests {
         assert_eq!(record.jump_table.as_deref(), Some("0x402000 8 6"));
         record.set_jump_table(None);
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_patch_is_hex_pairs_on_the_record_and_the_project_lists_them() {
+        assert_eq!(hex_of_bytes(&[0xb8, 1, 0, 0, 0]), "B8 01 00 00 00");
+        assert_eq!(bytes_of_hex("B8 01 00 00 00"), Some(vec![0xb8, 1, 0, 0, 0]));
+        assert_eq!(bytes_of_hex("b801000000"), Some(vec![0xb8, 1, 0, 0, 0]));
+        assert_eq!(bytes_of_hex("90"), Some(vec![0x90]));
+        assert_eq!(bytes_of_hex("9"), None, "half a byte");
+        assert_eq!(bytes_of_hex("zz"), None);
+        assert_eq!(bytes_of_hex(""), None);
+
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Address, "0x401005")
+            .set_patch(Some((&[0xeb, 0x0e], Some("jmp 0x401015"))));
+        project
+            .annotation_mut(TargetKind::Address, "EXTERNAL:0x10")
+            .set_patch(Some((&[0x90], None)));
+        project
+            .annotation_mut(TargetKind::Address, "0x401020")
+            .set_patch(Some((&[], Some("nothing"))));
+        assert!(
+            project.annotation_for("0x401020").is_none()
+                || project.annotation_for("0x401020").unwrap().patch.is_none(),
+            "an empty patch is no patch"
+        );
+        let record = project.annotation_for("0x401005").unwrap();
+        assert_eq!(record.patch.as_deref(), Some("EB 0E"));
+        assert_eq!(record.patch_text.as_deref(), Some("jmp 0x401015"));
+        assert_eq!(record.patch_bytes(), Some(vec![0xeb, 0x0e]));
+
+        let patches = project.patches();
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches.get(&0x401005), Some(&vec![0xeb, 0x0e]));
+        assert_eq!(
+            patches.get(&0x10),
+            Some(&vec![0x90]),
+            "a spaced record keys on its value"
+        );
+        let read = ProjectFile::from_json(&project.to_json().unwrap()).unwrap();
+        assert_eq!(read.patches(), patches);
+
+        let mut record = Annotation::new(TargetKind::Address, "0x10");
+        record.set_patch(Some((&[0x90], None)));
+        record.set_patch(None);
+        assert!(record.is_empty());
+
+        // A patch written over another takes it off, whatever their order
+        // in memory; one beside it stays.
+        let mut project = ProjectFile::new(Target::default());
+        project.write_patch(TargetKind::Address, "0x114a", Some((&[0x90], None)));
+        project.write_patch(TargetKind::Address, "0x1150", Some((&[0xcc], None)));
+        project.write_patch(
+            TargetKind::Address,
+            "0x1149",
+            Some((&[0xb8, 7, 0, 0, 0], Some("mov eax, 7"))),
+        );
+        let patches = project.patches();
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        assert_eq!(patches.get(&0x1149), Some(&vec![0xb8, 7, 0, 0, 0]));
+        assert_eq!(patches.get(&0x1150), Some(&vec![0xcc]));
+        assert!(
+            project.annotation_for("0x114a").is_none(),
+            "the overlapped patch is gone"
+        );
+        project.write_patch(TargetKind::Address, "0x1149", None);
+        assert_eq!(project.patches().len(), 1);
     }
 
     #[test]
