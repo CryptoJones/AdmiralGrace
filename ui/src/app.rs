@@ -184,6 +184,8 @@ pub enum Message {
     /// Force a new version of a variable of the function on screen at the
     /// selected line.
     EditVersionVariable,
+    /// Pin a variable of the function on screen to a value or a range.
+    EditVariableValue,
     /// Take one variable's dead stores out of the pseudocode, or put them
     /// back.
     EditDeadStores,
@@ -326,6 +328,11 @@ pub enum PromptKind {
     /// version is put at: `VAR@ADDRESS`, or `VAR@ADDRESS off` to take it
     /// back.
     VersionVariable,
+    /// A variable of the function on screen and the value or inclusive
+    /// range it holds: `VAR=VALUE`, `VAR=MIN..MAX`, at an address
+    /// `VAR@ADDRESS=…`, or `VAR off` / `VAR@ADDRESS off` to take the word
+    /// back.
+    VariableValue,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -2989,6 +2996,7 @@ impl App {
                         | PromptKind::UnmergeVariable
                         | PromptKind::SplitVariable
                         | PromptKind::VersionVariable
+                        | PromptKind::VariableValue
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -3706,6 +3714,25 @@ impl App {
                     kind: PromptKind::VersionVariable,
                     title: "New variable version at this line (VAR@ADDRESS, VAR@ADDRESS off)",
                     value: self.slice_suggestion(),
+                });
+            }
+
+            Message::EditVariableValue => {
+                if self.work.listing_of.is_none() || self.work.pseudocode.is_none() {
+                    self.notice = Some("Open the function whose variable to pin".into());
+                    return Task::none();
+                }
+                // The selected line's variable and address, waiting for the
+                // value.
+                let suggestion = self.slice_suggestion();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::VariableValue,
+                    title: "Set variable value (VAR=5, VAR=0..7, VAR@ADDRESS=…, VAR@ADDRESS off)",
+                    value: if suggestion.is_empty() {
+                        suggestion
+                    } else {
+                        format!("{suggestion}=")
+                    },
                 });
             }
 
@@ -5015,6 +5042,104 @@ impl App {
                         } else {
                             record.split_variable(&variable, &at);
                             self.notice = Some(format!("{variable} is split at {at}"));
+                        }
+                        self.annotations.prune();
+                        self.tell_variable_edits();
+                    }
+                    PromptKind::VariableValue => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let text = prompt.value.trim();
+                        // `VAR[@ADDRESS]=VALUE`, or `VAR[@ADDRESS] off`.
+                        let (place, value) = match text.split_once('=') {
+                            Some((place, value)) => (place.trim(), Some(value.trim())),
+                            None => match text.rsplit_once(char::is_whitespace) {
+                                Some((place, state)) if state.eq_ignore_ascii_case("off") => {
+                                    (place.trim(), None)
+                                }
+                                _ => {
+                                    self.notice = Some(
+                                        "Name the variable and its value: VAR=5, VAR=0..7, VAR@ADDRESS=5, or VAR off"
+                                            .into(),
+                                    );
+                                    return Task::none();
+                                }
+                            },
+                        };
+                        let (name, at) = match place.split_once('@') {
+                            Some((name, at)) => (name.trim(), Some(at.trim())),
+                            None => (place, None),
+                        };
+                        let at = match at {
+                            Some(at) => match ag_corpus::project::canonical_address(at) {
+                                Some(at) => Some(at),
+                                None => {
+                                    self.notice = Some(format!("{at:?} is not an address"));
+                                    return Task::none();
+                                }
+                            },
+                            None => None,
+                        };
+                        let range = match value {
+                            Some(value) => match ag_corpus::project::parse_value_or_range(value) {
+                                Ok(range) => Some(range),
+                                Err(why) => {
+                                    self.notice = Some(why);
+                                    return Task::none();
+                                }
+                            },
+                            None => None,
+                        };
+                        let held = self
+                            .annotations
+                            .annotation_for(&key)
+                            .map(|a| a.values.clone())
+                            .unwrap_or_default();
+                        // A declared name, or a renamed one; at an address,
+                        // the register a table's jump reads goes as typed.
+                        let variable = self
+                            .declared_name(&key, name)
+                            .or_else(|| {
+                                held.iter()
+                                    .find(|v| v.variable == name && v.at == at)
+                                    .map(|v| v.variable.clone())
+                            })
+                            .or_else(|| at.as_ref().map(|_| name.to_string()))
+                            .filter(|name| !name.is_empty());
+                        let Some(variable) = variable else {
+                            self.notice =
+                                Some(format!("This function declares no variable {name}"));
+                            return Task::none();
+                        };
+                        let place = match &at {
+                            Some(at) => format!(" from {at}"),
+                            None => String::new(),
+                        };
+                        let record = self
+                            .annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                        match range {
+                            Some((min, max)) => {
+                                record.set_variable_value(&variable, at.as_deref(), min, max);
+                                let spelled = if min == max {
+                                    format!("is {min}")
+                                } else {
+                                    format!("is in {min}..={max}")
+                                };
+                                self.notice = Some(format!("{variable} {spelled}{place}"));
+                            }
+                            None => {
+                                if !record.clear_variable_value(&variable, at.as_deref()) {
+                                    self.annotations.prune();
+                                    self.notice =
+                                        Some(format!("{variable} has no value pinned{place}"));
+                                    return Task::none();
+                                }
+                                self.notice =
+                                    Some(format!("{variable} no longer has a value pinned{place}"));
+                            }
                         }
                         self.annotations.prune();
                         self.tell_variable_edits();
@@ -11762,6 +11887,89 @@ mod tests {
         assert!(app.rename_pairs().is_empty(), "{:?}", app.rename_pairs());
         assert!(!body(&app).contains("rax_2"), "{}", body(&app));
         assert!(body(&app).contains("  return rax;\n"), "{}", body(&app));
+    }
+
+    #[test]
+    fn a_variables_value_is_pinned_followed_and_taken_back_with_undo() {
+        let config = Config {
+            binary: Some(switch_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        // classify: if ((unsigned int)a > 5) { return; } switch (…a) { case 0: … }
+        let _ = app.update(Message::FunctionSelected(0x401000));
+        let before = body(&app);
+        assert!(before.contains("  case 5:\n"), "{before}");
+        let line = before
+            .lines()
+            .position(|line| line.contains("switch ("))
+            .unwrap_or_else(|| panic!("{before}"));
+        let address = app.work.line_addresses[&line][0];
+        let _ = app.update(Message::PseudocodeLineSelected(line, address));
+
+        // The prompt opens on the selected line, waiting for the value.
+        let _ = app.update(Message::EditVariableValue);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::VariableValue);
+        assert!(
+            prompt.value.is_empty() || prompt.value.ends_with('='),
+            "{prompt:?}"
+        );
+        let _ = app.update(Message::PromptChanged("a=3".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(app.notice.as_deref(), Some("a is 3"));
+        let three = body(&app);
+        assert!(
+            three.contains("// a is 3 here, as the analyst said\n"),
+            "{three}"
+        );
+        assert!(
+            three.contains("  case 3:\n") && !three.contains("  case 2:\n"),
+            "{three}"
+        );
+
+        // A range in its place.
+        let _ = app.update(Message::EditVariableValue);
+        let _ = app.update(Message::PromptChanged("a=0..1".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("a is in 0..=1"));
+        let range = body(&app);
+        assert!(
+            range.contains("  case 1:\n") && !range.contains("  case 3:\n"),
+            "{range}"
+        );
+        // What is no value is said, and changes nothing.
+        let _ = app.update(Message::EditVariableValue);
+        let _ = app.update(Message::PromptChanged("a=lots".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("is not a number")),
+            "{:?}",
+            app.notice
+        );
+        app.prompt = None;
+        // `off` takes it back.
+        let _ = app.update(Message::EditVariableValue);
+        let _ = app.update(Message::PromptChanged("a off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("a no longer has a value pinned")
+        );
+        assert_eq!(body(&app), before);
+
+        // Undo brings the range back, then the value, then nothing.
+        let _ = app.update(Message::EditUndo);
+        assert!(body(&app).contains("a is in 0..=1 here"), "{}", body(&app));
+        let _ = app.update(Message::EditUndo);
+        assert!(body(&app).contains("a is 3 here"), "{}", body(&app));
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.annotation_for("0x401000").is_none());
+        assert_eq!(body(&app), before);
     }
 
     #[test]

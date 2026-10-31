@@ -5,9 +5,9 @@
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
 //! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `merge`,
-//! `split`, `version`, `patch`, `asm`, `nop`, `opaque`) so a script or an
-//! agent can build a project without editing JSON by hand, and reports the
-//! tags the analyst gave (`tags`).
+//! `split`, `version`, `value`, `patch`, `asm`, `nop`, `opaque`) so a
+//! script or an agent can build a project without editing JSON by hand, and
+//! reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -270,6 +270,30 @@ pub enum ProjectCmd {
         variable: String,
         /// The address of the statement the new definition goes before.
         address: String,
+    },
+    /// Pin a function's variable to a value or an inclusive range, for the
+    /// whole function or from an address on: the uses it settles read the
+    /// value, the conditions it decides are constants, and a `switch` on it
+    /// keeps the cases in range. At an indirect `jmp`, a range on the
+    /// register indexing its table bounds the table.
+    Value {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it, or the register a table's
+        /// `jmp` reads.
+        variable: String,
+        /// `5`, `-1` or `0x10`; an inclusive range `MIN..MAX`; or `clear`
+        /// to take the word back.
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+        /// The address of the statement the word holds from; the whole
+        /// function, from its entry, when absent.
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Take back a new version of a function's variable at an address.
     Unversion {
@@ -727,6 +751,46 @@ pub fn run(
             edit(&target, &file, TargetKind::Function, &address, |a| {
                 a.version_variable(&variable, &at);
             })
+        }
+        ProjectCmd::Value {
+            file,
+            function,
+            variable,
+            value,
+            at,
+        } => {
+            let at = at
+                .map(|at| {
+                    ag_corpus::project::canonical_address(&at)
+                        .ok_or_else(|| anyhow::anyhow!("{at:?} is not an address"))
+                })
+                .transpose()?;
+            let clear = value.trim().eq_ignore_ascii_case("clear");
+            let range = if clear {
+                None
+            } else {
+                Some(ag_corpus::project::parse_value_or_range(&value).map_err(anyhow::Error::msg)?)
+            };
+            let address = function_key(&target, &file, &function)?;
+            let variable = variable.trim().to_string();
+            let mut had = true;
+            let code = edit(
+                &target,
+                &file,
+                TargetKind::Function,
+                &address,
+                |a| match range {
+                    Some((min, max)) => a.set_variable_value(&variable, at.as_deref(), min, max),
+                    None => had = a.clear_variable_value(&variable, at.as_deref()),
+                },
+            )?;
+            if !had {
+                match &at {
+                    Some(at) => eprintln!("{variable} had no value pinned at {at} in {address}"),
+                    None => eprintln!("{variable} had no value pinned in {address}"),
+                }
+            }
+            Ok(code)
         }
         ProjectCmd::Unversion {
             file,
@@ -1829,6 +1893,18 @@ fn summarize(annotation: &Annotation) -> String {
     }
     for version in &annotation.versions {
         parts.push(format!("version {} at {}", version.variable, version.at));
+    }
+    for value in &annotation.values {
+        let at = value
+            .at
+            .as_ref()
+            .map(|at| format!(" at {at}"))
+            .unwrap_or_default();
+        parts.push(format!(
+            "value {} = {}{at}",
+            value.variable,
+            value.spelled()
+        ));
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {

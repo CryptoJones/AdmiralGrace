@@ -635,6 +635,95 @@ fn the_analysts_hint_stands_in_for_the_table_and_the_count() {
     assert!(cfg.jump_tables.is_empty());
 }
 
+/// A table image whose analyst pinned ranges at the jumps.
+struct Pinned {
+    table: Table,
+    ranges: Vec<(u64, String, i64, i64)>,
+}
+
+impl Entries for Pinned {
+    fn is_function(&self, _address: u64) -> bool {
+        false
+    }
+    fn is_import_slot(&self, _slot: u64) -> bool {
+        false
+    }
+    fn table_entry(&self, address: u64, width: u8) -> Option<u64> {
+        self.table.table_entry(address, width)
+    }
+    fn pinned_ranges(&self, site: u64) -> Vec<(String, i64, i64)> {
+        self.ranges
+            .iter()
+            .filter(|(at, ..)| *at == site)
+            .map(|(_, name, min, max)| (name.clone(), *min, *max))
+            .collect()
+    }
+}
+
+#[test]
+fn a_range_the_analyst_pins_on_the_index_bounds_a_table_no_compare_bounds() {
+    // SWITCH_ABSOLUTE without its guard: no `cmp`/`ja` says how long the
+    // table is.
+    // 401005: mov edi,edi ; 401007: jmp [rdi*8+0x402000] ; the cases.
+    let mut ctx = X86IcedContext::default();
+    let d = Disasm::decode(&mut ctx, &SWITCH_ABSOLUTE[5..], 0x401005).unwrap();
+    let table = || Table {
+        at: 0x402000,
+        entries: vec![0x40100e, 0x401033, 0x401014, 0x40101b, 0x401021, 0x401027],
+        width: 8,
+        hint: None,
+    };
+    let cfg = resolve_branches_among(&d, 0x401005, &table());
+    assert!(cfg.jump_tables.is_empty(), "unbounded, as before");
+
+    // `edi` in 0..=3 at the jump: four entries, read from the first.
+    let pinned = Pinned {
+        table: table(),
+        ranges: vec![(0x401007, "edi".to_string(), 0, 3)],
+    };
+    let cfg = resolve_branches_among(&d, 0x401005, &pinned);
+    assert_eq!(cfg.jump_tables.len(), 1);
+    let recovered = &cfg.jump_tables[0];
+    assert_eq!(recovered.site, 0x401007);
+    assert_eq!(recovered.base, 0);
+    assert_eq!(
+        recovered.targets,
+        [0x40100e, 0x401033, 0x401014, 0x40101b],
+        "max + 1 entries"
+    );
+    let jump = cfg.blocks.iter().find(|b| b.from == 0x401005).unwrap();
+    assert_eq!(jump.successor_addresses.len(), 4);
+    assert!(
+        !cfg.blocks.iter().any(|b| b.from == 0x401021),
+        "case 4 is out of range"
+    );
+
+    // Any width of the register's name; another register, another address
+    // or a range below 0 bounds nothing.
+    for (name, at, min, max, bounded) in [
+        ("rdi", 0x401007, 0, 1, true),
+        ("eax", 0x401007, 0, 3, false),
+        ("edi", 0x401005, 0, 3, false),
+        ("edi", 0x401007, -1, 3, false),
+    ] {
+        let pinned = Pinned {
+            table: table(),
+            ranges: vec![(at, name.to_string(), min, max)],
+        };
+        let cfg = resolve_branches_among(&d, 0x401005, &pinned);
+        assert_eq!(!cfg.jump_tables.is_empty(), bounded, "{name} at {at:#x}");
+    }
+
+    // Where a compare bounds the table, the compare's count stands.
+    let d = Disasm::decode(&mut ctx, SWITCH_ABSOLUTE, 0x401000).unwrap();
+    let pinned = Pinned {
+        table: table(),
+        ranges: vec![(0x401007, "edi".to_string(), 0, 1)],
+    };
+    let cfg = resolve_branches_among(&d, 0x401000, &pinned);
+    assert_eq!(cfg.jump_tables[0].targets.len(), 6);
+}
+
 /// Two routines that share a tail, and a third nothing names: the
 /// `boundaries.elf` fixture's code.
 ///

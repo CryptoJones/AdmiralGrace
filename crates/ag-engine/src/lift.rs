@@ -218,8 +218,9 @@ pub trait Symbols {
     }
 
     /// The analyst's words on the variables of the function at `address`:
-    /// which are merged and where one is split, by the names the lift
-    /// declares. None unless the image says.
+    /// which are merged, where one is split or has a new version, and what
+    /// values one holds, by the names the lift declares. None unless the
+    /// image says.
     fn variable_edits(&self, _address: u64) -> crate::merge::VariableEdits {
         crate::merge::VariableEdits::default()
     }
@@ -951,8 +952,20 @@ fn lift_inner(
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
-    // The analyst's splits and merges, on the body as it then reads.
-    crate::merge::apply_edits(&mut function, &symbols.variable_edits(entry));
+    // The analyst's splits, versions, pinned values and merges, on the body
+    // as it then reads; a value at a table's jump narrows its cases from
+    // the table's first.
+    let tables: BTreeMap<u64, i64> = cfg
+        .jump_tables
+        .iter()
+        .map(|table| (table.site, table.base))
+        .collect();
+    crate::merge::apply_edits_with(
+        &mut function,
+        &symbols.variable_edits(entry),
+        &SymbolSites(symbols),
+        &tables,
+    );
     let high = if keep {
         function.body.clone()
     } else {

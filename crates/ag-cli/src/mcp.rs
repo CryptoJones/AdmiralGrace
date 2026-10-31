@@ -446,6 +446,20 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_variable_value",
+            description: "Pin a function's variable to a value or an inclusive range, for the whole function — from its entry, as for a parameter — or from `address` on: the value the variable has as the first statement whose line carries the address reads it, or the value that statement gives it, where it assigns the variable. The lift follows the word forward by reaching definitions: a use only the word reaches reads a single value in its place, an `if` whose condition the value or range settles becomes a constant condition — its dead arm dimmed, or dropped under `dead-code drop`, unless the analyst said `fold off` at the branch — a `switch` on it keeps the cases in range, and what follows through `+ - * & << >>` and casts is followed too; a later assignment stops it. At an indirect `jmp` whose table no compare bounds, a range `0..=N` on the register that indexes the table (`eax`, by any width of its name) bounds it to `N + 1` entries, and the walk is read again. The function's leading comments say what was used, `a is 5 here, as the analyst said`, or why not: `a is not pinned to 5 at 0x401020: no statement there`. `value` of `clear` takes the word back. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it, or the register a table's `jmp` reads." },
+                    "value": { "type": ["string", "integer"], "description": "`5`, `-1` or `0x10`; an inclusive range `MIN..MAX` (`MIN..=MAX` reads the same); or `clear`." },
+                    "address": { "type": "string", "description": "The address of the statement the word holds from; the whole function when absent." },
+                },
+                "required": ["function", "variable", "value"]
+            }),
+        },
+        Tool {
             name: "opaque_predicates",
             description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
             schema: json!({
@@ -1211,7 +1225,7 @@ impl Server {
                 )))
             }
             "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable"
-            | "version_variable" | "unversion_variable" => {
+            | "version_variable" | "unversion_variable" | "set_variable_value" => {
                 let address = self.function(&text("function")?)?;
                 let word = |key: &str| -> Result<String, String> {
                     let value = text(key)?.trim().to_string();
@@ -1259,6 +1273,33 @@ impl Server {
                         let (variable, at) = (word("variable")?, at()?);
                         self.change(TargetKind::Function, address, |record| {
                             record.version_variable(&variable, &at)
+                        })?;
+                    }
+                    "set_variable_value" => {
+                        let variable = word("variable")?;
+                        let at = match optional_text("address")? {
+                            Some(at) => Some(format!("{:#x}", parse_address(&at)?)),
+                            None => None,
+                        };
+                        let value = match arguments.get("value") {
+                            Some(Value::String(text)) => text.trim().to_string(),
+                            Some(Value::Number(number)) => number.to_string(),
+                            _ => {
+                                return Err(
+                                    "\"value\" is a value, a range MIN..MAX, or clear".to_string()
+                                )
+                            }
+                        };
+                        let range = if value.eq_ignore_ascii_case("clear") {
+                            None
+                        } else {
+                            Some(ag_corpus::project::parse_value_or_range(&value)?)
+                        };
+                        self.change(TargetKind::Function, address, |record| match range {
+                            Some((min, max)) => {
+                                record.set_variable_value(&variable, at.as_deref(), min, max)
+                            }
+                            None => had = record.clear_variable_value(&variable, at.as_deref()),
                         })?;
                     }
                     _ => {
@@ -2009,6 +2050,16 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
                 "variable": version.variable,
                 "at": version.at,
             })).collect::<Vec<Value>>(),
+            "values": record.values.iter().map(|value| {
+                let (min, max) = value.range().unwrap_or_default();
+                json!({
+                    "variable": value.variable,
+                    "at": value.at,
+                    "min": min,
+                    "max": max,
+                    "spelled": value.spelled(),
+                })
+            }).collect::<Vec<Value>>(),
         })
     };
     json!({
@@ -2237,6 +2288,7 @@ mod tests {
                 "unsplit_variable",
                 "version_variable",
                 "unversion_variable",
+                "set_variable_value",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",
