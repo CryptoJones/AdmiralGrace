@@ -241,8 +241,11 @@ impl Image {
             )
         })?;
         let start = usize::try_from(chosen.offset).ok();
-        let end =
-            start.and_then(|start| usize::try_from(chosen.size).ok().map(|size| start + size));
+        let end = start.and_then(|start| {
+            usize::try_from(chosen.size)
+                .ok()
+                .and_then(|size| start.checked_add(size))
+        });
         let slice_bytes = start
             .zip(end)
             .and_then(|(start, end)| bytes.get(start..end))

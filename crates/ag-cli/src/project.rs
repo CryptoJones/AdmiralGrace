@@ -684,7 +684,21 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         );
     }
     let sha256 = sha256_of(target)?;
-    // A slice the file does not have would make a project nothing reads.
+    // A slice the file does not have would make a project nothing reads;
+    // so would a universal file with no slice named.
+    if SLICE.with(|held| held.borrow().is_none()) {
+        if let Some(slices) = ag_image::Binary::slices_of(target)? {
+            anyhow::bail!(
+                "{} is a universal Mach-O with the slices {}: say which one with --slice",
+                target.display(),
+                slices
+                    .iter()
+                    .map(|slice| slice.arch.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     if let Some(slice) = SLICE.with(|held| held.borrow().clone()) {
         let slices = ag_image::Binary::slices_of(target)?.with_context(|| {
             format!(

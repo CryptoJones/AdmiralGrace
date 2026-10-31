@@ -450,8 +450,7 @@ impl Binary {
     /// Read the slice `slice` — an architecture's name, or a position — of
     /// the universal Mach-O at `path`, under the analyst's `layout`.
     pub fn open_slice_with_layout(path: &Path, slice: &str, layout: &Layout) -> Result<Binary> {
-        let image = Image::open_slice(path, slice)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let image = Image::open_slice(path, slice)?;
         Self::from_opened(&image, layout)
     }
 

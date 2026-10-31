@@ -335,5 +335,19 @@ fn a_64_bit_fat_header_a_slice_past_the_end_and_a_haswell_slice_are_read() {
         "{refused}"
     );
     assert!(Image::open_slice(&truncated, "x86_64").is_ok());
+
+    // A crafted entry at the very top of the space is refused, not overflowed.
+    let mut crafted = fat64.clone();
+    crafted[8 + 8..8 + 16].copy_from_slice(&0xffff_ffff_ffff_fff0_u64.to_be_bytes());
+    crafted[8 + 16..8 + 24].copy_from_slice(&0x100_u64.to_be_bytes());
+    let evil = dir.join("evil.macho");
+    std::fs::write(&evil, &crafted).unwrap();
+    let refused = Image::open_slice(&evil, "0")
+        .expect_err("past the end")
+        .to_string();
+    assert!(
+        refused.contains("runs past the end of the file"),
+        "{refused}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
