@@ -105,6 +105,14 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// Draw the graph as an SVG picture at this path, in place of the
+        /// report.
+        #[arg(long, value_name = "PATH", conflicts_with = "json")]
+        svg: Option<PathBuf>,
+        /// Draw the graph as a one-page PDF at this path, in place of the
+        /// report.
+        #[arg(long, value_name = "PATH", conflicts_with = "json")]
+        pdf: Option<PathBuf>,
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]
         project: Option<PathBuf>,
@@ -719,7 +727,13 @@ pub fn run(
             utf16,
             json,
         } => strings(&image, filter.as_deref(), utf16, json),
-        ImageCmd::Cfg { target, json, .. } => cfg(&image, &target, json),
+        ImageCmd::Cfg {
+            target,
+            json,
+            svg,
+            pdf,
+            ..
+        } => cfg(&image, &target, json, svg.as_deref(), pdf.as_deref()),
         ImageCmd::Calls { target, json, .. } => calls(&image, target.as_deref(), json),
         ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
@@ -1349,7 +1363,13 @@ fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<S
 }
 
 /// Report the control-flow graph of one function.
-fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
+fn cfg(
+    image: &Binary,
+    target: &str,
+    json: bool,
+    svg: Option<&Path>,
+    pdf: Option<&Path>,
+) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
         "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
@@ -1360,6 +1380,24 @@ fn cfg(image: &Binary, target: &str, json: bool) -> Result<i32> {
     let graph = image
         .control_flow(address)
         .with_context(|| format!("walking the control flow of {target}"))?;
+
+    // A picture, when one is asked for: the graph laid out in rows, every
+    // instruction a line of its block. Either, or both, in place of the
+    // report.
+    if svg.is_some() || pdf.is_some() {
+        let drawing = ag_image::graph_export::layout(&graph);
+        if let Some(path) = svg {
+            std::fs::write(path, ag_image::graph_export::svg(&drawing))
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {}", path.display());
+        }
+        if let Some(path) = pdf {
+            std::fs::write(path, ag_image::graph_export::pdf(&drawing))
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {}", path.display());
+        }
+        return Ok(0);
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&cfg_json(&graph))?);

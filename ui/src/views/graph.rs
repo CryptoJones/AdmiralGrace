@@ -619,6 +619,88 @@ pub fn neighbour(layout: &GraphLayout, current: u64, direction: Direction) -> Op
     }
 }
 
+/// The layout as a picture to write: every node a box with the header the
+/// tab shows and a line per row — a note above its instruction on a row of
+/// its own, an inline note at the end — the analyst's highlight as the
+/// box's color, the selected block marked, and every arrow along the route
+/// the tab draws it by.
+pub fn drawing(
+    layout: &GraphLayout,
+    title: String,
+    selected: Option<u64>,
+) -> ag_image::graph_export::Drawing {
+    use ag_image::graph_export::{Drawing, DrawnEdge, DrawnNode, MARGIN};
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let nodes = layout
+        .nodes
+        .iter()
+        .map(|node| {
+            let header = match (&node.group, &node.label) {
+                (Some((name, members)), _) => format!(
+                    "{name} ({members} block{})",
+                    if *members == 1 { "" } else { "s" }
+                ),
+                (None, Some(label)) => label.clone(),
+                (None, None) => format!("{:#x} - {:#x}", node.from, node.to),
+            };
+            let mut lines = Vec::new();
+            for line in &node.lines {
+                if line.comment_above {
+                    if let Some(comment) = &line.comment {
+                        lines.push(format!("; {comment}"));
+                    }
+                }
+                let mut text = if node.group.is_some() {
+                    format!("{} {}", line.mnemonic, line.operands)
+                } else if line.operands.is_empty() {
+                    format!("{}  {}", line.address, line.mnemonic)
+                } else {
+                    format!("{}  {} {}", line.address, line.mnemonic, line.operands)
+                };
+                if !line.comment_above {
+                    if let Some(comment) = &line.comment {
+                        text.push_str(&format!("  ; {comment}"));
+                    }
+                }
+                lines.push(text);
+            }
+            DrawnNode {
+                x: node.x + MARGIN,
+                y: node.y + MARGIN,
+                width: node.width,
+                height: node.height,
+                title: header,
+                lines,
+                color: node
+                    .color
+                    .map(|color| [channel(color.r), channel(color.g), channel(color.b)]),
+                selected: selected.is_some_and(|address| node.contains(address)),
+            }
+        })
+        .collect();
+    // An edge whose block was not found has no route, and is no arrow.
+    let edges = layout
+        .edges
+        .iter()
+        .filter(|edge| edge.route.len() >= 2)
+        .map(|edge| DrawnEdge {
+            points: edge
+                .route
+                .iter()
+                .map(|point| (point.x + MARGIN, point.y + MARGIN))
+                .collect(),
+            kind: edge.kind,
+        })
+        .collect();
+    Drawing {
+        width: layout.width + MARGIN * 2.0,
+        height: layout.height + MARGIN * 2.0,
+        title,
+        nodes,
+        edges,
+    }
+}
+
 /// The width of the minimap, and the most height it takes.
 const MINIMAP_WIDTH: f32 = 160.0;
 const MINIMAP_MAX_HEIGHT: f32 = 110.0;
@@ -1933,6 +2015,68 @@ mod tests {
         assert!(ends.contains(0x1034));
         assert!(!ends.contains(0x1014));
         assert_eq!(neighbour(&apart, 0x1014, Direction::Right), Some(0x1020));
+    }
+
+    #[test]
+    fn the_drawing_of_a_layout_keeps_its_boxes_notes_and_arrows() {
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010, 0x1020], 2),
+            block(0x1010, 0x1020, vec![0x1030], 3),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![], 1),
+        ]);
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_label(0x1030, "done");
+        renamed.set_block_group(0x1010, "arms");
+        renamed.set_block_group(0x1020, "arms");
+        let layout = layout(&graph, &renamed);
+        let drawing = drawing(&layout, "f at 0x1000".to_string(), Some(0x1034));
+        assert_eq!(drawing.title, "f at 0x1000");
+        assert_eq!(drawing.nodes.len(), 3);
+        assert_eq!(drawing.edges.len(), layout.edges.len());
+        // An edge with no route is left out.
+        let mut cut = layout.clone();
+        cut.edges[0].route.clear();
+        let fewer = super::drawing(&cut, String::new(), None);
+        assert_eq!(fewer.edges.len(), layout.edges.len() - 1);
+        let group = drawing
+            .nodes
+            .iter()
+            .find(|node| node.title == "arms (2 blocks)")
+            .expect("the group");
+        assert_eq!(group.lines[0], "0x1010 - 0x1020 3 instructions");
+        let done = drawing
+            .nodes
+            .iter()
+            .find(|node| node.title == "done")
+            .expect("the labelled block");
+        assert!(done.selected);
+        assert!(!group.selected);
+        let entry = &drawing.nodes[0];
+        assert!(
+            entry.lines[0].starts_with("00001000  "),
+            "{:?}",
+            entry.lines
+        );
+        // Every box and every arrow is inside the picture.
+        for node in &drawing.nodes {
+            assert!(node.x >= 0.0 && node.y >= 0.0);
+            assert!(node.x + node.width <= drawing.width);
+            assert!(node.y + node.height <= drawing.height);
+        }
+        for edge in &drawing.edges {
+            assert!(edge.points.len() >= 2);
+            for (x, y) in &edge.points {
+                assert!(*x >= 0.0 && *x <= drawing.width);
+                assert!(*y >= 0.0 && *y <= drawing.height);
+            }
+        }
+        // The SVG and the PDF both carry the text.
+        let svg = ag_image::graph_export::svg(&drawing);
+        assert!(svg.contains("arms (2 blocks)"));
+        assert!(svg.contains("00001000  "));
+        let pdf = ag_image::graph_export::pdf(&drawing);
+        assert!(pdf.starts_with(b"%PDF-1.4"));
     }
 
     #[test]

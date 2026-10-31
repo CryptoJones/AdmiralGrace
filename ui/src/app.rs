@@ -73,6 +73,8 @@ pub enum Message {
     FileSaveProjectAs,
     /// Write a copy of the program with the patches in it.
     FileWritePatched,
+    /// Write the graph of the function on screen as an SVG or PDF picture.
+    FileExportGraph,
     /// Open a file as raw bytes, loaded where the analyst says.
     FileOpenRaw,
     /// Say which instruction set the code from the selection onward is in.
@@ -236,6 +238,8 @@ pub enum PromptKind {
     ProjectSave,
     /// Where the copy of the program with the patches in it goes.
     WritePatched,
+    /// Where the picture of the graph goes: a `.svg` or a `.pdf` path.
+    ExportGraph,
     /// Raw bytes to open: `PATH ARCH BASE [entry=ADDRESS] [offset=N] [length=N]`.
     Raw,
     /// The instruction set from the selection onward: `arm`, `thumb`, or
@@ -1396,6 +1400,80 @@ impl App {
             value: current,
         });
         Task::none()
+    }
+
+    /// Write the graph on screen — the blocks as the tab draws them,
+    /// groups, text and highlights and all — as the picture the path's
+    /// extension names: `.svg`, or `.pdf`. A file already there is written
+    /// over on a second submit of the same path.
+    fn export_graph_to(&mut self, path: &Path) {
+        let Some(function) = self.work.listing_of else {
+            self.notice = Some("Select a function to export its graph".into());
+            return;
+        };
+        // Neither the program nor the project file is written over, even
+        // when the program was opened from a picture's path.
+        if let Some(binary) = self.binary_path.as_deref() {
+            if path == binary || ag_image::same_file(path, binary) {
+                self.notice = Some(format!("{} is the program itself", path.display()));
+                return;
+            }
+        }
+        if self
+            .project_path
+            .as_deref()
+            .is_some_and(|project| project == path || ag_image::same_file(path, project))
+        {
+            self.notice = Some(format!("{} is the project file", path.display()));
+            return;
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        let pdf = match extension.as_deref() {
+            Some("svg") => false,
+            Some("pdf") => true,
+            _ => {
+                self.notice = Some(format!(
+                    "{} is neither a .svg nor a .pdf path",
+                    path.display()
+                ));
+                return;
+            }
+        };
+        if path.exists() && self.confirm_write.as_deref() != Some(path) {
+            self.confirm_write = Some(path.to_path_buf());
+            self.prompt = Some(Prompt {
+                kind: PromptKind::ExportGraph,
+                title: "Export the graph to (.svg or .pdf)",
+                value: path.display().to_string(),
+            });
+            self.notice = Some(format!(
+                "{} exists; submit again to write over it",
+                path.display()
+            ));
+            return;
+        }
+        self.confirm_write = None;
+        let layout = crate::views::graph::layout(&self.work.graph, &self.renames());
+        let title = format!("{} at {function:#x}", self.place_name(function));
+        let drawing = crate::views::graph::drawing(&layout, title, self.selection.address());
+        let bytes = if pdf {
+            ag_image::graph_export::pdf(&drawing)
+        } else {
+            ag_image::graph_export::svg(&drawing).into_bytes()
+        };
+        self.notice = Some(match std::fs::write(path, &bytes) {
+            Ok(()) => format!(
+                "Wrote {} ({} bytes, {} block{})",
+                path.display(),
+                bytes.len(),
+                drawing.nodes.len(),
+                if drawing.nodes.len() == 1 { "" } else { "s" }
+            ),
+            Err(error) => format!("Could not write {}: {error}", path.display()),
+        });
     }
 
     /// Open the highlight prompt for the selection, or for the block
@@ -3166,6 +3244,9 @@ impl App {
                     PromptKind::WritePatched => {
                         self.write_patched_to(&path);
                     }
+                    PromptKind::ExportGraph => {
+                        self.export_graph_to(&path);
+                    }
                     PromptKind::Mode => {
                         let text = prompt.value.trim().to_ascii_lowercase();
                         if let Some(address) = self.selection.address() {
@@ -3845,6 +3926,53 @@ impl App {
                     kind: PromptKind::WritePatched,
                     title: "Write the patched program to",
                     value: format!("{}.patched", binary.display()),
+                });
+            }
+
+            Message::FileExportGraph => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Select a function to export its graph".into());
+                    return Task::none();
+                };
+                if self.work.graph.blocks.is_empty() {
+                    self.notice = Some("The function has no graph to export".into());
+                    return Task::none();
+                }
+                // A path beside the program, named for the function; the
+                // extension picks the picture. A file already there takes
+                // a second submit of its path.
+                self.confirm_write = None;
+                // The function's name as a file name: anything but letters,
+                // digits and underscores becomes one underscore, and a long
+                // demangled name is cut, so the name fits a file system.
+                let mut name = String::new();
+                for c in self.place_name(function).chars() {
+                    if c.is_ascii_alphanumeric() {
+                        name.push(c);
+                    } else if !name.ends_with('_') {
+                        name.push('_');
+                    }
+                    if name.len() >= 100 {
+                        break;
+                    }
+                }
+                let name = name.trim_matches('_');
+                let name = if name.is_empty() {
+                    format!("{function:#x}")
+                } else {
+                    name.to_string()
+                };
+                let beside = self
+                    .binary_path
+                    .as_deref()
+                    .or(self.project_path.as_deref())
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::ExportGraph,
+                    title: "Export the graph to (.svg or .pdf)",
+                    value: beside.join(format!("{name}.svg")).display().to_string(),
                 });
             }
 
@@ -6421,6 +6549,137 @@ mod tests {
         let own = renamed.address_color(inside).expect("the line's color");
         assert_eq!(renamed.line_color(inside, Some(from)), Some(own));
         assert_ne!(renamed.block_color(from), Some(own));
+    }
+
+    #[test]
+    fn the_graph_is_exported_as_the_picture_the_extension_names() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // The program opens on its entry, so there is a graph to export
+        // from the first; the prompt is put away for the function chosen.
+        let _ = app.update(Message::FileExportGraph);
+        assert!(app.prompt.is_some(), "{:?}", app.notice);
+        let _ = app.update(Message::PromptCancel);
+        let main = app
+            .provider
+            .functions()
+            .into_iter()
+            .find(|row| row.name == "main")
+            .map(|row| row.address)
+            .expect("main");
+        let _ = app.update(Message::FunctionSelected(main));
+        let _ = app.update(Message::AddressSelected(main));
+        let _ = app.update(Message::ViewTabSelected(ViewTab::Graph));
+        let blocks = app.work.graph.blocks.len();
+        assert!(blocks > 0);
+
+        // The prompt offers a path beside the program, named for the
+        // function.
+        let _ = app.update(Message::FileExportGraph);
+        let offered = app
+            .prompt
+            .as_ref()
+            .map(|p| p.value.clone())
+            .expect("a prompt");
+        assert!(offered.ends_with("main.svg"), "{offered}");
+        assert_eq!(
+            Path::new(&offered).parent(),
+            sample_elf().parent(),
+            "{offered}"
+        );
+
+        let stem = std::env::temp_dir().join(format!(
+            "ag-ui-export-graph-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let svg = stem.with_extension("svg");
+        let pdf = stem.with_extension("pdf");
+        let txt = stem.with_extension("txt");
+        let _ = std::fs::remove_file(&svg);
+        let _ = std::fs::remove_file(&pdf);
+
+        // An extension that names no picture is refused.
+        let _ = app.update(Message::PromptChanged(txt.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.ends_with("is neither a .svg nor a .pdf path")),
+            "{:?}",
+            app.notice
+        );
+        assert!(!txt.exists());
+
+        // The SVG holds a box per block; the PDF is a PDF.
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(svg.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Wrote ")),
+            "{:?}",
+            app.notice
+        );
+        let text = std::fs::read_to_string(&svg).expect("the SVG");
+        assert_eq!(text.matches("<rect x=").count(), blocks, "{text}");
+        assert!(text.contains("<title>main at "), "{text}");
+
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(pdf.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        let bytes = std::fs::read(&pdf).expect("the PDF");
+        assert!(bytes.starts_with(b"%PDF-1.4"));
+        assert!(bytes.ends_with(b"%%EOF\n"));
+
+        // A file already there takes a second submit of the same path,
+        // and is then written over.
+        std::fs::write(&svg, b"not a picture").expect("the sentinel");
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(svg.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.ends_with("submit again to write over it")),
+            "{:?}",
+            app.notice
+        );
+        assert!(app.prompt.is_some());
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Wrote ")));
+        let again = std::fs::read_to_string(&svg).expect("the SVG");
+        assert!(again.starts_with("<svg"), "{again}");
+        assert_eq!(again, text);
+
+        // The program itself is never the target.
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(
+            sample_elf().with_extension("svg").display().to_string(),
+        ));
+        // A path beside the program with a picture's extension is fine;
+        // the program's own path is refused before any extension check.
+        let _ = app.update(Message::PromptCancel);
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(sample_elf().display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.ends_with("is the program itself")),
+            "{:?}",
+            app.notice
+        );
+
+        let _ = std::fs::remove_file(&svg);
+        let _ = std::fs::remove_file(&pdf);
     }
 
     #[test]

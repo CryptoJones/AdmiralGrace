@@ -58,6 +58,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::FileWritePatched,
             )),
+            Item::new(item_button("Export graph…", "", Message::FileExportGraph)),
             Item::new(separator()),
             Item::new(item_button("Reload project", "F5", Message::FileReload)),
             Item::new(item_button("Close project", "", Message::FileClose)),
