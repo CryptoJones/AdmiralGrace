@@ -174,7 +174,9 @@ on the stack word by word, or byte by byte, as one `__builtin_strcpy`
 (`--option builtins keep` for the stores); a struct filled field by field through a pointer
 reads as one initializer (`--option struct-initializers keep` for the stores); a call through
 a pointer the lift knows is the call through it (`--option indirect-calls refuse` to refuse
-it), and a Windows control-flow guard's dispatch is the call it guards. The text's
+it), and a Windows control-flow guard's dispatch is the call it guards. A call to `exit` or
+its kind ends its path, a function whose every path ends so never returns, and an exit-on-error
+helper is noted with the condition it does not return under, at its own head and at each call. The text's
 layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
 `wrap 80`, `call-hints names` — with rainbow braces and indent guides in the workbench, and a
 formatter plugin has the last word on the lines.

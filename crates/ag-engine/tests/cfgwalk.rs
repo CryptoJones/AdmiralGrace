@@ -740,3 +740,102 @@ fn a_conditional_branch_past_the_next_function_leaves_on_the_taken_side_only() {
         }]
     );
 }
+
+/// Functions the image knows, and the ones among them that never return.
+struct Dying {
+    functions: &'static [u64],
+    noreturn: &'static [u64],
+}
+
+impl Entries for Dying {
+    fn is_function(&self, address: u64) -> bool {
+        self.functions.contains(&address)
+    }
+
+    fn is_import_slot(&self, _slot: u64) -> bool {
+        false
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        !self.noreturn.contains(&callee)
+    }
+}
+
+// 0x1000: call 0x1010   ; e8 0b 00 00 00
+// 0x1005: ret           ; c3  (not reached: 0x1010 never returns)
+// 0x1006: ret           ; c3  (another function's, reached by nothing)
+// 0x1010: hlt           ; f4
+#[test]
+fn a_call_to_a_function_that_never_returns_ends_the_block_without_a_successor() {
+    let bytes = [0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let disasm = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let cfg = resolve_branches_among(
+        &disasm,
+        0x1000,
+        &Dying {
+            functions: &[0x1000, 0x1010],
+            noreturn: &[0x1010],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.blocks[0].to, 0x1005);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(cfg.call_targets, vec![0x1010]);
+    // The same call to a function that returns falls through to the ret.
+    let cfg = resolve_branches_among(
+        &disasm,
+        0x1000,
+        &Dying {
+            functions: &[0x1000, 0x1010],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 2, "{cfg:?}");
+}
+
+// 0x1000: mov eax, 60    ; b8 3c 00 00 00
+// 0x1005: syscall        ; 0f 05
+// 0x1007: ret            ; c3   — the next function's entry
+#[test]
+fn code_does_not_run_into_the_next_functions_entry() {
+    let bytes = [0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let disasm = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let cfg = resolve_branches_among(
+        &disasm,
+        0x1000,
+        &Dying {
+            functions: &[0x1000, 0x1007],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.blocks[0].to, 0x1007);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    // After the system call nothing fell through: not a tail call.
+    assert!(cfg.tail_calls.is_empty(), "{cfg:?}");
+}
+
+// 0x1000: mov eax, 1     ; b8 01 00 00 00   — outer, which falls into
+// 0x1005: ret            ; c3               — inner, a function of its own
+#[test]
+fn code_that_falls_into_the_next_function_tail_calls_it() {
+    let bytes = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let disasm = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let cfg = resolve_branches_among(
+        &disasm,
+        0x1000,
+        &Dying {
+            functions: &[0x1000, 0x1005],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.blocks[0].to, 0x1005);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(cfg.tail_calls.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.tail_calls[0].site, 0x1000);
+    assert_eq!(cfg.tail_calls[0].target, 0x1005);
+}

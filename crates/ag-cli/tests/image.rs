@@ -2117,3 +2117,45 @@ fn a_windows_control_flow_guard_dispatch_reads_as_the_call_it_guards() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn functions_that_do_not_return_end_their_paths_and_are_noted() {
+    // die ends in a system call and runs up to the next function: it never
+    // returns, so the graph of a function that calls it ends at the call.
+    let cfg = image("noreturn.elf", &["cfg", "die"]);
+    assert!(cfg.contains("blocks: 1\n"), "{cfg}");
+    let cfg = image("noreturn.elf", &["cfg", "positive"]);
+    assert!(cfg.contains("blocks: 3\n"), "{cfg}");
+    assert!(
+        !cfg.contains("0x401044"),
+        "the next function's code is not positive's: {cfg}"
+    );
+    // An exit-on-error helper: the arm that dies ends there, and the
+    // condition is noted.
+    let positive = image("noreturn.elf", &["pseudocode", "positive"]);
+    assert!(
+        positive.contains("  if (a < 0) {\n    die(3);\n  }\n  return;"),
+        "{positive}"
+    );
+    assert!(
+        positive.contains("// does not return when a < 0"),
+        "{positive}"
+    );
+    let checked = image("noreturn.elf", &["pseudocode", "checked"]);
+    assert!(
+        checked.contains("// does not return when a == 0"),
+        "{checked}"
+    );
+    assert!(
+        checked.contains("  if (a == 0) {\n    die(2);\n  }\n"),
+        "{checked}"
+    );
+    // The caller says it of its own arguments.
+    let caller = image("noreturn.elf", &["pseudocode", "caller"]);
+    // Both calls' conditions, the inner call's result named as the call.
+    assert!(
+        caller.contains("// checked does not return when (a + 4) == 0; positive does not return when checked(a + 4, 5) < 0"),
+        "{caller}"
+    );
+    assert!(!caller.contains("__builtin_unreachable"), "{caller}");
+}

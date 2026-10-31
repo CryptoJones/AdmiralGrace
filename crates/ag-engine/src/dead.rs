@@ -922,6 +922,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         }
     }
@@ -1008,6 +1011,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         let text = crate::emit::emit_function(

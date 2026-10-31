@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use iced_x86::Formatter as _;
 
 use ag_engine::arm::ArmVariant;
+use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::{emit_function_in, Callees};
@@ -376,6 +377,10 @@ impl CallGraph {
     }
 }
 
+/// The conditions under which a function does not return, each over the
+/// parameter names it is stated in.
+type NoReturnFacts = Vec<(Vec<String>, AstNode)>;
+
 /// A program image, read.
 pub struct Binary {
     language: String,
@@ -441,6 +446,21 @@ pub struct Binary {
     /// address of the function that declares them: taken out of the
     /// pseudocode even when the dead code is kept.
     removable_stores: Mutex<BTreeMap<u64, Vec<String>>>,
+    /// Whether each function never returns, as the walks found; forgotten
+    /// with the walks. Decided outside the lock, so two threads asking at
+    /// once may both decide it — the same answer, written twice.
+    noreturn: Mutex<BTreeMap<u64, bool>>,
+    /// The conditions under which each function does not return, from its
+    /// lift, by address; forgotten with the walks. Read outside the lock
+    /// too, and a thread that finds another reading the same function
+    /// gets no conditions for it, as a cycle of calls does.
+    noreturn_facts: Mutex<BTreeMap<u64, NoReturnFacts>>,
+    /// The functions whose return is being decided, so that a cycle of
+    /// calls is not followed round.
+    noreturn_visiting: Mutex<BTreeSet<u64>>,
+    /// The functions whose conditions of not returning are being read,
+    /// so that a cycle of calls is not followed round.
+    facts_visiting: Mutex<BTreeSet<u64>>,
     /// The levels of the lift, by function, level and form; forgotten with
     /// the pseudocode.
     levels: Mutex<LevelCache>,
@@ -745,6 +765,10 @@ impl Binary {
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
             levels: Mutex::new(HashMap::new()),
+            noreturn: Mutex::new(BTreeMap::new()),
+            noreturn_facts: Mutex::new(BTreeMap::new()),
+            noreturn_visiting: Mutex::new(BTreeSet::new()),
+            facts_visiting: Mutex::new(BTreeSet::new()),
             removable_stores: Mutex::new(BTreeMap::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
@@ -1476,6 +1500,12 @@ impl Binary {
             if let Ok(mut cache) = self.cfgs.lock() {
                 cache.clear();
             }
+            if let Ok(mut held) = self.noreturn.lock() {
+                held.clear();
+            }
+            if let Ok(mut held) = self.noreturn_facts.lock() {
+                held.clear();
+            }
             // The program-wide indexes were built from the old walks.
             for index in [&self.string_users, &self.data_users] {
                 if let Ok(mut held) = index.lock() {
@@ -1523,6 +1553,126 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// Whether the function at `address` never returns: it is `exit`,
+    /// `abort` or another of that kind by name, or every path of its graph
+    /// ends in a call to one, a tail call to one — a `jmp` to it, or a fall
+    /// into it as the next function — or a trap, or at a system call or an
+    /// interrupt the next function follows; none in a `ret`, a tail call
+    /// to a function that returns, or a jump the walk could not follow,
+    /// which is taken to return. A cycle of calls is taken to return.
+    pub fn never_returns(&self, address: u64) -> bool {
+        if let Some(name) = self.function_name(address) {
+            if ag_engine::cfgwalk::never_returns_by_name(name) {
+                return true;
+            }
+        }
+        if let Some(known) = self
+            .noreturn
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).copied())
+        {
+            return known;
+        }
+        {
+            let Ok(mut visiting) = self.noreturn_visiting.lock() else {
+                return false;
+            };
+            if !visiting.insert(address) {
+                return false;
+            }
+        }
+        let verdict = self.never_returns_by_graph(address);
+        if let Ok(mut visiting) = self.noreturn_visiting.lock() {
+            visiting.remove(&address);
+        }
+        if let Ok(mut held) = self.noreturn.lock() {
+            held.insert(address, verdict);
+        }
+        verdict
+    }
+
+    /// [`Self::never_returns`] by the graph alone.
+    fn never_returns_by_graph(&self, address: u64) -> bool {
+        let Some(code) = self.code_at(address) else {
+            return false;
+        };
+        if !self.supports_disassembly() {
+            return false;
+        }
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        if cfg.blocks.is_empty() {
+            return false;
+        }
+        for block in &cfg.blocks {
+            let Some(last) = decoded
+                .disasm
+                .instructions
+                .iter()
+                .find(|ins| ins.address + ins.length as u64 == block.to)
+            else {
+                return false;
+            };
+            // A tail call — a `jmp` to another function, or a fall into the
+            // next one — returns if its callee does.
+            if let Some(tail) = cfg.tail_calls.iter().find(|tail| tail.site == last.address) {
+                if self.tail_returns(tail.target) {
+                    return false;
+                }
+                continue;
+            }
+            match last.flow {
+                Flow::Return => return false,
+                // A jump the walk could not follow may go anywhere.
+                Flow::IndirectBranch
+                    if !cfg
+                        .jump_tables
+                        .iter()
+                        .any(|table| table.site == last.address) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Whether a tail call to `target` — a function's entry, or the GOT
+    /// slot a `jmp [rip+slot]` reads — comes back.
+    fn tail_returns(&self, target: u64) -> bool {
+        match self.imports.get(&target) {
+            Some(import) => !ag_engine::cfgwalk::never_returns_by_name(import),
+            None => !self.never_returns(target),
+        }
+    }
+
+    /// Whether some path of the function at `address` ends in a call the
+    /// walk gave no fall-through — a call to a function that never
+    /// returns — by the graph alone: the shape of an exit-on-error helper,
+    /// and the only one whose lift can say when the function does not
+    /// return. Asked before the lift, which costs more than the walk.
+    fn has_dying_path(&self, address: u64) -> bool {
+        let Some(code) = self.code_at(address) else {
+            return false;
+        };
+        if !self.supports_disassembly() {
+            return false;
+        }
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        cfg.blocks.iter().any(|block| {
+            block.successor_addresses.is_empty()
+                && decoded
+                    .disasm
+                    .instructions
+                    .iter()
+                    .find(|ins| ins.address + ins.length as u64 == block.to)
+                    .is_some_and(|last| matches!(last.flow, Flow::Call(_) | Flow::IndirectCall))
+        })
+    }
+
     /// Tell the image where the jump tables are that its code does not
     /// say: one hint per indirect jump, by the jump's address. The walks
     /// and the pseudocode built so far are forgotten, since the graph of
@@ -1536,6 +1686,12 @@ impl Binary {
         }
         if let Ok(mut cache) = self.disassembly.lock() {
             cache.clear();
+        }
+        if let Ok(mut held) = self.noreturn.lock() {
+            held.clear();
+        }
+        if let Ok(mut held) = self.noreturn_facts.lock() {
+            held.clear();
         }
         if let Ok(mut cache) = self.cfgs.lock() {
             cache.clear();
@@ -2789,6 +2945,16 @@ impl Entries for Binary {
         self.site_override(site).switch != Some(false)
     }
 
+    fn returns(&self, callee: u64) -> bool {
+        !self.never_returns(callee)
+    }
+
+    fn slot_returns(&self, slot: u64) -> bool {
+        self.imports
+            .get(&slot)
+            .is_none_or(|import| !ag_engine::cfgwalk::never_returns_by_name(import))
+    }
+
     /// Under `branches-end-procedures yes`, a branch to an address before
     /// the entry or at or past the next function the image knows leaves
     /// the procedure.
@@ -2843,6 +3009,68 @@ impl Symbols for ImageSymbols<'_> {
 
     fn site(&self, address: u64) -> SiteOverride {
         self.0.site_override(address)
+    }
+
+    fn returns(&self, address: u64) -> bool {
+        !self.0.never_returns(address)
+    }
+
+    /// The conditions under which the function at `address` does not
+    /// return, over its parameters' names, from its own lift — made once
+    /// per function and kept until the walks are forgotten, and not made
+    /// at all for a function none of whose paths ends in a call that does
+    /// not return, which the walk alone says; a cycle of calls is not
+    /// followed round.
+    fn noreturn_when(&self, address: u64) -> Vec<(Vec<String>, AstNode)> {
+        if let Some(known) = self
+            .0
+            .noreturn_facts
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+        {
+            return known;
+        }
+        if !self.0.has_dying_path(address) {
+            if let Ok(mut held) = self.0.noreturn_facts.lock() {
+                held.insert(address, Vec::new());
+            }
+            return Vec::new();
+        }
+        {
+            let Ok(mut visiting) = self.0.facts_visiting.lock() else {
+                return Vec::new();
+            };
+            if !visiting.insert(address) {
+                return Vec::new();
+            }
+        }
+        let facts: Vec<(Vec<String>, AstNode)> = self
+            .0
+            .stages(address)
+            .ok()
+            .map(|stages| {
+                let params: Vec<String> = stages
+                    .function
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect();
+                stages
+                    .function
+                    .noreturn_when
+                    .iter()
+                    .map(|condition| (params.clone(), condition.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(mut visiting) = self.0.facts_visiting.lock() {
+            visiting.remove(&address);
+        }
+        if let Ok(mut held) = self.0.noreturn_facts.lock() {
+            held.insert(address, facts.clone());
+        }
+        facts
     }
 
     /// The call graph's callers of the function, each call site decided by

@@ -170,7 +170,7 @@ Filed 2026-10-26.
 - [x] Outline inlined memcpy, memset and strcpy into builtins — [#350](https://github.com/CryptoJones/AdmiralGrace/issues/350)
 - [x] Struct initializer expressions in pseudocode — [#351](https://github.com/CryptoJones/AdmiralGrace/issues/351)
 - [x] Translate Windows CFG dispatch calls and jumps to functions into direct calls and tail calls — [#352](https://github.com/CryptoJones/AdmiralGrace/issues/352)
-- [ ] Detect conditionally non-returning functions — [#353](https://github.com/CryptoJones/AdmiralGrace/issues/353)
+- [x] Detect conditionally non-returning functions — [#353](https://github.com/CryptoJones/AdmiralGrace/issues/353)
 - [ ] Guided analysis: choose per block which branch targets to analyze — [#354](https://github.com/CryptoJones/AdmiralGrace/issues/354)
 - [ ] Inline a function during analysis — [#355](https://github.com/CryptoJones/AdmiralGrace/issues/355)
 - [ ] Opaque predicate patcher — [#356](https://github.com/CryptoJones/AdmiralGrace/issues/356)

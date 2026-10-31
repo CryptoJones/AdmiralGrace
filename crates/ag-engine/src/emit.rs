@@ -18,7 +18,7 @@ use std::fmt::Write;
 
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
-use crate::lift::{signed, LiftedFunction, Statement, StatementKind};
+use crate::lift::{CallNote, signed, LiftedFunction, Statement, StatementKind};
 use crate::options::{
     BraceStyle, CallHints, ConstantConditions, ConstantStyle, Language, Options, Ternaries,
 };
@@ -98,6 +98,9 @@ struct Style {
     /// The parameter names of the functions called, by address, when the
     /// arguments are to be labelled with them.
     hints: BTreeMap<u64, Vec<String>>,
+    /// What is known of the calls, for the end of their lines: that a
+    /// callee does not return when the arguments are such.
+    call_notes: Vec<CallNote>,
 }
 
 impl Style {
@@ -112,6 +115,7 @@ impl Style {
             ternaries: options.ternaries,
             wrap: usize::from(options.wrap),
             hints: BTreeMap::new(),
+            call_notes: Vec::new(),
         }
     }
 
@@ -276,6 +280,7 @@ pub fn emit_function_in(
     if options.call_hints == CallHints::Names {
         style.hints = parameter_names_of(function, callees);
     }
+    style.call_notes = function.call_notes.clone();
     let mut lines = Vec::new();
 
     let mut signature_addresses = vec![function.address];
@@ -309,6 +314,14 @@ pub fn emit_function_in(
         };
         lines.push(Line {
             text: style.comment(&format!("{verdict}: {reason}")),
+            addresses: Vec::new(),
+        });
+    }
+    // What else is known of the function: that it does not return, or does
+    // not under a condition.
+    for note in &function.notes {
+        lines.push(Line {
+            text: style.comment(note),
             addresses: Vec::new(),
         });
     }
@@ -831,6 +844,9 @@ fn emit_statements(
                     arm(&otherwise, lines);
                     close(lines);
                 }
+                // The end of a path after a call that never returns: said by
+                // nothing, as the reader knows the callee.
+                AstNode::Intrinsic { name, .. } if name == crate::lift::UNREACHABLE => {}
                 node => {
                     let mut text = String::new();
                     emit_into(node, &mut text, 0, style);
@@ -842,6 +858,28 @@ fn emit_statements(
                             }
                         } else {
                             push(lines, whole, &statement.addresses);
+                        }
+                    }
+                    // What is known of the calls the statement holds, at the
+                    // end of its line: a note is the call's, not the
+                    // address's, so a later line sharing the address — one
+                    // that reads a value the call's arguments were made
+                    // from — does not say it again.
+                    let mut notes: Vec<&str> = Vec::new();
+                    for note in &style.call_notes {
+                        let holds_the_call = statement.addresses.contains(&note.at)
+                            && node.any(&|n| {
+                                matches!(n, AstNode::Call { callee, .. }
+                                    if matches!(callee.as_ref(), AstNode::FunctionName { name, .. } if *name == note.callee))
+                            });
+                        if holds_the_call && !notes.contains(&note.text.as_str()) {
+                            notes.push(&note.text);
+                        }
+                    }
+                    {
+                        if let (false, Some(last)) = (notes.is_empty(), lines.last_mut()) {
+                            last.text.push_str("  ");
+                            last.text.push_str(&style.comment(&notes.join("; ")));
                         }
                     }
                 }
@@ -1897,6 +1935,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: Some("main reads rax after the call".to_string()),
         }
     }
@@ -1984,6 +2025,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         }
     }
@@ -2190,6 +2234,9 @@ mod tests {
             }],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         let options =
@@ -2243,6 +2290,9 @@ mod tests {
             }],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         assert_eq!(
@@ -2377,6 +2427,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         let kept = emit_function(&function, &Options::default());
@@ -2488,6 +2541,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         for language in ["c", "rust", "python"] {
@@ -2824,6 +2880,9 @@ mod tests {
             ],
             frame: Vec::new(),
             thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         let broken = emit_function(

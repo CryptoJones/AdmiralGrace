@@ -165,7 +165,7 @@ use iced_x86::Mnemonic;
 use crate::arch::Bitness;
 use crate::ast::{AstNode, BinaryOp, StructField};
 use crate::cfg::{JumpTable, ProcedureCfg};
-use crate::cfgwalk::{resolve_branches_among, Entries};
+use crate::cfgwalk::{never_returns_by_name, resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
@@ -191,6 +191,21 @@ pub trait Symbols {
     /// did.
     fn site(&self, _address: u64) -> crate::options::SiteOverride {
         crate::options::SiteOverride::default()
+    }
+
+    /// Whether a call to the function at `address` comes back: not for
+    /// `exit`, `abort` and their kind, nor for a function whose every path
+    /// ends in one. Every call returns unless the image says otherwise.
+    fn returns(&self, _address: u64) -> bool {
+        true
+    }
+
+    /// The conditions under which the function at `address` does not
+    /// return — an exit-on-error helper's — each over the names of its
+    /// parameters, in order, so that a caller can say them of its own
+    /// arguments. None unless the image knows.
+    fn noreturn_when(&self, _address: u64) -> Vec<(Vec<String>, AstNode)> {
+        Vec::new()
     }
 
     /// What the pointer to `address` lands on, when the image knows.
@@ -239,6 +254,14 @@ impl Entries for SymbolEntries<'_> {
 
     fn table_allowed(&self, site: u64) -> bool {
         self.0.site(site).switch != Some(false)
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        self.0.returns(callee)
+    }
+
+    fn slot_returns(&self, slot: u64) -> bool {
+        !matches!(self.0.pointee(slot), Some(Pointee::Import(name)) if never_returns_by_name(&name))
     }
 }
 
@@ -364,6 +387,18 @@ pub struct Statement {
     pub kind: StatementKind,
 }
 
+/// What is known of a call, for the end of its line: that the callee does
+/// not return when the arguments are such.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallNote {
+    /// The address of the call instruction.
+    pub at: u64,
+    /// The callee, by the name the call is printed with.
+    pub callee: String,
+    /// The note: `checked does not return when a == 0`.
+    pub text: String,
+}
+
 /// The kinds of statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatementKind {
@@ -487,6 +522,18 @@ pub struct LiftedFunction {
     /// The instructions no statement came from: the frame setup and
     /// teardown, and the no-ops. The signature line stands for them.
     pub frame: Vec<u64>,
+    /// What is known of the function besides its return: that it does not
+    /// return, or does not return under a condition — printed as comments
+    /// after the one that says what decided the return type.
+    pub notes: Vec<String>,
+    /// What is known of the calls the function makes, by the call's
+    /// address: that the callee does not return when the arguments are
+    /// such — printed as a comment at the end of the call's line.
+    pub call_notes: Vec<CallNote>,
+    /// The conditions under which the function does not return, over its
+    /// parameters: an `if` whose one arm ends in a call that never returns
+    /// while the other goes on. For its callers to say of their arguments.
+    pub noreturn_when: Vec<AstNode>,
     /// The function this one is a thunk for, when it is one: a function
     /// that is only a `jmp` to another, behind at most `endbr64` and `nop`s,
     /// such as a PLT stub. A thunk has no body, parameters or return type
@@ -719,6 +766,9 @@ pub fn lift_graph(
         body: body.clone(),
         frame,
         thunk: None,
+        notes: Vec::new(),
+        call_notes: Vec::new(),
+        noreturn_when: Vec::new(),
         return_reason: None,
     };
     Ok(Stages {
@@ -777,6 +827,9 @@ fn lift_inner(
                 .map(|ins| ins.address)
                 .collect(),
             thunk: Some(callee),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
             return_reason: None,
         };
         let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
@@ -1209,12 +1262,17 @@ enum End {
         table: JumpTable,
         cases: Vec<(Vec<i64>, usize)>,
     },
+    /// In a call to a function that never returns: the walk gave the
+    /// block no successor, and nothing follows the call — not even the
+    /// next function's entry, when the call is the last instruction
+    /// before it: the walk keeps a function from running into the next.
+    NoReturn,
 }
 
 impl End {
     fn successors(&self) -> Vec<usize> {
         match self {
-            End::Return | End::Leave => Vec::new(),
+            End::Return | End::Leave | End::NoReturn => Vec::new(),
             End::Jump(target) | End::Fall(target) => vec![*target],
             End::Branch { taken, next } => vec![*taken, *next],
             End::Switch { cases, .. } => {
@@ -1273,6 +1331,8 @@ fn chains(
                 && (symbols.function_name(target).is_some() || tail_call_at(ins.address))
         }
         Flow::IndirectBranch => table_at(ins.address).is_none(),
+        // A fall into the next function, which the walk made a tail call.
+        Flow::Next => tail_call_at(ins.address),
         _ => false,
     };
     let mut predecessors: BTreeMap<u64, usize> = BTreeMap::new();
@@ -1369,6 +1429,7 @@ fn chains(
                     taken: node_at(target)?,
                     next: node_at(after)?,
                 },
+                Flow::Call(_) | Flow::IndirectCall if successors.is_empty() => End::NoReturn,
                 _ => match successors.as_slice() {
                     [next] if *next == after => End::Fall(node_at(after)?),
                     _ => {
@@ -1459,7 +1520,109 @@ enum Sym {
     Unknown(String),
 }
 
-/// Why a [`Sym::Dead`] value cannot be read.
+/// The conditions under which a function does not return: at the top of
+/// its body, an `if` whose one arm ends in a call to a function that never
+/// returns while the other goes on, by the condition — negated when it is
+/// the `else` that ends so. Only a condition over the parameters and the
+/// globals is one: a condition on a `local`, one of `locals`, means
+/// nothing to a caller. Deeper `if`s are left out, since their conditions
+/// hold only under the ones above them; and so is every `if` after a
+/// statement that may return, jump, loop or write a parameter, since what
+/// its condition says of the parameters is not what held at entry.
+fn noreturn_conditions(statements: &[Statement], locals: &[String]) -> Vec<AstNode> {
+    let mut conditions = Vec::new();
+    for statement in statements {
+        if let StatementKind::If {
+            then_part,
+            else_part,
+        } = &statement.kind
+        {
+            let then_ends = ends_without_return(then_part);
+            let else_ends = ends_without_return(else_part);
+            let condition = match (then_ends, else_ends) {
+                (true, false) => Some(statement.node.clone()),
+                (false, true) => Some(statement.node.negated()),
+                _ => None,
+            };
+            if let Some(condition) = condition {
+                let on_a_local = condition
+                    .any(&|node| matches!(node, AstNode::Var { name } if locals.contains(name)));
+                if !on_a_local {
+                    conditions.push(condition);
+                }
+            }
+        }
+        if !holds_after(statement, locals) {
+            break;
+        }
+    }
+    conditions
+}
+
+/// Whether what held of the parameters before `statement` holds after
+/// it, whichever way it went: not past a loop or a `switch`, a `return`,
+/// a `goto` or a label at any depth, nor a store to a variable that is
+/// not one of `locals` — a parameter, or a global a condition may read.
+fn holds_after(statement: &Statement, locals: &[String]) -> bool {
+    if !matches!(
+        statement.kind,
+        StatementKind::Plain | StatementKind::If { .. }
+    ) {
+        return false;
+    }
+    !any_statement(std::slice::from_ref(statement), &|inner| {
+        inner.node.any(&|node| match node {
+            AstNode::Return { .. }
+            | AstNode::Goto { .. }
+            | AstNode::Label { .. }
+            | AstNode::IfGoto { .. }
+            | AstNode::Loop { .. }
+            | AstNode::Break
+            | AstNode::Continue => true,
+            AstNode::Assign { lhs, .. } => {
+                !matches!(lhs.as_ref(), AstNode::Var { name } if locals.contains(name))
+            }
+            _ => false,
+        })
+    })
+}
+
+/// Whether `statements` end in a call to a function that never returns.
+fn ends_without_return(statements: &[Statement]) -> bool {
+    matches!(
+        statements.last(),
+        Some(Statement {
+            kind: StatementKind::Plain,
+            node: AstNode::Intrinsic { name, .. },
+            ..
+        }) if name == UNREACHABLE
+    )
+}
+
+/// The statement that marks the end of a path after a call that never
+/// returns: `__builtin_unreachable()`, as the compilers name it.
+pub const UNREACHABLE: &str = "__builtin_unreachable";
+
+/// Whether any statement, at any depth, satisfies `pred`.
+fn any_statement(statements: &[Statement], pred: &dyn Fn(&Statement) -> bool) -> bool {
+    statements.iter().any(|statement| {
+        pred(statement)
+            || match &statement.kind {
+                StatementKind::Plain => false,
+                StatementKind::If {
+                    then_part,
+                    else_part,
+                } => any_statement(then_part, pred) || any_statement(else_part, pred),
+                StatementKind::While { body }
+                | StatementKind::DoWhile { body }
+                | StatementKind::For { body, .. } => any_statement(body, pred),
+                StatementKind::Switch { arms } => {
+                    arms.iter().any(|arm| any_statement(&arm.body, pred))
+                }
+            }
+    })
+}
+
 /// What a call or a jump calls.
 #[derive(Debug, Clone, PartialEq)]
 enum Callee {
@@ -1505,6 +1668,7 @@ fn one_line_of(node: &AstNode) -> String {
         .to_string()
 }
 
+/// Why a [`Sym::Dead`] value cannot be read.
 fn dead_reason(callee: &str) -> String {
     format!("{callee}'s result on one path and nothing on another")
 }
@@ -1879,6 +2043,11 @@ struct Lifter<'a> {
     state: State,
     /// The slots whose address was taken.
     address_taken: BTreeSet<i64>,
+    /// What is known of the calls made so far: the call's address, the
+    /// callee's name and the condition under which it does not return,
+    /// over this function's own values — a call result inlined later is
+    /// inlined here too.
+    call_notes: Vec<(u64, String, AstNode)>,
     /// While resolving: the variable the last constant store wrote to or
     /// into, and the offset just past that store — where the next word of a
     /// string put on the stack would go.
@@ -1918,6 +2087,7 @@ impl<'a> Lifter<'a> {
             pending_compare: None,
             state: State::initial(),
             address_taken: BTreeSet::new(),
+            call_notes: Vec::new(),
             string_run: None,
             locals: BTreeMap::new(),
             stack_pointers: BTreeMap::new(),
@@ -2108,6 +2278,20 @@ impl<'a> Lifter<'a> {
         match chain.end {
             End::Return => {
                 self.step(last)?;
+                Ok(Terminator::Return)
+            }
+            // The call is made, and the path ends there without a `return`
+            // of its own: the callee never comes back.
+            End::NoReturn => {
+                self.step(last)?;
+                // The marker says the path ends here: the structurer reads
+                // it as no fall-through, the emitter prints nothing for it,
+                // and the transpiler writes it for the compiler.
+                self.statements.push(Stmt::Builtin {
+                    name: UNREACHABLE,
+                    args: Vec::new(),
+                    addresses: vec![last.address],
+                });
                 Ok(Terminator::Return)
             }
             End::Leave => {
@@ -4196,7 +4380,15 @@ impl<'a> Lifter<'a> {
     /// entry value and the `tail-calls` option allows it.
     fn tail_jump(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         let at = ins.address;
-        let callee = self.jump_target(ins)?;
+        let callee = if ins.flow == Flow::Next {
+            // A fall into the next function: the instruction is this
+            // function's own, and the call goes where it ends.
+            self.step(ins)?;
+            let next = at + ins.length as u64;
+            Callee::Named(self.function_named(next), next)
+        } else {
+            self.jump_target(ins)?
+        };
         if self.stack_pointer()? != 0 {
             return Err(NotLifted::new(format!(
                 "the stack is not balanced at the jmp at {at:#x}"
@@ -4228,6 +4420,10 @@ impl<'a> Lifter<'a> {
             .instructions
             .split_last()
             .expect("a chain has an instruction");
+        // A fall into the next function is no jump to name a thunk by.
+        if last.flow == Flow::Next {
+            return Ok(None);
+        }
         let is_padding = |ins: &DecodedInsn| {
             matches!(
                 Mnemonic::try_from(ins.mnemonic as usize),
@@ -4258,19 +4454,25 @@ impl<'a> Lifter<'a> {
             name: name.clone(),
             address: target,
         };
-        self.emit_call_node(callee, name, at)
+        self.emit_call_node(callee, name, Some(target), at)
     }
 
     /// A call through `expression` — a parameter, a field loaded from a
     /// struct — at `at`: `a(b, 1)`.
     fn emit_call_through(&mut self, expression: AstNode, at: u64) -> Result<(), NotLifted> {
         let label = one_line_of(&expression);
-        self.emit_call_node(expression, label, at)
+        self.emit_call_node(expression, label, None, at)
     }
 
     /// A call of `callee` — a function by name, or an expression — at `at`,
     /// `name` being what the callee is called in the reasons given later.
-    fn emit_call_node(&mut self, callee: AstNode, name: String, at: u64) -> Result<(), NotLifted> {
+    fn emit_call_node(
+        &mut self,
+        callee: AstNode,
+        name: String,
+        target: Option<u64>,
+        at: u64,
+    ) -> Result<(), NotLifted> {
         let mut args = Vec::new();
         let mut addresses = vec![at];
         for &register in self.abi.argument_registers() {
@@ -4320,6 +4522,37 @@ impl<'a> Lifter<'a> {
                 if let Some(arity) = message_arity(&name, &args) {
                     wanted = arity;
                 }
+            }
+        }
+        // What the callee's own lift says of when it does not return, said
+        // of these arguments: `checked does not return when p == 0`.
+        if let Some(target) = target {
+            for (params, condition) in self.symbols.noreturn_when(target) {
+                // Said only when every parameter the condition names has an
+                // argument here to stand for it.
+                if params
+                    .iter()
+                    .skip(args.len())
+                    .any(|param| condition.reads_var(param))
+                {
+                    continue;
+                }
+                // All at once, through placeholders: an argument named as
+                // a later parameter must not be substituted again.
+                let placeholder = |i: usize| format!("__noreturn_arg_{i}");
+                let mut condition = condition;
+                for (i, param) in params.iter().enumerate().take(args.len()) {
+                    condition = condition.substitute(param, &AstNode::var(placeholder(i)));
+                }
+                for (i, arg) in args.iter().enumerate().take(params.len()) {
+                    condition = condition.substitute(&placeholder(i), arg);
+                }
+                let condition = condition.folded();
+                // A condition the arguments decide against is no note.
+                if matches!(condition, AstNode::ConstantCondition { holds: false, .. }) {
+                    continue;
+                }
+                self.call_notes.push((at, name.clone(), condition));
             }
         }
         let callee_name = name;
@@ -4584,6 +4817,12 @@ impl<'a> Lifter<'a> {
                         node = node.substitute(&name, &call);
                         addresses.extend(call_addresses);
                         addresses = sorted(addresses);
+                        // A note that named the result names the call now.
+                        for (_, _, condition) in &mut self.call_notes {
+                            if condition.reads_var(&name) {
+                                *condition = condition.clone().substitute(&name, &call);
+                            }
+                        }
                     } else {
                         unreachable!(
                             "a pending call is only kept when the next statement reads it"
@@ -4695,6 +4934,25 @@ impl<'a> Lifter<'a> {
                 .filter(|address| !claimed.contains(address)),
         );
 
+        // What the body says of the function's return besides the width:
+        // that it never comes back, or does not under a condition.
+        let never_returns = !body.is_empty()
+            && !any_statement(&body, &|statement| {
+                matches!(statement.node, AstNode::Return { .. })
+            });
+        let local_names: Vec<String> = locals.iter().map(|local| local.name.clone()).collect();
+        let noreturn_when = if never_returns {
+            Vec::new()
+        } else {
+            noreturn_conditions(&body, &local_names)
+        };
+        let mut notes = Vec::new();
+        if never_returns {
+            notes.push("does not return".to_string());
+        }
+        for condition in &noreturn_when {
+            notes.push(format!("does not return when {}", one_line_of(condition)));
+        }
         Ok(LiftedFunction {
             name: name.to_string(),
             address: entry,
@@ -4703,6 +4961,24 @@ impl<'a> Lifter<'a> {
             locals,
             body,
             frame,
+            notes,
+            call_notes: self
+                .call_notes
+                .into_iter()
+                .map(|(at, callee, condition)| CallNote {
+                    at,
+                    text: match &condition {
+                        AstNode::ConstantCondition { holds: true, .. } => {
+                            format!("{callee} does not return")
+                        }
+                        condition => {
+                            format!("{callee} does not return when {}", one_line_of(condition))
+                        }
+                    },
+                    callee,
+                })
+                .collect(),
+            noreturn_when,
             thunk: None,
             return_reason: Some(self.return_reason),
         })
@@ -6848,7 +7124,10 @@ mod tests {
     fn a_function_that_never_returns_is_an_endless_loop() {
         // call f; .top: jmp .top
         let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xeb, 0xfe];
-        assert_eq!(c(&code), "void f(void)\n{\n  f();\n  while (1) {\n  }\n}");
+        assert_eq!(
+            c(&code),
+            "// does not return\nvoid f(void)\n{\n  f();\n  while (1) {\n  }\n}"
+        );
     }
 
     #[test]
@@ -7654,5 +7933,272 @@ mod tests {
             0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, 0xc7, 0x07, 0x02, 0x00, 0x00, 0x00, 0xc3,
         ]);
         assert!(!twice.contains("struct {"), "{twice}");
+    }
+
+    /// Symbols that know `die` at 0x2000 never returns, and `checked` at
+    /// 0x3000 does not when its first parameter is zero.
+    struct Dying;
+
+    impl Symbols for Dying {
+        fn function_name(&self, address: u64) -> Option<String> {
+            match address {
+                0x2000 => Some("die".to_string()),
+                0x3000 => Some("checked".to_string()),
+                _ => None,
+            }
+        }
+
+        fn returns(&self, address: u64) -> bool {
+            address != 0x2000
+        }
+
+        fn noreturn_when(&self, address: u64) -> Vec<(Vec<String>, AstNode)> {
+            if address == 0x3000 {
+                vec![(
+                    vec!["p".to_string(), "v".to_string()],
+                    AstNode::binary(AstNode::var("p"), BinaryOp::Equal, AstNode::constant(0, 8)),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_that_never_returns_ends_its_path_and_the_condition_is_noted() {
+        // test edi, edi; js .die; lea eax, [rdi+rdi]; ret; .die: mov edi, 3;
+        // call die — and nothing after: the walk gives the block no
+        // successor, since die never returns.
+        let code = [
+            0x85, 0xff, 0x78, 0x04, 0x8d, 0x04, 0x3f, 0xc3, 0xbf, 0x03, 0x00, 0x00, 0x00, 0xe8,
+            0xee, 0x0f, 0x00, 0x00,
+        ];
+        let disasm = decode(&code);
+        struct Ends;
+        impl Entries for Ends {
+            fn is_function(&self, _address: u64) -> bool {
+                false
+            }
+            fn is_import_slot(&self, _slot: u64) -> bool {
+                false
+            }
+            fn returns(&self, callee: u64) -> bool {
+                callee != 0x2000
+            }
+        }
+        let cfg = crate::cfgwalk::resolve_branches_among(
+            &Disasm {
+                instructions: disasm.clone(),
+                ..Default::default()
+            },
+            BASE,
+            &Ends,
+        );
+        let options = Options::default();
+        let function = lift_block(&disasm, BASE, "f", Abi::SystemV, &Dying, &options)
+            .unwrap_or_else(|error| panic!("{error}: {cfg:?}"));
+        let text = emit_function(&function, &options).text();
+        // The arm that dies is the guard: nothing is printed for the end of
+        // its path, and the rest follows unnested.
+        assert!(
+            text.contains("  if (a < 0) {\n    die(3);\n  }\n  return a + a;"),
+            "{text}"
+        );
+        assert!(!text.contains("__builtin_unreachable"), "{text}");
+        // The transpiler writes the marker for the compiler.
+        let cpp = crate::emit::emit_node_c(&AstNode::Intrinsic {
+            name: UNREACHABLE.to_string(),
+            args: Vec::new(),
+        });
+        assert_eq!(cpp.trim_end(), "__builtin_unreachable();");
+        // The function's own note, after the return's reason.
+        assert!(
+            text.contains("\n// does not return when a < 0\nint f(int a)"),
+            "{text}"
+        );
+        assert_eq!(
+            function.noreturn_when,
+            vec![AstNode::binary(
+                AstNode::var("a"),
+                BinaryOp::Less,
+                AstNode::constant(0, 4)
+            )]
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_helper_that_may_not_return_is_noted_with_the_arguments() {
+        // mov rdi, rsi; mov esi, 5; call checked; ret: checked does not
+        // return when its first parameter is zero, which here is this
+        // function's own `b`.
+        let code = [
+            0x48, 0x89, 0xf7, 0xbe, 0x05, 0x00, 0x00, 0x00, 0xe8, 0xf3, 0x1f, 0x00, 0x00, 0xc3,
+        ];
+        let text = c_with(&code, &Dying, &[]);
+        assert!(
+            text.contains("  checked(b, 5);  // checked does not return when b == 0"),
+            "{text}"
+        );
+        // Without an argument for the parameter the condition names, nothing
+        // is said: mov esi, 5; call checked; ret
+        let text = c_with(
+            &[
+                0xbe, 0x05, 0x00, 0x00, 0x00, 0xe8, 0xf6, 0x1f, 0x00, 0x00, 0xc3,
+            ],
+            &Dying,
+            &[],
+        );
+        assert!(!text.contains("does not return when"), "{text}");
+        // A function whose every path ends in such a call does not return.
+        // mov edi, 1; call die
+        let text = c_with(
+            &[0xbf, 0x01, 0x00, 0x00, 0x00, 0xe8, 0xf6, 0x0f, 0x00, 0x00],
+            &Dying,
+            &[],
+        );
+        assert!(
+            text.contains("// does not return\nvoid f(void)\n{\n  die(1);\n}"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_arguments_stand_in_for_the_parameters_all_at_once() {
+        // checked's parameters are named as this function's own, a and b,
+        // and are passed swapped: mov rax, rdi; mov rdi, rsi; mov rsi, rax;
+        // call checked; ret. Its `a == 0` is on this function's b — and is
+        // not then substituted on into a.
+        struct Swapped;
+        impl Symbols for Swapped {
+            fn function_name(&self, address: u64) -> Option<String> {
+                (address == 0x3000).then(|| "checked".to_string())
+            }
+
+            fn noreturn_when(&self, address: u64) -> Vec<(Vec<String>, AstNode)> {
+                if address == 0x3000 {
+                    vec![(
+                        vec!["a".to_string(), "b".to_string()],
+                        AstNode::binary(AstNode::var("a"), BinaryOp::Equal, AstNode::constant(0, 8)),
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let code = [
+            0x48, 0x89, 0xf8, 0x48, 0x89, 0xf7, 0x48, 0x89, 0xc6, 0xe8, 0xf2, 0x1f, 0x00, 0x00,
+            0xc3,
+        ];
+        let text = c_with(&code, &Swapped, &[]);
+        assert!(
+            text.contains("checked(b, a);  // checked does not return when b == 0"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_code_after_a_call_that_never_returns_is_not_the_functions() {
+        // mov edi, 1; call die; ret: the walk among the lift's own symbols
+        // ends the block at the call, and the ret after it is never lifted.
+        let code = [
+            0xbf, 0x01, 0x00, 0x00, 0x00, 0xe8, 0xf6, 0x0f, 0x00, 0x00, 0xc3,
+        ];
+        let text = c_with(&code, &Dying, &[]);
+        assert!(
+            text.contains("// does not return\nvoid f(void)\n{\n  die(1);\n}"),
+            "{text}"
+        );
+        assert!(!text.contains("  return"), "{text}");
+    }
+
+    #[test]
+    fn code_that_falls_into_the_next_function_tail_calls_it() {
+        // mov edi, 1 — and inner, the next function, starts right after:
+        // the fall into it is a tail call to it.
+        struct Inner;
+        impl Symbols for Inner {
+            fn function_name(&self, address: u64) -> Option<String> {
+                (address == BASE + 5).then(|| "inner".to_string())
+            }
+        }
+        let text = c_with(&[0xbf, 0x01, 0x00, 0x00, 0x00], &Inner, &[]);
+        assert!(text.contains("inner(1)"), "{text}");
+        assert!(!text.contains("not lifted"), "{text}");
+    }
+
+    #[test]
+    fn conditions_are_over_the_parameters_and_hold_at_entry() {
+        let dies = |code: u64| {
+            vec![
+                Statement::plain(
+                    AstNode::Call {
+                        callee: Box::new(AstNode::FunctionName {
+                            name: "die".to_string(),
+                            address: 0x2000,
+                        }),
+                        args: vec![AstNode::constant(code, 4)],
+                    },
+                    Vec::new(),
+                ),
+                Statement::plain(
+                    AstNode::Intrinsic {
+                        name: UNREACHABLE.to_string(),
+                        args: Vec::new(),
+                    },
+                    Vec::new(),
+                ),
+            ]
+        };
+        let guard = |condition: AstNode, code: u64| Statement {
+            node: condition,
+            addresses: Vec::new(),
+            kind: StatementKind::If {
+                then_part: dies(code),
+                else_part: Vec::new(),
+            },
+        };
+        let is_zero = |name: &str| {
+            AstNode::binary(AstNode::var(name), BinaryOp::Equal, AstNode::constant(0, 8))
+        };
+        let store = |name: &str| {
+            Statement::plain(
+                AstNode::Assign {
+                    lhs: Box::new(AstNode::var(name)),
+                    rhs: Box::new(AstNode::constant(1, 8)),
+                },
+                Vec::new(),
+            )
+        };
+        let locals = vec!["v1".to_string()];
+        // A condition on a local is not said; one on a global is.
+        let body = vec![
+            guard(is_zero("a"), 1),
+            guard(is_zero("v1"), 2),
+            guard(is_zero("status"), 3),
+        ];
+        assert_eq!(
+            noreturn_conditions(&body, &locals),
+            vec![is_zero("a"), is_zero("status")]
+        );
+        // Past a return, nothing more is said.
+        let returns = Statement {
+            node: AstNode::var("a"),
+            addresses: Vec::new(),
+            kind: StatementKind::If {
+                then_part: vec![Statement::plain(
+                    AstNode::Return { value: None },
+                    Vec::new(),
+                )],
+                else_part: Vec::new(),
+            },
+        };
+        let body = vec![guard(is_zero("a"), 1), returns, guard(is_zero("b"), 2)];
+        assert_eq!(noreturn_conditions(&body, &locals), vec![is_zero("a")]);
+        // Nor past a store to a parameter — while a store to a local
+        // changes nothing a caller sees.
+        let body = vec![store("a"), guard(is_zero("a"), 1)];
+        assert!(noreturn_conditions(&body, &locals).is_empty());
+        let body = vec![store("v1"), guard(is_zero("a"), 1)];
+        assert_eq!(noreturn_conditions(&body, &locals), vec![is_zero("a")]);
     }
 }
