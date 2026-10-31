@@ -1437,13 +1437,20 @@ fn the_dead_code_option_drops_what_nothing_uses() {
     assert!(!report.contains("rax"), "{report}");
     assert!(!report.contains("if ("), "{report}");
     assert!(report.contains("{\n  return;\n}"), "{report}");
-    // A function with nothing dead reads the same under either.
-    let kept = image("sample.elf", &["pseudocode", "add"]);
-    let dropped = image(
-        "sample.elf",
-        &["pseudocode", "add", "--option", "dead-code", "drop"],
+    // A function with nothing dead reads the same under either, and so
+    // does one whose store is to a global: `completed.0 = 1;` is for the
+    // rest of the program.
+    for function in ["add", "__do_global_dtors_aux"] {
+        let kept = image("sample.elf", &["pseudocode", function]);
+        let dropped = image(
+            "sample.elf",
+            &["pseudocode", function, "--option", "dead-code", "drop"],
+        );
+        assert_eq!(kept, dropped, "{function}");
+    }
+    assert!(
+        image("sample.elf", &["pseudocode", "__do_global_dtors_aux"]).contains("completed.0 = 1;")
     );
-    assert_eq!(kept, dropped);
     // The option is in the catalog.
     let catalog = Command::new(env!("CARGO_BIN_EXE_ag"))
         .args(["catalog", "--markdown"])

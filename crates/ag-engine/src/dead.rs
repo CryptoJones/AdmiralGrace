@@ -5,18 +5,25 @@
 //! pruned before it is printed. What goes is what provably does nothing for
 //! the rest of the function:
 //!
-//! - an assignment to a variable the function never reads, anywhere;
-//! - an assignment to a variable that is assigned again, in the same block,
-//!   before anything reads it — the later store wins;
+//! - an assignment to one of the function's own variables — a parameter,
+//!   a local, a register's or a call's temporary — that the function never
+//!   reads, anywhere;
+//! - an assignment to one of them that is assigned again, in the same
+//!   block, before anything reads it — the later store wins;
 //! - a branch whose condition can only go one way: the arm it never takes
 //!   goes, and the one it always takes stands in for the `if`.
 //!
-//! A call does more than yield a result, so an assignment that holds one
-//! keeps the call as the statement `f();`. Reads are counted over the whole
-//! function, every arm and every loop, so a variable read on any path is
-//! kept on every path: the pruning is conservative, never reaching past
-//! what the text itself shows to be unused. It runs to a fixed point, since
-//! removing one statement can leave another unused.
+//! A store to anything else — a global, a piece of data the image names —
+//! is for the rest of the program, and is never dead here. A call does
+//! more than yield a result, so an assignment that holds one keeps the call
+//! as the statement `f();`; and a call, or a store through a pointer, may
+//! read a variable whose address was taken, so no store to such a variable
+//! is overwritten across one. A branch is not folded away while a label a
+//! `goto` still names stands in the arm that goes. Reads are counted over
+//! the whole function, every arm and every loop, so a variable read on any
+//! path is kept on every path: the pruning is conservative, never reaching
+//! past what the text itself shows to be unused. It runs to a fixed point,
+//! since removing one statement can leave another unused.
 
 use crate::ast::AstNode;
 use crate::lift::{LiftedFunction, Statement, StatementKind};
@@ -28,7 +35,13 @@ const MOST_ROUNDS: usize = 64;
 /// nothing names after that.
 pub fn pruned(function: &LiftedFunction) -> LiftedFunction {
     let mut function = function.clone();
-    prune(&mut function.body);
+    let own: Vec<String> = function
+        .params
+        .iter()
+        .chain(&function.locals)
+        .map(|variable| variable.name.clone())
+        .collect();
+    prune(&mut function.body, &own);
     function.locals.retain(|local| {
         function
             .body
@@ -38,11 +51,12 @@ pub fn pruned(function: &LiftedFunction) -> LiftedFunction {
     function
 }
 
-/// Prune `body` to a fixed point.
-pub fn prune(body: &mut Vec<Statement>) {
+/// Prune `body` to a fixed point. `own` names the function's own
+/// variables — the only ones a store to may be dead.
+pub fn prune(body: &mut Vec<Statement>, own: &[String]) {
     for _ in 0..MOST_ROUNDS {
         let folded = fold_constant_branches(body);
-        let dropped = drop_dead_assignments(body);
+        let dropped = drop_dead_assignments(body, own);
         if !folded && !dropped {
             break;
         }
@@ -74,6 +88,26 @@ fn fold_constant_branches(statements: &mut Vec<Statement>) -> bool {
             _ => None,
         };
         if let Some(holds) = holds {
+            // The arm that goes may hold a label a `goto` elsewhere still
+            // names: then the arm is reached after all, and the branch
+            // stays as it is.
+            let dropped_has_label = match &statements[index].kind {
+                StatementKind::If {
+                    then_part,
+                    else_part,
+                } => {
+                    let dropped = if holds { else_part } else { then_part };
+                    dropped.iter().any(has_label)
+                }
+                _ => false,
+            };
+            if dropped_has_label {
+                if fold_in_children(&mut statements[index]) {
+                    changed = true;
+                }
+                index += 1;
+                continue;
+            }
             let statement = statements.remove(index);
             let StatementKind::If {
                 then_part,
@@ -124,25 +158,40 @@ fn fold_in_children(statement: &mut Statement) -> bool {
 }
 
 /// Drop the assignments nothing uses, at every depth; whether any was.
-fn drop_dead_assignments(body: &mut Vec<Statement>) -> bool {
-    // The variables read anywhere in the function.
+fn drop_dead_assignments(body: &mut Vec<Statement>, own: &[String]) -> bool {
+    // The variables read anywhere in the function, and the ones whose
+    // address is taken anywhere — which a call or a store through a pointer
+    // may reach.
     let mut read = Vec::new();
+    let mut escaped = Vec::new();
     for statement in body.iter() {
         collect_reads(statement, &mut read);
+        collect_escapes(statement, &mut escaped);
     }
-    drop_in(body, &read)
+    drop_in(body, own, &read, &escaped)
 }
 
-/// Drop, in `statements` and their nested bodies, each assignment to a
-/// variable in no read anywhere (`read`), and each assignment a later one
-/// in the same block overwrites before any read.
-fn drop_in(statements: &mut Vec<Statement>, read: &[String]) -> bool {
+/// Drop, in `statements` and their nested bodies, each assignment to one
+/// of the function's own variables (`own`) in no read anywhere (`read`),
+/// and each assignment a later one in the same block overwrites before any
+/// read — not across a call or a pointer store where the variable's
+/// address was taken (`escaped`).
+fn drop_in(
+    statements: &mut Vec<Statement>,
+    own: &[String],
+    read: &[String],
+    escaped: &[String],
+) -> bool {
     let mut changed = false;
     let mut index = 0;
     while index < statements.len() {
-        if let Some(name) = assigned_var(&statements[index]) {
+        if let Some(name) = assigned_var(&statements[index]).filter(|name| own.contains(name)) {
             let dead = !read.contains(&name)
-                || overwritten_before_read(&statements[index + 1..], &name);
+                || overwritten_before_read(
+                    &statements[index + 1..],
+                    &name,
+                    escaped.contains(&name),
+                );
             if dead {
                 let statement = statements.remove(index);
                 // A call in the value is kept, as the call it is.
@@ -162,18 +211,18 @@ fn drop_in(statements: &mut Vec<Statement>, read: &[String]) -> bool {
                 then_part,
                 else_part,
             } => {
-                changed |= drop_in(then_part, read);
-                changed |= drop_in(else_part, read);
+                changed |= drop_in(then_part, own, read, escaped);
+                changed |= drop_in(else_part, own, read, escaped);
             }
             StatementKind::While { body } | StatementKind::DoWhile { body } => {
-                changed |= drop_in(body, read);
+                changed |= drop_in(body, own, read, escaped);
             }
             StatementKind::For { body, .. } => {
-                changed |= drop_in(body, read);
+                changed |= drop_in(body, own, read, escaped);
             }
             StatementKind::Switch { arms } => {
                 for arm in arms {
-                    changed |= drop_in(&mut arm.body, read);
+                    changed |= drop_in(&mut arm.body, own, read, escaped);
                 }
             }
         }
@@ -199,10 +248,15 @@ fn assigned_var(statement: &Statement) -> Option<String> {
 /// Whether `rest` — the statements after an assignment to `name`, in its
 /// block — assigns `name` again before anything reads it: only plain
 /// statements that do not read it may come between, since a control
-/// statement may read it on a path of its own.
-fn overwritten_before_read(rest: &[Statement], name: &str) -> bool {
+/// statement may read it on a path of its own; and, where the variable's
+/// address was taken (`escaped`), none that calls or stores through a
+/// pointer, since that may read it too.
+fn overwritten_before_read(rest: &[Statement], name: &str, escaped: bool) -> bool {
     for statement in rest {
         if statement.kind != StatementKind::Plain {
+            return false;
+        }
+        if escaped && may_touch_memory(&statement.node) {
             return false;
         }
         if let AstNode::Assign { lhs, rhs } = &statement.node {
@@ -220,15 +274,85 @@ fn overwritten_before_read(rest: &[Statement], name: &str) -> bool {
         if reads(&statement.node, name) {
             return false;
         }
-        // A return, a goto, a label: the block's straight run ends.
+        // A return, a goto, a label, a break, a continue: the block's
+        // straight run ends.
         if matches!(
             statement.node,
-            AstNode::Return { .. } | AstNode::Goto { .. } | AstNode::Label { .. }
+            AstNode::Return { .. }
+                | AstNode::Goto { .. }
+                | AstNode::Label { .. }
+                | AstNode::Break
+                | AstNode::Continue
         ) {
             return false;
         }
     }
     false
+}
+
+/// Whether a statement calls something or stores through a pointer: what
+/// may read a variable whose address was taken.
+fn may_touch_memory(node: &AstNode) -> bool {
+    if node.any(&|n| matches!(n, AstNode::Call { .. } | AstNode::Intrinsic { .. })) {
+        return true;
+    }
+    matches!(node, AstNode::Assign { lhs, .. } if matches!(lhs.as_ref(), AstNode::Deref { .. }))
+}
+
+/// Whether a statement, or any statement inside it, is or holds a label.
+fn has_label(statement: &Statement) -> bool {
+    if statement.node.any(&|n| matches!(n, AstNode::Label { .. })) {
+        return true;
+    }
+    match &statement.kind {
+        StatementKind::Plain => false,
+        StatementKind::If {
+            then_part,
+            else_part,
+        } => then_part.iter().chain(else_part).any(has_label),
+        StatementKind::While { body } | StatementKind::DoWhile { body } => {
+            body.iter().any(has_label)
+        }
+        StatementKind::For { init, step, body } => {
+            has_label(init) || has_label(step) || body.iter().any(has_label)
+        }
+        StatementKind::Switch { arms } => arms.iter().any(|arm| arm.body.iter().any(has_label)),
+    }
+}
+
+/// Every variable whose address a statement takes — `&x` — into `escaped`.
+fn collect_escapes(statement: &Statement, escaped: &mut Vec<String>) {
+    let found = std::cell::RefCell::new(Vec::new());
+    statement.node.any(&|n| {
+        if let AstNode::AddressOf { target } = n {
+            if let AstNode::Var { name } = target.as_ref() {
+                found.borrow_mut().push(name.clone());
+            }
+        }
+        false
+    });
+    for name in found.into_inner() {
+        if !escaped.contains(&name) {
+            escaped.push(name);
+        }
+    }
+    let nested: Vec<&Statement> = match &statement.kind {
+        StatementKind::Plain => Vec::new(),
+        StatementKind::If {
+            then_part,
+            else_part,
+        } => then_part.iter().chain(else_part).collect(),
+        StatementKind::While { body } | StatementKind::DoWhile { body } => body.iter().collect(),
+        StatementKind::For { init, step, body } => {
+            let mut all: Vec<&Statement> = vec![init, step];
+            all.extend(body.iter());
+            all
+        }
+        StatementKind::Switch { arms } => arms.iter().flat_map(|arm| arm.body.iter()).collect(),
+    };
+    for statement in nested {
+        collect_escapes(statement, escaped);
+    }
 }
 
 /// The call an expression holds, when it holds one: what keeps a dropped
@@ -385,6 +509,99 @@ mod tests {
         }
     }
 
+    fn own(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_store_to_a_global_is_never_dead() {
+        // `counter` is the image's, not the function's: the rest of the
+        // program reads it.
+        let mut body = vec![
+            assign("counter", AstNode::constant(5, 4)),
+            assign("counter", AstNode::constant(6, 4)),
+            ret(AstNode::constant(0, 8)),
+        ];
+        prune(&mut body, &own(&["rax"]));
+        assert_eq!(body.len(), 3);
+    }
+
+    #[test]
+    fn a_call_between_two_stores_keeps_the_first_where_the_address_was_taken() {
+        let mut body = vec![
+            assign(
+                "p",
+                AstNode::AddressOf {
+                    target: Box::new(AstNode::var("local_8")),
+                },
+            ),
+            assign("local_8", AstNode::constant(1, 8)),
+            Statement::plain(
+                AstNode::Call {
+                    callee: Box::new(AstNode::FunctionName {
+                        name: "f".to_string(),
+                        address: 0x2000,
+                    }),
+                    args: vec![AstNode::var("p")],
+                },
+                vec![0x1008],
+            ),
+            assign("local_8", AstNode::constant(2, 8)),
+            ret(AstNode::var("local_8")),
+        ];
+        prune(&mut body, &own(&["p", "local_8"]));
+        assert_eq!(body.len(), 5);
+        // A variable whose address is never taken is overwritten across the
+        // call all the same.
+        let mut body = vec![
+            assign("rax", AstNode::constant(1, 8)),
+            Statement::plain(call("f"), vec![0x1008]),
+            assign("rax", AstNode::constant(2, 8)),
+            ret(AstNode::var("rax")),
+        ];
+        prune(&mut body, &own(&["rax"]));
+        assert_eq!(body.len(), 3);
+        // A break ends the straight run too.
+        let mut body = vec![
+            assign("rax", AstNode::constant(1, 8)),
+            Statement::plain(AstNode::Break, vec![0x1008]),
+            assign("rax", AstNode::constant(2, 8)),
+            ret(AstNode::var("rax")),
+        ];
+        prune(&mut body, &own(&["rax"]));
+        assert_eq!(body.len(), 4);
+    }
+
+    #[test]
+    fn a_branch_whose_dropped_arm_holds_a_label_stays() {
+        let mut body = vec![
+            if_constant(
+                false,
+                vec![
+                    Statement::plain(
+                        AstNode::Label {
+                            name: "again".to_string(),
+                            address: 0x1004,
+                        },
+                        vec![0x1004],
+                    ),
+                    ret(AstNode::constant(1, 8)),
+                ],
+                Vec::new(),
+            ),
+            Statement::plain(
+                AstNode::Goto {
+                    label: "again".to_string(),
+                    address: 0x1010,
+                },
+                vec![0x1010],
+            ),
+        ];
+        prune(&mut body, &own(&[]));
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0].kind, StatementKind::If { .. }));
+    }
+
     #[test]
     fn an_assignment_nothing_reads_goes_and_its_call_stays() {
         let mut body = vec![
@@ -392,7 +609,7 @@ mod tests {
             assign("v1", call("f")),
             ret(AstNode::constant(0, 8)),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["rax", "v1"]));
         assert_eq!(body.len(), 2);
         assert!(matches!(body[0].node, AstNode::Call { .. }));
         assert!(matches!(body[1].node, AstNode::Return { .. }));
@@ -405,7 +622,7 @@ mod tests {
             assign("rax", AstNode::constant(2, 8)),
             ret(AstNode::var("rax")),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["rax"]));
         assert_eq!(body.len(), 2);
         assert_eq!(
             body[0].node,
@@ -423,7 +640,7 @@ mod tests {
             ),
             ret(AstNode::var("rax")),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["rax"]));
         assert_eq!(body.len(), 3);
     }
 
@@ -441,7 +658,7 @@ mod tests {
             },
             ret(AstNode::var("rax")),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["rax"]));
         assert_eq!(body.len(), 3);
     }
 
@@ -456,7 +673,7 @@ mod tests {
             ),
             ret(AstNode::constant(0, 8)),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["rax"]));
         // The never-taken arm goes, then `rax` is read nowhere, and goes.
         assert_eq!(body.len(), 1);
         assert!(matches!(body[0].node, AstNode::Return { .. }));
@@ -466,7 +683,7 @@ mod tests {
             vec![ret(AstNode::constant(1, 8))],
             vec![ret(AstNode::constant(2, 8))],
         )];
-        prune(&mut body);
+        prune(&mut body, &own(&[]));
         assert_eq!(body.len(), 1);
         assert_eq!(
             body[0].node,
@@ -490,7 +707,7 @@ mod tests {
             ),
             ret(AstNode::constant(0, 8)),
         ];
-        prune(&mut body);
+        prune(&mut body, &own(&["p"]));
         assert_eq!(body.len(), 2);
     }
 }

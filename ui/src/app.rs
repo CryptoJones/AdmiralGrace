@@ -2709,15 +2709,16 @@ impl App {
                     return Task::none();
                 }
                 // The image is lifted under the options it was opened with,
-                // so it is opened again; the selection is kept.
+                // so it is opened again; the function on screen is kept,
+                // and nothing is added to the history.
                 let Some(path) = self.binary_path.clone() else {
                     return Task::none();
                 };
-                let selected = self.selection.address();
+                let function = self.work.listing_of.or(self.navigator.selected);
                 let task = self.load_binary(&path);
                 self.work.tab = ViewTab::Pseudocode;
-                if let Some(address) = selected {
-                    let _ = self.update(Message::FunctionSelected(address));
+                if let Some(address) = function {
+                    let _ = self.select_function(address, false);
                     self.work.tab = ViewTab::Pseudocode;
                 }
                 return task;
@@ -7625,9 +7626,12 @@ mod tests {
         assert!(shown.contains("rax = &completed.0;"), "{shown}");
         assert_eq!(app.options.get("dead-code").as_deref(), Some("keep"));
 
+        // A click inside the function moves the selection; the toggle keeps
+        // the function on screen, not the line.
+        let _ = app.update(Message::AddressSelected(0x1094));
         let _ = app.update(Message::ToggleDeadCode);
         assert_eq!(app.options.get("dead-code").as_deref(), Some("drop"));
-        assert_eq!(app.selection.address(), Some(0x1090));
+        assert_eq!(app.work.listing_of, Some(0x1090));
         let hidden = app.work.pseudocode.clone().expect("lifts");
         assert!(!hidden.contains("rax"), "{hidden}");
         assert!(hidden.contains("return;"), "{hidden}");
