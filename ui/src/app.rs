@@ -69,6 +69,14 @@ pub enum Message {
     FileSaveProjectAs,
     /// Write a copy of the program with the patches in it.
     FileWritePatched,
+    /// Move the whole image to a new base address.
+    EditRebase,
+    /// Add a segment the loader missed.
+    EditSegmentAdd,
+    /// Take a segment out of the image.
+    EditSegmentRemove,
+    /// Call a segment something else.
+    EditSegmentRename,
     /// Reload the open project.
     FileReload,
     /// Close the open project.
@@ -212,6 +220,14 @@ pub enum PromptKind {
     ProjectSave,
     /// Where the copy of the program with the patches in it goes.
     WritePatched,
+    /// The address the image is moved to, or `none`.
+    Rebase,
+    /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
+    SegmentAdd,
+    /// The name of the segment to take out.
+    SegmentRemove,
+    /// A segment's name and its new one: `NAME NEW`.
+    SegmentRename,
     /// The new name of the selected function.
     Rename,
     /// The new name of the label at the selected address.
@@ -528,6 +544,9 @@ pub struct App {
     /// The file the next submit of the patched-program prompt writes over,
     /// once the analyst has been told it is there.
     pub confirm_write: Option<PathBuf>,
+    /// Why the project's layout was not applied when the program was last
+    /// read, when it was not: the program is read as the loader reads it.
+    pub layout_failed: Option<String>,
     /// The engine's options, for the pseudocode of a program image.
     pub options: ag_image::Options,
     /// The Objective-C method map currently open.
@@ -622,6 +641,7 @@ impl App {
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
             confirm_write: None,
+            layout_failed: None,
             options: config.options,
             methods_path: config.methods.clone(),
             shift: config.shift,
@@ -684,11 +704,40 @@ impl App {
 
     /// Load a program image into the workbench.
     fn load_binary(&mut self, path: &Path) -> Task<Message> {
-        match BinaryProvider::load_with_options(path, self.options) {
+        // The analyst's layout is read under when the annotations are this
+        // program's; a program opened in place of another starts as the
+        // loader reads it.
+        let (layout, mut layout_failed) = if self.annotations_root.as_deref() == Some(path)
+            && !self.annotations.layout.is_empty()
+        {
+            match layout_of(&self.annotations) {
+                Ok(layout) => (layout, None),
+                Err(reason) => (ag_image::Layout::default(), Some(reason)),
+            }
+        } else {
+            (ag_image::Layout::default(), None)
+        };
+        let loaded = match BinaryProvider::load_with(path, self.options, &layout) {
+            // When the layout is what the image cannot take, the program
+            // is read as the loader reads it, and the analyst is told.
+            Err(error) if layout != ag_image::Layout::default() => {
+                layout_failed = Some(error.to_string());
+                BinaryProvider::load_with(path, self.options, &ag_image::Layout::default())
+            }
+            loaded => loaded,
+        };
+        self.layout_failed = layout_failed;
+        match loaded {
             Ok(provider) => {
                 let binary = provider.binary();
                 self.provider = Box::new(provider);
-                self.notice = Some(format!("Opened {}", path.display()));
+                self.notice = Some(match &self.layout_failed {
+                    Some(reason) => format!(
+                        "Opened {} as the loader reads it: the project's layout could not be applied ({reason})",
+                        path.display()
+                    ),
+                    None => format!("Opened {}", path.display()),
+                });
 
                 let adopted = self.adopt_provider();
 
@@ -1537,6 +1586,42 @@ impl App {
             value: current,
         });
         Task::none()
+    }
+
+    /// The name of the segment the selection is in, when it is in one.
+    fn segment_at_selection(&self) -> Option<String> {
+        let address = self.selection.address()?;
+        self.provider
+            .segments()
+            .into_iter()
+            .filter(|segment| segment.vma != 0)
+            .find(|segment| segment.vma <= address && address < segment.vma + segment.size)
+            .map(|segment| segment.name)
+    }
+
+    /// Read the program again under the layout the annotations now
+    /// record, and say `said`; when the image cannot take the layout, put
+    /// `previous` back and say why instead. The annotations stay: the
+    /// root is the same.
+    fn relayout(&mut self, previous: ag_corpus::project::Layout, said: String) -> Task<Message> {
+        let Some(path) = self.binary_path.clone() else {
+            self.annotations.layout = previous;
+            self.notice = Some("Changing the layout needs a program image".into());
+            return Task::none();
+        };
+        // Tried on the side first, so a layout the image cannot take
+        // leaves the program on screen as it is.
+        let tried = layout_of(&self.annotations).and_then(|layout| {
+            ag_image::Binary::open_with_layout(&path, &layout).map_err(|error| error.to_string())
+        });
+        if let Err(reason) = tried {
+            self.annotations.layout = previous;
+            self.notice = Some(reason);
+            return Task::none();
+        }
+        let task = self.load_binary(&path);
+        self.notice = Some(said);
+        task
     }
 
     /// Write a copy of the program with the patches in it to `path`, and
@@ -2695,9 +2780,25 @@ impl App {
                                 Ok(project) => {
                                     self.annotations = project;
                                     self.forget_changes();
+                                    self.project_path = Some(path.clone());
+                                    // A project with a layout reads the
+                                    // program again under it; the reload
+                                    // tells the patches and notes itself.
+                                    if !self.annotations.layout.is_empty() {
+                                        if let Some(binary) = self.binary_path.clone() {
+                                            let task = self.load_binary(&binary);
+                                            if self.layout_failed.is_none() {
+                                                self.notice = Some(format!(
+                                                    "Opened project {} and read {} under its layout",
+                                                    path.display(),
+                                                    binary.display()
+                                                ));
+                                            }
+                                            return task;
+                                        }
+                                    }
                                     self.tell_patches();
                                     self.tell_jump_tables();
-                                    self.project_path = Some(path.clone());
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -2716,6 +2817,113 @@ impl App {
                     }
                     PromptKind::WritePatched => {
                         self.write_patched_to(&path);
+                    }
+                    PromptKind::Rebase => {
+                        let text = prompt.value.trim();
+                        let base = if text.eq_ignore_ascii_case("none") {
+                            None
+                        } else {
+                            match ag_corpus::parse_addr_space(text) {
+                                Ok((value, None)) => Some(value),
+                                _ => {
+                                    self.notice =
+                                        Some(format!("Not an address of the image: {text:?}"));
+                                    return Task::none();
+                                }
+                            }
+                        };
+                        let previous = self.annotations.layout.clone();
+                        self.annotations.set_base(base);
+                        let said = match base {
+                            Some(base) => format!("The image is read at {base:#x}"),
+                            None => "The image is read where the loader puts it".to_string(),
+                        };
+                        return self.relayout(previous, said);
+                    }
+                    PromptKind::SegmentAdd => {
+                        let words: Vec<&str> = prompt.value.split_whitespace().collect();
+                        let [name, address, size, rest @ ..] = words.as_slice() else {
+                            self.notice = Some(
+                                "A segment is NAME ADDRESS SIZE, with file:OFFSET and exec after when they apply"
+                                    .into(),
+                            );
+                            return Task::none();
+                        };
+                        let Ok((at, None)) = ag_corpus::parse_addr_space(address) else {
+                            self.notice = Some(format!("Not an address of the image: {address:?}"));
+                            return Task::none();
+                        };
+                        let Some(size) = parse_number(size) else {
+                            self.notice = Some(format!("Not a size: {size:?}"));
+                            return Task::none();
+                        };
+                        let mut file_offset = None;
+                        let mut executable = false;
+                        for word in rest {
+                            if let Some(offset) = word.strip_prefix("file:") {
+                                let Some(offset) = parse_number(offset) else {
+                                    self.notice = Some(format!("Not a file offset: {offset:?}"));
+                                    return Task::none();
+                                };
+                                file_offset = Some(format!("{offset:#x}"));
+                            } else if word.eq_ignore_ascii_case("exec") {
+                                executable = true;
+                            } else {
+                                self.notice = Some(format!(
+                                    "Not part of a segment: {word:?} (file:OFFSET or exec)"
+                                ));
+                                return Task::none();
+                            }
+                        }
+                        let previous = self.annotations.layout.clone();
+                        let edit = ag_corpus::project::SegmentEdit::Add {
+                            name: name.to_string(),
+                            address: format!("{at:#x}"),
+                            size,
+                            file_offset,
+                            executable,
+                        };
+                        if let Err(reason) = self.annotations.edit_segment(edit) {
+                            self.notice = Some(reason);
+                            return Task::none();
+                        }
+                        return self.relayout(
+                            previous,
+                            format!("Segment {name} added at {at:#x}, {size} bytes"),
+                        );
+                    }
+                    PromptKind::SegmentRemove => {
+                        let name = prompt.value.trim();
+                        if name.is_empty() {
+                            self.notice = Some("Name the segment to remove".into());
+                            return Task::none();
+                        }
+                        let previous = self.annotations.layout.clone();
+                        let edit = ag_corpus::project::SegmentEdit::Remove {
+                            name: name.to_string(),
+                        };
+                        if let Err(reason) = self.annotations.edit_segment(edit) {
+                            self.notice = Some(reason);
+                            return Task::none();
+                        }
+                        return self.relayout(previous, format!("Segment {name} removed"));
+                    }
+                    PromptKind::SegmentRename => {
+                        let words: Vec<&str> = prompt.value.split_whitespace().collect();
+                        let [name, to] = words.as_slice() else {
+                            self.notice = Some("A rename is NAME NEW".into());
+                            return Task::none();
+                        };
+                        let previous = self.annotations.layout.clone();
+                        let edit = ag_corpus::project::SegmentEdit::Rename {
+                            name: name.to_string(),
+                            to: to.to_string(),
+                        };
+                        if let Err(reason) = self.annotations.edit_segment(edit) {
+                            self.notice = Some(reason);
+                            return Task::none();
+                        }
+                        return self.relayout(previous, format!("Segment {name} renamed {to}"));
                     }
                     PromptKind::Rename => {
                         let name = prompt.value.trim().to_string();
@@ -3130,6 +3338,68 @@ impl App {
                 };
                 self.save_project_to(&path);
                 return Task::none();
+            }
+
+            Message::EditRebase => {
+                if self.binary_path.is_none() || self.provider.segments().is_empty() {
+                    self.notice = Some("Moving the image needs a program image".into());
+                    return Task::none();
+                }
+                // The prompt offers the base the image is read at now: the
+                // one the layout says, else the one its format states.
+                let base = self
+                    .annotations
+                    .layout
+                    .base
+                    .as_deref()
+                    .and_then(|base| ag_corpus::parse_addr_space(base).ok())
+                    .map(|(value, _)| value)
+                    .or_else(|| self.provider.base())
+                    .unwrap_or(0);
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Rebase,
+                    title: "Move the image to (an address, or none)",
+                    value: format!("{base:#x}"),
+                });
+            }
+
+            Message::EditSegmentAdd => {
+                if self.binary_path.is_none() || self.provider.segments().is_empty() {
+                    self.notice = Some("Adding a segment needs a program image".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::SegmentAdd,
+                    title: "Add segment: NAME ADDRESS SIZE [file:OFFSET] [exec]",
+                    value: String::new(),
+                });
+            }
+
+            Message::EditSegmentRemove => {
+                if self.binary_path.is_none() || self.provider.segments().is_empty() {
+                    self.notice = Some("Removing a segment needs a program image".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::SegmentRemove,
+                    title: "Remove segment",
+                    value: self.segment_at_selection().unwrap_or_default(),
+                });
+            }
+
+            Message::EditSegmentRename => {
+                if self.binary_path.is_none() || self.provider.segments().is_empty() {
+                    self.notice = Some("Renaming a segment needs a program image".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::SegmentRename,
+                    title: "Rename segment: NAME NEW",
+                    value: self
+                        .segment_at_selection()
+                        .map(|name| format!("{name} "))
+                        .unwrap_or_default(),
+                });
             }
 
             Message::FileWritePatched => {
@@ -4020,6 +4290,50 @@ fn references_of_string(
             })
         })
         .collect()
+}
+
+/// The layout `project` records, in the image's terms, or why it does not
+/// read as one.
+fn layout_of(project: &ag_corpus::project::ProjectFile) -> Result<ag_image::Layout, String> {
+    use ag_corpus::project::SegmentEdit;
+    let address = |text: &str| -> Result<u64, String> {
+        ag_corpus::parse_addr_space(text)
+            .map(|(value, _)| value)
+            .map_err(|_| format!("{text:?} in the layout is not an address"))
+    };
+    let base = project.layout.base.as_deref().map(address).transpose()?;
+    let mut segments = Vec::new();
+    for edit in &project.layout.segments {
+        segments.push(match edit {
+            SegmentEdit::Add {
+                name,
+                address: at,
+                size,
+                file_offset,
+                executable,
+            } => ag_image::SegmentEdit::Add {
+                name: name.clone(),
+                vma: address(at)?,
+                size: *size,
+                file_offset: file_offset.as_deref().map(address).transpose()?,
+                executable: *executable,
+            },
+            SegmentEdit::Remove { name } => ag_image::SegmentEdit::Remove { name: name.clone() },
+            SegmentEdit::Rename { name, to } => ag_image::SegmentEdit::Rename {
+                name: name.clone(),
+                to: to.clone(),
+            },
+        });
+    }
+    Ok(ag_image::Layout { base, segments })
+}
+
+/// A number as the analyst types it: decimal, or hex with `0x`.
+fn parse_number(text: &str) -> Option<u64> {
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
 }
 
 #[cfg(test)]
@@ -6537,6 +6851,175 @@ mod tests {
             .is_some_and(|n| n.starts_with("Wrote ")));
         assert_eq!(std::fs::read(&out).expect("the copy").len(), original.len());
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn the_image_is_moved_and_its_segments_edited_and_the_project_remembers() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let main_at = |app: &App| {
+            app.provider
+                .functions()
+                .into_iter()
+                .find(|row| row.name == "main")
+                .map(|row| row.address)
+        };
+        assert_eq!(main_at(&app), Some(0x1198));
+
+        // Moved to 0x400000: every function and section moves with it, and
+        // the project remembers.
+        let _ = app.update(Message::EditRebase);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("0x0"));
+        let _ = app.update(Message::PromptChanged("0x400000".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(main_at(&app), Some(0x401198), "{:?}", app.notice);
+        assert_eq!(app.annotations.layout.base.as_deref(), Some("0x400000"));
+        let text = app
+            .provider
+            .segments()
+            .into_iter()
+            .find(|segment| segment.name == ".text")
+            .expect(".text");
+        assert_eq!(text.vma, 0x401060);
+        let _ = app.update(Message::FunctionSelected(0x401198));
+        assert!(
+            !app.work.listing.is_empty(),
+            "main is listed at its new address"
+        );
+
+        // Segments renamed, removed and added, in the moved image's addresses.
+        let _ = app.update(Message::AddressSelected(0x401198));
+        let _ = app.update(Message::EditSegmentRename);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(".text ")
+        );
+        let _ = app.update(Message::PromptChanged(".text code".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.provider
+                .segments()
+                .iter()
+                .any(|segment| segment.name == "code" && segment.vma == 0x401060),
+            "{:?}",
+            app.notice
+        );
+        let _ = app.update(Message::EditSegmentRemove);
+        let _ = app.update(Message::PromptChanged(".comment".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(!app
+            .provider
+            .segments()
+            .iter()
+            .any(|segment| segment.name == ".comment"));
+        let _ = app.update(Message::EditSegmentAdd);
+        let _ = app.update(Message::PromptChanged(
+            "extra 0x405000 16 file:0x3000".into(),
+        ));
+        let _ = app.update(Message::PromptSubmit);
+        let extra = app
+            .provider
+            .segments()
+            .into_iter()
+            .find(|segment| segment.name == "extra")
+            .expect("the segment added");
+        assert_eq!((extra.vma, extra.size), (0x405000, 16));
+        assert_eq!(app.annotations.layout.segments.len(), 3);
+
+        // One the image cannot take is refused, and nothing changes.
+        let _ = app.update(Message::EditSegmentAdd);
+        let _ = app.update(Message::PromptChanged("clash 0x401070 4".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("overlaps")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(app.annotations.layout.segments.len(), 3);
+        assert!(app
+            .provider
+            .segments()
+            .iter()
+            .any(|segment| segment.name == "extra"));
+        let _ = app.update(Message::EditSegmentAdd);
+        let _ = app.update(Message::PromptChanged("half 0x409000".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("A segment is")));
+
+        // Saved and opened again, the project reads the image under its layout.
+        let file = std::env::temp_dir().join(format!(
+            "ag-ui-layout-{}-{:?}.agproj",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        app.save_project_to(&file);
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut again = App::boot(config).0;
+        assert_eq!(main_at(&again), Some(0x1198));
+        let _ = again.update(Message::FileOpenProject);
+        let _ = again.update(Message::PromptChanged(file.display().to_string()));
+        let _ = again.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(main_at(&again), Some(0x401198), "{:?}", again.notice);
+        assert!(again
+            .provider
+            .segments()
+            .iter()
+            .any(|segment| segment.name == "code"));
+
+        // A project whose layout the image cannot take opens all the same:
+        // the program is read as the loader reads it, and the notice says
+        // why.
+        std::fs::write(
+            &file,
+            r#"{"format": 5, "target": {}, "layout": {"segments": [{"action": "add", "name": "clash", "address": "0x1070", "size": 4}]}}"#,
+        )
+        .expect("a project with a bad layout");
+        let mut bad = App::boot(Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        })
+        .0;
+        let _ = bad.update(Message::FileOpenProject);
+        let _ = bad.update(Message::PromptChanged(file.display().to_string()));
+        let _ = bad.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            bad.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("could not be applied")),
+            "{:?}",
+            bad.notice
+        );
+        assert_eq!(main_at(&bad), Some(0x1198));
+        assert!(!bad
+            .provider
+            .segments()
+            .iter()
+            .any(|segment| segment.name == "clash"));
+        assert!(bad.layout_failed.is_some());
+
+        // Put back, the image reads where the loader puts it.
+        let _ = again.update(Message::EditRebase);
+        assert_eq!(
+            again.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("0x400000")
+        );
+        let _ = again.update(Message::PromptChanged("none".into()));
+        let _ = again.update(Message::PromptSubmit);
+        assert_eq!(main_at(&again), Some(0x1198), "{:?}", again.notice);
+        assert!(again.annotations.layout.base.is_none());
     }
 
     #[test]

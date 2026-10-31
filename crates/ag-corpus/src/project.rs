@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -774,6 +774,76 @@ pub struct ProjectFile {
     /// The analyst's changes, in the order they were made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<Annotation>,
+    /// The layout the image is read under: the base it is moved to, and
+    /// the segments added, removed and renamed.
+    #[serde(default, skip_serializing_if = "Layout::is_empty")]
+    pub layout: Layout,
+}
+
+/// The layout the image is read under, as the analyst corrected it.
+///
+/// Addresses are written as the rest of the file writes them, `0x400000`;
+/// they are the moved image's. A reader applies the base first, then the
+/// segment edits in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    /// The address the image is moved to, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// The edits to the segments, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<SegmentEdit>,
+}
+
+impl Layout {
+    /// Whether the layout changes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.base.is_none() && self.segments.is_empty()
+    }
+}
+
+/// One change to the image's segments, as the project file records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum SegmentEdit {
+    /// A segment the loader missed.
+    Add {
+        /// Its name.
+        name: String,
+        /// The address it maps to.
+        address: String,
+        /// Its size in memory.
+        size: u64,
+        /// Where its bytes start in the file, when the file holds them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_offset: Option<String>,
+        /// Whether it holds code.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        executable: bool,
+    },
+    /// A segment taken out of the image.
+    Remove {
+        /// Its name.
+        name: String,
+    },
+    /// A segment called something else.
+    Rename {
+        /// Its name.
+        name: String,
+        /// Its new name.
+        to: String,
+    },
+}
+
+impl SegmentEdit {
+    /// The name of the segment the edit is to.
+    pub fn name(&self) -> &str {
+        match self {
+            SegmentEdit::Add { name, .. }
+            | SegmentEdit::Remove { name }
+            | SegmentEdit::Rename { name, .. } => name,
+        }
+    }
 }
 
 impl ProjectFile {
@@ -784,7 +854,110 @@ impl ProjectFile {
             target,
             options: BTreeMap::new(),
             annotations: Vec::new(),
+            layout: Layout::default(),
         }
+    }
+
+    /// Move the image to `base`, or put it back with `None`.
+    pub fn set_base(&mut self, base: Option<u64>) {
+        self.layout.base = base.map(|base| format!("{base:#x}"));
+        // A layout is new to a file written before version 5: an older
+        // reader would read the image unmoved, so the file names a version
+        // it refuses.
+        self.format = FORMAT_VERSION;
+    }
+
+    /// Record `edit` to the segments, folded into the edits before it where
+    /// that keeps their meaning in order: removing a segment the layout
+    /// added drops the addition, and renaming one it added or renamed
+    /// renames that — unless an edit since names the segment, in which
+    /// case the new edit goes at the end, as it was made.
+    pub fn edit_segment(&mut self, edit: SegmentEdit) -> Result<(), String> {
+        /// Whether `name` is a segment the edits, applied in order, have
+        /// made or renamed to and not taken away since.
+        fn taken(edits: &[SegmentEdit], name: &str) -> bool {
+            let mut taken = false;
+            for earlier in edits {
+                match earlier {
+                    SegmentEdit::Add { name: added, .. } if added == name => taken = true,
+                    SegmentEdit::Rename { to, .. } if to == name => taken = true,
+                    SegmentEdit::Rename { name: from, .. } if from == name => taken = false,
+                    SegmentEdit::Remove { name: gone } if gone == name => taken = false,
+                    _ => {}
+                }
+            }
+            taken
+        }
+        /// Whether an edit after `index` names `name`, so that folding into
+        /// the edit at `index` would change what the edits mean in order.
+        fn named_after(edits: &[SegmentEdit], index: usize, name: &str) -> bool {
+            edits[index + 1..].iter().any(|later| match later {
+                SegmentEdit::Add { name: n, .. } | SegmentEdit::Remove { name: n } => n == name,
+                SegmentEdit::Rename { name: n, to } => n == name || to == name,
+            })
+        }
+
+        let edits = &mut self.layout.segments;
+        match &edit {
+            SegmentEdit::Add { name, .. } => {
+                if name.is_empty() {
+                    return Err("a segment needs a name".into());
+                }
+                if taken(edits, name) {
+                    return Err(format!(
+                        "the layout already adds or renames a segment to {name}"
+                    ));
+                }
+                edits.push(edit);
+            }
+            SegmentEdit::Remove { name } => {
+                let added = edits.iter().rposition(
+                    |earlier| matches!(earlier, SegmentEdit::Add { name: n, .. } if n == name),
+                );
+                match added {
+                    Some(index) if !named_after(edits, index, name) => {
+                        edits.remove(index);
+                    }
+                    _ => edits.push(edit),
+                }
+            }
+            SegmentEdit::Rename { name, to } => {
+                if to.is_empty() {
+                    return Err("a segment needs a name".into());
+                }
+                if name == to {
+                    return Err(format!("{name} is already the segment's name"));
+                }
+                let earlier = edits.iter().rposition(|earlier| match earlier {
+                    SegmentEdit::Add { name: added, .. } => added == name,
+                    SegmentEdit::Rename { to: renamed, .. } => renamed == name,
+                    SegmentEdit::Remove { .. } => false,
+                });
+                match earlier {
+                    Some(index)
+                        if !named_after(edits, index, name) && !named_after(edits, index, to) =>
+                    {
+                        let put_back = matches!(
+                            &edits[index],
+                            SegmentEdit::Rename { name: original, .. } if original == to
+                        );
+                        if put_back {
+                            // Renamed back to what it was: no rename at all.
+                            edits.remove(index);
+                        } else {
+                            match &mut edits[index] {
+                                SegmentEdit::Add { name: added, .. } => *added = to.clone(),
+                                SegmentEdit::Rename { to: renamed, .. } => *renamed = to.clone(),
+                                SegmentEdit::Remove { .. } => {}
+                            }
+                        }
+                    }
+                    _ => edits.push(edit),
+                }
+            }
+        }
+        self.format = FORMAT_VERSION;
+        Ok(())
     }
 
     /// The annotation for the address `address`, added when none is there.
@@ -1880,5 +2053,131 @@ mod tests {
         assert!(text.contains("\"bookmark\": true"), "{text}");
         // An empty name is not written at all.
         assert!(!text.contains("\"name\""), "{text}");
+    }
+
+    #[test]
+    fn the_layout_is_recorded_folded_and_read_back_and_an_older_file_has_none() {
+        let mut project = ProjectFile::new(Target::default());
+        assert!(project.layout.is_empty());
+        project.set_base(Some(0x400000));
+        assert_eq!(project.layout.base.as_deref(), Some("0x400000"));
+
+        // Added, renamed, removed: the edits fold into one another.
+        let add = |name: &str| SegmentEdit::Add {
+            name: name.into(),
+            address: "0x405000".into(),
+            size: 16,
+            file_offset: None,
+            executable: false,
+        };
+        project.edit_segment(add("extra")).unwrap();
+        project
+            .edit_segment(SegmentEdit::Rename {
+                name: "extra".into(),
+                to: "more".into(),
+            })
+            .unwrap();
+        assert_eq!(project.layout.segments.len(), 1);
+        assert_eq!(project.layout.segments[0].name(), "more");
+        project
+            .edit_segment(SegmentEdit::Remove {
+                name: "more".into(),
+            })
+            .unwrap();
+        assert!(project.layout.segments.is_empty(), "{:?}", project.layout);
+        project
+            .edit_segment(SegmentEdit::Rename {
+                name: ".text".into(),
+                to: "code".into(),
+            })
+            .unwrap();
+        project
+            .edit_segment(SegmentEdit::Rename {
+                name: "code".into(),
+                to: "program".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            project.layout.segments,
+            [SegmentEdit::Rename {
+                name: ".text".into(),
+                to: "program".into(),
+            }]
+        );
+        project
+            .edit_segment(SegmentEdit::Rename {
+                name: "program".into(),
+                to: ".text".into(),
+            })
+            .unwrap();
+        assert!(project.layout.segments.is_empty());
+        assert!(project
+            .edit_segment(SegmentEdit::Rename {
+                name: ".data".into(),
+                to: ".data".into(),
+            })
+            .is_err());
+        project
+            .edit_segment(SegmentEdit::Remove {
+                name: ".comment".into(),
+            })
+            .unwrap();
+        project.edit_segment(add("extra")).unwrap();
+        assert!(project.edit_segment(add("extra")).is_err());
+
+        // An edit between keeps a later one from folding into an earlier:
+        // the edits read in order as they were made, and a name taken away
+        // is free again.
+        let mut folded = ProjectFile::new(Target::default());
+        folded.edit_segment(add("x")).unwrap();
+        folded
+            .edit_segment(SegmentEdit::Remove {
+                name: ".comment".into(),
+            })
+            .unwrap();
+        folded
+            .edit_segment(SegmentEdit::Rename {
+                name: "x".into(),
+                to: ".comment".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            folded.layout.segments.len(),
+            3,
+            "{:?}",
+            folded.layout.segments
+        );
+        assert!(matches!(
+            &folded.layout.segments[2],
+            SegmentEdit::Rename { name, to } if name == "x" && to == ".comment"
+        ));
+        let mut folded = ProjectFile::new(Target::default());
+        folded
+            .edit_segment(SegmentEdit::Rename {
+                name: ".text".into(),
+                to: "a".into(),
+            })
+            .unwrap();
+        folded
+            .edit_segment(SegmentEdit::Remove { name: "a".into() })
+            .unwrap();
+        folded.edit_segment(add("a")).unwrap();
+        assert_eq!(folded.layout.segments.len(), 3);
+
+        // Written and read back, at the version that carries a layout.
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"action\": \"remove\""), "{json}");
+        assert!(json.contains("\"base\": \"0x400000\""), "{json}");
+        let again = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(again.layout, project.layout);
+        assert_eq!(again.format, FORMAT_VERSION);
+
+        // An older file has no layout, and is read all the same.
+        let older = ProjectFile::from_json(r#"{"format": 4, "target": {}}"#).unwrap();
+        assert!(older.layout.is_empty());
+        assert!(!ProjectFile::new(Target::default())
+            .to_json()
+            .unwrap()
+            .contains("layout"));
     }
 }

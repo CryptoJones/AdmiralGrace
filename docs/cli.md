@@ -123,7 +123,7 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 
 | Subcommand | What it prints |
 |---|---|
-| `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. |
+| `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
@@ -399,6 +399,13 @@ ag project ./bin/ls patch --file ls.agproj 0x11a0 "90 90"
 ag project ./bin/ls nop --file ls.agproj 0x1198
 ag project ./bin/ls nop --file ls.agproj 0x11a0 --to 0x11a8
 ag project ./bin/ls write-patched --file ls.agproj --out ls.patched
+
+# Correct the layout the image is read under; `ag image … --project` reads it
+ag project ./bin/ls rebase --file ls.agproj 0x400000
+ag project ./bin/ls segment --file ls.agproj rename .text code
+ag project ./bin/ls segment --file ls.agproj add extra 0x405000 16 --file-offset 0x3000
+ag project ./bin/ls segment --file ls.agproj remove .comment
+ag image ./bin/ls info --project ls.agproj
 ag asm "jmp 0x401010" --at 0x401000
 ag image ./bin/ls cfg 0x1200 --project ls.agproj
 
@@ -437,6 +444,10 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET asm --file FILE ADDRESS TEXT` | Assembles the instruction `TEXT` (Intel syntax) as it would sit at `ADDRESS`, at the target's width, and records its bytes as a patch there; warns on stderr when it is longer than the instruction it replaces. |
 | `ag project TARGET nop --file FILE ADDRESS [--len N \| --to END]` | Fills bytes from `ADDRESS` with the architecture's no-op as a patch: the instruction there, as long as it is, or `--len N` bytes, or up to `--to END`. |
 | `ag project TARGET write-patched --file FILE --out OUT` | Writes a copy of `TARGET` to `OUT` with every patch `FILE` holds in it, with the target's mode, leaving the target as it is. Refuses an existing `OUT` without `--force`, the target or the project file as `OUT` (a hard link to either included), a project with no patches, a target whose SHA-256 is no longer the one the project recorded (`--force` writes anyway), and a patch over bytes the file does not hold — or that reaches past the end of its section, which the image cuts but the file does not. The copy is written whole or not at all. |
+| `ag project TARGET rebase --file FILE BASE` | Moves the whole image to `BASE` — its lowest mapped page goes there, and every section, function, symbol and string with it — for every `ag project` command and for `ag image … --project` (`info`, `symbols`, `disasm`, `cfg`, `pseudocode`); `none` puts it back. The base is the one the format states — a PE's image base, an ELF's first load segment — and a move that would leave the address space, or a layout the image cannot take, is refused before it is written. Nothing is relocated: an absolute address in the code still names what it named, and the project's records keep the addresses they were made at. |
+| `ag project TARGET segment --file FILE add NAME ADDRESS SIZE [--file-offset OFF] [--exec]` | Adds a segment the loader missed, at `ADDRESS` in the moved image's addresses, `SIZE` bytes long (`16` or `0x10`), holding the file's bytes from `--file-offset` when the file holds them, and code with `--exec`. One that would overlap a segment the image has, or reuse a name, is refused. |
+| `ag project TARGET segment --file FILE remove NAME` | Takes the segment out of the image, and the functions, data and import slots that lay in it with it. Removing a segment the layout added drops the addition. |
+| `ag project TARGET segment --file FILE rename NAME NEW` | Calls the segment `NEW`. Renaming one the layout added or renamed folds into that edit. |
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 

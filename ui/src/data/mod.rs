@@ -449,6 +449,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// The address the program is loaded at, when the provider reads a
+    /// program image whose format states one.
+    fn base(&self) -> Option<u64> {
+        None
+    }
+
     /// Write a copy of the program with the patches told to the provider
     /// in it to `out`, when the provider reads a program image: how many
     /// bytes were written, or why none were.

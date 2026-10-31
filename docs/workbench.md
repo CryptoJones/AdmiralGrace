@@ -387,6 +387,32 @@ The assembler knows the instructions patching reaches for — moves, arithmetic,
 pushes and pops, branches to an address, `nop`, `ret`, `int3` and their kin — and refuses
 anything else by name rather than guess.
 
+The image itself can be corrected, when the loader read it at the wrong base or missed a
+segment:
+
+- **Rebase image…** moves the whole image to a new base address — every section, function,
+  symbol, string and line with it. The prompt offers the base the image has now, its lowest
+  mapped address rounded down to the page; `none` puts the image back where the loader reads
+  it.
+- **Add segment…** takes `NAME ADDRESS SIZE`, with `file:OFFSET` after when the file holds the
+  segment's bytes from that offset, and `exec` when it holds code: `extra 0x405000 16
+  file:0x3000`. A segment that would overlap one the image has, or reuse a name, is refused and
+  nothing changes. **Remove segment…** takes a name — the functions, data and import slots
+  that lay in it go with it — and **Rename segment…** takes `NAME NEW`; both offer the
+  segment the selection is in.
+
+The layout is a record in the project file, read under on every open and reload, with the
+addresses of the moved image; `ag project rebase` and `ag project segment` record the same
+for `ag image … --project` to read. The image is read again under the layout, so a layout
+change is not on the undo stack: it is taken back by its own door — `none`, a removal of what
+was added, a name put back — and a project file that carries a layout is written at format 5.
+The move is for an image the loader placed wrongly: nothing is relocated, so an absolute
+address in the code still names what it named, and the analyst's marks, patches and notes
+keep the addresses they were made at. The base offered is the one the format states — a
+PE's image base, an ELF's first load segment. A project whose layout the image cannot take
+opens all the same, read as the loader reads it, and the notice says why; the layout stays
+recorded, so it is mended by its own doors — taking the edit away, or `none` for the base.
+
 Every one of these changes can be taken back:
 
 - **Undo** (Ctrl+Z) takes back the last change; **Redo** (Ctrl+Shift+Z) puts it back. The
