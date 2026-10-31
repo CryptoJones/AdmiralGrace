@@ -94,8 +94,11 @@ impl Image {
             return Vec::new();
         };
         let mut hints = Vec::new();
+        // An ELF's or a PE's entry carries the mode in its low bit; a
+        // Mach-O's entry is a file offset, and says nothing here.
+        let format = file.format();
         let entry = file.entry();
-        if entry != 0 {
+        if entry != 0 && matches!(format, object::BinaryFormat::Elf | object::BinaryFormat::Pe) {
             hints.push((entry & !1, entry & 1 == 1));
         }
         for symbol in file.symbols() {
@@ -105,8 +108,15 @@ impl Image {
                 "$t" => hints.push((symbol.address(), true)),
                 "$a" => hints.push((symbol.address(), false)),
                 _ => {
-                    if symbol.kind() == object::SymbolKind::Text && symbol.address() & 1 == 1 {
-                        hints.push((symbol.address() & !1, true));
+                    // An ELF function symbol says its mode in its low bit,
+                    // Thumb or ARM; a Mach-O marks Thumb elsewhere, so its
+                    // even symbols say nothing.
+                    if symbol.kind() == object::SymbolKind::Text {
+                        if symbol.address() & 1 == 1 {
+                            hints.push((symbol.address() & !1, true));
+                        } else if format == object::BinaryFormat::Elf {
+                            hints.push((symbol.address(), false));
+                        }
                     }
                 }
             }

@@ -399,7 +399,12 @@ themselves (`blx` to an address switches it), and from the analyst:
   other. `ag project mode` records the same for `ag image … --project` to read.
 
 ARM is decoded, walked and listed; it is not lifted to pseudocode yet, and the assembler and
-the no-op fill are x86's. A `tbb`/`tbh` table branch is an indirect branch whose table is not
+the no-op fill are x86's. The decode reads each section once from its start, so a `blx` that
+reaches backwards, or into another section, does not switch what was already read; the
+prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/
+`tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
+are not reached by the graph; and a call or jump through a register under a condition is read
+as falling through. A `tbb`/`tbh` table branch is an indirect branch whose table is not
 read yet, so the cases after it are not reached by the graph.
 
 The image itself can be corrected, when the loader read it at the wrong base or missed a

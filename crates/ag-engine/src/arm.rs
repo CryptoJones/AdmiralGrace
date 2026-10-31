@@ -338,6 +338,14 @@ fn decode_with(
         })
         .collect();
     sleigh.with_context_db_mut(|db| {
+        // Every context word over the section goes back to its default
+        // first: the last decode on this thread left what its instructions
+        // set — an `it` block's condition, `LRset` after `mov lr, pc` —
+        // and those addresses may be this section's.
+        let defaults = db.get_default_value().to_vec();
+        for (word, value) in defaults.iter().enumerate() {
+            db.set_context_region(&at(base), &at(end), word as i32, u32::MAX, *value);
+        }
         let _ = db.set_variable_region(TMODE, &at(base), &at(end), variant.default_mode.tmode());
         for &(start, stop, mode, _) in &ranges {
             let _ = db.set_variable_region(TMODE, &at(start), &at(stop), mode.tmode());
@@ -461,9 +469,11 @@ fn mode_in_context(sleigh: &mut Sleigh, address: &Address) -> Option<Mode> {
 /// condition fails. That branch is the condition, not a flow of the
 /// program: under it, a call is still a call, a branch is a conditional
 /// one, and a return or an indirect branch may not happen, so the
-/// instruction falls through. A branch within the instruction, to a
-/// constant, is no flow either. The first operation that moves control
-/// otherwise decides.
+/// instruction falls through — a conditional tail call through a register
+/// or a conditional table jump leaves no edge, then. A branch within the
+/// instruction, to a constant, is no flow either; and a real branch to the
+/// very next instruction reads as the fall-through it is. The first
+/// operation that moves control otherwise decides.
 ///
 /// A literal-pool load reads a word of the program outright — SLEIGH folds
 /// the address into a ram varnode — or through a pointer the instruction
@@ -879,5 +889,42 @@ mod tests {
             ("db".to_string(), "0xff".to_string())
         );
         assert_eq!(decoded.text[&0x1000].0, "mov");
+    }
+
+    #[test]
+    fn a_second_decode_on_the_same_thread_starts_from_a_clean_context() {
+        // Thumb: `ite eq; mov r0, #1; mov r0, #2; bx lr` leaves the `it`
+        // block's condition in the context at those addresses. The same
+        // addresses decoded again, with a `nop` in place of the `ite`, read
+        // plain `movs` — not `mov.eq`/`mov.ne`.
+        let variant = ArmVariant::of_language("ARM:LE:32:v8").expect("ARM");
+        let thumb = BTreeMap::from([(0x1000_u64, Mode::Thumb)]);
+        let with_it = [0x0c, 0xbf, 0x01, 0x20, 0x02, 0x20, 0x70, 0x47];
+        let without = [0x00, 0xbf, 0x01, 0x20, 0x02, 0x20, 0x70, 0x47];
+        let first =
+            decode_section(variant, &with_it, 0x1000, &thumb, &BTreeMap::new()).expect("decodes");
+        assert_eq!(first.text[&0x1000].0, "ite");
+        assert!(
+            first.text[&0x1002].0.starts_with("mov"),
+            "{:?}",
+            first.text[&0x1002]
+        );
+        let second =
+            decode_section(variant, &without, 0x1000, &thumb, &BTreeMap::new()).expect("decodes");
+        assert_eq!(second.text[&0x1000].0, "nop");
+        assert_eq!(second.text[&0x1002].0, "movs", "{:?}", second.text[&0x1002]);
+        assert_eq!(second.text[&0x1004].0, "movs", "{:?}", second.text[&0x1004]);
+
+        // ARM: `mov lr, pc; bx r3` makes the `bx` a call; `mov r0, r0; bx r3`
+        // decoded after it at the same addresses is a plain indirect branch.
+        let arm = BTreeMap::new();
+        let call = [0x0f, 0xe0, 0xa0, 0xe1, 0x13, 0xff, 0x2f, 0xe1];
+        let jump = [0x00, 0x00, 0xa0, 0xe1, 0x13, 0xff, 0x2f, 0xe1];
+        let first =
+            decode_section(variant, &call, 0x2000, &arm, &BTreeMap::new()).expect("decodes");
+        assert_eq!(first.disasm.instructions[1].flow, Flow::IndirectCall);
+        let second =
+            decode_section(variant, &jump, 0x2000, &arm, &BTreeMap::new()).expect("decodes");
+        assert_eq!(second.disasm.instructions[1].flow, Flow::IndirectBranch);
     }
 }
