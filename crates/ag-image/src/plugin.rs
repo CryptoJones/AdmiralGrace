@@ -11,7 +11,7 @@
 //! architectures of a manifest are the engine's to register; its tools are
 //! registered here ([`install`]), where the image they read is.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use ag_engine::plugin::ExternalTool;
 // The engine's side of the SDK, reachable from here so a crate that builds
@@ -60,18 +60,18 @@ fn registry() -> &'static RwLock<Vec<Arc<dyn Tool>>> {
 
 /// Add a tool; one of the same name is replaced.
 pub fn register_tool(tool: Arc<dyn Tool>) {
-    if let Ok(mut tools) = registry().write() {
-        tools.retain(|known| known.name() != tool.name());
-        tools.push(tool);
-    }
+    let mut tools = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = tool.name().to_string();
+    tools.retain(|known| known.name() != name);
+    tools.push(tool);
 }
 
 /// The tools registered, in the order they were.
 pub fn tools() -> Vec<Arc<dyn Tool>> {
     registry()
         .read()
-        .map(|tools| tools.clone())
-        .unwrap_or_default()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// The tool called `name`, when one is registered.
@@ -129,8 +129,11 @@ impl Tool for CommandTool {
             "project": context.project_path.as_ref().map(|path| path.display().to_string()),
             "arguments": arguments,
         });
-        let output =
-            ag_engine::plugin::run_command(&self.0.command, request.to_string().as_bytes())?;
+        let output = ag_engine::plugin::run_command(
+            &self.0.command,
+            request.to_string().as_bytes(),
+            self.0.timeout,
+        )?;
         // JSON when the command answers with JSON; its text otherwise.
         Ok(serde_json::from_slice(&output).unwrap_or_else(|_| {
             serde_json::Value::String(String::from_utf8_lossy(&output).trim_end().to_string())
@@ -213,6 +216,7 @@ mod tests {
             name: "echo_request".to_string(),
             description: "Echoes.".to_string(),
             command: vec!["sh".to_string(), "-c".to_string(), "cat".to_string()],
+            timeout: ag_engine::plugin::DEFAULT_TIMEOUT,
             input_schema: None,
         });
         let answer = echo
@@ -230,6 +234,7 @@ mod tests {
                 "-c".to_string(),
                 "cat >/dev/null; echo hello".to_string(),
             ],
+            timeout: ag_engine::plugin::DEFAULT_TIMEOUT,
             input_schema: None,
         });
         assert_eq!(

@@ -2,14 +2,30 @@
 //! run from the command line.
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use ag_image::plugin::Manifest;
+
+fn remembered() -> &'static Mutex<Vec<Manifest>> {
+    static MANIFESTS: OnceLock<Mutex<Vec<Manifest>>> = OnceLock::new();
+    MANIFESTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Keep the manifests read as the program started, for the listing.
+pub fn remember(manifests: Vec<Manifest>) {
+    *remembered().lock().unwrap_or_else(PoisonError::into_inner) = manifests;
+}
+
 /// List the plugins: every loader, architecture and tool registered, and
 /// the manifests they were read from.
 pub fn list(json: bool) -> Result<i32> {
-    let (manifests, _) = ag_image::plugin::load_all();
+    let manifests = remembered()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let loaders: Vec<String> = ag_image::plugin::loaders()
         .iter()
         .map(|loader| loader.name().to_string())

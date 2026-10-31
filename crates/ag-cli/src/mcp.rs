@@ -70,6 +70,27 @@ pub struct Server {
     project: Option<Project>,
 }
 
+/// A tool's answer as the result of `tools/call`.
+fn result_of(answer: Answer) -> Value {
+    let mut result = json!({
+        "content": [ { "type": "text", "text": answer.text } ],
+        "isError": answer.error,
+    });
+    if let Some(structured) = answer.structured {
+        result["structuredContent"] = structured;
+    }
+    result
+}
+
+/// What a panic said, when it said anything.
+fn panic_words(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "an unknown fault".to_string())
+}
+
 /// A JSON-RPC error reply.
 fn error_reply(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({
@@ -601,16 +622,12 @@ impl Server {
                 Ok(Ok(value)) if value.is_object() => Answer::json(value),
                 Ok(Ok(value)) => Answer::text(value.to_string()),
                 Ok(Err(message)) => Answer::failed(message),
-                Err(_) => Answer::failed(format!("the tool {name} failed inside the plugin")),
+                Err(panic) => Answer::failed(format!(
+                    "the tool {name} failed inside the plugin: {}",
+                    panic_words(panic.as_ref())
+                )),
             };
-            let mut result = json!({
-                "content": [ { "type": "text", "text": answer.text } ],
-                "isError": answer.error,
-            });
-            if let Some(structured) = answer.structured {
-                result["structuredContent"] = structured;
-            }
-            return Ok(result);
+            return Ok(result_of(answer));
         }
         // A fault in the engine under one call is that call's failure, not
         // the server's end.
@@ -619,23 +636,12 @@ impl Server {
         })) {
             Ok(Ok(answer)) => answer,
             Ok(Err(message)) => Answer::failed(message),
-            Err(panic) => {
-                let what = panic
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "an unknown fault".to_string());
-                Answer::failed(format!("the tool {name} failed inside the engine: {what}"))
-            }
+            Err(panic) => Answer::failed(format!(
+                "the tool {name} failed inside the engine: {}",
+                panic_words(panic.as_ref())
+            )),
         };
-        let mut result = json!({
-            "content": [ { "type": "text", "text": answer.text } ],
-            "isError": answer.error,
-        });
-        if let Some(structured) = answer.structured {
-            result["structuredContent"] = structured;
-        }
-        Ok(result)
+        Ok(result_of(answer))
     }
 
     /// The answer of tool `name` to `arguments`; an error is the tool's own

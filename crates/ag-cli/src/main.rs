@@ -307,10 +307,11 @@ fn main() -> Result<()> {
     // The plugins declared in the plugin directories are there for every
     // command: a loader for the image about to be opened, an architecture
     // for its code, a tool for `ag tool` and the server.
-    let (_, problems) = ag_image::plugin::load_all();
+    let (manifests, problems) = ag_image::plugin::load_all();
     for problem in problems {
-        eprintln!("warning: a plugin manifest was skipped: {problem}");
+        eprintln!("warning: plugins: {problem}");
     }
+    plugins::remember(manifests);
     match cmd_run(cli.cmd) {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),

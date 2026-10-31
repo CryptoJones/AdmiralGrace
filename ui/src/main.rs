@@ -29,6 +29,12 @@ Options:
 ";
 
 fn main() -> iced::Result {
+    // The plugins of the plugin directories: a loader for the program about
+    // to be opened, an architecture for its code.
+    let (_, problems) = ag_image::plugin::load_all();
+    for problem in problems {
+        eprintln!("warning: plugins: {problem}");
+    }
     let config = match parse_args() {
         Ok(Some(config)) => config,
         Ok(None) => {

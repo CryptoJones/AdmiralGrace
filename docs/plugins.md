@@ -42,11 +42,19 @@ registered, as text or with `--json`.
 ```
 
 A loader names the `magic` — the hex of the bytes a file of its format starts with — and
-the engine offers it every file that starts so, before its own loaders. An architecture
-names the `languages` it decodes (the language ids a loader reports) and its `bitness`
-(32 or 64). A tool names itself (letters, digits, `_` and `-`), says what it does, and may
-give the JSON Schema of its arguments. Every command is a list: the program and its
-arguments, run as they are.
+the engine offers it every file that starts so, before its own loaders; a loader that fails
+is reported on standard error and the engine's own loaders read the file after all, so a
+loader with a common magic cannot keep a program from opening. An architecture names the
+`languages` it decodes (the language ids a loader reports) and its `bitness` (16, 32 or 64).
+A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
+Schema of its arguments (an object). An entry without a `name` is named for the manifest,
+the second and later with their place (`toy-1`); a name declared twice is reported, and the
+later declaration replaces the earlier. Every command is a list: the program and its
+arguments. A bare program name is found on `PATH`, as a shell finds it; a program that names
+a path — one with a separator in it — is taken from the manifest's directory when it is
+relative; the arguments are passed as they are, with `${dir}` in any element standing for
+the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
+not answered by then is ended and its answer is an error.
 
 ## The three conversations
 
@@ -69,8 +77,8 @@ go; its standard error is the terminal's. Numbers may be JSON numbers or hex tex
 ```
 
 `sections` carry where each sits in the file (`file_offset`, `file_size`), which is how the
-bytes of a section are found; `functions`, `data` and `imports` are optional, as are `entry`
-and `base`.
+bytes of a section are found — a section without a `file_offset` has no bytes, and so no
+code to list; `functions`, `data` and `imports` are optional, as are `entry` and `base`.
 
 **An architecture** is given one section — `{"language": "…", "base": 256, "bytes": "<hex>"}`
 — and answers with its instructions, in address order:
@@ -87,9 +95,10 @@ and `base`.
 a `target` (without one they are `indirect-jump`), `call` with a `target` (without one
 `indirect-call`), `return`, `halt`, `trap`, `interrupt`, `syscall` or `invalid`. `registers`
 may list the registers the operands name, so a rename reaches them; `memory` may give the
-address a memory operand names, so a reference to data or a string is found. An image a
-plugin's architecture decodes has its listing, its graph and its cross references; the
-lifter does not read it, so it has no pseudocode.
+address a memory operand names, so a reference to data or a string is found. An instruction
+outside the section, or running past its end, or on an address already given, is left out
+with a warning. An image a plugin's architecture decodes has its listing, its graph and its
+cross references; the lifter does not read it, so it has no pseudocode.
 
 **A tool** is given `{"tool": "…", "image": "<path>", "project": "<path or null>",
 "arguments": {…}}` — the image's path and the project file's, so it can open them itself
@@ -97,7 +106,8 @@ lifter does not read it, so it has no pseudocode.
 text when its output is not JSON. `ag tool NAME IMAGE [--project FILE] [--arg name=value]…`
 runs one from the command line, a value that reads as JSON given as JSON; the MCP server
 lists every registered tool after the image's own and calls it the same way, its failure
-told as the tool's own (`isError`).
+told as the tool's own (`isError`). A tool named like one of the image's own is not listed:
+the image's answers to the name.
 
 ## In Rust
 

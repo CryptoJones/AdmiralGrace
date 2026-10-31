@@ -153,6 +153,43 @@ fn the_plugins_are_listed_from_their_manifest_and_a_bad_manifest_is_reported() {
 }
 
 #[test]
+fn a_loader_that_fails_hands_the_file_on_and_a_slow_tool_is_ended() {
+    let dir = Dir::new("fallback");
+    // A loader claiming every ELF, and failing; a tool that never answers
+    // in time.
+    std::fs::write(
+        dir.0.join("greedy.json"),
+        r#"{ "name": "greedy",
+             "loaders": [{ "name": "elf-eater", "magic": "7f454c46", "command": ["sh", "-c", "cat >/dev/null; exit 3"] }],
+             "tools": [{ "name": "slow", "description": "Sleeps.", "command": ["sh", "-c", "cat >/dev/null; sleep 5"], "timeout": 1 }] }"#,
+    )
+    .unwrap();
+    let sample =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .arg("info")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("elf-eater did not read"), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("x86:LE:64"));
+    let started = std::time::Instant::now();
+    let output = ag(&dir.0)
+        .arg("tool")
+        .arg("slow")
+        .arg(&sample)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("within 1 seconds"), "{stderr}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+}
+
+#[test]
 fn a_manifests_loader_architecture_and_tool_carry_a_toy_image_through_the_commands() {
     if !has_python() {
         eprintln!("python3 is not on this machine: the toy plugin is not run");

@@ -225,6 +225,11 @@ impl Image {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        // A registered loader that knows the bytes has the first word: a
+        // format of its own may share a magic with a universal Mach-O.
+        if crate::plugin::loader_for(&bytes).is_some() {
+            return Image::from_bytes(&name, bytes);
+        }
         // A universal Mach-O is several images in one file: which one is
         // the analyst's to say.
         if let Some(slices) = fat_slices(&bytes) {
@@ -293,21 +298,27 @@ impl Image {
     /// Parse an image already in memory; `name` labels it in errors.
     pub fn from_bytes(name: &str, bytes: Vec<u8>) -> Result<Image> {
         // A registered loader that knows the bytes reads them first: that
-        // is how a format the engine does not read is added.
+        // is how a format the engine does not read is added. One that
+        // fails is reported, and the engine's own loaders have their say.
         if let Some(loader) = crate::plugin::loader_for(&bytes) {
-            let loaded = loader
-                .load(name, &bytes)
-                .map_err(|error| anyhow::anyhow!("{}: loading {name}: {error}", loader.name()))?;
-            return Ok(Image {
-                inner: Loaded::Plugin(Box::new(loaded)),
-                bytes,
-                name: name.to_string(),
-                slice: None,
-                objc: std::cell::OnceCell::new(),
-                mangled: std::cell::OnceCell::new(),
-                swift: std::cell::OnceCell::new(),
-                unwind: std::cell::OnceCell::new(),
-            });
+            match loader.load(name, &bytes) {
+                Ok(loaded) => {
+                    return Ok(Image {
+                        inner: Loaded::Plugin(Box::new(loaded)),
+                        bytes,
+                        name: name.to_string(),
+                        slice: None,
+                        objc: std::cell::OnceCell::new(),
+                        mangled: std::cell::OnceCell::new(),
+                        swift: std::cell::OnceCell::new(),
+                        unwind: std::cell::OnceCell::new(),
+                    });
+                }
+                Err(error) => eprintln!(
+                    "warning: the loader {} did not read {name}: {error}; reading it as the engine does",
+                    loader.name()
+                ),
+            }
         }
         let inner = ObjectLoadImage::from_bytes(name, &bytes)
             .map_err(|error| anyhow::anyhow!("loading {name}: {error}"))?;

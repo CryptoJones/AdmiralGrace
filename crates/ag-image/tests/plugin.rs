@@ -101,15 +101,21 @@ impl Architecture for ToyCpu {
 fn a_plugins_image_is_listed_graphed_and_reported_like_any_other() {
     plugin::register_loader(Arc::new(ToyLoader));
     plugin::register_architecture(Arc::new(ToyCpu));
-    let path = std::env::temp_dir().join(format!(
+    /// The toy file, removed when the test ends however it ends.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = Scratch(std::env::temp_dir().join(format!(
         "ag-image-plugin-{}-{:?}.toy",
         std::process::id(),
         std::thread::current().id()
-    ));
+    )));
     // 0x100: br 0x104; 0x102: nop; 0x103: ret; 0x104: nop; 0x105: ret.
-    std::fs::write(&path, b"TOY!\x06\x03\x04\x00\x01\x00\x01").unwrap();
-    let image = Binary::open(&path).expect("the toy loader reads the file");
-    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path.0, b"TOY!\x06\x03\x04\x00\x01\x00\x01").unwrap();
+    let image = Binary::open(&path.0).expect("the toy loader reads the file");
 
     assert_eq!(image.language(), "TOYCPU:LE:32:default");
     assert_eq!(image.plugin_architecture().as_deref(), Some("toy-cpu"));
