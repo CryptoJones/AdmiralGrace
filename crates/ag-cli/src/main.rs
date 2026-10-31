@@ -10,6 +10,7 @@ mod catalog;
 mod docs;
 mod export;
 mod image;
+mod mcp;
 mod project;
 mod skill;
 
@@ -76,6 +77,22 @@ enum Cmd {
         raw: project::RawArgs,
         #[command(subcommand)]
         cmd: project::ProjectCmd,
+    },
+    /// Serve the image to a language model over the Model Context
+    /// Protocol, on standard input and output.
+    Mcp {
+        /// The program image to serve.
+        binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
+        /// The project file whose names, comments and bookmarks the tools
+        /// read and write; made from the image when it is not there yet.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Set an engine option, such as `--option dead-code drop`. May be
+        /// repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
     },
     /// Assemble one instruction to its bytes, as it would sit at an address.
     Asm {
@@ -279,6 +296,18 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Project { binary, raw, cmd } => {
             project::run(binary, raw.spec()?, raw.slice.clone(), cmd)
         }
+        Cmd::Mcp {
+            binary,
+            raw,
+            project,
+            options,
+        } => mcp::run(
+            &binary,
+            raw.spec()?,
+            raw.slice.clone(),
+            project.as_deref(),
+            options,
+        ),
         Cmd::Catalog {
             json,
             markdown: _,

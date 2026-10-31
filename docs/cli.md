@@ -550,6 +550,60 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
+## An MCP server: `ag mcp`
+
+Language models drive analysis through the Model Context Protocol, and `ag mcp` serves the
+image to one: JSON-RPC 2.0, one message a line, over the process's standard input and
+output, which is how MCP clients start a local server. Point a client at the command and the
+image's facts are tools it calls.
+
+```bash
+cargo run --bin ag -- mcp ./sample.elf
+cargo run --bin ag -- mcp ./sample.elf --project sample.agproj --option dead-code drop
+```
+
+A client configuration names the command and its arguments; for one that takes a JSON
+block, something like:
+
+```json
+{ "mcpServers": { "ag": { "command": "ag", "args": ["mcp", "/path/to/sample.elf", "--project", "/path/to/sample.agproj"] } } }
+```
+
+The image opens the way `ag image` opens it: `--raw` and its flags for raw bytes, `--slice`
+for a universal Mach-O, `--option NAME VALUE` for the engine's options, and `--project FILE`
+for the project file, under whose layout the image is read and whose patches, mode marks and
+jump-table notes the walk is told. A project file that is not there yet is made from the
+image on the first change, as `ag project` makes it.
+
+The tools, each answering with text and, where the answer is a record, the same as JSON in
+`structuredContent`:
+
+| Tool | Answer |
+|---|---|
+| `image_info` | The file, its language, entry point and sections, how many functions and strings it has, and the project file in use. |
+| `list_functions [filter] [limit]` | The functions: address, name (demangled), the mangled name when there was one, where it ends when the unwind data says, and the analyst's name from the project when it has one. `filter` is a case-insensitive regular expression, or a plain substring. |
+| `search query [limit]` | The function names, data symbol names and strings matching a regular expression. |
+| `disassemble target` | The listing of one function, as `ag image disasm` prints it. A target is an address, such as `0x1198`, or a name — exact first, then a substring, a mangled name too. |
+| `decompile target` | The pseudocode of one function; a function the lifter refuses is a tool error with the reason. |
+| `control_flow target` | The blocks, edges and jump tables of one function, as `ag image cfg --json` reports them. |
+| `callers target`, `callees target` | Who calls the function; the calls it makes, tail calls marked. |
+| `cross_references target` | For a function: the data and strings it refers to, its callers and callees. For a piece of data or a string: the functions that refer to it. Both with the references the analyst recorded in the project, to and from the address. |
+| `strings [filter] [limit]` | The strings of the image with the functions that use them. |
+| `read_bytes address [length]` | The bytes at an address, as hex and ASCII; 64 unless said, 4096 at most. |
+| `annotations address` | The analyst's records at an address from the project file: the address's own and the block's. |
+| `set_name address name` | Names the function at the address; an empty name clears the analyst's. |
+| `set_comment address text [above]` | Puts a comment on the address, inline or above; empty text clears it. |
+| `set_bookmark address [on]` | Bookmarks the function, or takes the bookmark off. |
+| `bookmarks` | The project's bookmarks. |
+
+Every write saves the project file at once, so the workbench opened on the same file sees
+the change on its next reload, and the model's work is kept the way the analyst's is. Without
+`--project` the write tools answer with an error saying so. Lists are cut at 200 rows unless
+`limit` says otherwise, and at 5000 at most; a tool's own failure — a function that is not
+there, an address outside the image — is answered as a tool error (`isError`), and a request
+the server cannot take — an unknown method, an unknown tool, arguments that are not an
+object — as a JSON-RPC error. The server stops when its input ends.
+
 ## `ag catalog`: the engine's options
 
 Every judgment call the engine makes is a row of one registry
