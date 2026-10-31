@@ -112,6 +112,51 @@ pub struct DecodedInsn {
     /// it is not position-independent.
     pub absolute_address: Option<u64>,
     pub switch_indices: bool,
+    /// The instruction's form, as the decoder numbers it: iced-x86's `Code`
+    /// for x86, so `mov eax, [rbp-0xc]` and `mov [rbp-0xc], eax` are two
+    /// forms of one mnemonic. 0 where the decoder has no such number.
+    pub opcode: u32,
+    /// The flags the instruction reads, as the decoder's bits (`RflagsBits`
+    /// for x86); 0 where it tracks none. [`flag_names`] spells them.
+    pub flags_read: u32,
+    /// The flags the instruction writes — set, cleared, computed or left
+    /// undefined.
+    pub flags_written: u32,
+}
+
+/// The name of an instruction's form, as the decoder numbers it: `None` for
+/// a form it does not know, an invalid instruction among them.
+pub fn opcode_name(opcode: u32) -> Option<String> {
+    iced_x86::Code::try_from(opcode as usize)
+        .ok()
+        .filter(|code| *code != iced_x86::Code::INVALID)
+        .map(|code| format!("{code:?}"))
+}
+
+/// The names of the flags in a set of the decoder's bits, in the order the
+/// register lays them out.
+pub fn flag_names(bits: u32) -> Vec<&'static str> {
+    use iced_x86::RflagsBits;
+    [
+        (RflagsBits::CF, "CF"),
+        (RflagsBits::PF, "PF"),
+        (RflagsBits::AF, "AF"),
+        (RflagsBits::ZF, "ZF"),
+        (RflagsBits::SF, "SF"),
+        (RflagsBits::DF, "DF"),
+        (RflagsBits::OF, "OF"),
+        (RflagsBits::IF, "IF"),
+        (RflagsBits::AC, "AC"),
+        (RflagsBits::UIF, "UIF"),
+        (RflagsBits::C0, "C0"),
+        (RflagsBits::C1, "C1"),
+        (RflagsBits::C2, "C2"),
+        (RflagsBits::C3, "C3"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| bits & bit != 0)
+    .map(|(_, name)| name)
+    .collect()
 }
 
 impl DecodedInsn {
@@ -250,6 +295,9 @@ impl CpuContext for X86IcedContext {
                 rip_relative_address: None,
                 absolute_address: None,
                 switch_indices: false,
+                opcode: 0,
+                flags_read: 0,
+                flags_written: 0,
             });
         }
         let mnemonic = ins.mnemonic() as u32;
@@ -333,6 +381,9 @@ impl CpuContext for X86IcedContext {
             rip_relative_address,
             absolute_address,
             switch_indices: false,
+            opcode: ins.code() as u32,
+            flags_read: ins.rflags_read(),
+            flags_written: ins.rflags_modified(),
         })
     }
 

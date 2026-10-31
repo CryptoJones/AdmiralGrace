@@ -486,13 +486,15 @@ pub trait Provider: Send + Sync {
         false
     }
 
-    /// The function at one level of the lift, in SSA form when asked, for
-    /// a provider whose engine lifts in stages.
+    /// The function at one level of the lift, in SSA form when asked and
+    /// with its casts explicit when asked, for a provider whose engine
+    /// lifts in stages.
     fn il(
         &self,
         _address: u64,
         _level: ag_image::Level,
         _ssa: bool,
+        _casts: bool,
     ) -> Option<ag_image::IlFunction> {
         None
     }

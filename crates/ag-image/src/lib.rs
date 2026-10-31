@@ -57,7 +57,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
-pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level};
+pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
@@ -293,7 +293,7 @@ pub fn edges_of(from: u64, to: u64, successors: &[u64]) -> Vec<Edge> {
 }
 
 /// The lifted levels a [`Binary`] keeps: by function, level and SSA form.
-type LevelCache = HashMap<(u64, Level, bool), Result<IlFunction, NotLifted>>;
+type LevelCache = HashMap<(u64, Level, bool, bool), Result<IlFunction, NotLifted>>;
 
 /// The control-flow graph of one function.
 #[derive(Debug, Clone)]
@@ -1831,19 +1831,39 @@ impl Binary {
     /// when asked. Every item carries the addresses it came from, so the
     /// levels map onto each other and onto the listing.
     pub fn il(&self, address: u64, level: Level, ssa: bool) -> Result<IlFunction, NotLifted> {
+        self.il_with(address, level, ssa, false)
+    }
+
+    /// [`Binary::il`] with the casts explicit when `casts`: every constant
+    /// spelled with the type of its width, a value stored at another width
+    /// cast to it. The items' opcodes, flags, stack pointers and types are
+    /// there either way; [`IlFunction::render`] shows them.
+    pub fn il_with(
+        &self,
+        address: u64,
+        level: Level,
+        ssa: bool,
+        casts: bool,
+    ) -> Result<IlFunction, NotLifted> {
         if let Ok(cache) = self.levels.lock() {
-            if let Some(found) = cache.get(&(address, level, ssa)) {
+            if let Some(found) = cache.get(&(address, level, ssa, casts)) {
                 return found.clone();
             }
         }
-        let built = self.build_il(address, level, ssa);
+        let built = self.build_il(address, level, ssa, casts);
         if let Ok(mut cache) = self.levels.lock() {
-            cache.insert((address, level, ssa), built.clone());
+            cache.insert((address, level, ssa, casts), built.clone());
         }
         built
     }
 
-    fn build_il(&self, address: u64, level: Level, ssa: bool) -> Result<IlFunction, NotLifted> {
+    fn build_il(
+        &self,
+        address: u64,
+        level: Level,
+        ssa: bool,
+        casts: bool,
+    ) -> Result<IlFunction, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),
         })?;
@@ -1864,14 +1884,14 @@ impl Binary {
             &self.options,
         )?;
         let text = |at: u64| decoded.text.get(&at).cloned();
-        let function = il::build(level, &stages, &decoded.disasm, &text);
+        let function = il::build(level, &stages, &decoded.disasm, &text, casts);
         if !ssa {
             return Ok(function);
         }
         // The high level takes its versions from the medium level's.
         let medium = (level == Level::High).then(|| {
             il::to_ssa(
-                &il::build(Level::Medium, &stages, &decoded.disasm, &text),
+                &il::build(Level::Medium, &stages, &decoded.disasm, &text, casts),
                 &stages.analysis,
                 None,
             )

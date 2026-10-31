@@ -80,6 +80,8 @@ pub enum Message {
     ViewCycleLevel,
     /// Show the active pane's level in SSA form, or out of it.
     ViewToggleSsa,
+    /// Show, or stop showing, one of the notes beside a level's items.
+    ViewToggleIlOption(IlOption),
     /// Run the program under the debugger, stopped at its first instruction.
     DebugStart,
     /// Ask for a process to attach the debugger to.
@@ -443,6 +445,37 @@ impl PaneLevel {
     }
 }
 
+/// What a level's rows can show beside each item, and the casts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IlOption {
+    Opcodes,
+    Flags,
+    StackPointer,
+    Types,
+    Casts,
+}
+
+impl IlOption {
+    pub const ALL: [IlOption; 5] = [
+        IlOption::Opcodes,
+        IlOption::Flags,
+        IlOption::StackPointer,
+        IlOption::Types,
+        IlOption::Casts,
+    ];
+
+    /// The option's name, for the menu and the status line.
+    pub fn label(self) -> &'static str {
+        match self {
+            IlOption::Opcodes => "Opcodes",
+            IlOption::Flags => "Flag use",
+            IlOption::StackPointer => "Stack pointer",
+            IlOption::Types => "Types",
+            IlOption::Casts => "Explicit casts",
+        }
+    }
+}
+
 /// The center work surface.
 #[derive(Debug, Default)]
 pub struct WorkSurface {
@@ -475,6 +508,11 @@ pub struct WorkSurface {
     /// `graph` stays the disassembly's, which the arrows, the block lookups
     /// and the block edits read.
     pub il_graph: Option<Graph>,
+    /// What a level's rows show beside each item: opcodes, flags, the stack
+    /// pointer, types.
+    pub render: ag_image::Render,
+    /// Whether a level spells its casts: every constant with its width.
+    pub casts: bool,
     /// The control-flow graph of the selected function.
     pub graph: Graph,
     /// Pseudocode of the selected function.
@@ -500,6 +538,29 @@ impl WorkSurface {
     /// disassembly's otherwise.
     pub fn shown_graph(&self) -> &Graph {
         self.il_graph.as_ref().unwrap_or(&self.graph)
+    }
+
+    /// Whether a level's option is on.
+    pub fn il_option(&self, option: IlOption) -> bool {
+        match option {
+            IlOption::Opcodes => self.render.opcodes,
+            IlOption::Flags => self.render.flags,
+            IlOption::StackPointer => self.render.stack_pointer,
+            IlOption::Types => self.render.types,
+            IlOption::Casts => self.casts,
+        }
+    }
+
+    fn toggle_il_option(&mut self, option: IlOption) -> bool {
+        let slot = match option {
+            IlOption::Opcodes => &mut self.render.opcodes,
+            IlOption::Flags => &mut self.render.flags,
+            IlOption::StackPointer => &mut self.render.stack_pointer,
+            IlOption::Types => &mut self.render.types,
+            IlOption::Casts => &mut self.casts,
+        };
+        *slot = !*slot;
+        *slot
     }
 }
 
@@ -2327,9 +2388,9 @@ impl App {
         // the status line says so. One lift serves both panes at one level.
         let mut lifted: Option<(PaneLevel, ag_image::IlFunction)> = None;
         if let PaneLevel::Il { level, ssa } = self.work.listing_level {
-            match self.provider.il(function, level, ssa) {
+            match self.provider.il(function, level, ssa, self.work.casts) {
                 Some(il) => {
-                    self.work.listing = il_rows(&il);
+                    self.work.listing = il_rows(&il, &self.work.render);
                     self.work.listing_shown = self.work.listing_level;
                     lifted = Some((self.work.listing_level, il));
                 }
@@ -2344,11 +2405,11 @@ impl App {
         if let PaneLevel::Il { level, ssa } = self.work.graph_level {
             let il = match lifted {
                 Some((at, il)) if at == self.work.graph_level => Some(il),
-                _ => self.provider.il(function, level, ssa),
+                _ => self.provider.il(function, level, ssa, self.work.casts),
             };
             match il {
                 Some(il) => {
-                    self.work.il_graph = Some(il_graph(&il, &self.work.graph));
+                    self.work.il_graph = Some(il_graph(&il, &self.work.graph, &self.work.render));
                     self.work.graph_shown = self.work.graph_level;
                 }
                 None => {
@@ -4308,6 +4369,15 @@ impl App {
                     });
                 }
             }
+            Message::ViewToggleIlOption(option) => {
+                let on = self.work.toggle_il_option(option);
+                self.refresh_listing();
+                self.notice = Some(format!(
+                    "{}: {} — shown beside a level's items",
+                    option.label(),
+                    if on { "on" } else { "off" }
+                ));
+            }
             Message::DebugStart => return self.debug_start(),
             Message::DebugAttach => {
                 if self.binary_path.is_none() {
@@ -4873,7 +4943,7 @@ impl App {
 /// first address it came from — or the row before's, for an item with
 /// none — its text in the operands column indented by its depth, and
 /// nothing in the columns a machine instruction fills.
-pub(crate) fn il_rows(il: &ag_image::IlFunction) -> Vec<ListingLine> {
+pub(crate) fn il_rows(il: &ag_image::IlFunction, render: &ag_image::Render) -> Vec<ListingLine> {
     let mut rows = Vec::new();
     for block in &il.blocks {
         let mut last = block.address;
@@ -4885,7 +4955,11 @@ pub(crate) fn il_rows(il: &ag_image::IlFunction) -> Vec<ListingLine> {
                 address,
                 bytes: String::new(),
                 mnemonic: String::new(),
-                operands: format!("{}{}", "    ".repeat(item.depth), item.text),
+                operands: format!(
+                    "{}{}",
+                    "    ".repeat(item.depth),
+                    il.item_text(item, render)
+                ),
                 call_target: None,
                 tail: false,
                 registers: Vec::new(),
@@ -4900,7 +4974,11 @@ pub(crate) fn il_rows(il: &ag_image::IlFunction) -> Vec<ListingLine> {
 /// level, its items as its lines, its successors by address. A block ends
 /// where the `disassembly`'s block holding its last instruction ends, so
 /// an edge to the block after it is the fall-through it is.
-pub(crate) fn il_graph(il: &ag_image::IlFunction, disassembly: &Graph) -> Graph {
+pub(crate) fn il_graph(
+    il: &ag_image::IlFunction,
+    disassembly: &Graph,
+    render: &ag_image::Render,
+) -> Graph {
     let blocks: Vec<GraphBlock> = il
         .blocks
         .iter()
@@ -4917,7 +4995,7 @@ pub(crate) fn il_graph(il: &ag_image::IlFunction, disassembly: &Graph) -> Graph 
                         address,
                         bytes: String::new(),
                         mnemonic: String::new(),
-                        operands: item.text.clone(),
+                        operands: il.item_text(item, render),
                         call_target: None,
                         tail: false,
                         registers: Vec::new(),
@@ -7352,6 +7430,114 @@ mod tests {
                 .cycled(),
             PaneLevel::Disassembly
         );
+    }
+
+    #[test]
+    fn the_level_options_decorate_the_rows_and_the_casts_spell_the_constants() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let _ = app.update(Message::ViewTabSelected(ViewTab::Listing));
+        for _ in 0..3 {
+            let _ = app.update(Message::ViewCycleLevel);
+        }
+        let plain = app.work.listing.clone();
+        assert!(
+            plain.iter().any(|line| line.operands == "local_14 = 1"),
+            "{plain:?}"
+        );
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::Opcodes));
+        assert!(app.work.il_option(IlOption::Opcodes));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Opcodes: on")));
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands == "[assign] local_14 = 1"),
+            "{:?}",
+            app.work.listing
+        );
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::Types));
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands.contains("; types: local_14: int")),
+            "{:?}",
+            app.work.listing
+        );
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::StackPointer));
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands.contains("; sp = entry-0x")),
+            "{:?}",
+            app.work.listing
+        );
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::Casts));
+        assert!(app.work.casts);
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands.contains("local_14 = (int)1")),
+            "{:?}",
+            app.work.listing
+        );
+        // Off again: the rows are as they were.
+        for option in [
+            IlOption::Opcodes,
+            IlOption::Types,
+            IlOption::StackPointer,
+            IlOption::Casts,
+        ] {
+            let _ = app.update(Message::ViewToggleIlOption(option));
+        }
+        assert_eq!(app.work.listing.len(), plain.len());
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .any(|line| line.operands == "local_14 = 1"));
+        // The flags are the lifted level's: high, the disassembly, lifted.
+        for _ in 0..3 {
+            let _ = app.update(Message::ViewCycleLevel);
+        }
+        assert!(matches!(
+            app.work.listing_level,
+            PaneLevel::Il {
+                level: ag_image::Level::Lifted,
+                ..
+            }
+        ));
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::Flags));
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands.starts_with("cmp ")
+                    && line.operands.contains("flags: reads none, writes")
+                    && line.operands.contains("ZF")),
+            "{:?}",
+            app.work.listing
+        );
+        let _ = app.update(Message::ViewToggleIlOption(IlOption::Opcodes));
+        assert!(
+            app.work
+                .listing
+                .iter()
+                .any(|line| line.operands.starts_with("[Cmp_")),
+            "{:?}",
+            app.work.listing
+        );
+        assert_eq!(IlOption::ALL.len(), 5);
     }
 
     #[test]

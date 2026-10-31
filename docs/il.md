@@ -57,6 +57,35 @@ medium level's statements, which it is a rearrangement of — a header (`if`, `w
 `switch`, `for`) part by part, from the statements and the branch at its addresses — and
 has no SSA form without the medium's.
 
+## Render options
+
+Every item carries more than its text: its opcode — the instruction's form as the decoder
+numbers it at the lifted level (`Mov_r32_rm32`), the statement's kind at the others
+(`assign`, `store`, `call`, `return`, `compare`, `branch`, `switch`, `goto`, `if`, `else`,
+`while`, `do`, `for`, `case`, `phi`) — the flags an instruction reads and writes, the stack
+pointer's offset from the entry's before the item's first instruction, and the C type of
+every name it reads or writes. The JSON has them always; the text shows them when asked:
+
+```bash
+cargo run --bin ag -- image ./sample.elf il sum_to --level lifted --opcodes --flags --stack-pointer
+cargo run --bin ag -- image ./sample.elf il sum_to --level medium --types --casts
+```
+
+```
+  00001169  [Mov_rm32_r32] mov [rbp-14h],edi  ; sp = entry-0x10
+  0000118a  [Cmp_r32_rm32] cmp eax,[rbp-14h]  ; sp = entry-0x10  ; flags: reads none, writes CF PF AF ZF SF OF
+  00001174  [assign] local_14 = (int)1  ; sp = entry-0x10  ; types: local_14: int
+```
+
+`--opcodes` puts the opcode before the item in brackets; `--flags`, `--stack-pointer` and
+`--types` add notes after `  ; `. `--casts` changes the text itself: every constant is spelled
+with the type of its width (`(int)1`, `(long)0`), and a value stored at a width other than its
+own is cast to it. The MCP tool `il` and `scripts/ag.py`'s `il()` take the same five as
+booleans; in Rust, `Binary::il_with(address, level, ssa, casts)` builds the function and
+`IlFunction::render(&Render)` prints it. In the workbench the options are under **View**
+(`docs/workbench.md`). A register's value at entry is `long`; the flags are `flags`; a
+register at the lifted level is named by its width.
+
 ## The output
 
 As text, each level prints a header (`; sum_to at 0x1161: medium level, SSA form`), then its
@@ -64,7 +93,7 @@ blocks — a label and the blocks it goes on to — and their items, each with t
 it came from (`+` when there are more) and indented by depth. As JSON (`--json`): `function`,
 `name`, `level`, `ssa`, the `blocks` (`id`, `address`, `successors`, the ids of their
 `items`) and the `items` (`id`, `block`, `depth`, `addresses`, `text`, `defines`, `uses`,
-`phi`). The MCP server's `il` tool answers the same for a language model, and a script asks
+`phi`, `opcode`, `flags_read`, `flags_written`, `stack_pointer`, `types`). The MCP server's `il` tool answers the same for a language model, and a script asks
 it through `ag run`. In Rust, `ag_image::Binary::il(address, level, ssa)` gives the
 `IlFunction`, and `ag_engine::il` holds the types, `build`, `to_ssa` and `correspondence`;
 `ag_engine::lift::lift_stages` keeps every stage of one lift for a plugin that wants them

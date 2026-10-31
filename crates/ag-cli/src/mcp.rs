@@ -208,6 +208,11 @@ fn tools() -> Vec<Tool> {
                     "target": target,
                     "level": { "type": "string", "enum": ["lifted", "low", "medium", "high"], "description": "The level (default medium)." },
                     "ssa": { "type": "boolean", "description": "Static single assignment form: every definition a version, a φ where paths meet (default false)." },
+                    "opcodes": { "type": "boolean", "description": "Show each item's opcode in the text: the instruction's form at the lifted level, the statement's kind at the others (default false; the JSON has them always)." },
+                    "flags": { "type": "boolean", "description": "Show the flags each instruction reads and writes, at the lifted level (default false)." },
+                    "stack_pointer": { "type": "boolean", "description": "Show the stack pointer's offset from the entry's before each item (default false)." },
+                    "types": { "type": "boolean", "description": "Show the type of every name an item reads or writes (default false)." },
+                    "casts": { "type": "boolean", "description": "Explicit casts: every constant with the type of its width, a value stored at another width cast to it (default false)." },
                 },
                 "required": ["target"]
             }),
@@ -740,12 +745,19 @@ impl Server {
                     })?,
                 };
                 let ssa = flag("ssa", false)?;
+                let render = ag_image::Render {
+                    opcodes: flag("opcodes", false)?,
+                    flags: flag("flags", false)?,
+                    stack_pointer: flag("stack_pointer", false)?,
+                    types: flag("types", false)?,
+                };
+                let casts = flag("casts", false)?;
                 let function = self
                     .image
-                    .il(address, level, ssa)
+                    .il_with(address, level, ssa, casts)
                     .map_err(|error| format!("{address:#x} was not lifted: {}", error.reason))?;
                 let mut answer = Answer::json(crate::image::il_json(&function));
-                answer.text = function.text();
+                answer.text = function.render(&render);
                 Ok(answer)
             }
             "control_flow" => {
