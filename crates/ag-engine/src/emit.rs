@@ -1434,7 +1434,14 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
                     AstNode::FunctionName { address, .. } => style.hints.get(address),
                     _ => None,
                 };
-                expr(callee, out, true, style);
+                // A call through an expression: `(*(long *)a)(b)`.
+                if callee.is_atom() {
+                    expr(callee, out, true, style);
+                } else {
+                    out.push('(');
+                    expr(callee, out, false, style);
+                    out.push(')');
+                }
                 arguments_named(args, names.map(Vec::as_slice), out, style);
             }
         }

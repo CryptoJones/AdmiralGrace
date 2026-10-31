@@ -49,6 +49,43 @@ pub struct Image {
     unwind: std::cell::OnceCell<BTreeMap<u64, u64>>,
 }
 
+/// The control-flow guard's pointers in a 64-bit load configuration, by
+/// their offsets: the check and the dispatcher at 0x70 and 0x78 (Windows
+/// 8.1), and the extended guard's check, dispatcher and table dispatcher
+/// at 0x118, 0x120 and 0x128 (Windows 10). The configuration's own `size`
+/// says how far it goes — a compiler writes the length its headers knew,
+/// shorter than the latest — and only the pointers within it count.
+pub fn guard_pointers_in(data: &[u8]) -> Vec<(u64, String)> {
+    let u32_at = |offset: usize| -> Option<u32> {
+        data.get(offset..offset + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+    };
+    let u64_at = |offset: usize| -> Option<u64> {
+        data.get(offset..offset + 8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
+    };
+    let Some(size) = u32_at(0).map(|size| size as usize) else {
+        return Vec::new();
+    };
+    let fields: [(usize, &str); 5] = [
+        (0x70, "__guard_check_icall_fptr"),
+        (0x78, "__guard_dispatch_icall_fptr"),
+        (0x118, "__guard_xfg_check_icall_fptr"),
+        (0x120, "__guard_xfg_dispatch_icall_fptr"),
+        (0x128, "__guard_xfg_table_dispatch_icall_fptr"),
+    ];
+    let mut pointers = Vec::new();
+    for (offset, name) in fields {
+        if offset + 8 > size {
+            continue;
+        }
+        if let Some(address) = u64_at(offset).filter(|address| *address != 0) {
+            pointers.push((address, name.to_string()));
+        }
+    }
+    pointers
+}
+
 /// A mangled name the symbol table spells, and what it demangles to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MangledName {
@@ -703,6 +740,31 @@ impl Image {
         symbols
     }
 
+    /// The pointers a PE's control-flow guard calls through, from its load
+    /// configuration, as `(address, name)`: the slot that holds the check
+    /// function, `__guard_check_icall_fptr`, and the one that holds the
+    /// dispatcher, `__guard_dispatch_icall_fptr`, named as the C runtime
+    /// names them. A call through the dispatcher is the call it guards, to
+    /// the function in `rax`; a call through the check validates `rcx` and
+    /// returns. Empty for any other image, or a PE without them.
+    pub fn guard_pointers(&self) -> Vec<(u64, String)> {
+        use object::read::pe::PeFile64;
+        if self.object().is_none() {
+            return Vec::new();
+        }
+        let Ok(pe) = PeFile64::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let Some(directory) = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+        else {
+            return Vec::new();
+        };
+        let Ok(data) = directory.data(self.bytes.as_slice(), &pe.section_table()) else {
+            return Vec::new();
+        };
+        guard_pointers_in(data)
+    }
+
     /// The named data objects as `(address, name, size)`.
     pub fn data_symbols(&self) -> Vec<(u64, String, u64)> {
         let mut symbols = match &self.inner {
@@ -712,11 +774,17 @@ impl Image {
                 .map(|inner| inner.data_symbols())
                 .unwrap_or_default(),
         };
-        // A PE names its data through its export table, with no extent.
+        // A PE names its data through its export table, with no extent; its
+        // load configuration names the control-flow guard's pointers.
         if let Some(inner) = self.object() {
             for (address, name) in inner.data_exports() {
                 if !symbols.iter().any(|(found, _, _)| found == address) {
                     symbols.push((*address, name.clone(), 0));
+                }
+            }
+            for (address, name) in self.guard_pointers() {
+                if !symbols.iter().any(|(found, _, _)| *found == address) {
+                    symbols.push((address, name, 8));
                 }
             }
             symbols.sort_by_key(|(address, _, _)| *address);
@@ -994,5 +1062,46 @@ impl Image {
             .find(|s| s.vma <= vma && vma < s.vma.saturating_add(s.size))?;
         let bytes = self.bytes_from(section.vma)?;
         Some((section, bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_guard_pointers_are_read_at_their_offsets_as_far_as_the_configuration_goes() {
+        let mut data = vec![0u8; 0x138];
+        let put = |data: &mut Vec<u8>, offset: usize, value: u64| {
+            data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(&mut data, 0x70, 0x1400_3008);
+        put(&mut data, 0x78, 0x1400_3000);
+        put(&mut data, 0x120, 0x1400_3010);
+        // A configuration of 0x94 bytes — an older compiler's — holds the
+        // two of the guard and none of the extended guard.
+        data[0..4].copy_from_slice(&0x94u32.to_le_bytes());
+        assert_eq!(
+            guard_pointers_in(&data),
+            vec![
+                (0x1400_3008, "__guard_check_icall_fptr".to_string()),
+                (0x1400_3000, "__guard_dispatch_icall_fptr".to_string()),
+            ]
+        );
+        // One of 0x138 holds the extended guard's too.
+        data[0..4].copy_from_slice(&0x138u32.to_le_bytes());
+        assert_eq!(
+            guard_pointers_in(&data),
+            vec![
+                (0x1400_3008, "__guard_check_icall_fptr".to_string()),
+                (0x1400_3000, "__guard_dispatch_icall_fptr".to_string()),
+                (0x1400_3010, "__guard_xfg_dispatch_icall_fptr".to_string()),
+            ]
+        );
+        // One too short for the guard, or too short for its own size, has none.
+        data[0..4].copy_from_slice(&0x70u32.to_le_bytes());
+        assert!(guard_pointers_in(&data).is_empty());
+        assert!(guard_pointers_in(&data[..0x74]).is_empty());
+        assert!(guard_pointers_in(&[]).is_empty());
     }
 }

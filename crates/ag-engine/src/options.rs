@@ -291,6 +291,18 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "indirect-calls",
+        phase: Phase::Lift,
+        tier: Tier::Transform,
+        kind: Kind::Choice(&["lift", "refuse"]),
+        default: "lift",
+        description: "A call or a jump through a value the lift knows — a parameter, a field loaded from a struct — made as the call through that value, `a(b, 1)`, or refused as `an indirect call`. A Windows control-flow guard's dispatch — `call [__guard_dispatch_icall_fptr]` with the target in `rax`, or a `jmp` through it — is the call it guards, to that target, and its check is dropped; the target it names outright is called outright either way.",
+        symptoms: &[
+            symptom("`not lifted yet: an indirect call` where the function pointer is a parameter", "lift"),
+            symptom("`a(b, 1)` where the arguments of a call through a pointer cannot be trusted", "refuse"),
+        ],
+    },
+    OptionSpec {
         name: "builtins",
         phase: Phase::Lift,
         tier: Tier::Transform,
@@ -671,6 +683,17 @@ pub enum ConstantConditions {
     Expression,
 }
 
+/// What becomes of a call or a jump through a value that is not a function
+/// the image names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndirectCalls {
+    /// A call through the value.
+    #[default]
+    Lift,
+    /// `not lifted yet: an indirect call`.
+    Refuse,
+}
+
 /// What becomes of the constant stores that put a string on the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Builtins {
@@ -799,6 +822,7 @@ pub struct Options {
     pub pointer_loads: PointerLoads,
     pub operand_order: OperandOrder,
     pub unsigned_compare: UnsignedCompare,
+    pub indirect_calls: IndirectCalls,
     pub builtins: Builtins,
     pub struct_initializers: StructInitializers,
     pub dead_compares: DeadCompares,
@@ -984,6 +1008,7 @@ impl Default for Options {
             pointer_loads: PointerLoads::default(),
             operand_order: OperandOrder::default(),
             unsigned_compare: UnsignedCompare::default(),
+            indirect_calls: IndirectCalls::default(),
             builtins: Builtins::default(),
             struct_initializers: StructInitializers::default(),
             dead_compares: DeadCompares::default(),
@@ -1122,6 +1147,16 @@ impl Options {
                     &[
                         ("cast", UnsignedCompare::Cast),
                         ("bare", UnsignedCompare::Bare),
+                    ],
+                )?
+            }
+            "indirect-calls" => {
+                self.indirect_calls = choose(
+                    spec,
+                    value,
+                    &[
+                        ("lift", IndirectCalls::Lift),
+                        ("refuse", IndirectCalls::Refuse),
                     ],
                 )?
             }
@@ -1324,6 +1359,10 @@ impl Options {
                 "unsigned-compare" => match self.unsigned_compare {
                     UnsignedCompare::Cast => "cast",
                     UnsignedCompare::Bare => "bare",
+                },
+                "indirect-calls" => match self.indirect_calls {
+                    IndirectCalls::Lift => "lift",
+                    IndirectCalls::Refuse => "refuse",
                 },
                 "builtins" => match self.builtins {
                     Builtins::Recognize => "recognize",

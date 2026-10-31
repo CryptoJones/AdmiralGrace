@@ -2033,14 +2033,25 @@ fn inlined_memory_operations_read_as_builtins() {
 fn a_run_of_field_stores_reads_as_a_struct_initializer() {
     let text = image("structs.elf", &["pseudocode", "init"]);
     assert!(
-        text.contains("  *(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 0x1122334455667788 };"),
+        text.contains(
+            "  *(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 0x1122334455667788 };"
+        ),
         "{text}"
     );
     let kept = image(
         "structs.elf",
-        &["pseudocode", "init", "--option", "struct-initializers", "keep"],
+        &[
+            "pseudocode",
+            "init",
+            "--option",
+            "struct-initializers",
+            "keep",
+        ],
     );
-    assert!(kept.contains("  *(int *)a = b;\n  *(int *)(a + 4) = 2;"), "{kept}");
+    assert!(
+        kept.contains("  *(int *)a = b;\n  *(int *)(a + 4) = 2;"),
+        "{kept}"
+    );
     // The globals an address names stay their own stores.
     let global = image("structs.elf", &["pseudocode", "init_global"]);
     assert!(global.contains("  here = a;\n  *(int *)0x4030"), "{global}");
@@ -2060,5 +2071,49 @@ fn a_run_of_field_stores_reads_as_a_struct_initializer() {
     // pointer, not a field: the stores stay their own.
     let indexed = image("structs.elf", &["pseudocode", "fill_pair"]);
     assert!(!indexed.contains("struct {"), "{indexed}");
-    assert!(indexed.contains("= 1;") && indexed.contains("= 2;"), "{indexed}");
+    assert!(
+        indexed.contains("= 1;") && indexed.contains("= 2;"),
+        "{indexed}"
+    );
+}
+
+#[test]
+fn a_windows_control_flow_guard_dispatch_reads_as_the_call_it_guards() {
+    // The load configuration names the guard's pointers as data.
+    let symbols = image("cfg.exe", &["symbols"]);
+    assert!(symbols.contains("__guard_dispatch_icall_fptr"), "{symbols}");
+    assert!(symbols.contains("__guard_check_icall_fptr"), "{symbols}");
+    // A tail call through the dispatcher to a parameter.
+    let through = image("cfg.exe", &["pseudocode", "call_through"]);
+    assert!(through.contains("  return a(b, 1);"), "{through}");
+    let tail = image("cfg.exe", &["pseudocode", "tail_through"]);
+    assert!(tail.contains("  a(a);"), "{tail}");
+    // Through a pointer loaded from a struct; the register the function's
+    // own parameter was moved into is passed on, as any call's are.
+    let field = image("cfg.exe", &["pseudocode", "field_call"]);
+    assert!(
+        field.contains("return (*(long *)a)(b, *(int *)(a + 8)"),
+        "{field}"
+    );
+    assert!(!field.contains("__guard_dispatch_icall_fptr"), "{field}");
+    // Refused when asked.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("cfg.exe"))
+        .args([
+            "pseudocode",
+            "call_through",
+            "--option",
+            "indirect-calls",
+            "refuse",
+        ])
+        .output()
+        .expect("the ag binary runs");
+    assert!(!output.status.success());
+    // The dispatch here is a jump, and is refused as the jump it is.
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("an indirect jump at 0x140001015"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

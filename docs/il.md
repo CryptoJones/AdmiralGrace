@@ -92,6 +92,23 @@ of declarations. It is pseudocode in each language, not a program: `long(x)` and
 addresses the language has no spelling for, and `/` and `>>` keep C's meaning. The levels
 and the transpiler keep C, which a compiler reads. `docs/options.md` has the option.
 
+## Calls through pointers, and Windows control-flow guard
+
+A call or a jump through a value the lift knows — a parameter, a field loaded from a struct —
+is the call through that value: `return a(b, 1);`, `(*(long *)a)(b, …)`. Under
+`--option indirect-calls refuse` it is `not lifted yet: an indirect call`, as it used to be. A
+Windows image built under control-flow guard makes every such call through the guard: the
+target goes in `rax` and the code calls, or jumps, through `__guard_dispatch_icall_fptr`, or
+validates `rcx` through `__guard_check_icall_fptr` and then calls `rcx`; under the extended
+guard the pointers are `__guard_xfg_dispatch_icall_fptr` and its kin. The image names the
+pointers from its load configuration, as far as the configuration's own length goes, and the
+lift reads the dispatch as the call it guards — to the function `rax` names outright when it
+is one, else through the value — and drops the check, which calls nothing of the function's
+own; a `jmp` through the dispatcher is the tail call it is. A `rax` that holds a guard pointer
+itself is refused, not followed round. The transpiler writes a call through an expression as
+a call through a pointer to a function of integers, `((long (*)(...))a)(b, 1)`, and a function
+passed as an argument as the integer it is, `(long)add`.
+
 ## Builtins
 
 The memory operations a compiler writes inline are read back as the calls they stand for.
