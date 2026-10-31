@@ -173,6 +173,16 @@ class Session:
             **_given(steps=steps, depth=depth),
         )
 
+    def transpile(self, *targets, all=False, follow=True, harness=None):
+        """The functions as C++ that compiles; the text."""
+        return self.call(
+            "transpile",
+            targets=[str(target) for target in targets],
+            all=all,
+            follow=follow,
+            **_given(harness=None if harness is None else str(harness)),
+        )
+
     def callers(self, target):
         return self.call("callers", target=str(target))
 

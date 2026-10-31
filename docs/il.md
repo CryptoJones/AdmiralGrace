@@ -77,6 +77,36 @@ answer the same; in Rust, `Binary::emulate(address, args, limits)` runs
 the width and signedness their C type gives them; a comparison is a byte that is 1 or 0. A
 plugin's rewriter has already had the graph, as has an architecture that lifts its own.
 
+## Transpiling to C++
+
+The medium level compiles. `ag image X transpile FUNCTION… [--all] [--harness FUNCTION]
+[--out FILE]` writes the functions as C++: each one's signature and locals as the pseudocode
+declares them, then its blocks, each under a label named by its address (`block_1161:`), its
+statements as the pseudocode spells them and a `goto` for every way out — `goto block_118a;`,
+`if (local_14 <= a) goto block_117d; else goto block_1192;`, a `switch` whose cases `goto`
+their blocks. The lift's own types and casts are C, so the text builds with a C++ compiler:
+`<cstdint>`, `<cstdio>`, `<cstdlib>` and `<cstring>` are included, a compare kept as a
+statement (`__cmp(a, b)`) is a template that does nothing, the globals the functions name
+are defined with the bytes the image holds for them (`static int32_t counter = (int32_t)0x7;
+// at 0x4010`), every function of the image a function calls is written too unless
+`--no-follow` says to declare it instead, an import the C library does not declare is
+declared `extern "C" long name(...)`, and a function the lifter refuses is declared with the
+reason beside it. `--harness FUNCTION` adds a `main` that calls that function with the numbers
+on its command line, each read by `strtoll`, and prints what it returns, so a lifter's reading
+of the machine can be built and run beside the program it came from:
+
+```bash
+cargo run --bin ag -- image ./sample.elf transpile sum_to --harness sum_to --out sum_to.cpp
+c++ -std=c++17 -w sum_to.cpp -o sum_to && ./sum_to 5   # 15, as emulate sum_to --arg 5 says
+```
+
+A name that is not a C++ identifier (`completed.0`) is spelled with underscores, and `main`
+as `_main` so the harness can be `main`. A load from an absolute address (`*(int *)0x4010`)
+compiles and would fault when run: the program's memory is not the image's. The MCP tool
+`transpile` and `scripts/ag.py`'s `transpile(*targets, harness=…)` answer the same text; in
+Rust, `Binary::transpile(targets, follow, harness)` builds it, and `ag_engine::transpile`
+writes a `Program` of `Stages`.
+
 ## How the lifter reads the flags
 
 The machine's flags are read back as the relations they stand for, by who wrote them. Each
