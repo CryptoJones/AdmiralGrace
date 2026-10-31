@@ -1299,3 +1299,113 @@ fn a_project_remembers_how_raw_bytes_load() {
     ]);
     assert!(ok, "{stderr}");
 }
+
+#[test]
+fn raw_flags_that_disagree_with_a_project_are_refused_everywhere() {
+    let sample = fixture("sample.elf").display().to_string();
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // A project of raw bytes: other raw flags are refused by every reader.
+    let raw = TempFile::new("raw-disagree");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "save",
+        "--out",
+        &raw.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    for args in [
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "show",
+            &raw.text(),
+        ],
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "tags",
+            &raw.text(),
+        ],
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "write-patched",
+            "--file",
+            &raw.text(),
+            "--out",
+            "/nonexistent/dir/out",
+        ],
+    ] {
+        let (ok, _, stderr) = run(&args);
+        assert!(!ok, "{args:?}");
+        assert!(
+            stderr.contains("but") && stderr.contains("says"),
+            "{args:?}: {stderr}"
+        );
+    }
+
+    // A project made for the container refuses raw flags in both commands.
+    let plain = TempFile::new("raw-plain");
+    let (ok, _, stderr) = run(&["project", &sample, "save", "--out", &plain.text()]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "image",
+        &sample,
+        "--raw",
+        "x86",
+        "--base",
+        "0x1060",
+        "info",
+        "--project",
+        &plain.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("it is not raw bytes"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86",
+        "--base",
+        "0x1060",
+        "patch",
+        "--file",
+        &plain.text(),
+        "0x1149",
+        "90",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("it is not raw bytes"), "{stderr}");
+}
