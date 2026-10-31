@@ -142,6 +142,9 @@ fn selection_card(app: &App) -> Element<'_, Message> {
             None => detail.name.clone(),
         };
         rows = rows.push(kv("Name", name));
+        if let Some(mangled) = &detail.mangled {
+            rows = rows.push(kv("Mangled", mangled.clone()));
+        }
         rows = rows.push(kv(
             "Selected",
             app.selection

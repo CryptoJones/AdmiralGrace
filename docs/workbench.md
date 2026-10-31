@@ -25,7 +25,7 @@ the workbench in more detail.
 |---|---|
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
 | Work surface | The selected function: listing, pseudocode, graph, bytes, and references; for an Objective-C image, a Header tab with the recovered declarations. |
-| Inspector | The selection's detail, its cross references, the project's provenance and its shape. |
+| Inspector | The selection's detail — its name, and the mangled name a C++ or Rust symbol spelled — its cross references, the project's provenance and its shape. |
 | Bottom workspace | Search results, problems, and the log. |
 
 ## A kuna project export in the workbench
@@ -406,6 +406,11 @@ prompt offers the mode the marks and symbols give an address, not one a `blx` se
 `tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
 are not reached by the graph; and a call or jump through a register under a condition is read
 as falling through.
+
+A C++ or Rust image's functions are listed under their demangled names, the signature kept —
+`geometry::area(int, int)`, not `_ZN8geometry4areaEii` — in the navigator, the listing, the
+graph and the pseudocode alike; the inspector's **Mangled** row shows what the symbol table
+spelled.
 
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
 `+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped

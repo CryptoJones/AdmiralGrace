@@ -19,6 +19,7 @@ The images the image tests read, and how they were made.
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
+| `sample_cpp.elf`, `sample_cpp.macho`, `sample_cpp.exe` | A C++ program built from `sample.cpp` for the three containers, with no runtime library: a namespace, a class with a constructor, two methods and a static member, two overloads of a free function and two instances of a template — every common shape of a mangled name, Itanium in the ELF and the Mach-O, Microsoft in the PE's export table. |
 | `sample_objc_chained` | The same source linked for macOS 12 with chained fixups (`LC_DYLD_CHAINED_FIXUPS`): every pointer slot of the metadata holds a packed fixup, not an address, as every Mach-O linked for macOS 12 or iOS 15 and later does. |
 | `sample.m` | The Objective-C source of the two. |
 | `strip_symtab.py` | Empties a Mach-O's symbol table in place, for hosts without `strip` for Mach-O. |
@@ -172,6 +173,20 @@ one `fat_arch` per slice, each slice at an offset aligned to 2^14 as `lipo` alig
 clang --target=arm64-apple-macos11 -O1 -nostdlib -fuse-ld=lld -Wl,-e,_sum \
       -Wl,-platform_version,macos,11.0,11.0 arm_sample.c -o sample_arm64.macho
 python3 make_fat.py sample_fat.macho x86_64=sample.macho arm64=sample_arm64.macho
+```
+
+The C++ program was built with g++ (the ELF), clang and lld (the Mach-O and the PE), with no
+runtime library, so the whole image is the program's own functions; the PE exports every
+function and the static member by `__declspec(dllexport)`, since the export table is how a PE
+names its functions:
+
+```sh
+g++ -O0 -fno-pic -no-pie -fno-stack-protector -fcf-protection=none -fno-asynchronous-unwind-tables \
+    -fno-exceptions -fno-rtti -nostdlib -static -Wl,-e,main -o sample_cpp.elf sample.cpp
+clang++ -target x86_64-apple-darwin -fno-exceptions -fno-rtti -O0 -c sample.cpp -o sample_cpp.o
+ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -o sample_cpp.macho sample_cpp.o -e _main
+clang++ -target x86_64-pc-windows-msvc -fno-exceptions -fno-rtti -O0 -c sample.cpp -o sample_cpp.obj
+lld-link /entry:main /subsystem:console /out:sample_cpp.exe /nodefaultlib /noimplib sample_cpp.obj
 ```
 
 The Objective-C program was built with clang and lld, with no Foundation and no runtime

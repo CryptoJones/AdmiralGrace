@@ -187,8 +187,11 @@ struct FunctionJson {
     address: u64,
     /// The address, as a hex string.
     address_hex: String,
-    /// The function's name.
+    /// The function's name, demangled when the symbol was mangled.
     name: String,
+    /// The mangled name the symbol table spelled, when the name was
+    /// demangled from one.
+    mangled: Option<String>,
 }
 
 /// One data symbol, as JSON.
@@ -198,8 +201,11 @@ struct DataJson {
     address: u64,
     /// The address, as a hex string.
     address_hex: String,
-    /// The symbol's name.
+    /// The symbol's name, demangled when the symbol was mangled.
     name: String,
+    /// The mangled name the symbol table spelled, when the name was
+    /// demangled from one.
+    mangled: Option<String>,
     /// The symbol's size in bytes.
     size: u64,
 }
@@ -978,30 +984,38 @@ fn symbols(image: &Binary, filter: Option<&str>, json: bool) -> Result<i32> {
 pub(crate) fn symbols_json(image: &Binary, filter: Option<&str>) -> Result<SymbolsJson> {
     let pattern = filter.map(Regex::new).transpose()?;
 
-    let matches = |name: &str| match &pattern {
-        Some(pattern) => pattern.is_match(name),
+    // The filter matches the shown name, or the mangled one it came from.
+    let matches = |address: u64, name: &str| match &pattern {
+        Some(pattern) => {
+            pattern.is_match(name)
+                || image
+                    .mangled_name(address)
+                    .is_some_and(|mangled| pattern.is_match(mangled))
+        }
         None => true,
     };
 
     let functions: Vec<FunctionJson> = image
         .functions()
         .iter()
-        .filter(|function| matches(&function.name))
+        .filter(|function| matches(function.address, &function.name))
         .map(|function| FunctionJson {
             address: function.address,
             address_hex: format!("{:#x}", function.address),
             name: function.name.clone(),
+            mangled: image.mangled_name(function.address).map(str::to_string),
         })
         .collect();
 
     let data: Vec<DataJson> = image
         .data_symbols()
         .iter()
-        .filter(|symbol| matches(&symbol.name))
+        .filter(|symbol| matches(symbol.address, &symbol.name))
         .map(|symbol| DataJson {
             address: symbol.address,
             address_hex: format!("{:#x}", symbol.address),
             name: symbol.name.clone(),
+            mangled: image.mangled_name(symbol.address).map(str::to_string),
             size: symbol.size,
         })
         .collect();
@@ -1452,7 +1466,11 @@ pub(crate) fn function_calls_json(image: &Binary, address: u64) -> FunctionCalls
         function_hex: format!("{address:#x}"),
         name: image.function_name(address).map(str::to_string),
         calls: image.calls(address).iter().map(call_json).collect(),
-        callers: image.called_by(address).iter().map(function_json).collect(),
+        callers: image
+            .called_by(address)
+            .iter()
+            .map(|function| function_json(image, function))
+            .collect(),
     }
 }
 
@@ -1538,19 +1556,19 @@ pub(crate) fn calls_json(image: &Binary) -> CallsJson {
                 callers: image
                     .called_by(function.address)
                     .iter()
-                    .map(function_json)
+                    .map(|function| function_json(image, function))
                     .collect(),
             })
             .collect(),
         reachable: image
             .reachable_from_entry()
             .iter()
-            .map(function_json)
+            .map(|function| function_json(image, function))
             .collect(),
         without_callers: image
             .functions_without_callers()
             .iter()
-            .map(function_json)
+            .map(|function| function_json(image, function))
             .collect(),
     }
 }
@@ -1783,11 +1801,12 @@ fn edge_json(edge: &ag_image::Edge) -> EdgeJson {
 }
 
 /// One function of the image, as JSON.
-fn function_json(function: &ag_image::Function) -> FunctionJson {
+fn function_json(image: &Binary, function: &ag_image::Function) -> FunctionJson {
     FunctionJson {
         address: function.address,
         address_hex: format!("{:#x}", function.address),
         name: function.name.clone(),
+        mangled: image.mangled_name(function.address).map(str::to_string),
     }
 }
 
@@ -1849,6 +1868,13 @@ fn find_function(image: &Binary, target: &str) -> Option<u64> {
     {
         return Some(function.address);
     }
+    // The mangled name a C++ or Rust symbol was shown from names it too.
+    if let Some(address) = image
+        .address_of_mangled(target)
+        .filter(|address| image.function_name(*address).is_some())
+    {
+        return Some(address);
+    }
 
     image
         .functions()
@@ -1873,6 +1899,14 @@ fn resolve_data(image: &Binary, target: &str) -> Result<u64> {
         .find(|symbol| symbol.name == target)
     {
         return Ok(symbol.address);
+    }
+    if let Some(address) = image.address_of_mangled(target).filter(|address| {
+        image
+            .data_symbols()
+            .iter()
+            .any(|symbol| symbol.address == *address)
+    }) {
+        return Ok(address);
     }
 
     let loose: Vec<u64> = image

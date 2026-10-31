@@ -1414,6 +1414,80 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
 }
 
 #[test]
+fn mangled_names_are_reported_demangled_and_still_name_their_functions() {
+    // Itanium names, in an ELF: the two overloads read apart.
+    let report = image("sample_cpp.elf", &["symbols"]);
+    assert!(report.contains(" geometry::area(int)\n"), "{report}");
+    assert!(report.contains(" geometry::area(int, int)\n"), "{report}");
+    assert!(
+        report.contains(" geometry::Shape::corner(int) const\n"),
+        "{report}"
+    );
+    assert!(report.contains(" geometry::Shape::count size="), "{report}");
+    assert!(!report.contains("_ZN8geometry"), "{report}");
+    // The JSON carries the mangled name beside the shown one.
+    let json = image_json("sample_cpp.elf", &["symbols"]);
+    let area = json["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .find(|function| function["name"] == "geometry::area(int, int)")
+        .expect("area");
+    assert_eq!(area["mangled"], serde_json::json!("_ZN8geometry4areaEii"));
+    let main = json["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .find(|function| function["name"] == "main")
+        .expect("main");
+    assert!(main["mangled"].is_null());
+    let count = json["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|symbol| symbol["name"] == "geometry::Shape::count")
+        .expect("count");
+    assert_eq!(
+        count["mangled"],
+        serde_json::json!("_ZN8geometry5Shape5countE")
+    );
+    // The filter matches the mangled name too.
+    let report = image(
+        "sample_cpp.elf",
+        &["symbols", "--filter", "ZN8geometry4areaEii"],
+    );
+    assert!(report.contains("geometry::area(int, int)"), "{report}");
+    assert!(!report.contains("geometry::area(int)\n"), "{report}");
+    // A function is named by either name.
+    let report = image("sample_cpp.elf", &["disasm", "_ZN8geometry4areaEii"]);
+    assert!(report.contains("geometry::area(int, int)"), "{report}");
+    let report = image("sample_cpp.elf", &["disasm", "geometry::area(int, int)"]);
+    assert!(report.contains("geometry::area(int, int)"), "{report}");
+    let report = image("sample_cpp.elf", &["data", "_ZN8geometry5Shape5countE"]);
+    assert!(report.contains("geometry::Shape::count"), "{report}");
+
+    // Microsoft names, from a PE's export table.
+    let report = image("sample_cpp.exe", &["symbols"]);
+    assert!(report.contains(" geometry::area(int, int)\n"), "{report}");
+    assert!(
+        report.contains(" geometry::Shape::Shape(int)\n"),
+        "{report}"
+    );
+    assert!(!report.contains("?area@geometry"), "{report}");
+    let json = image_json("sample_cpp.exe", &["symbols"]);
+    assert!(json["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .any(|function| function["mangled"] == "?area@geometry@@YAHHH@Z"));
+
+    // Itanium names under a Mach-O's leading underscore.
+    let report = image("sample_cpp.macho", &["symbols"]);
+    assert!(report.contains(" geometry::area(int, int)\n"), "{report}");
+    assert!(report.contains(" _main\n"), "{report}");
+}
+
+#[test]
 fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
     // The stripped twin names nothing in its symbol table; the metadata does.
     let report = image("sample_objc_stripped", &["symbols"]);
@@ -1455,10 +1529,7 @@ fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
         serde_json::json!("Ti,N,V_count")
     );
     let text = image("sample_objc_stripped", &["objc"]);
-    assert!(
-        text.contains("    property count  Ti,N,V_count"),
-        "{text}"
-    );
+    assert!(text.contains("    property count  Ti,N,V_count"), "{text}");
 
     // The same as a header: declarations in dependency order, the types
     // decoded, the accessors folded into their properties.

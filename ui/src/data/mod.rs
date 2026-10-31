@@ -88,6 +88,9 @@ pub struct FunctionDetail {
     pub provenance: String,
     /// Human-readable summary of the analysis state.
     pub summary: String,
+    /// The mangled name the symbol table spelled, when the shown name was
+    /// demangled from one.
+    pub mangled: Option<String>,
 }
 
 /// One line of a linear disassembly listing.

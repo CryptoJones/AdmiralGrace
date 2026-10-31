@@ -152,6 +152,7 @@ impl Provider for CorpusProvider {
             start,
             end,
             provenance,
+            mangled: None,
             summary,
         })
     }

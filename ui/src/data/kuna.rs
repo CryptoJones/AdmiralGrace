@@ -223,6 +223,7 @@ impl Provider for KunaProvider {
             start: Some(f.address),
             end: f.size.map(|size| f.address.saturating_add(size)),
             provenance: "Kuna project export".to_string(),
+            mangled: None,
             summary,
         })
     }

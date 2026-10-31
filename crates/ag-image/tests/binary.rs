@@ -1867,6 +1867,107 @@ fn a_slice_of_a_universal_macho_is_a_program_whose_patches_land_in_its_part_of_t
 }
 
 #[test]
+fn mangled_names_are_shown_demangled_and_kept_beside_the_shown_name() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for (file, area, sides, count) in [
+        (
+            "sample_cpp.elf",
+            "_ZN8geometry4areaEii",
+            "_ZNK8geometry5Shape5sidesEv",
+            "_ZN8geometry5Shape5countE",
+        ),
+        (
+            "sample_cpp.macho",
+            "__ZN8geometry4areaEii",
+            "__ZNK8geometry5Shape5sidesEv",
+            "__ZN8geometry5Shape5countE",
+        ),
+        (
+            "sample_cpp.exe",
+            "?area@geometry@@YAHHH@Z",
+            "?sides@Shape@geometry@@QEBAHXZ",
+            "?count@Shape@geometry@@2HA",
+        ),
+    ] {
+        let binary = Binary::open(&fixtures.join(file)).expect(file);
+        let names: Vec<&str> = binary
+            .functions()
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+        // The two overloads read apart, by their signatures.
+        assert!(names.contains(&"geometry::area(int)"), "{file}: {names:?}");
+        assert!(
+            names.contains(&"geometry::area(int, int)"),
+            "{file}: {names:?}"
+        );
+        assert!(
+            names.contains(&"geometry::Shape::sides(void) const")
+                || names.contains(&"geometry::Shape::sides() const"),
+            "{file}: {names:?}"
+        );
+        assert!(
+            names.contains(&"geometry::Shape::Shape(int)"),
+            "{file}: {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("geometry::twice<int>(int)")),
+            "{file}: {names:?}"
+        );
+        // The mangled name is kept by address, and names its function still.
+        let area_address = binary.address_of_mangled(area).expect(area);
+        assert_eq!(
+            binary.function_name(area_address),
+            Some("geometry::area(int, int)")
+        );
+        assert_eq!(binary.mangled_name(area_address), Some(area));
+        let sides_address = binary.address_of_mangled(sides).expect(sides);
+        assert!(binary.function_name(sides_address).is_some());
+        // A data symbol too, where the loader lists the static member as one.
+        if let Some(count_address) = binary.address_of_mangled(count) {
+            if let Some(data) = binary
+                .data_symbols()
+                .iter()
+                .find(|symbol| symbol.address == count_address)
+            {
+                assert_eq!(data.name, "geometry::Shape::count", "{file}");
+            }
+        } else {
+            assert_eq!(file, "sample_cpp.exe", "{file} should name {count}");
+        }
+        // A C name is left alone, and has no mangled twin.
+        let main = binary
+            .functions()
+            .iter()
+            .find(|function| function.name == "main" || function.name == "_main")
+            .expect("main");
+        assert_eq!(binary.mangled_name(main.address), None);
+    }
+
+    // Under another base the mangled names move with their functions.
+    let path = fixtures.join("sample_cpp.elf");
+    let layout = ag_image::Layout {
+        base: Some(0x1000_0000),
+        segments: Vec::new(),
+    };
+    let moved = Binary::open_with_layout(&path, &layout).expect("loads");
+    let area = moved
+        .address_of_mangled("_ZN8geometry4areaEii")
+        .expect("moved");
+    assert_eq!(moved.function_name(area), Some("geometry::area(int, int)"));
+    assert!(area >= 0x1000_0000);
+
+    // An image without mangled names has none kept.
+    assert_eq!(macho().address_of_mangled("_ZN8geometry4areaEii"), None);
+    assert!(macho()
+        .functions()
+        .iter()
+        .all(|function| macho().mangled_name(function.address).is_none()));
+}
+
+#[test]
 fn an_objective_c_images_methods_are_functions_under_their_runtime_names() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_objc_stripped");
     let binary = Binary::open(&path).expect("loads");
@@ -1890,8 +1991,14 @@ fn an_objective_c_images_methods_are_functions_under_their_runtime_names() {
     assert!(macho().objc().is_none());
     assert!(macho().objc_header().is_none());
     let header = binary.objc_header().expect("a header");
-    assert!(header.contains("@interface Derived : Base <Greeting>"), "{header}");
-    assert!(header.contains("@property (nonatomic) int count;"), "{header}");
+    assert!(
+        header.contains("@interface Derived : Base <Greeting>"),
+        "{header}"
+    );
+    assert!(
+        header.contains("@property (nonatomic) int count;"),
+        "{header}"
+    );
 
     // Read at another base, the metadata's addresses move with the functions.
     let layout = ag_image::Layout {

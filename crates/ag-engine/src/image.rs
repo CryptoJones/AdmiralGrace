@@ -7,6 +7,7 @@
 //! enough to pick a code section, hand its bytes to the decoder, and name what
 //! the walk finds.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -39,6 +40,18 @@ pub struct Image {
     slice: Option<Slice>,
     /// The Objective-C metadata the image carries, read once when asked.
     objc: std::cell::OnceCell<Option<crate::objc::ObjcMetadata>>,
+    /// The mangled names the symbol table spells, by address, with what
+    /// each demangles to; read once when asked.
+    mangled: std::cell::OnceCell<BTreeMap<u64, MangledName>>,
+}
+
+/// A mangled name the symbol table spells, and what it demangles to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MangledName {
+    /// The symbol as the table spells it: `_ZN8geometry4areaEii`.
+    pub mangled: String,
+    /// The name the source spelled, signature kept: `geometry::area(int, int)`.
+    pub plain: String,
 }
 
 /// One slice of a universal (fat) Mach-O: an image of one architecture
@@ -278,6 +291,7 @@ impl Image {
             name: name.to_string(),
             slice: None,
             objc: std::cell::OnceCell::new(),
+            mangled: std::cell::OnceCell::new(),
         })
     }
 
@@ -347,6 +361,7 @@ impl Image {
             name: name.to_string(),
             slice: None,
             objc: std::cell::OnceCell::new(),
+            mangled: std::cell::OnceCell::new(),
         })
     }
 
@@ -522,6 +537,7 @@ impl Image {
             .object()
             .map(|inner| inner.func_symbols())
             .unwrap_or_default();
+        self.show_demangled(symbols.iter_mut().map(|(address, name)| (*address, name)));
         // An Objective-C method's implementation is named by the metadata —
         // `-[Class sel]` — where no symbol names it, as in a stripped image.
         // Only an implementation in code is a function: a crafted record
@@ -554,6 +570,7 @@ impl Image {
             .object()
             .map(|inner| inner.data_symbols())
             .unwrap_or_default();
+        self.show_demangled(symbols.iter_mut().map(|(address, name, _)| (*address, name)));
         // A class object is data the loader registers, named by its class.
         if let Some(objc) = self.objc() {
             let named: std::collections::HashSet<u64> =
@@ -566,6 +583,68 @@ impl Image {
             symbols.sort_by_key(|(address, _, _)| *address);
         }
         symbols
+    }
+
+    /// Give each named thing the full demangled form of the mangled name
+    /// the symbol table spells for its address, where it spells one: the
+    /// loader's names are the scope and the name alone, under which two
+    /// overloads read the same.
+    fn show_demangled<'n>(&self, names: impl Iterator<Item = (u64, &'n mut String)>) {
+        let mangled = self.mangled_names();
+        if mangled.is_empty() {
+            return;
+        }
+        for (address, name) in names {
+            if let Some(found) = mangled.get(&address) {
+                *name = found.plain.clone();
+            }
+        }
+    }
+
+    /// The mangled names the symbol table — and a PE's export table —
+    /// spells, by address, each with what it demangles to: the C++ and Rust
+    /// symbols of the image. Empty for an image with none.
+    pub fn mangled_names(&self) -> &BTreeMap<u64, MangledName> {
+        self.mangled.get_or_init(|| {
+            use object::read::{Object, ObjectSymbol};
+            let mut names = BTreeMap::new();
+            if self.object().is_none() {
+                return names;
+            }
+            let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+                return names;
+            };
+            let mut note = |address: u64, name: &str| {
+                if address == 0 || names.contains_key(&address) {
+                    return;
+                }
+                if let Some(plain) = crate::demangle::demangle(name) {
+                    names.insert(
+                        address,
+                        MangledName {
+                            mangled: name.to_string(),
+                            plain,
+                        },
+                    );
+                }
+            };
+            for symbol in file.symbols().chain(file.dynamic_symbols()) {
+                if !symbol.is_definition() {
+                    continue;
+                }
+                if let Ok(name) = symbol.name() {
+                    note(symbol.address(), name);
+                }
+            }
+            if let Ok(exports) = file.exports() {
+                for export in exports {
+                    if let Ok(name) = std::str::from_utf8(export.name()) {
+                        note(export.address(), name);
+                    }
+                }
+            }
+            names
+        })
     }
 
     /// The name of the function symbol at `address`, when there is one.

@@ -105,6 +105,13 @@ or the class a category extends — is bound at load, so a category on one names
 `?`. (The external method map `ag corpus … --methods` takes is for a corpus; an image needs
 none.)
 
+A C++ or Rust image names its functions by mangled symbols — Itanium (`_ZN8geometry4areaEii`,
+on ELF and Mach-O), Microsoft (`?area@geometry@@YAHHH@Z`, on PE) or Rust (`_ZN4core3fmt5write17h…E`,
+`_R…`). Every report shows them demangled, signature kept, so two overloads read apart:
+`geometry::area(int)` and `geometry::area(int, int)`. The mangled name is kept beside the shown
+one: `symbols --json` carries it as `mangled`, and a command that takes a function or a piece of
+data by name — `disasm`, `cfg`, `pseudocode`, `data` — takes the mangled name too.
+
 `ag image FILE objc --header` writes the same as an Objective-C header — the quickest
 overview of such a binary: every protocol, class and category declared, with its properties,
 instance variables and methods under the types the runtime's encodings say (`i20@0:8i16` is
@@ -171,7 +178,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
-| `symbols` | The function symbols as `address name`, and the data symbols with their size. |
+| `symbols` | The function symbols as `address name`, and the data symbols with their size. A C++ or Rust name is shown demangled, with its signature — `geometry::area(int, int)` for `_ZN8geometry4areaEii` or `?area@geometry@@YAHHH@Z` — and `--json` carries the mangled name beside it as `mangled`; `--filter` matches either. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
 | `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then a comment that says what decided the return type (`// returns int: main reads eax after the call`, `// void: no caller reads the result`), then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result — and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |

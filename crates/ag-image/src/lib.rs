@@ -392,6 +392,9 @@ pub struct Binary {
     /// The GOT slots the loader fills with the address of an import, by
     /// slot, with the import's name.
     imports: BTreeMap<u64, String>,
+    /// The mangled name of each function, data symbol and import slot whose
+    /// name was demangled, by address: what the symbol table spelled.
+    mangled: BTreeMap<u64, String>,
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
@@ -532,6 +535,13 @@ impl Binary {
             })
             .collect();
 
+        // A C++ or Rust symbol is shown as the name the source spelled; the
+        // mangled one is kept beside it, for the inspector and the JSON.
+        let mut mangled: BTreeMap<u64, String> = image
+            .mangled_names()
+            .iter()
+            .map(|(address, name)| (unbit(*address), name.mangled.clone()))
+            .collect();
         let mut functions: Vec<Function> = image
             .function_symbols()
             .into_iter()
@@ -567,7 +577,20 @@ impl Binary {
 
         // The import slots: what a PLT stub jumps through, and what a call
         // through the GOT reads. They name the function at the other end.
-        let imports: BTreeMap<u64, String> = image.import_slots().into_iter().collect();
+        let imports: BTreeMap<u64, String> = image
+            .import_slots()
+            .into_iter()
+            .map(|(slot, name)| {
+                let name = match ag_engine::demangle::demangle(&name) {
+                    Some(plain) => {
+                        mangled.entry(slot).or_insert(name);
+                        plain
+                    }
+                    None => name,
+                };
+                (slot, name)
+            })
+            .collect();
 
         // The bytes of every section the file holds are kept: the listing
         // decodes the code out of them, and the byte pane shows the rest.
@@ -606,6 +629,7 @@ impl Binary {
             functions,
             data,
             imports,
+            mangled,
             file,
             strings,
             wide_strings,
@@ -872,6 +896,10 @@ impl Binary {
         self.imports = std::mem::take(&mut self.imports)
             .into_iter()
             .map(|(slot, name)| (shift(slot), name))
+            .collect();
+        self.mangled = std::mem::take(&mut self.mangled)
+            .into_iter()
+            .map(|(address, name)| (shift(address), name))
             .collect();
         self.entry = self.entry.map(shift);
         if let Some(objc) = &mut self.objc {
@@ -1318,6 +1346,22 @@ impl Binary {
     /// loader reads.
     pub fn imports(&self) -> &BTreeMap<u64, String> {
         &self.imports
+    }
+
+    /// The mangled name of the function, data symbol or import slot at
+    /// `address`, when its name was demangled: what the symbol table
+    /// spelled, `_ZN8geometry4areaEii` for `geometry::area(int, int)`.
+    pub fn mangled_name(&self, address: u64) -> Option<&str> {
+        self.mangled.get(&address).map(String::as_str)
+    }
+
+    /// The address of the function, data symbol or import slot whose mangled
+    /// name is `name`, so that a mangled name still names its thing.
+    pub fn address_of_mangled(&self, name: &str) -> Option<u64> {
+        self.mangled
+            .iter()
+            .find(|(_, mangled)| mangled.as_str() == name)
+            .map(|(address, _)| *address)
     }
 
     /// The import whose address the GOT slot at `slot` holds, when the image
