@@ -385,6 +385,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "dead-code",
+        phase: Phase::Emit,
+        tier: Tier::Transform,
+        kind: Kind::Choice(&["keep", "drop"]),
+        default: "keep",
+        description: "A statement whose result nothing uses — a variable assigned and never read, or assigned again before it is read, a branch whose condition can only go one way — kept as the code made it, or dropped; a call in a dropped assignment stays, as the call it is.",
+        symptoms: &[
+            symptom(
+                "`rax = &completed.0;` where nothing reads `rax`, or an `if (0) { … }` block, cluttering the body",
+                "drop",
+            ),
+            symptom(
+                "a store in the listing that the C says nothing about",
+                "keep",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "constant-conditions",
         phase: Phase::Emit,
         tier: Tier::Rendering,
@@ -566,6 +584,16 @@ pub enum DeadCompares {
     Keep,
 }
 
+/// What becomes of a statement whose result nothing uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeadCode {
+    /// The statement, as the code made it.
+    #[default]
+    Keep,
+    /// Nothing — or the call it held, as a call.
+    Drop,
+}
+
 /// Whether a branch out of a procedure's own range ends the procedure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BranchesEndProcedures {
@@ -655,6 +683,7 @@ pub struct Options {
     pub operand_order: OperandOrder,
     pub unsigned_compare: UnsignedCompare,
     pub dead_compares: DeadCompares,
+    pub dead_code: DeadCode,
     pub tail_calls: TailCalls,
     pub return_liveness: ReturnLiveness,
     pub loop_form: LoopForm,
@@ -677,6 +706,7 @@ impl Default for Options {
             operand_order: OperandOrder::default(),
             unsigned_compare: UnsignedCompare::default(),
             dead_compares: DeadCompares::default(),
+            dead_code: DeadCode::default(),
             tail_calls: TailCalls::default(),
             return_liveness: ReturnLiveness::default(),
             loop_form: LoopForm::default(),
@@ -816,6 +846,13 @@ impl Options {
                     &[("drop", DeadCompares::Drop), ("keep", DeadCompares::Keep)],
                 )?
             }
+            "dead-code" => {
+                self.dead_code = choose(
+                    spec,
+                    value,
+                    &[("keep", DeadCode::Keep), ("drop", DeadCode::Drop)],
+                )?
+            }
             "tail-calls" => {
                 self.tail_calls = choose(
                     spec,
@@ -948,6 +985,10 @@ impl Options {
                 "dead-compares" => match self.dead_compares {
                     DeadCompares::Drop => "drop",
                     DeadCompares::Keep => "keep",
+                },
+                "dead-code" => match self.dead_code {
+                    DeadCode::Keep => "keep",
+                    DeadCode::Drop => "drop",
                 },
                 "tail-calls" => match self.tail_calls {
                     TailCalls::Return => "return",
@@ -1328,9 +1369,18 @@ mod tests {
         }
         assert!(markdown.contains("| `--option loop-form while`\n"));
         assert!(markdown.contains("`loop-form` | transform | `for` \\| `while` | `for` |"));
-        assert!(markdown.contains("## Decode\n\nOption | Tier"), "{markdown}");
-        assert!(markdown.contains("`branches-end-procedures` | analysis |"), "{markdown}");
-        assert!(markdown.contains("`code-sections` | analysis |"), "{markdown}");
+        assert!(
+            markdown.contains("## Decode\n\nOption | Tier"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("`branches-end-procedures` | analysis |"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("`code-sections` | analysis |"),
+            "{markdown}"
+        );
     }
 
     #[test]

@@ -35,6 +35,8 @@ a `for` whose step is not the increment you expected, or whose init is a stateme
 `i = 0; while (i < n) { …; i = i + 1; }` where a `for` would read better | `--option loop-form for`
 `goto label_…;` to a `return` a few lines up | `--option shared-tail duplicate`
 the same `return` statements repeated in two arms | `--option shared-tail goto`
+`rax = &completed.0;` where nothing reads `rax`, or an `if (0) { … }` block, cluttering the body | `--option dead-code drop`
+a store in the listing that the C says nothing about | `--option dead-code keep`
 `if (0) { // constant: &a != &a` where you want the comparison the bytes made between the parentheses | `--option constant-conditions expression`
 `if (&completed.0 != &completed.0)`, a comparison that can only go one way, printed as if it could go either | `--option constant-conditions fold`
 `0x64` where the source said `100` | `--option constant-style decimal`
@@ -75,6 +77,7 @@ Option | Tier | Takes | Default | What it decides
 
 Option | Tier | Takes | Default | What it decides
 --- | --- | --- | --- | ---
+`dead-code` | transform | `keep` \| `drop` | `keep` | A statement whose result nothing uses — a variable assigned and never read, or assigned again before it is read, a branch whose condition can only go one way — kept as the code made it, or dropped; a call in a dropped assignment stays, as the call it is.
 `constant-conditions` | rendering | `fold` \| `expression` | `fold` | A condition that can only go one way — a relation with the same expression on both sides, `&completed.0 != &completed.0` or `rax != rax` — printed as the constant it is, `if (0) { // constant: &completed.0 != &completed.0`, with the comparison in the comment, or as the comparison itself.
 `constant-style` | rendering | `mixed` \| `decimal` \| `hex` | `mixed` | How a constant is spelled: decimal below 10 and hex from 10 up, all decimal, or all hex.
 `indent` | rendering | an integer, 1 to 8 | `2` | The spaces one level of a body is indented by.

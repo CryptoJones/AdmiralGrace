@@ -43,6 +43,10 @@ pub enum Message {
     StringFilterChanged(String),
     /// A center work surface tab was activated.
     ViewTabSelected(ViewTab),
+    /// Show or hide the statements whose results nothing uses, in the
+    /// pseudocode: the engine's `dead-code` option, flipped, and the image
+    /// read again under it.
+    ToggleDeadCode,
     /// A lower work surface tab was activated.
     LowerTabSelected(LowerTab),
     /// A bottom workspace tab was activated.
@@ -2696,6 +2700,27 @@ impl App {
 
             Message::ViewTabSelected(tab) => {
                 self.work.tab = tab;
+            }
+
+            Message::ToggleDeadCode => {
+                let dropping = self.options.get("dead-code").as_deref() == Some("drop");
+                let value = if dropping { "keep" } else { "drop" };
+                if self.options.set("dead-code", value).is_err() {
+                    return Task::none();
+                }
+                // The image is lifted under the options it was opened with,
+                // so it is opened again; the selection is kept.
+                let Some(path) = self.binary_path.clone() else {
+                    return Task::none();
+                };
+                let selected = self.selection.address();
+                let task = self.load_binary(&path);
+                self.work.tab = ViewTab::Pseudocode;
+                if let Some(address) = selected {
+                    let _ = self.update(Message::FunctionSelected(address));
+                    self.work.tab = ViewTab::Pseudocode;
+                }
+                return task;
             }
 
             Message::LowerTabSelected(tab) => {
@@ -7582,6 +7607,34 @@ mod tests {
             "{:?}",
             again.notice
         );
+    }
+
+    #[test]
+    fn the_dead_code_toggle_flips_the_option_and_relifts_the_function() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-engine/tests/fixtures/sample.elf");
+        let mut app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        // deregister_tm_clones: a store nothing reads, and a branch that can
+        // only go one way.
+        let _ = app.update(Message::FunctionSelected(0x1090));
+        let shown = app.work.pseudocode.clone().expect("lifts");
+        assert!(shown.contains("rax = &completed.0;"), "{shown}");
+        assert_eq!(app.options.get("dead-code").as_deref(), Some("keep"));
+
+        let _ = app.update(Message::ToggleDeadCode);
+        assert_eq!(app.options.get("dead-code").as_deref(), Some("drop"));
+        assert_eq!(app.selection.address(), Some(0x1090));
+        let hidden = app.work.pseudocode.clone().expect("lifts");
+        assert!(!hidden.contains("rax"), "{hidden}");
+        assert!(hidden.contains("return;"), "{hidden}");
+
+        let _ = app.update(Message::ToggleDeadCode);
+        assert_eq!(app.options.get("dead-code").as_deref(), Some("keep"));
+        assert_eq!(app.work.pseudocode.as_deref(), Some(shown.as_str()));
     }
 
     #[test]

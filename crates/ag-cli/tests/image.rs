@@ -1424,6 +1424,36 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
 }
 
 #[test]
+fn the_dead_code_option_drops_what_nothing_uses() {
+    // As made: a store nothing reads, and a branch that can only go one way.
+    let report = image("sample.elf", &["pseudocode", "deregister_tm_clones"]);
+    assert!(report.contains("  rax = &completed.0;\n"), "{report}");
+    assert!(report.contains("  if (0) {"), "{report}");
+    // Dropped: neither, and the local they needed goes with them.
+    let report = image(
+        "sample.elf",
+        &["pseudocode", "deregister_tm_clones", "--option", "dead-code", "drop"],
+    );
+    assert!(!report.contains("rax"), "{report}");
+    assert!(!report.contains("if ("), "{report}");
+    assert!(report.contains("{\n  return;\n}"), "{report}");
+    // A function with nothing dead reads the same under either.
+    let kept = image("sample.elf", &["pseudocode", "add"]);
+    let dropped = image(
+        "sample.elf",
+        &["pseudocode", "add", "--option", "dead-code", "drop"],
+    );
+    assert_eq!(kept, dropped);
+    // The option is in the catalog.
+    let catalog = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["catalog", "--markdown"])
+        .output()
+        .expect("runs");
+    let catalog = String::from_utf8_lossy(&catalog.stdout);
+    assert!(catalog.contains("`dead-code`"), "{catalog}");
+}
+
+#[test]
 fn a_stripped_image_lists_the_functions_its_unwind_data_names() {
     let report = image("unwind_stripped.elf", &["symbols"]);
     assert!(report.contains("0x401000 sub_401000\n"), "{report}");

@@ -424,6 +424,12 @@ a class's vtable points at and no symbol names is listed as `Type.<kind>#N`
 (`sample.Base.getter#0`). `ag image FILE
 swift` prints the types, their fields and their conformances.
 
+The Pseudocode tab's **Dead code** button shows or hides the statements whose results
+nothing uses — a variable assigned and never read, or assigned again before it is read, a
+branch whose condition can only go one way — the engine's `dead-code` option, flipped: dead
+code is sometimes noise and sometimes the point, so the reader chooses. A call in a hidden
+assignment stays, as the call it is.
+
 The Pseudocode tab reads an Objective-C method's calls of the runtime's dispatcher as the
 messages they send — `[a twice:c] + 1`, `[Base answer]` — the selector resolved from the
 reference the code loads.
