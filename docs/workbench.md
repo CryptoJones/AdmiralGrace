@@ -407,6 +407,14 @@ prompt offers the mode the marks and symbols give an address, not one a `blx` se
 are not reached by the graph; and a call or jump through a register under a condition is read
 as falling through.
 
+A file with no container — firmware, shellcode, a dump — is opened as raw bytes:
+
+- **Open raw bytes…** (File menu) takes `PATH ARCH BASE`, with `entry=ADDRESS`, `offset=N` and
+  `length=N` after when they apply: `firmware.bin thumb 0x8000000 entry=0x8000101`. `ARCH` is
+  `x86-64`, `x86`, `arm`, `thumb` or `aarch64`. The bytes are one section of code at the base,
+  the entry a function; the project file remembers how the bytes load, so opening the project
+  opens them the same way.
+
 The image itself can be corrected, when the loader read it at the wrong base or missed a
 segment:
 

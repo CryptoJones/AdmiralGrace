@@ -1762,3 +1762,43 @@ fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
     let refused = binary.pseudocode(0x2_0000).expect_err("not lifted");
     assert!(refused.reason.contains("AARCH64"), "{}", refused.reason);
 }
+
+#[test]
+fn raw_bytes_are_read_as_a_program_with_the_entry_for_a_function() {
+    use ag_image::{raw_language, Layout, RawSpec};
+
+    let spec = RawSpec {
+        language: raw_language("x86-64").unwrap().to_string(),
+        base: 0x1060,
+        entry: Some(0x1149),
+        offset: 0x1060,
+        length: Some(0x18c),
+    };
+    let raw = Binary::open_raw_with_layout(&sample_path(), &spec, &Layout::default())
+        .expect("raw bytes load");
+    assert!(raw.supports_disassembly());
+    assert_eq!(raw.base(), Some(0x1060));
+    let names: Vec<(u64, &str)> = raw
+        .functions()
+        .iter()
+        .map(|function| (function.address, function.name.as_str()))
+        .collect();
+    assert_eq!(names, [(0x1149, "entry_0x1149")]);
+    let add = raw.disassembly(0x1149).expect("the entry is decoded");
+    let first = &add.blocks[0].instructions[0];
+    assert_eq!(first.mnemonic, "endbr64");
+    assert_eq!(raw.sections()[0].name, "raw");
+
+    // Moved by a layout, the raw bytes move with it.
+    let moved = Binary::open_raw_with_layout(
+        &sample_path(),
+        &spec,
+        &Layout {
+            base: Some(0x40_1060),
+            segments: Vec::new(),
+        },
+    )
+    .expect("loads moved");
+    assert_eq!(moved.functions()[0].address, 0x40_1149);
+    assert!(moved.disassembly(0x40_1149).is_some());
+}

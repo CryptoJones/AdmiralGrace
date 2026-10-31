@@ -772,6 +772,29 @@ pub struct Target {
     /// SHA-256 of the target, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// How the target loads, when it is raw bytes with no container to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawTarget>,
+}
+
+/// How a target of raw bytes loads: the analyst's answer to what a
+/// container would say. Addresses and counts are written as the rest of
+/// the file writes them, `0x8000`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawTarget {
+    /// The architecture: `x86-64`, `x86`, `arm`, `thumb` or `aarch64`.
+    pub arch: String,
+    /// The address the bytes load at.
+    pub base: String,
+    /// The entry point, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    /// Where in the file the bytes start, when not at its start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<String>,
+    /// How many bytes, when not the rest of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<String>,
 }
 
 /// A portable project: the analysis's identity and the analyst's changes.
@@ -1360,6 +1383,7 @@ mod tests {
         let mut project = ProjectFile::new(Target {
             path: Some("/bin/ls".into()),
             sha256: Some("9f86d0".into()),
+            raw: None,
         });
         project
             .options

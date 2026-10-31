@@ -532,7 +532,7 @@ pub(crate) struct PseudocodeJson {
 }
 
 /// Report on a program image.
-pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
+pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Result<i32> {
     // The options are checked before the image is read, so a typo in one
     // is answered at once and names the row.
     let options = match &cmd {
@@ -564,9 +564,13 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         Some(project) => crate::project::layout_of(project)?,
         None => ag_image::Layout::default(),
     };
-    let image = Binary::open_with_layout(binary, &layout)
-        .with_context(|| format!("reading {}", binary.display()))?
-        .with_options(options);
+    // Raw bytes load as the flags say, or as the project remembers.
+    let raw = match (raw, &project) {
+        (Some(raw), _) => Some(raw),
+        (None, Some(project)) => crate::project::raw_of_project(project)?,
+        (None, None) => None,
+    };
+    let image = crate::project::open_target(binary, raw.as_ref(), &layout)?.with_options(options);
     if let Some(project) = project {
         // The analyst's patches are the bytes the image is read with, and
         // the modes the instruction sets they are read in.
@@ -2004,6 +2008,7 @@ mod tests {
 
         let error = run(
             &sample_path(),
+            None,
             ImageCmd::Pseudocode {
                 target: "sum_to".into(),
                 json: false,
@@ -2018,6 +2023,7 @@ mod tests {
         );
         let error = run(
             &sample_path(),
+            None,
             ImageCmd::Pseudocode {
                 target: "sum_to".into(),
                 json: false,

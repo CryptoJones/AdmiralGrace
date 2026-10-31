@@ -1181,3 +1181,70 @@ fn a_mode_mark_on_an_x86_image_changes_nothing() {
     assert!(ok, "{stderr}");
     assert_eq!(before, after, "x86 has one instruction set");
 }
+
+#[test]
+fn a_project_remembers_how_raw_bytes_load() {
+    let file = TempFile::new("raw");
+    let sample = fixture("sample.elf");
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let sample = sample.display().to_string();
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "--entry",
+        "0x1149",
+        "save",
+        "--out",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["target"]["raw"]["arch"], serde_json::json!("x86-64"));
+    assert_eq!(report["target"]["raw"]["base"], serde_json::json!("0x1060"));
+    assert_eq!(
+        report["target"]["raw"]["length"],
+        serde_json::json!("0x18c")
+    );
+
+    // Every command after reads the target as the project says, flags or not.
+    let (ok, stdout, stderr) = run(&[
+        "image",
+        &sample,
+        "disasm",
+        "0x1149",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("endbr64"), "{stdout}");
+    let (ok, _, stderr) = run(&["project", &sample, "nop", "--file", &file.text(), "0x1149"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = run(&[
+        "image",
+        &sample,
+        "disasm",
+        "0x1149",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("nop"), "{stdout}");
+}

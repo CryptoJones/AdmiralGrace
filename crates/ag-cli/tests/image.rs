@@ -1334,3 +1334,30 @@ fn an_aarch64_executable_is_decoded_walked_and_listed() {
     let (ok, stdout, stderr) = image_result("arm64.elf", &["pseudocode", "add"]);
     assert!(!ok || stdout.contains("AARCH64"), "{stdout}{stderr}");
 }
+
+#[test]
+fn raw_bytes_are_read_where_the_flags_say_they_load() {
+    // The sample's `.text`, as raw bytes at its own address.
+    let flags = [
+        "--raw", "x86-64", "--base", "0x1060", "--offset", "0x1060", "--length", "0x18c",
+        "--entry", "0x1149",
+    ];
+    let args: Vec<&str> = flags.iter().copied().chain(["info"]).collect();
+    let report = image("sample.elf", &args);
+    assert!(report.contains("language: x86:LE:64"), "{report}");
+    assert!(report.contains("entry: 0x1149"), "{report}");
+    assert!(report.contains("raw vma=0x1060 size=396"), "{report}");
+    let args: Vec<&str> = flags.iter().copied().chain(["disasm", "0x1149"]).collect();
+    let report = image("sample.elf", &args);
+    assert!(report.contains("endbr64"), "{report}");
+    assert!(report.contains("entry_0x1149"), "{report}");
+
+    // Without --base the bytes have nowhere to load; an architecture that
+    // is not one is refused by name.
+    let (ok, _, stderr) = image_result("sample.elf", &["--raw", "x86-64", "info"]);
+    assert!(!ok);
+    assert!(stderr.contains("--base"), "{stderr}");
+    let (ok, _, stderr) = image_result("sample.elf", &["--raw", "sparc", "--base", "0", "info"]);
+    assert!(!ok);
+    assert!(stderr.contains("not an architecture"), "{stderr}");
+}

@@ -296,7 +296,10 @@ pub enum ProjectCmd {
 }
 
 /// Run `ag project <target> …`: the target is the binary the project describes.
-pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
+pub fn run(target: PathBuf, raw: Option<ag_image::RawSpec>, cmd: ProjectCmd) -> Result<i32> {
+    // The flags that say how raw bytes load are recorded when the project
+    // is made, so every command after reads the target the same way.
+    RAW.with(|held| *held.borrow_mut() = raw);
     match cmd {
         ProjectCmd::Save {
             out,
@@ -635,6 +638,29 @@ impl Named {
     }
 }
 
+thread_local! {
+    /// How the command line said the target loads as raw bytes, for the
+    /// project made or opened by this run.
+    static RAW: std::cell::RefCell<Option<ag_image::RawSpec>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The target as this run was told to read it, with the raw flags folded
+/// in when they were given.
+fn target_of(target: &Path, sha256: Option<String>) -> Target {
+    let raw = RAW.with(|held| held.borrow().clone());
+    Target {
+        path: Some(target.display().to_string()),
+        sha256,
+        raw: raw.map(|spec| {
+            let arch = ag_image::RAW_ARCHITECTURES
+                .split(", ")
+                .find(|arch| ag_image::raw_language(arch) == Some(spec.language.as_str()))
+                .unwrap_or("x86-64");
+            RawArgs::target(&spec, arch)
+        }),
+    }
+}
+
 /// Create a project file for `target`, recording the option pairs.
 ///
 /// A `save` onto an existing file replaces it — and with it every annotation
@@ -648,10 +674,7 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         );
     }
     let sha256 = sha256_of(target)?;
-    let mut project = ProjectFile::new(Target {
-        path: Some(target.display().to_string()),
-        sha256: Some(sha256),
-    });
+    let mut project = ProjectFile::new(target_of(target, Some(sha256)));
     for pair in options {
         let (name, value) = pair
             .split_once('=')
@@ -666,6 +689,103 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         project.options.len()
     );
     Ok(0)
+}
+
+/// How to read the target as raw bytes, when it has no container to say
+/// where it loads: `--raw ARCH --base ADDRESS`, with the entry, the offset
+/// into the file and the length when they apply.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct RawArgs {
+    /// Read the target as raw bytes of this architecture: x86-64, x86,
+    /// arm, thumb or aarch64.
+    #[arg(long, value_name = "ARCH")]
+    pub raw: Option<String>,
+    /// The address the bytes load at (with --raw).
+    #[arg(long, requires = "raw")]
+    pub base: Option<String>,
+    /// The entry point (with --raw).
+    #[arg(long, requires = "raw")]
+    pub entry: Option<String>,
+    /// Where in the file the bytes start (with --raw); the start of it
+    /// otherwise.
+    #[arg(long, requires = "raw")]
+    pub offset: Option<String>,
+    /// How many bytes (with --raw); the rest of the file otherwise.
+    #[arg(long, requires = "raw")]
+    pub length: Option<String>,
+}
+
+impl RawArgs {
+    /// What the flags say, when `--raw` is given.
+    pub fn spec(&self) -> Result<Option<ag_image::RawSpec>> {
+        let Some(arch) = &self.raw else {
+            return Ok(None);
+        };
+        let language = ag_image::raw_language(arch).with_context(|| {
+            format!(
+                "{arch:?} is not an architecture raw bytes are read as: {}",
+                ag_image::RAW_ARCHITECTURES
+            )
+        })?;
+        let base = self
+            .base
+            .as_deref()
+            .context("raw bytes need --base, the address they load at")?;
+        Ok(Some(ag_image::RawSpec {
+            language: language.to_string(),
+            base: number(base)?,
+            entry: self.entry.as_deref().map(number).transpose()?,
+            offset: self.offset.as_deref().map(number).transpose()?.unwrap_or(0),
+            length: self.length.as_deref().map(number).transpose()?,
+        }))
+    }
+
+    /// The flags as the project file records them.
+    pub fn target(spec: &ag_image::RawSpec, arch: &str) -> ag_corpus::project::RawTarget {
+        ag_corpus::project::RawTarget {
+            arch: arch.to_string(),
+            base: format!("{:#x}", spec.base),
+            entry: spec.entry.map(|entry| format!("{entry:#x}")),
+            offset: (spec.offset != 0).then(|| format!("{:#x}", spec.offset)),
+            length: spec.length.map(|length| format!("{length:#x}")),
+        }
+    }
+}
+
+/// How a project's target loads as raw bytes, when it says it does, in the
+/// image's terms.
+pub fn raw_of_project(project: &ProjectFile) -> Result<Option<ag_image::RawSpec>> {
+    let Some(raw) = &project.target.raw else {
+        return Ok(None);
+    };
+    let language = ag_image::raw_language(&raw.arch).with_context(|| {
+        format!(
+            "the project's raw target names {:?}, not an architecture raw bytes are read as: {}",
+            raw.arch,
+            ag_image::RAW_ARCHITECTURES
+        )
+    })?;
+    Ok(Some(ag_image::RawSpec {
+        language: language.to_string(),
+        base: number(&raw.base)?,
+        entry: raw.entry.as_deref().map(number).transpose()?,
+        offset: raw.offset.as_deref().map(number).transpose()?.unwrap_or(0),
+        length: raw.length.as_deref().map(number).transpose()?,
+    }))
+}
+
+/// Read `target` as the project says — raw bytes when its target says so —
+/// under `layout`.
+pub fn open_target(
+    target: &Path,
+    raw: Option<&ag_image::RawSpec>,
+    layout: &ag_image::Layout,
+) -> Result<ag_image::Binary> {
+    match raw {
+        Some(spec) => ag_image::Binary::open_raw_with_layout(target, spec, layout),
+        None => ag_image::Binary::open_with_layout(target, layout),
+    }
+    .with_context(|| format!("reading {}", target.display()))
 }
 
 /// One edit to the image's segments.
@@ -746,11 +866,11 @@ fn number(text: &str) -> Result<u64> {
     .with_context(|| format!("{text:?} is not a number"))
 }
 
-/// Read `target` under the layout `project` records.
+/// Read `target` as the project says — raw bytes when its target says so
+/// — under the layout it records.
 fn image_under(target: &Path, project: &ProjectFile) -> Result<ag_image::Binary> {
     let layout = layout_of(project)?;
-    ag_image::Binary::open_with_layout(target, &layout)
-        .with_context(|| format!("reading {}", target.display()))
+    open_target(target, raw_of_project(project)?.as_ref(), &layout)
 }
 
 /// Read `target` under the layout `project` now records, so a layout the
@@ -1077,10 +1197,7 @@ fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
                     None
                 }
             };
-            Ok(ProjectFile::new(Target {
-                path: Some(target.display().to_string()),
-                sha256,
-            }))
+            Ok(ProjectFile::new(target_of(target, sha256)))
         }
         Err(error) => Err(error),
     }
