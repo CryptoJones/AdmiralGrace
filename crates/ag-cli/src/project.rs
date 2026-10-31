@@ -646,8 +646,8 @@ pub fn run(
             state,
         } => {
             let drop = match state.trim().to_ascii_lowercase().as_str() {
-                "drop" | "off" | "remove" => true,
-                "keep" | "on" | "show" => false,
+                "drop" => true,
+                "keep" => false,
                 other => anyhow::bail!("the state is drop or keep, not {other:?}"),
             };
             edit_named(

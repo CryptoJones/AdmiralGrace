@@ -2905,6 +2905,7 @@ impl App {
                         | PromptKind::Reference { .. }
                         | PromptKind::Switch
                         | PromptKind::Override
+                        | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
                         | PromptKind::Bytes
@@ -3261,8 +3262,8 @@ impl App {
                     .collect();
                 self.prompt = Some(Prompt {
                     kind: PromptKind::DeadStores,
-                    title: "Drop dead stores of variable (NAME, or NAME keep)",
-                    value: dropped.join(" "),
+                    title: "Drop dead stores of variables (NAME, NAME keep, …)",
+                    value: dropped.join(", "),
                 });
             }
 
@@ -4271,38 +4272,87 @@ impl App {
                         }
                     }
                     PromptKind::DeadStores => {
-                        let mut words = prompt.value.split_whitespace();
-                        let (Some(name), state) = (words.next(), words.next()) else {
-                            self.notice = Some(
-                                "Name the variable whose dead stores to drop, as the pseudocode declares it".into(),
-                            );
-                            return Task::none();
-                        };
-                        let drop = match state.map(str::to_ascii_lowercase).as_deref() {
-                            None | Some("drop") => true,
-                            Some("keep") => false,
-                            Some(other) => {
-                                self.notice = Some(format!("The state is drop or keep, not {other:?}"));
-                                return Task::none();
-                            }
-                        };
+                        // `NAME`, `NAME drop` or `NAME keep`, several apart by
+                        // commas — the shape the prompt is filled with. A
+                        // name is the declared one, the one the analyst
+                        // renamed it to, or one whose stores are dropped
+                        // already — whose declaration may be gone with them.
                         let Some(address) =
                             self.work.detail.as_ref().and_then(|detail| detail.start)
                         else {
                             self.notice = Some("Open a function to drop its variables' dead stores".into());
                             return Task::none();
                         };
-                        if !self.declared_variables().iter().any(|v| v == name) {
-                            self.notice = Some(format!("This function declares no variable {name}"));
+                        let key = self.annotation_key(address);
+                        let declared = self.declared_variables();
+                        let mut words = Vec::new();
+                        for entry in prompt.value.split(',').filter(|e| !e.trim().is_empty()) {
+                            let mut parts = entry.split_whitespace();
+                            let (Some(name), state, None) =
+                                (parts.next(), parts.next(), parts.next())
+                            else {
+                                self.notice = Some(
+                                    "Name the variable whose dead stores to drop, as the pseudocode declares it, then drop or keep".into(),
+                                );
+                                return Task::none();
+                            };
+                            let drop = match state.map(str::to_ascii_lowercase).as_deref() {
+                                None | Some("drop") => true,
+                                Some("keep") => false,
+                                Some(other) => {
+                                    self.notice = Some(format!("The state is drop or keep, not {other:?}"));
+                                    return Task::none();
+                                }
+                            };
+                            let resolved = declared
+                                .iter()
+                                .find(|v| *v == name)
+                                .or_else(|| {
+                                    declared.iter().find(|v| {
+                                        self.annotations.variable_name(&key, v).as_deref() == Some(name)
+                                    })
+                                })
+                                .cloned()
+                                .or_else(|| {
+                                    self.annotations
+                                        .variable_for(&key, name)
+                                        .filter(|record| record.drop_stores)
+                                        .map(|_| name.to_string())
+                                });
+                            let Some(resolved) = resolved else {
+                                self.notice = Some(format!("This function declares no variable {name}"));
+                                return Task::none();
+                            };
+                            words.push((resolved, drop));
+                        }
+                        if words.is_empty() {
+                            self.notice = Some(
+                                "Name the variable whose dead stores to drop, as the pseudocode declares it".into(),
+                            );
                             return Task::none();
                         }
-                        let key = self.annotation_key(address);
-                        self.annotations.variable_mut(&key, name).drop_stores = drop;
+                        for (name, drop) in &words {
+                            self.annotations.variable_mut(&key, name).drop_stores = *drop;
+                        }
                         self.annotations.prune();
-                        self.notice = Some(if drop {
-                            format!("Dead stores of {name} dropped in {key}")
-                        } else {
-                            format!("Dead stores of {name} kept in {key}")
+                        let dropped: Vec<&str> = words
+                            .iter()
+                            .filter(|(_, drop)| *drop)
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        let kept: Vec<&str> = words
+                            .iter()
+                            .filter(|(_, drop)| !*drop)
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        self.notice = Some(match (dropped.is_empty(), kept.is_empty()) {
+                            (false, true) => format!("Dead stores of {} dropped in {key}", dropped.join(", ")),
+                            (true, false) => format!("Dead stores of {} kept in {key}", kept.join(", ")),
+                            _ => format!(
+                                "Dead stores of {} dropped and of {} kept in {key}",
+                                dropped.join(", "),
+                                kept.join(", ")
+                            ),
                         });
                         self.tell_dead_stores();
                     }
@@ -10628,13 +10678,37 @@ mod tests {
                 .is_some_and(|record| record.drop_stores)
         );
 
-        // `keep` puts the store back and takes the record off.
+        // The prompt opens filled with the names dropped, and a renamed
+        // variable is named by what the screen shows.
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("rax=table".into()));
+        let _ = app.update(Message::PromptSubmit);
         let _ = app.update(Message::EditDeadStores);
-        let _ = app.update(Message::PromptChanged("rax keep".into()));
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "rax");
+        // `keep` puts the store back and takes the word off the record.
+        let _ = app.update(Message::PromptChanged("table keep".into()));
         let _ = app.update(Message::PromptSubmit);
         let body = app.work.pseudocode.clone().unwrap_or_default();
         assert!(body.contains("rax = &completed.0;"), "{body}");
-        assert!(app.annotations.variable_for("0x1090", "rax").is_none());
+        assert!(
+            app.annotations
+                .variable_for("0x1090", "rax")
+                .is_some_and(|record| !record.drop_stores && record.name.as_deref() == Some("table"))
+        );
+
+        // Undo takes the last word back — the stores are dropped again —
+        // and redo puts it forward.
+        let _ = app.update(Message::EditUndo);
+        assert!(
+            app.annotations
+                .variable_for("0x1090", "rax")
+                .is_some_and(|record| record.drop_stores)
+        );
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(!body.contains("rax = &completed.0;"), "{body}");
+        let _ = app.update(Message::EditRedo);
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(body.contains("rax = &completed.0;"), "{body}");
     }
 
     #[test]

@@ -1498,10 +1498,6 @@ impl Binary {
             .unwrap_or_default()
     }
 
-    /// Tell the image where the jump tables are that its code does not
-    /// say: one hint per indirect jump, by the jump's address. The walks
-    /// and the pseudocode built so far are forgotten, since the graph of
-    /// a function may have grown cases.
     /// Tell the lift which variables' dead stores to take out of the
     /// pseudocode — by the address of the function declaring each — and say
     /// whether that changed anything. The pseudocode is read again after.
@@ -1527,6 +1523,10 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// Tell the image where the jump tables are that its code does not
+    /// say: one hint per indirect jump, by the jump's address. The walks
+    /// and the pseudocode built so far are forgotten, since the graph of
+    /// a function may have grown cases.
     pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) -> bool {
         if let Ok(mut held) = self.table_hints.lock() {
             if *held == hints {

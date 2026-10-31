@@ -226,7 +226,7 @@ pub fn emit_function_with(
     let mut marks = Marks {
         next: 0,
         dead: &dead,
-        lines: BTreeSet::new(),
+        spans: Vec::new(),
     };
     let style = Style::of(options);
     let mut lines = Vec::new();
@@ -384,7 +384,7 @@ pub fn emit_function_with(
         lines,
         return_type: Some(function.return_type.clone()),
         return_reason: function.return_reason.clone(),
-        dead_lines: marks.lines,
+        dead_lines: marks.dead_lines(),
     }
 }
 
@@ -396,8 +396,29 @@ struct Marks<'a> {
     next: usize,
     /// The indices of the statements the pruning would take out.
     dead: &'a BTreeSet<usize>,
-    /// The lines of those statements, so far.
-    lines: BTreeSet<usize>,
+    /// Each statement printed, in the order they were begun: the lines it
+    /// spans, and whether it is dead. A statement's lines hold the lines of
+    /// the statements it holds, which speak for themselves after it.
+    spans: Vec<(usize, usize, bool)>,
+}
+
+impl Marks<'_> {
+    /// The dead lines: a dead statement's lines, less those of a live
+    /// statement it holds — the arm a folded `if` keeps — plus those of a
+    /// dead one inside that again.
+    fn dead_lines(&self) -> BTreeSet<usize> {
+        let mut lines = BTreeSet::new();
+        for (first, end, dead) in &self.spans {
+            if *dead {
+                lines.extend(*first..*end);
+            } else {
+                for line in *first..*end {
+                    lines.remove(&line);
+                }
+            }
+        }
+        lines
+    }
 }
 
 /// Whether every line is a comment — or there is none — so that a Python
@@ -465,6 +486,10 @@ fn emit_statements(
         let mark = marks.next;
         marks.next += 1;
         let first_line = lines.len();
+        let span = marks.spans.len();
+        marks
+            .spans
+            .push((first_line, first_line, marks.dead.contains(&mark)));
         match &statement.kind {
             StatementKind::Plain => match &statement.node {
                 // A label sits one level out from the statements it names;
@@ -570,6 +595,8 @@ fn emit_statements(
                                 ),
                                 addresses: Vec::new(),
                             });
+                            // The `break` not printed is counted still.
+                            marks.next += arm.body.len();
                             continue;
                         }
                         lines.push(Line {
@@ -577,6 +604,7 @@ fn emit_statements(
                             addresses: Vec::new(),
                         });
                         emit_statements(inner, depth + 2, lines, style, exit, marks);
+                        marks.next += arm.body.len() - inner.len();
                         lines.push(Line {
                             text: format!("{pad}{}}}", style.indent),
                             addresses: Vec::new(),
@@ -613,7 +641,10 @@ fn emit_statements(
                                 Vec::new()
                             },
                         });
-                        body(without_trailing_break(&arm.body), lines, exit, marks);
+                        let inner = without_trailing_break(&arm.body);
+                        body(inner, lines, exit, marks);
+                        // The `break` not printed is counted still.
+                        marks.next += arm.body.len() - inner.len();
                     }
                 }
             },
@@ -733,9 +764,7 @@ fn emit_statements(
                 }
             },
         }
-        if marks.dead.contains(&mark) {
-            marks.lines.extend(first_line..lines.len());
-        }
+        marks.spans[span].1 = lines.len();
     }
 }
 
@@ -1995,5 +2024,138 @@ mod tests {
         assert!(!text.contains("x = 1;"), "{text}");
         assert!(text.contains("if (0) {"), "{text}");
         assert_eq!(x.dead_lines.len(), 3, "{text} {:?}", x.dead_lines);
+    }
+
+    #[test]
+    fn the_dead_lines_stay_in_step_past_a_switch_in_rust_and_python_and_a_kept_arm_is_live() {
+        use crate::lift::{Statement, StatementKind, SwitchArm};
+        let var = AstNode::var;
+        let plain = |node: AstNode, at: u64| Statement {
+            node,
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        };
+        let assign = |name: &str, rhs: AstNode| AstNode::Assign {
+            lhs: Box::new(AstNode::var(name)),
+            rhs: Box::new(rhs),
+        };
+        let local = |name: &str| Variable {
+            ty: "int".to_string(),
+            name: name.to_string(),
+        };
+        // switch (a) { case 0: y = a; break; case 1: y = 1; break; }
+        // x = 1 (overwritten); if (1) { x = a; } else { y = 3; } return x + y.
+        let function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![local("a")],
+            locals: vec![local("x"), local("y")],
+            body: vec![
+                Statement {
+                    node: var("a"),
+                    addresses: vec![0x20],
+                    kind: StatementKind::Switch {
+                        arms: vec![
+                            SwitchArm {
+                                values: vec![0],
+                                body: vec![
+                                    plain(assign("y", var("a")), 0x24),
+                                    plain(AstNode::Break, 0x26),
+                                ],
+                            },
+                            SwitchArm {
+                                values: vec![1],
+                                body: vec![
+                                    plain(assign("y", AstNode::constant(1, 4)), 0x28),
+                                    plain(AstNode::Break, 0x2a),
+                                ],
+                            },
+                            SwitchArm {
+                                values: vec![2],
+                                body: vec![plain(AstNode::Break, 0x2c)],
+                            },
+                        ],
+                    },
+                },
+                plain(assign("x", AstNode::constant(1, 4)), 0x30),
+                Statement {
+                    node: AstNode::ConstantCondition {
+                        holds: true,
+                        compared: Box::new(AstNode::binary(var("a"), BinaryOp::Equal, var("a"))),
+                    },
+                    addresses: vec![0x34],
+                    kind: StatementKind::If {
+                        then_part: vec![plain(assign("x", var("a")), 0x38)],
+                        else_part: vec![plain(assign("y", AstNode::constant(3, 4)), 0x3c)],
+                    },
+                },
+                plain(
+                    AstNode::Return {
+                        value: Some(Box::new(AstNode::binary(var("x"), BinaryOp::Add, var("y")))),
+                    },
+                    0x40,
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        for language in ["c", "rust", "python"] {
+            let options = Options::from_pairs([("language", language)]).expect("a language");
+            let kept = emit_function(&function, &options);
+            let text = kept.text();
+            let dead: Vec<&str> = kept
+                .dead_lines
+                .iter()
+                .map(|line| kept.lines[*line].text.trim())
+                .collect();
+            // The overwritten store, the folded `if`'s own lines and its
+            // dropped arm are dead; the kept arm, the switch and the return
+            // are not.
+            assert!(
+                dead.contains(&"x = 1;") || dead.contains(&"x = 1"),
+                "{language}: {dead:?}\n{text}"
+            );
+            assert!(
+                dead.iter().any(|line| line.starts_with("if ")),
+                "{language}: {dead:?}\n{text}"
+            );
+            assert!(
+                dead.contains(&"y = 3;") || dead.contains(&"y = 3"),
+                "{language}: {dead:?}\n{text}"
+            );
+            assert!(
+                dead.iter()
+                    .any(|line| line.starts_with("else") || *line == "} else {"),
+                "{language}: {dead:?}\n{text}"
+            );
+            assert!(
+                !dead.contains(&"x = a;") && !dead.contains(&"x = a"),
+                "the kept arm is live: {language}: {dead:?}\n{text}"
+            );
+            assert!(
+                !dead.iter().any(|line| line.starts_with("return")),
+                "{language}: {dead:?}\n{text}"
+            );
+            assert!(
+                !dead
+                    .iter()
+                    .any(|line| line.starts_with("y = a") || line.starts_with("y = 1")),
+                "{language}: {dead:?}\n{text}"
+            );
+            // The dropped `else` and the kept arm go their ways under drop.
+            let dropped = emit_function(
+                &function,
+                &Options::from_pairs([("language", language), ("dead-code", "drop")])
+                    .expect("options"),
+            )
+            .text();
+            assert!(dropped.contains("x = a"), "{dropped}");
+            assert!(
+                !dropped.contains("y = 3") && !dropped.contains("x = 1"),
+                "{dropped}"
+            );
+        }
     }
 }

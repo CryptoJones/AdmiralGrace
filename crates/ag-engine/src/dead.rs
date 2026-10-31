@@ -98,8 +98,10 @@ pub fn dead_indices(function: &LiftedFunction) -> BTreeSet<usize> {
 /// they stand in code that stays — and a local nothing names after that
 /// dropped. A store inside a branch that is itself dead is left with its
 /// branch: the branch goes whole or not at all, and a store taken out of
-/// it would leave its reader without one. A call in a removed store
-/// stays, as the call it is.
+/// it would leave its reader without one; the arm a folded `if` keeps is
+/// code that stays. A store taken out of the code that stays may leave a
+/// reader of it inside a dead branch, which never runs. A call in a
+/// removed store stays, as the call it is.
 pub fn without_stores(function: &LiftedFunction, removable: &[String]) -> LiftedFunction {
     if removable.is_empty() {
         return function.clone();
@@ -140,14 +142,22 @@ fn remove_stores(
             continue;
         }
         let inside = inside_dead || is_dead;
+        // A dead `if` is one whose condition is a constant: its taken arm is
+        // spliced into the code that stays and is live, its other arm goes.
+        let (then_inside, else_inside) = match &statements[index].node {
+            AstNode::ConstantCondition { holds, .. } if is_dead => {
+                (inside_dead || !*holds, inside_dead || *holds)
+            }
+            _ => (inside, inside),
+        };
         match &mut statements[index].kind {
             StatementKind::Plain => {}
             StatementKind::If {
                 then_part,
                 else_part,
             } => {
-                remove_stores(then_part, next, dead, removable, inside);
-                remove_stores(else_part, next, dead, removable, inside);
+                remove_stores(then_part, next, dead, removable, then_inside);
+                remove_stores(else_part, next, dead, removable, else_inside);
             }
             StatementKind::While { body }
             | StatementKind::DoWhile { body }
@@ -965,5 +975,49 @@ mod tests {
         assert!(printed.contains("y = 2;"), "{printed}");
         assert!(printed.contains("x = 1;"), "{printed}");
         assert_eq!(y.locals.len(), 2);
+    }
+
+    #[test]
+    fn a_store_in_the_arm_a_folded_if_keeps_is_in_live_code() {
+        // x = 1; if (1) { x = 2; x = z; } else { x = 3; } return x: the
+        // first store and the one at the kept arm's start are overwritten
+        // and go; the dropped arm's stays with its arm.
+        let function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x1000,
+            return_type: "long".to_string(),
+            params: vec![crate::lift::Variable {
+                ty: "long".to_string(),
+                name: "z".to_string(),
+            }],
+            locals: vec![crate::lift::Variable {
+                ty: "long".to_string(),
+                name: "x".to_string(),
+            }],
+            body: vec![
+                assign("x", AstNode::constant(1, 8)),
+                if_constant(
+                    true,
+                    vec![
+                        assign("x", AstNode::constant(2, 8)),
+                        assign("x", AstNode::var("z")),
+                    ],
+                    vec![assign("x", AstNode::constant(3, 8))],
+                ),
+                ret(AstNode::var("x")),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let text = crate::emit::emit_function(
+            &without_stores(&function, &own(&["x"])),
+            &Default::default(),
+        )
+        .text();
+        assert!(!text.contains("x = 1;"), "{text}");
+        assert!(!text.contains("x = 2;"), "{text}");
+        assert!(text.contains("x = z;"), "{text}");
+        assert!(text.contains("x = 3;"), "{text}");
     }
 }
