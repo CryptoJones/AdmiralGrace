@@ -14,6 +14,7 @@ pub mod image;
 pub mod inline;
 pub mod lift;
 pub mod liveness;
+pub mod merge;
 pub mod objc;
 pub mod opaque;
 pub mod options;

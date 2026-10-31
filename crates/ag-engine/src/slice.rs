@@ -193,38 +193,54 @@ pub fn slice(
 }
 
 /// The statement graph's two fixed nodes.
-const EXIT: usize = 0;
-const ENTRY: usize = 1;
+pub(crate) const EXIT: usize = 0;
+pub(crate) const ENTRY: usize = 1;
 
 /// One node of the statement graph: a plain statement, a condition, a
 /// `for`'s init or step.
 #[derive(Debug, Default)]
-struct Node {
+pub(crate) struct Node {
     /// The statement it is part of, by its index in the walk; `None` for
     /// the entry and the exit.
-    owner: Option<usize>,
+    pub(crate) owner: Option<usize>,
+    /// Which part of the statement it is: its node, or a `for`'s init or
+    /// step.
+    pub(crate) part: Part,
     /// The addresses it came from.
-    addresses: Vec<u64>,
+    pub(crate) addresses: Vec<u64>,
     /// The variables it defines, each with whether it kills the others: an
     /// assignment does, a call or a store through a pointer only may.
-    defs: Vec<(usize, bool)>,
+    pub(crate) defs: Vec<(usize, bool)>,
     /// The variables it reads.
-    uses: Vec<usize>,
+    pub(crate) uses: Vec<usize>,
     /// Where control goes next.
-    succ: Vec<usize>,
+    pub(crate) succ: Vec<usize>,
     /// Whether it is a `return`.
     returns: bool,
     /// The condition of the control statement that holds it, when one does.
     parent: Option<usize>,
 }
 
+/// Which part of its statement a node is.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Part {
+    /// The statement's node: a plain statement, or a control statement's
+    /// condition.
+    #[default]
+    Node,
+    /// A `for`'s init.
+    Init,
+    /// A `for`'s step.
+    Step,
+}
+
 /// The statements of a function as a graph, with its variables numbered.
-struct Graph {
-    nodes: Vec<Node>,
-    vars: BTreeMap<String, usize>,
+pub(crate) struct Graph {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) vars: BTreeMap<String, usize>,
     /// The variables that are memory: whose address is taken, that the
     /// function does not declare, and `*` for what pointers point at.
-    memory: Vec<usize>,
+    pub(crate) memory: Vec<usize>,
 }
 
 /// What an expression reads, and whether it reads memory or calls.
@@ -239,7 +255,7 @@ struct Effects {
 const POINTEE: &str = "*";
 
 impl Graph {
-    fn of(function: &LiftedFunction) -> Self {
+    pub(crate) fn of(function: &LiftedFunction) -> Self {
         let mut names = BTreeSet::new();
         let mut escaped = BTreeSet::new();
         for_each_node(&function.body, &mut |node| {
@@ -359,7 +375,7 @@ impl Graph {
 }
 
 /// The expression under its casts.
-fn strip_casts(node: &AstNode) -> &AstNode {
+pub(crate) fn strip_casts(node: &AstNode) -> &AstNode {
     match node {
         AstNode::Cast { target, .. } => strip_casts(target),
         other => other,
@@ -642,6 +658,7 @@ impl Builder<'_> {
                 let step_id = self.add(
                     Node {
                         succ: vec![cond],
+                        part: Part::Step,
                         ..step_node
                     },
                     Some(cond),
@@ -659,6 +676,7 @@ impl Builder<'_> {
                 self.add(
                     Node {
                         succ: vec![cond],
+                        part: Part::Init,
                         ..init_node
                     },
                     parent,
@@ -689,10 +707,10 @@ impl Builder<'_> {
 
 /// A set of small numbers.
 #[derive(Clone, PartialEq, Eq)]
-struct Bits(Vec<u64>);
+pub(crate) struct Bits(Vec<u64>);
 
 impl Bits {
-    fn new(len: usize) -> Self {
+    pub(crate) fn new(len: usize) -> Self {
         Self(vec![0; len.div_ceil(64)])
     }
 
@@ -704,19 +722,19 @@ impl Bits {
         bits
     }
 
-    fn insert(&mut self, i: usize) {
+    pub(crate) fn insert(&mut self, i: usize) {
         self.0[i / 64] |= 1 << (i % 64);
     }
 
-    fn remove(&mut self, i: usize) {
+    pub(crate) fn remove(&mut self, i: usize) {
         self.0[i / 64] &= !(1 << (i % 64));
     }
 
-    fn contains(&self, i: usize) -> bool {
+    pub(crate) fn contains(&self, i: usize) -> bool {
         self.0[i / 64] & (1 << (i % 64)) != 0
     }
 
-    fn union_with(&mut self, other: &Self) {
+    pub(crate) fn union_with(&mut self, other: &Self) {
         for (a, b) in self.0.iter_mut().zip(&other.0) {
             *a |= b;
         }
@@ -734,7 +752,7 @@ impl Bits {
         }
     }
 
-    fn ones(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn ones(&self) -> impl Iterator<Item = usize> + '_ {
         self.0.iter().enumerate().flat_map(|(word, bits)| {
             (0..64)
                 .filter(move |bit| bits & (1 << bit) != 0)
@@ -745,9 +763,9 @@ impl Bits {
 
 /// What flows over the graph: the definitions reaching each node, and
 /// which conditions decide which nodes.
-struct Flow {
+pub(crate) struct Flow {
     /// Every definition, as its node and its variable.
-    defs: Vec<(usize, usize)>,
+    pub(crate) defs: Vec<(usize, usize)>,
     /// The definitions reaching each node's start.
     reaching: Vec<Bits>,
     /// The branches each node depends on.
@@ -757,7 +775,7 @@ struct Flow {
 }
 
 impl Flow {
-    fn of(graph: &Graph) -> Self {
+    pub(crate) fn of(graph: &Graph) -> Self {
         let count = graph.nodes.len();
         let mut defs = Vec::new();
         let mut gen = vec![Vec::new(); count];
@@ -887,7 +905,7 @@ impl Flow {
     }
 
     /// The nodes whose definitions of `var` reach the start of `node`.
-    fn reaching_of(&self, node: usize, var: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn reaching_of(&self, node: usize, var: usize) -> impl Iterator<Item = usize> + '_ {
         self.reaching[node]
             .ones()
             .filter(move |id| self.defs[*id].1 == var)

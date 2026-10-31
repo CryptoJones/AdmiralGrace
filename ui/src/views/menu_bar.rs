@@ -177,6 +177,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::EditInline,
             )),
+            Item::new(item_button(
+                "Merge variables…",
+                "",
+                Message::EditMergeVariables,
+            )),
+            Item::new(item_button(
+                "Unmerge variable…",
+                "",
+                Message::EditUnmergeVariable,
+            )),
+            Item::new(item_button(
+                "Split variable here…",
+                "",
+                Message::EditSplitVariable,
+            )),
             Item::new(separator()),
             Item::new(item_button(
                 "Assemble over bytes…",

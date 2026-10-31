@@ -63,6 +63,7 @@ pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
+pub use ag_engine::merge::{MergeCandidate, MergeKind, VariableEdits};
 pub use ag_engine::objc::{
     ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
 };
@@ -456,6 +457,9 @@ pub struct Binary {
     /// The analyst's words on which functions are inlined into their
     /// callers' pseudocode, by entry: `true` to inline, `false` never to.
     inlines: Mutex<BTreeMap<u64, bool>>,
+    /// The analyst's merges and splits of each function's variables, by
+    /// the function's entry.
+    variable_edits: Mutex<BTreeMap<u64, VariableEdits>>,
     /// The functions being lifted, by the thread lifting them, so that a
     /// cycle of calls through the bodies inlined is not followed round —
     /// and another thread lifting the same function at once is no cycle.
@@ -785,6 +789,7 @@ impl Binary {
             facts_visiting: Mutex::new(BTreeSet::new()),
             removable_stores: Mutex::new(BTreeMap::new()),
             inlines: Mutex::new(BTreeMap::new()),
+            variable_edits: Mutex::new(BTreeMap::new()),
             inline_visiting: Mutex::new(HashSet::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
@@ -1582,6 +1587,49 @@ impl Binary {
             cache.clear();
         }
         true
+    }
+
+    /// Tell the lift which variables of each function the analyst merges
+    /// and where one is split — by the function's entry, the names the
+    /// lift declares — and say whether that changed anything. The
+    /// pseudocode and the levels are read again after; the walks are kept.
+    pub fn set_variable_edits(&self, edits: BTreeMap<u64, VariableEdits>) -> bool {
+        let edits: BTreeMap<u64, VariableEdits> = edits
+            .into_iter()
+            .filter(|(_, edits)| !edits.is_empty())
+            .collect();
+        if let Ok(mut held) = self.variable_edits.lock() {
+            if *held == edits {
+                return false;
+            }
+            *held = edits;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        true
+    }
+
+    /// The analyst's merges and splits of the variables of the function at
+    /// `address`.
+    pub fn variable_edits(&self, address: u64) -> VariableEdits {
+        self.variable_edits
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+            .unwrap_or_default()
+    }
+
+    /// The pairs of the variables of the function at `address` that could
+    /// be one — suggested, then valid, then unsound — over its lift as it
+    /// reads, the analyst's merges and splits made. See
+    /// `ag_engine::merge`.
+    pub fn merge_candidates(&self, address: u64) -> Result<Vec<MergeCandidate>, NotLifted> {
+        let stages = self.stages(address)?;
+        Ok(ag_engine::merge::merge_candidates(&stages.function))
     }
 
     /// Whether the analyst said to inline the function at `address` into
@@ -3234,6 +3282,11 @@ impl Symbols for ImageSymbols<'_> {
             held.insert(address, facts.clone());
         }
         facts
+    }
+
+    /// The analyst's merges and splits of the function's variables.
+    fn variable_edits(&self, address: u64) -> VariableEdits {
+        self.0.variable_edits(address)
     }
 
     /// The function's own lift, when the analyst said to inline it: lifted

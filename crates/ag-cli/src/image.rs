@@ -290,6 +290,20 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The pairs of a function's variables that could be one: suggested —
+    /// one copies the other, or both hold one register or slot — valid,
+    /// never live at once, and unsound, live at once with different values.
+    Merges {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose words the function is lifted with: its
+        /// merges and splits made.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -809,6 +823,7 @@ pub(crate) fn open_image(
         image.set_site_overrides(site_overrides(project));
         image.set_removable_stores(project.removable_stores());
         image.set_inlines(project.inlines());
+        image.set_variable_edits(variable_edits(project));
     }
     Ok(image)
 }
@@ -873,6 +888,7 @@ pub fn run(
         | ImageCmd::Cfg { project, .. }
         | ImageCmd::Il { project, .. }
         | ImageCmd::Opaque { project, .. }
+        | ImageCmd::Merges { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -983,6 +999,7 @@ pub fn run(
             }
             Ok(0)
         }
+        ImageCmd::Merges { target, json, .. } => merges(&image, &target, json),
         ImageCmd::Export {
             dir,
             functions,
@@ -2100,6 +2117,106 @@ pub(crate) fn taken_words(always: bool) -> &'static str {
     } else {
         "never taken"
     }
+}
+
+/// The analyst's merges and splits of each function's variables, as the
+/// image takes them.
+pub(crate) fn variable_edits(
+    project: &ag_corpus::project::ProjectFile,
+) -> std::collections::BTreeMap<u64, ag_image::VariableEdits> {
+    project
+        .variable_edits()
+        .into_iter()
+        .map(|(address, words)| (address, words.into()))
+        .collect()
+}
+
+/// `ag image FILE merges FUNCTION`: the merge candidates, grouped.
+fn merges(image: &Binary, target: &str, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
+        image.language()
+    );
+    let address = resolve(image, target)?;
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    let candidates = image
+        .merge_candidates(address)
+        .map_err(|error| anyhow::anyhow!("{name} at {address:#x}: {}", error.reason))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&merges_json(&name, address, &candidates))?
+        );
+    } else {
+        print!("{}", merges_text(&name, address, &candidates));
+    }
+    Ok(0)
+}
+
+/// The merge candidates as text: a heading for each kind, and under it one
+/// line a pair, `gone into keep`, and why.
+pub(crate) fn merges_text(
+    name: &str,
+    address: u64,
+    candidates: &[ag_image::MergeCandidate],
+) -> String {
+    use ag_image::MergeKind;
+    let mut out = format!("// merge candidates of {name} at {address:#x}\n");
+    for kind in [MergeKind::Suggested, MergeKind::Valid, MergeKind::Unsound] {
+        out.push_str(&format!("{}:\n", kind.name()));
+        let rows: Vec<&ag_image::MergeCandidate> =
+            candidates.iter().filter(|c| c.kind == kind).collect();
+        if rows.is_empty() {
+            out.push_str("  none\n");
+        }
+        let width = rows
+            .iter()
+            .map(|c| c.gone.len() + c.keep.len() + 6)
+            .max()
+            .unwrap_or(0);
+        for c in rows {
+            let pair = format!("{} into {}", c.gone, c.keep);
+            out.push_str(&format!("  {pair:width$}  {}\n", c.reason));
+        }
+    }
+    out
+}
+
+/// The merge candidates as JSON: the function, and the pairs of each kind.
+pub(crate) fn merges_json(
+    name: &str,
+    address: u64,
+    candidates: &[ag_image::MergeCandidate],
+) -> serde_json::Value {
+    use ag_image::MergeKind;
+    let of = |kind: MergeKind| {
+        candidates
+            .iter()
+            .filter(|c| c.kind == kind)
+            .map(|c| {
+                let mut row = serde_json::json!({
+                    "keep": c.keep,
+                    "gone": c.gone,
+                    "reason": c.reason,
+                });
+                if let Some(at) = c.at {
+                    row["at"] = serde_json::json!(format!("{at:#x}"));
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "function": name,
+        "address": format!("{address:#x}"),
+        "suggested": of(MergeKind::Suggested),
+        "valid": of(MergeKind::Valid),
+        "unsound": of(MergeKind::Unsound),
+    })
 }
 
 /// The opaque predicates as text: one line each, the site, the function,

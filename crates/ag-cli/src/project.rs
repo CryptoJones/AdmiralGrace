@@ -4,9 +4,10 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `patch`,
-//! `asm`, `nop`, `opaque`) so a script or an agent can build a project without editing JSON
-//! by hand, and reports the tags the analyst gave (`tags`).
+//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `merge`,
+//! `split`, `patch`, `asm`, `nop`, `opaque`) so a script or an agent can
+//! build a project without editing JSON by hand, and reports the tags the
+//! analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -199,6 +200,60 @@ pub enum ProjectCmd {
         /// `on` to inline it, `off` never to, `clear` to leave it to the
         /// analysis, which inlines nothing by itself.
         state: String,
+    },
+    /// Merge two of a function's variables: every occurrence of `GONE`
+    /// reads `KEEP`, and `GONE` is no longer declared. A merge that changes
+    /// the meaning is made, and the function says so.
+    Merge {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable kept, as the lift declares it.
+        keep: String,
+        /// The variable merged into it, as the lift declares it.
+        gone: String,
+    },
+    /// Take back the merge of a function's variable into another.
+    Unmerge {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable merged away, as the lift declares it.
+        gone: String,
+    },
+    /// Split a function's variable at one of its definitions: the statement
+    /// assigning it at the address, and the uses that assignment reaches,
+    /// take a fresh name, `VAR_2`.
+    Split {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it.
+        variable: String,
+        /// The address of the statement assigning it.
+        address: String,
+    },
+    /// Take back the split of a function's variable at a definition.
+    Unsplit {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it.
+        variable: String,
+        /// The address of the statement the split is at.
+        address: String,
     },
     /// Write bytes over the image's at an address: a patch the image is
     /// read with. The file on disk is not changed.
@@ -563,31 +618,72 @@ pub fn run(
                 "clear" | "none" => None,
                 other => anyhow::bail!("the state is on, off or clear, not {other:?}"),
             };
-            // An address spelled `0x…` or with its space is taken as it is;
-            // anything else is a name the image says the address of first,
-            // so a function called `beef` is not the address 0xbeef.
-            let name = function.trim();
-            let spelled = name.to_ascii_lowercase().starts_with("0x") || name.contains(':');
-            let address = match ag_corpus::project::canonical_address(name) {
-                Some(address) if spelled => address,
-                bare => {
-                    let image = image_under(&target, &open_project(&target, &file)?)?;
-                    let found = image
-                        .functions()
-                        .iter()
-                        .find(|f| f.name == name)
-                        .map(|f| f.address)
-                        .or_else(|| image.address_of_mangled(name));
-                    match (found, bare) {
-                        (Some(found), _) => format!("{found:#x}"),
-                        (None, Some(address)) => address,
-                        (None, None) => anyhow::bail!("no function is named {name:?}"),
-                    }
-                }
-            };
+            let address = function_key(&target, &file, &function)?;
             edit(&target, &file, TargetKind::Function, &address, |a| {
                 a.inline = on;
             })
+        }
+        ProjectCmd::Merge {
+            file,
+            function,
+            keep,
+            gone,
+        } => {
+            let (keep, gone) = (keep.trim().to_string(), gone.trim().to_string());
+            anyhow::ensure!(keep != gone, "{keep} cannot be merged into itself");
+            let address = function_key(&target, &file, &function)?;
+            edit(&target, &file, TargetKind::Function, &address, |a| {
+                a.merge_variables(&keep, &gone);
+            })
+        }
+        ProjectCmd::Unmerge {
+            file,
+            function,
+            gone,
+        } => {
+            let address = function_key(&target, &file, &function)?;
+            let gone = gone.trim().to_string();
+            let mut had = false;
+            let code = edit(&target, &file, TargetKind::Function, &address, |a| {
+                had = a.unmerge_variable(&gone);
+            })?;
+            if !had {
+                eprintln!("{gone} was not merged in {address}");
+            }
+            Ok(code)
+        }
+        ProjectCmd::Split {
+            file,
+            function,
+            variable,
+            address: at,
+        } => {
+            let at = ag_corpus::project::canonical_address(&at)
+                .ok_or_else(|| anyhow::anyhow!("{at:?} is not an address"))?;
+            let address = function_key(&target, &file, &function)?;
+            let variable = variable.trim().to_string();
+            edit(&target, &file, TargetKind::Function, &address, |a| {
+                a.split_variable(&variable, &at);
+            })
+        }
+        ProjectCmd::Unsplit {
+            file,
+            function,
+            variable,
+            address: at,
+        } => {
+            let at = ag_corpus::project::canonical_address(&at)
+                .ok_or_else(|| anyhow::anyhow!("{at:?} is not an address"))?;
+            let address = function_key(&target, &file, &function)?;
+            let variable = variable.trim().to_string();
+            let mut had = false;
+            let code = edit(&target, &file, TargetKind::Function, &address, |a| {
+                had = a.unsplit_variable(&variable, &at);
+            })?;
+            if !had {
+                eprintln!("{variable} was not split at {at} in {address}");
+            }
+            Ok(code)
         }
         ProjectCmd::Patch {
             file,
@@ -1422,6 +1518,32 @@ fn edit_patch(
 }
 
 /// Change one annotation of the project of `target`, then save it back.
+/// The record key of the function `function` names: an address spelled
+/// `0x…` or with its space is taken as it is; anything else is a name the
+/// image says the address of first, so a function called `beef` is not the
+/// address 0xbeef.
+fn function_key(target: &Path, file: &Path, function: &str) -> Result<String> {
+    let name = function.trim();
+    let spelled = name.to_ascii_lowercase().starts_with("0x") || name.contains(':');
+    Ok(match ag_corpus::project::canonical_address(name) {
+        Some(address) if spelled => address,
+        bare => {
+            let image = image_under(target, &open_project(target, file)?)?;
+            let found = image
+                .functions()
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.address)
+                .or_else(|| image.address_of_mangled(name));
+            match (found, bare) {
+                (Some(found), _) => format!("{found:#x}"),
+                (None, Some(address)) => address,
+                (None, None) => anyhow::bail!("no function is named {name:?}"),
+            }
+        }
+    })
+}
+
 fn edit(
     target: &Path,
     file: &Path,
@@ -1636,6 +1758,12 @@ fn summarize(annotation: &Annotation) -> String {
         Some(true) => parts.push("inline on".to_string()),
         Some(false) => parts.push("inline off".to_string()),
         None => {}
+    }
+    for (keep, gone) in &annotation.merges {
+        parts.push(format!("merge {gone} into {keep}"));
+    }
+    for split in &annotation.splits {
+        parts.push(format!("split {} at {}", split.variable, split.at));
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {

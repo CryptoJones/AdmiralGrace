@@ -364,6 +364,62 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "merge_candidates",
+            description: "The pairs of a function's variables of one type that could be one, as the lift declares them: `suggested` — never live at once with different values, and one is a copy of the other (`v2 = v1;`) or both hold one register or stack slot (`eax` and `eax_2`); `valid` — never live at once, so one name serves for both and the pseudocode means what it meant; `unsound` — one is assigned while the other is live, so one name for both changes the meaning, with the address where. Each pair names the variable kept and the one merged into it, and why. A variable whose address is taken is no candidate. Read over the lift with the project's merges and splits made.",
+            schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
+        },
+        Tool {
+            name: "merge_variables",
+            description: "Merge two of a function's variables, by the names the lift declares them with (before the analyst's renames): every occurrence of `gone` reads `keep`, `gone` is no longer declared, and a copy `keep = keep;` left is dropped. An unsound merge is made, and the function's leading comments say `v1 and v2 are merged though both are live at 0x401020`; one of a parameter merged away, a name the function does not declare, or two types is refused there with why. A word already on `gone` is replaced. The pseudocode is read again with the word. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "keep": { "type": "string", "description": "The variable kept." },
+                    "gone": { "type": "string", "description": "The variable merged into it." },
+                },
+                "required": ["function", "keep", "gone"]
+            }),
+        },
+        Tool {
+            name: "unmerge_variable",
+            description: "Take back the merge of a function's variable `gone` into another; the pseudocode is read again. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "gone": { "type": "string", "description": "The variable merged away." },
+                },
+                "required": ["function", "gone"]
+            }),
+        },
+        Tool {
+            name: "split_variable",
+            description: "Split a function's variable at one of its definitions: the statement at `address` assigning it, and the uses that assignment reaches, take a fresh name, `<variable>_2` (or `_3`… where taken), declared with the variable's type. A use the definition reaches with another reaching it too would need both names, and the split is refused in the function's leading comments: `v1 is not split at 0x401020: a use at 0x401030 is reached by another definition too`; so is one where no statement at the address assigns it, or whose address is taken. The splits are made before the merges. The pseudocode is read again with the word. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it." },
+                    "address": { "type": "string", "description": "The address of the statement assigning it: any of its line's addresses." },
+                },
+                "required": ["function", "variable", "address"]
+            }),
+        },
+        Tool {
+            name: "unsplit_variable",
+            description: "Take back the split of a function's variable at a definition; the pseudocode is read again. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it." },
+                    "address": { "type": "string", "description": "The address the split is at." },
+                },
+                "required": ["function", "variable", "address"]
+            }),
+        },
+        Tool {
             name: "opaque_predicates",
             description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
             schema: json!({
@@ -1112,6 +1168,79 @@ impl Server {
                     address,
                 )))
             }
+            "merge_candidates" => {
+                let address = self.function(&text("target")?)?;
+                let name = self
+                    .image
+                    .function_name(address)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("sub_{address:x}"));
+                let candidates = self.image.merge_candidates(address).map_err(|error| {
+                    format!("{name} at {address:#x} was not lifted: {}", error.reason)
+                })?;
+                Ok(Answer::json(crate::image::merges_json(
+                    &name,
+                    address,
+                    &candidates,
+                )))
+            }
+            "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable" => {
+                let address = self.function(&text("function")?)?;
+                let word = |key: &str| -> Result<String, String> {
+                    let value = text(key)?.trim().to_string();
+                    if value.is_empty() {
+                        return Err(format!(
+                            "\"{key}\" names a variable as the lift declares it"
+                        ));
+                    }
+                    Ok(value)
+                };
+                let at = || -> Result<String, String> {
+                    let at = parse_address(&text("address")?)?;
+                    Ok(format!("{at:#x}"))
+                };
+                let mut had = true;
+                match name {
+                    "merge_variables" => {
+                        let (keep, gone) = (word("keep")?, word("gone")?);
+                        if keep == gone {
+                            return Err(format!("{keep} cannot be merged into itself"));
+                        }
+                        self.change(TargetKind::Function, address, |record| {
+                            record.merge_variables(&keep, &gone)
+                        })?;
+                    }
+                    "unmerge_variable" => {
+                        let gone = word("gone")?;
+                        self.change(TargetKind::Function, address, |record| {
+                            had = record.unmerge_variable(&gone)
+                        })?;
+                    }
+                    "split_variable" => {
+                        let (variable, at) = (word("variable")?, at()?);
+                        self.change(TargetKind::Function, address, |record| {
+                            record.split_variable(&variable, &at)
+                        })?;
+                    }
+                    _ => {
+                        let (variable, at) = (word("variable")?, at()?);
+                        self.change(TargetKind::Function, address, |record| {
+                            had = record.unsplit_variable(&variable, &at)
+                        })?;
+                    }
+                }
+                if !had {
+                    return Err(format!(
+                        "there was no such word on the function at {address:#x}"
+                    ));
+                }
+                self.image
+                    .set_variable_edits(crate::image::variable_edits(&self.project()?.file));
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
             "opaque_predicates" | "patch_opaque_predicates" => {
                 let all = flag("all", false)?;
                 let targets = match arguments.get("targets") {
@@ -1832,6 +1961,11 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
             "color": record.color,
             "overrides": record.overrides,
             "inline": record.inline,
+            "merges": record.merges,
+            "splits": record.splits.iter().map(|split| json!({
+                "variable": split.variable,
+                "at": split.at,
+            })).collect::<Vec<Value>>(),
         })
     };
     json!({
@@ -2053,6 +2187,11 @@ mod tests {
                 "set_comment",
                 "set_override",
                 "set_inline",
+                "merge_candidates",
+                "merge_variables",
+                "unmerge_variable",
+                "split_variable",
+                "unsplit_variable",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",

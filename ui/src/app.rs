@@ -174,6 +174,13 @@ pub enum Message {
     /// Say whether the function on screen is inlined into its callers'
     /// pseudocode.
     EditInline,
+    /// Merge two variables of the function on screen.
+    EditMergeVariables,
+    /// Take back a merge of a variable of the function on screen.
+    EditUnmergeVariable,
+    /// Split a variable of the function on screen at the selected line's
+    /// definition of it.
+    EditSplitVariable,
     /// Take one variable's dead stores out of the pseudocode, or put them
     /// back.
     EditDeadStores,
@@ -304,6 +311,14 @@ pub enum PromptKind {
     /// Whether the function on screen is inlined into its callers:
     /// `on`, `off` or `clear`.
     Inline,
+    /// Two variables of the function on screen to merge: `KEEP GONE`.
+    MergeVariables,
+    /// A variable of the function on screen merged away: `GONE`.
+    UnmergeVariable,
+    /// A variable of the function on screen and the address of the
+    /// definition it is split at: `VAR@ADDRESS`, or `VAR@ADDRESS off` to
+    /// take the split back.
+    SplitVariable,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -1183,6 +1198,7 @@ impl App {
             self.tell_overrides();
             self.tell_dead_stores();
             self.tell_inlines();
+            self.tell_variable_edits();
         }
         task
     }
@@ -2962,6 +2978,9 @@ impl App {
                         | PromptKind::Switch
                         | PromptKind::Override
                         | PromptKind::Inline
+                        | PromptKind::MergeVariables
+                        | PromptKind::UnmergeVariable
+                        | PromptKind::SplitVariable
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -2982,6 +3001,7 @@ impl App {
                 self.tell_overrides();
                 self.tell_dead_stores();
                 self.tell_inlines();
+                self.tell_variable_edits();
             }
         }
         task
@@ -3250,6 +3270,85 @@ impl App {
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
         }
+    }
+
+    /// Tell the analysis the analyst's merges and splits of each
+    /// function's variables, and read the function on screen again when
+    /// that changed anything.
+    fn tell_variable_edits(&mut self) {
+        if !self
+            .provider
+            .set_variable_edits(self.annotations.variable_edits())
+        {
+            return;
+        }
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
+        }
+    }
+
+    /// The name the lift declares for the variable the analyst typed as
+    /// `name` in the function keyed `key`: the declared name itself, or the
+    /// one the analyst renamed to it; `None` when the function on screen
+    /// declares neither.
+    fn declared_name(&self, key: &str, name: &str) -> Option<String> {
+        let mut declared = self.declared_parameters();
+        declared.extend(self.declared_variables());
+        declared
+            .iter()
+            .find(|v| *v == name)
+            .or_else(|| {
+                declared
+                    .iter()
+                    .find(|v| self.annotations.variable_name(key, v).as_deref() == Some(name))
+            })
+            .cloned()
+    }
+
+    /// The parameters the function on screen declares, read from its
+    /// signature — the first line past the leading comments with a `(` in
+    /// it: `long main(int a, long b)`, `fn main(a: i32, b: i64) -> i64`,
+    /// `def main(a, b):`.
+    fn declared_parameters(&self) -> Vec<String> {
+        let Some(body) = self.work.pseudocode.as_deref() else {
+            return Vec::new();
+        };
+        let Some(signature) = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && !line.starts_with('#'))
+            .find(|line| line.contains('('))
+        else {
+            return Vec::new();
+        };
+        let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) else {
+            return Vec::new();
+        };
+        signature[open + 1..close.max(open + 1)]
+            .split(',')
+            .filter_map(|param| {
+                let param = param.split(':').next().unwrap_or(param);
+                let name = param.split_whitespace().last()?;
+                let name = name.trim_start_matches(['*', '&']);
+                let name = name.split('[').next().unwrap_or(name);
+                (name != "void"
+                    && name != "self"
+                    && name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    /// A variable's name as the screen shows it: the analyst's, where it
+    /// has one.
+    fn shown_variable(&self, key: &str, name: &str) -> String {
+        self.annotations
+            .variable_name(key, name)
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Tell the analysis the analyst's words on the sites, and read the
@@ -3535,6 +3634,61 @@ impl App {
                 });
             }
 
+            Message::EditMergeVariables => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose variables to merge".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let candidates = self.provider.merge_candidates(function);
+                let value = candidates
+                    .first()
+                    .map(|c| {
+                        format!(
+                            "{} {}",
+                            self.shown_variable(&key, &c.keep),
+                            self.shown_variable(&key, &c.gone)
+                        )
+                    })
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::MergeVariables,
+                    title: "Merge variables (KEEP GONE)",
+                    value,
+                });
+            }
+
+            Message::EditUnmergeVariable => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose variable to unmerge".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let value = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.merges.last())
+                    .map(|(_, gone)| gone.clone())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::UnmergeVariable,
+                    title: "Unmerge variable (GONE)",
+                    value,
+                });
+            }
+
+            Message::EditSplitVariable => {
+                if self.work.listing_of.is_none() || self.work.pseudocode.is_none() {
+                    self.notice = Some("Open the function whose variable to split".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::SplitVariable,
+                    title: "Split variable at its definition (VAR@ADDRESS, VAR@ADDRESS off)",
+                    value: self.slice_suggestion(),
+                });
+            }
+
             Message::EditMark(mark) => {
                 use ag_corpus::project::{ByteType, TargetKind};
                 let Some(address) = self.selection.address() else {
@@ -3628,6 +3782,7 @@ impl App {
                 self.tell_overrides();
                 self.tell_dead_stores();
                 self.tell_inlines();
+                self.tell_variable_edits();
             }
 
             Message::EditRedo => {
@@ -3649,6 +3804,7 @@ impl App {
                 self.tell_overrides();
                 self.tell_dead_stores();
                 self.tell_inlines();
+                self.tell_variable_edits();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -4044,6 +4200,7 @@ impl App {
                                     self.tell_overrides();
                                     self.tell_dead_stores();
                                     self.tell_inlines();
+                                    self.tell_variable_edits();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -4679,6 +4836,145 @@ impl App {
                             None => format!("Inlining {key} left to the analysis"),
                         });
                         self.tell_inlines();
+                        self.tell_variable_edits();
+                    }
+                    PromptKind::MergeVariables => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let words: Vec<&str> = prompt.value.split_whitespace().collect();
+                        let [keep, gone] = words.as_slice() else {
+                            self.notice = Some(
+                                "Name the variable kept and the one merged into it: KEEP GONE"
+                                    .into(),
+                            );
+                            return Task::none();
+                        };
+                        let Some(keep) = self.declared_name(&key, keep) else {
+                            self.notice =
+                                Some(format!("This function declares no variable {keep}"));
+                            return Task::none();
+                        };
+                        let Some(gone) = self.declared_name(&key, gone) else {
+                            self.notice =
+                                Some(format!("This function declares no variable {gone}"));
+                            return Task::none();
+                        };
+                        if keep == gone {
+                            self.notice = Some(format!("{keep} cannot be merged into itself"));
+                            return Task::none();
+                        }
+                        let unsound =
+                            self.provider
+                                .merge_candidates(function)
+                                .into_iter()
+                                .find(|c| {
+                                    c.kind == ag_image::MergeKind::Unsound
+                                        && ((c.keep == keep && c.gone == gone)
+                                            || (c.keep == gone && c.gone == keep))
+                                });
+                        self.annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                            .merge_variables(&keep, &gone);
+                        self.notice = Some(match unsound {
+                            Some(c) => {
+                                format!("{gone} is merged into {keep} (unsound: {})", c.reason)
+                            }
+                            None => format!("{gone} is merged into {keep}"),
+                        });
+                        self.tell_variable_edits();
+                    }
+                    PromptKind::UnmergeVariable => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let typed = prompt.value.trim();
+                        let merged: Vec<String> = self
+                            .annotations
+                            .annotation_for(&key)
+                            .map(|a| a.merges.iter().map(|(_, gone)| gone.clone()).collect())
+                            .unwrap_or_default();
+                        // The variable merged away is no longer declared:
+                        // its name is the record's, or the analyst's for it.
+                        let gone = merged.iter().find(|g| *g == typed).or_else(|| {
+                            merged.iter().find(|g| {
+                                self.annotations.variable_name(&key, g).as_deref() == Some(typed)
+                            })
+                        });
+                        let Some(gone) = gone.cloned() else {
+                            self.notice = Some(format!("{typed} is not merged in {key}"));
+                            return Task::none();
+                        };
+                        self.annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                            .unmerge_variable(&gone);
+                        self.annotations.prune();
+                        self.notice = Some(format!("{gone} is no longer merged"));
+                        self.tell_variable_edits();
+                    }
+                    PromptKind::SplitVariable => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let text = prompt.value.trim().replacen('@', " ", 1);
+                        let mut parts = text.split_whitespace();
+                        let (Some(name), Some(at), state) =
+                            (parts.next(), parts.next(), parts.next())
+                        else {
+                            self.notice = Some(
+                                "Name the variable and the address of its definition: VAR@ADDRESS"
+                                    .into(),
+                            );
+                            return Task::none();
+                        };
+                        let off = match state.map(str::to_ascii_lowercase).as_deref() {
+                            None | Some("on") => false,
+                            Some("off") => true,
+                            Some(other) => {
+                                self.notice =
+                                    Some(format!("The state is on or off, not {other:?}"));
+                                return Task::none();
+                            }
+                        };
+                        let Some(at) = ag_corpus::project::canonical_address(at) else {
+                            self.notice = Some(format!("{at:?} is not an address"));
+                            return Task::none();
+                        };
+                        let split = self
+                            .annotations
+                            .annotation_for(&key)
+                            .map(|a| a.splits.clone())
+                            .unwrap_or_default();
+                        let variable = self.declared_name(&key, name).or_else(|| {
+                            split
+                                .iter()
+                                .find(|s| s.at == at && s.variable == name)
+                                .map(|s| s.variable.clone())
+                        });
+                        let Some(variable) = variable else {
+                            self.notice =
+                                Some(format!("This function declares no variable {name}"));
+                            return Task::none();
+                        };
+                        let record = self
+                            .annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                        if off {
+                            if !record.unsplit_variable(&variable, &at) {
+                                self.annotations.prune();
+                                self.notice = Some(format!("{variable} is not split at {at}"));
+                                return Task::none();
+                            }
+                            self.notice = Some(format!("{variable} is no longer split at {at}"));
+                        } else {
+                            record.split_variable(&variable, &at);
+                            self.notice = Some(format!("{variable} is split at {at}"));
+                        }
+                        self.annotations.prune();
+                        self.tell_variable_edits();
                     }
                     PromptKind::Override => {
                         // `KIND on|off|clear`, or several apart by commas —
@@ -11240,6 +11536,104 @@ mod tests {
         let _ = app.update(Message::EditRedo);
         let body = app.work.pseudocode.clone().unwrap_or_default();
         assert!(body.contains("rax = &completed.0;"), "{body}");
+    }
+
+    #[test]
+    fn variables_are_merged_and_split_on_the_analysts_word_and_undo_takes_it_back() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(
+            body(&app).contains("  v2 = sum_to(add(a, 3));\n"),
+            "{}",
+            body(&app)
+        );
+
+        // The prompt opens on the first candidate: v2 into the parameter b.
+        let _ = app.update(Message::EditMergeVariables);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::MergeVariables);
+        assert_eq!(prompt.value, "b v2");
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        let merged = body(&app);
+        assert!(merged.contains("  b = sum_to(add(a, 3));\n"), "{merged}");
+        assert!(merged.contains("  return b;\n"), "{merged}");
+        assert!(!merged.contains("long v2;"), "{merged}");
+
+        // The unmerge prompt reads back the variable merged away; undo
+        // takes the merge back as well.
+        let _ = app.update(Message::EditUnmergeVariable);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "v2");
+        app.prompt = None;
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.annotation_for("0x1198").is_none());
+        assert!(
+            body(&app).contains("  v2 = sum_to(add(a, 3));\n"),
+            "{}",
+            body(&app)
+        );
+
+        // A split of v2 at its one assignment renames it and every use.
+        let text = body(&app);
+        let line = text
+            .lines()
+            .position(|line| line.contains("v2 = sum_to("))
+            .unwrap_or_else(|| panic!("{text}"));
+        let address = app.work.line_addresses[&line][0];
+        let _ = app.update(Message::PseudocodeLineSelected(line, address));
+        let _ = app.update(Message::EditSplitVariable);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::SplitVariable);
+        assert!(prompt.value.starts_with("v2@0x"), "{}", prompt.value);
+        let _ = app.update(Message::PromptChanged("v2@0x11a4".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        let split = body(&app);
+        assert!(split.contains("  v2_2 = sum_to(add(a, 3));\n"), "{split}");
+        assert!(split.contains("  return v2_2;\n"), "{split}");
+        assert!(!split.contains("long v2;"), "{split}");
+        // `off` takes it back.
+        let _ = app.update(Message::EditSplitVariable);
+        let _ = app.update(Message::PromptChanged("v2@0x11a4 off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            body(&app).contains("  v2 = sum_to(add(a, 3));\n"),
+            "{}",
+            body(&app)
+        );
+        assert!(app.annotations.annotation_for("0x1198").is_none());
+
+        // In sum_to the loop's sum is reached by its first assignment and
+        // its own: the split is refused, and the function says why.
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let _ = app.update(Message::EditSplitVariable);
+        let _ = app.update(Message::PromptChanged("local_10@0x116c".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let refused = body(&app);
+        assert!(
+            refused.contains(
+                "// local_10 is not split at 0x116c: a use at 0x117d is reached by another definition too\n"
+            ),
+            "{refused}"
+        );
+        assert!(!refused.contains("local_10_2"), "{refused}");
+
+        // A variable the function lacks is said.
+        let _ = app.update(Message::EditMergeVariables);
+        let _ = app.update(Message::PromptChanged("local_10 nothing".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("no variable nothing")),
+            "{:?}",
+            app.notice
+        );
     }
 
     #[test]

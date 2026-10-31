@@ -407,6 +407,19 @@ impl Provider for BinaryProvider {
         self.binary.set_inlines(inlines)
     }
 
+    fn set_variable_edits(&self, edits: BTreeMap<u64, crate::data::VariableWords>) -> bool {
+        self.binary.set_variable_edits(
+            edits
+                .into_iter()
+                .map(|(address, words)| (address, words.into()))
+                .collect(),
+        )
+    }
+
+    fn merge_candidates(&self, address: u64) -> Vec<ag_image::MergeCandidate> {
+        self.binary.merge_candidates(address).unwrap_or_default()
+    }
+
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
         Some(self.byte_rows(address))
     }
