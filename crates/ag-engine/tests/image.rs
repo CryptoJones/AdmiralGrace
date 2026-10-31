@@ -216,3 +216,138 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
         assert!(refused.contains(says), "{refused}");
     }
 }
+
+#[test]
+fn a_universal_macho_names_its_slices_and_opens_as_the_one_chosen() {
+    use ag_engine::image::{fat_slices, Image};
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ag-image/tests/fixtures/sample_fat.macho");
+    let bytes = std::fs::read(&path).expect("the fixture");
+    let slices = fat_slices(&bytes).expect("a universal Mach-O");
+    let arches: Vec<&str> = slices.iter().map(|slice| slice.arch.as_str()).collect();
+    assert_eq!(arches, ["x86_64", "arm64"]);
+    assert_eq!(slices[0].offset, 0x4000);
+    assert_eq!(slices[1].offset, 0x8000);
+
+    // Opened as a plain image, it says what it is and what to choose.
+    let refused = Image::open(&path).expect_err("several images").to_string();
+    assert!(refused.contains("universal Mach-O"), "{refused}");
+    assert!(refused.contains("x86_64, arm64"), "{refused}");
+
+    // Each slice is an image of its own, by name or by number; the bytes
+    // the slice holds are the thin image's.
+    let x86 = Image::open_slice(&path, "x86_64").expect("the x86-64 slice");
+    assert!(
+        x86.language().starts_with("x86:LE:64"),
+        "{}",
+        x86.language()
+    );
+    assert_eq!(x86.slice().map(|slice| slice.offset), Some(0x4000));
+    let arm64 = Image::open_slice(&path, "1").expect("the arm64 slice");
+    assert!(
+        arm64.language().starts_with("AARCH64:LE:64"),
+        "{}",
+        arm64.language()
+    );
+    assert!(arm64.entry().is_some());
+    let thin = Image::open(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ag-image/tests/fixtures/sample.macho"),
+    )
+    .expect("the thin Mach-O");
+    assert_eq!(x86.sections().len(), thin.sections().len());
+    assert_eq!(x86.function_symbols(), thin.function_symbols());
+
+    // A slice that is not there, and a file that has none.
+    let refused = Image::open_slice(&path, "ppc")
+        .expect_err("no such slice")
+        .to_string();
+    assert!(refused.contains("has no slice"), "{refused}");
+    assert!(refused.contains("0: x86_64, 1: arm64"), "{refused}");
+    let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    let refused = Image::open_slice(&elf, "x86_64")
+        .expect_err("not universal")
+        .to_string();
+    assert!(refused.contains("not a universal Mach-O"), "{refused}");
+    assert!(fat_slices(&std::fs::read(&elf).unwrap()).is_none());
+}
+
+#[test]
+fn a_64_bit_fat_header_a_slice_past_the_end_and_a_haswell_slice_are_read() {
+    use ag_engine::image::{fat_slices, resolve_slice, Image};
+
+    // A fat64 header over the fixture's two slices: the same slices.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ag-image/tests/fixtures/sample_fat.macho");
+    let fixture = std::fs::read(&path).expect("the fixture");
+    let slices = fat_slices(&fixture).expect("universal");
+    let mut fat64 = Vec::new();
+    fat64.extend_from_slice(&0xcafe_babf_u32.to_be_bytes());
+    fat64.extend_from_slice(&(slices.len() as u32).to_be_bytes());
+    let cputypes = [(0x0100_0007_u32, 0x8_u32), (0x0100_000c_u32, 0_u32)];
+    for (slice, (cputype, cpusubtype)) in slices.iter().zip(cputypes) {
+        fat64.extend_from_slice(&cputype.to_be_bytes());
+        fat64.extend_from_slice(&cpusubtype.to_be_bytes());
+        fat64.extend_from_slice(&slice.offset.to_be_bytes());
+        fat64.extend_from_slice(&slice.size.to_be_bytes());
+        fat64.extend_from_slice(&14_u32.to_be_bytes());
+        fat64.extend_from_slice(&0_u32.to_be_bytes());
+    }
+    fat64.resize(fixture.len(), 0);
+    fat64[0x4000..].copy_from_slice(&fixture[0x4000..]);
+    let read = fat_slices(&fat64).expect("a fat64 header");
+    assert_eq!(
+        read.iter()
+            .map(|slice| slice.arch.as_str())
+            .collect::<Vec<_>>(),
+        ["x86_64h", "arm64"]
+    );
+    assert_eq!(read[1].offset, slices[1].offset);
+    assert_eq!(
+        resolve_slice(&read, "ARM64").map(|slice| slice.offset),
+        Some(0x8000)
+    );
+    assert_eq!(
+        resolve_slice(&read, "1").map(|slice| slice.offset),
+        Some(0x8000)
+    );
+    assert!(resolve_slice(&read, "5").is_none());
+    assert!(
+        resolve_slice(&read, "x86_64").is_none(),
+        "the Haswell slice has its own name"
+    );
+
+    // A slice that runs past the end of the file is refused by name.
+    let dir = std::env::temp_dir().join(format!(
+        "ag-engine-fat-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let truncated = dir.join("truncated.macho");
+    std::fs::write(&truncated, &fixture[..0x8100]).unwrap();
+    let refused = Image::open_slice(&truncated, "arm64")
+        .expect_err("past the end")
+        .to_string();
+    assert!(
+        refused.contains("runs past the end of the file"),
+        "{refused}"
+    );
+    assert!(Image::open_slice(&truncated, "x86_64").is_ok());
+
+    // A crafted entry at the very top of the space is refused, not overflowed.
+    let mut crafted = fat64.clone();
+    crafted[8 + 8..8 + 16].copy_from_slice(&0xffff_ffff_ffff_fff0_u64.to_be_bytes());
+    crafted[8 + 16..8 + 24].copy_from_slice(&0x100_u64.to_be_bytes());
+    let evil = dir.join("evil.macho");
+    std::fs::write(&evil, &crafted).unwrap();
+    let refused = Image::open_slice(&evil, "0")
+        .expect_err("past the end")
+        .to_string();
+    assert!(
+        refused.contains("runs past the end of the file"),
+        "{refused}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -264,7 +264,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             print,
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
-        Cmd::Image { binary, raw, cmd } => image::run(&binary, raw.spec()?, cmd),
+        Cmd::Image { binary, raw, cmd } => image::run(&binary, raw.spec()?, raw.slice.clone(), cmd),
         Cmd::Asm { text, at, bits } => {
             let address = ag_corpus::parse_addr(&at)?;
             let bitness = match bits {
@@ -276,7 +276,9 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             println!("{}", ag_corpus::project::hex_of_bytes(&bytes));
             Ok(0)
         }
-        Cmd::Project { binary, raw, cmd } => project::run(binary, raw.spec()?, cmd),
+        Cmd::Project { binary, raw, cmd } => {
+            project::run(binary, raw.spec()?, raw.slice.clone(), cmd)
+        }
         Cmd::Catalog {
             json,
             markdown: _,

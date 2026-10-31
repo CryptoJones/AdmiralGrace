@@ -1409,3 +1409,181 @@ fn raw_flags_that_disagree_with_a_project_are_refused_everywhere() {
     assert!(!ok);
     assert!(stderr.contains("it is not raw bytes"), "{stderr}");
 }
+
+#[test]
+fn a_project_remembers_which_slice_of_a_universal_macho_it_describes() {
+    let file = TempFile::new("slice");
+    let out = TempFile::new("slice-out");
+    let fat = fixture("sample_fat.macho").display().to_string();
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, _, stderr) = run(&[
+        "project",
+        &fat,
+        "--slice",
+        "x86_64",
+        "save",
+        "--out",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["target"]["slice"], serde_json::json!("x86_64"));
+
+    // Every command after reads that slice, flags or not: a patch in it,
+    // and the copy written with the patch where the slice lies in the file.
+    let (ok, stdout, stderr) = run(&["image", &fat, "symbols", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    let add = stdout
+        .lines()
+        .find(|line| line.ends_with(" _add") || line.ends_with(" add"))
+        .and_then(|line| line.split_whitespace().next())
+        .expect("add is a symbol")
+        .to_string();
+    let (ok, _, stderr) = run(&["project", &fat, "patch", "--file", &file.text(), &add, "cc"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &fat,
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let original = std::fs::read(fixture("sample_fat.macho")).expect("the fixture");
+    let written = std::fs::read(out.path()).expect("the copy");
+    let differing: Vec<usize> = (0..original.len())
+        .filter(|&i| original[i] != written[i])
+        .collect();
+    assert_eq!(differing.len(), 1, "{differing:?}");
+    assert!(
+        (0x4000..0x8000).contains(&differing[0]),
+        "the x86-64 slice: {differing:?}"
+    );
+}
+
+#[test]
+fn a_slice_flag_that_disagrees_with_the_project_is_refused_and_save_checks_the_slice() {
+    let file = TempFile::new("slice-disagree");
+    let fat = fixture("sample_fat.macho").display().to_string();
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, _, stderr) = run(&[
+        "project",
+        &fat,
+        "--slice",
+        "arm64",
+        "save",
+        "--out",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+
+    // Another slice, by name or by number, is refused by both commands; the
+    // same slice by another spelling is the same slice.
+    for flag in ["x86_64", "0"] {
+        let (ok, _, stderr) = run(&[
+            "project",
+            &fat,
+            "--slice",
+            flag,
+            "patch",
+            "--file",
+            &file.text(),
+            "0x100000420",
+            "90",
+        ]);
+        assert!(!ok, "{flag}");
+        assert!(
+            stderr.contains("but") && stderr.contains("says arm64"),
+            "{stderr}"
+        );
+        let (ok, _, stderr) = run(&[
+            "image",
+            &fat,
+            "--slice",
+            flag,
+            "info",
+            "--project",
+            &file.text(),
+        ]);
+        assert!(!ok, "{flag}");
+        assert!(stderr.contains("says arm64"), "{stderr}");
+    }
+    let (ok, _, stderr) = run(&[
+        "image",
+        &fat,
+        "--slice",
+        "1",
+        "info",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&["project", &fat, "--slice", "ARM64", "show", &file.text()]);
+    assert!(ok, "{stderr}");
+
+    // A project of the whole file refuses a slice flag; a slice the file
+    // does not have, or a file with none, cannot be saved.
+    let whole = TempFile::new("slice-whole");
+    let thin = fixture("sample.macho").display().to_string();
+    let (ok, _, stderr) = run(&["project", &thin, "save", "--out", &whole.text()]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&["project", &thin, "--slice", "0", "show", &whole.text()]);
+    assert!(!ok);
+    assert!(stderr.contains("has no slice"), "{stderr}");
+    let missing = TempFile::new("slice-missing");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &fat,
+        "--slice",
+        "ppc",
+        "save",
+        "--out",
+        &missing.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("has no slice \"ppc\""), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &thin,
+        "--slice",
+        "arm64",
+        "save",
+        "--out",
+        &missing.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("not a universal Mach-O"), "{stderr}");
+    let (ok, _, stderr) = run(&["image", &fat, "--slice", "5", "info"]);
+    assert!(!ok);
+    assert!(stderr.contains("has no slice \"5\""), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "image", &fat, "--slice", "arm64", "--raw", "x86-64", "--base", "0x1000", "info",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    let (ok, _, stderr) = run(&["project", &fat, "save", "--out", &missing.text()]);
+    assert!(!ok);
+    assert!(stderr.contains("say which one with --slice"), "{stderr}");
+}

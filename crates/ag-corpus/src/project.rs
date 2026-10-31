@@ -775,6 +775,10 @@ pub struct Target {
     /// How the target loads, when it is raw bytes with no container to say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawTarget>,
+    /// Which slice of a universal Mach-O the target is, when it is one:
+    /// the architecture's name, or its position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice: Option<String>,
 }
 
 /// How a target of raw bytes loads: the analyst's answer to what a
@@ -1384,6 +1388,7 @@ mod tests {
             path: Some("/bin/ls".into()),
             sha256: Some("9f86d0".into()),
             raw: None,
+            slice: None,
         });
         project
             .options

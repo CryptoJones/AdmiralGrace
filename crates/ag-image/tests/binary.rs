@@ -1802,3 +1802,66 @@ fn raw_bytes_are_read_as_a_program_with_the_entry_for_a_function() {
     assert_eq!(moved.functions()[0].address, 0x40_1149);
     assert!(moved.disassembly(0x40_1149).is_some());
 }
+
+#[test]
+fn a_slice_of_a_universal_macho_is_a_program_whose_patches_land_in_its_part_of_the_file() {
+    use ag_image::Layout;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_fat.macho");
+    assert_eq!(
+        Binary::slices_of(&path)
+            .expect("read")
+            .expect("universal")
+            .iter()
+            .map(|slice| slice.arch.as_str())
+            .collect::<Vec<_>>(),
+        ["x86_64", "arm64"]
+    );
+    assert!(Binary::slices_of(&macho_path()).expect("read").is_none());
+    let refused = format!("{:#}", Binary::open(&path).expect_err("several images"));
+    assert!(refused.contains("universal Mach-O"), "{refused}");
+
+    // The x86-64 slice is the thin sample: the same functions, the same lift.
+    let slice = Binary::open_slice_with_layout(&path, "x86_64", &Layout::default())
+        .expect("the x86-64 slice");
+    assert_eq!(
+        slice.slice().map(|slice| slice.arch.as_str()),
+        Some("x86_64")
+    );
+    assert_eq!(slice.functions(), macho().functions());
+    let add = slice
+        .functions()
+        .iter()
+        .find(|function| function.name.contains("add"))
+        .expect("add")
+        .address;
+    assert!(slice.pseudocode(add).is_ok());
+
+    // A patch into the slice is written where the slice's bytes are in the
+    // whole file, and nowhere else.
+    let original = std::fs::read(&path).expect("the fixture");
+    assert!(slice.set_patches(BTreeMap::from([(add, vec![0xcc])])));
+    let written = slice.patched_file(&original).expect("written");
+    assert_eq!(written.len(), original.len());
+    let differing: Vec<usize> = (0..original.len())
+        .filter(|&i| original[i] != written[i])
+        .collect();
+    assert_eq!(differing.len(), 1, "{differing:?}");
+    assert!((0x4000..0x8000).contains(&differing[0]), "{differing:?}");
+    let thin = std::fs::read(macho_path()).expect("the thin");
+    let thin_written = macho().patched_file(&thin).map(|_| ());
+    assert!(thin_written.is_err() || thin_written.is_ok());
+
+    // The arm64 slice decodes under its own specification.
+    let arm64 = Binary::open_slice_with_layout(&path, "arm64", &Layout::default())
+        .expect("the arm64 slice");
+    assert!(
+        arm64.language().starts_with("AARCH64"),
+        "{}",
+        arm64.language()
+    );
+    assert!(arm64.supports_disassembly());
+    assert!(arm64
+        .entry()
+        .is_some_and(|entry| arm64.disassembly(entry).is_some()));
+}

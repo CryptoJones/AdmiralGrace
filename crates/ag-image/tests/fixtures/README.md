@@ -15,6 +15,8 @@ The images the image tests read, and how they were made.
 | `arm_flows_stripped.elf` | The same with every symbol removed: only the entry point's low bit says the mode. |
 | `arm_flows.s` | The source of the two. |
 | `arm64.elf` | An AArch64 ELF executable built from `arm_sample.c`, statically linked with no C library. |
+| `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
+| `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 
 The 64-bit ELF the tests read is in `crates/ag-engine/tests/fixtures/sample.elf`; the
 engine's own tests read it, and the image tests read it from there.
@@ -156,3 +158,13 @@ the mode changes: that is how the decoder learns the mode. In `arm_thumb.elf` `o
 (`0x20038`) is the one ARM function; `arm_flows.elf` holds a call and a return under a
 condition, a Thumb `blx` into ARM code that no symbol names, and a literal-pool load, and its
 stripped twin keeps only the entry point's bit.
+
+The universal Mach-O was put together here, where there is no `lipo`: the arm64 slice linked
+with clang and lld, and the two slices combined by `make_fat.py`, a big-endian fat header and
+one `fat_arch` per slice, each slice at an offset aligned to 2^14 as `lipo` aligns arm64.
+
+```sh
+clang --target=arm64-apple-macos11 -O1 -nostdlib -fuse-ld=lld -Wl,-e,_sum \
+      -Wl,-platform_version,macos,11.0,11.0 arm_sample.c -o sample_arm64.macho
+python3 make_fat.py sample_fat.macho x86_64=sample.macho arm64=sample_arm64.macho
+```

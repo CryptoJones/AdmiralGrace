@@ -1361,3 +1361,27 @@ fn raw_bytes_are_read_where_the_flags_say_they_load() {
     assert!(!ok);
     assert!(stderr.contains("not an architecture"), "{stderr}");
 }
+
+#[test]
+fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
+    let report = image("sample_fat.macho", &["slices"]);
+    assert!(report.contains("0: x86_64 offset=0x4000"), "{report}");
+    assert!(report.contains("1: arm64 offset=0x8000"), "{report}");
+    let report = image("sample.macho", &["slices"]);
+    assert!(report.contains("one image: no slices"), "{report}");
+
+    // Opened whole it says what to choose; chosen, it is that image.
+    let (ok, _, stderr) = image_result("sample_fat.macho", &["info"]);
+    assert!(!ok);
+    assert!(stderr.contains("universal Mach-O"), "{stderr}");
+    assert!(stderr.contains("x86_64, arm64"), "{stderr}");
+    let report = image("sample_fat.macho", &["--slice", "arm64", "info"]);
+    assert!(report.contains("language: AARCH64:LE:64"), "{report}");
+    let report = image("sample_fat.macho", &["--slice", "0", "info"]);
+    assert!(report.contains("language: x86:LE:64"), "{report}");
+    let report = image("sample_fat.macho", &["--slice", "x86_64", "symbols"]);
+    assert!(report.contains("add"), "{report}");
+    let (ok, _, stderr) = image_result("sample_fat.macho", &["--slice", "ppc", "info"]);
+    assert!(!ok);
+    assert!(stderr.contains("has no slice"), "{stderr}");
+}

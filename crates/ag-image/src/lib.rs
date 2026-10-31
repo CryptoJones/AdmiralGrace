@@ -57,7 +57,9 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
-pub use ag_engine::image::{raw_arch, raw_language, RawSpec, RAW_ARCHITECTURES};
+pub use ag_engine::image::{
+    fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
+};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::Bitness;
@@ -374,6 +376,11 @@ pub struct Binary {
     entry: Option<u64>,
     /// The address the image is loaded at, as its format states it.
     base: Option<u64>,
+    /// How far into the file the image's bytes start, when the image is a
+    /// slice of a universal Mach-O: what its file offsets are measured from.
+    slice_offset: u64,
+    /// The slice of a universal Mach-O the image is, when it is one.
+    slice: Option<Slice>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
@@ -438,6 +445,20 @@ impl Binary {
     pub fn open_with_layout(path: &Path, layout: &Layout) -> Result<Binary> {
         let image = Image::open(path).with_context(|| format!("reading {}", path.display()))?;
         Self::from_opened(&image, layout)
+    }
+
+    /// Read the slice `slice` — an architecture's name, or a position — of
+    /// the universal Mach-O at `path`, under the analyst's `layout`.
+    pub fn open_slice_with_layout(path: &Path, slice: &str, layout: &Layout) -> Result<Binary> {
+        let image = Image::open_slice(path, slice)?;
+        Self::from_opened(&image, layout)
+    }
+
+    /// The slices of the universal Mach-O at `path`, or `None` when the
+    /// file is one image.
+    pub fn slices_of(path: &Path) -> Result<Option<Vec<Slice>>> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(fat_slices(&bytes))
     }
 
     /// Read the file at `path` as raw bytes, loaded as `spec` says, under
@@ -573,6 +594,8 @@ impl Binary {
             symbol_modes,
             entry,
             base: image.load_base(),
+            slice_offset: image.slice().map_or(0, |slice| slice.offset),
+            slice: image.slice().cloned(),
             sections,
             functions,
             data,
@@ -646,6 +669,11 @@ impl Binary {
         }
         self.forget_decoded();
         true
+    }
+
+    /// The slice of a universal Mach-O the image is, when it is one.
+    pub fn slice(&self) -> Option<&Slice> {
+        self.slice.as_ref()
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
@@ -1010,10 +1038,16 @@ impl Binary {
                 let take = usize::try_from(held - skip)
                     .unwrap_or(usize::MAX)
                     .min(rest.len());
-                let start = usize::try_from(offset.saturating_add(skip))
-                    .ok()
-                    .filter(|start| start.saturating_add(take) <= out.len())
-                    .ok_or_else(|| refuse(&format!("{vma:#x} lies beyond the end of the file")))?;
+                // A slice's offsets are the slice's; the file's start that
+                // far before.
+                let start = usize::try_from(
+                    offset
+                        .saturating_add(skip)
+                        .saturating_add(self.slice_offset),
+                )
+                .ok()
+                .filter(|start| start.saturating_add(take) <= out.len())
+                .ok_or_else(|| refuse(&format!("{vma:#x} lies beyond the end of the file")))?;
                 out[start..start + take].copy_from_slice(&rest[..take]);
                 rest = &rest[take..];
                 vma += take as u64;

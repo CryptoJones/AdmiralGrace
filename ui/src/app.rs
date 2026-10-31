@@ -553,6 +553,8 @@ pub struct App {
     /// How the program is read as raw bytes, when it is: a file with no
     /// container to say where it loads.
     pub raw: Option<ag_image::RawSpec>,
+    /// Which slice of a universal Mach-O the program is, when it is one.
+    pub slice: Option<String>,
     /// The file the next submit of the patched-program prompt writes over,
     /// once the analyst has been told it is there.
     pub confirm_write: Option<PathBuf>,
@@ -653,6 +655,7 @@ impl App {
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
             raw: None,
+            slice: None,
             confirm_write: None,
             layout_failed: None,
             options: config.options,
@@ -731,7 +734,14 @@ impl App {
             (ag_image::Layout::default(), None)
         };
         let raw = self.raw.clone();
-        let loaded = match BinaryProvider::load_with(path, self.options, &layout, raw.as_ref()) {
+        let slice = self.slice.clone();
+        let loaded = match BinaryProvider::load_with(
+            path,
+            self.options,
+            &layout,
+            raw.as_ref(),
+            slice.as_deref(),
+        ) {
             // When the layout is what the image cannot take, the program
             // is read as the loader reads it, and the analyst is told.
             Err(error) if layout != ag_image::Layout::default() => {
@@ -741,6 +751,7 @@ impl App {
                     self.options,
                     &ag_image::Layout::default(),
                     raw.as_ref(),
+                    slice.as_deref(),
                 )
             }
             loaded => loaded,
@@ -1728,6 +1739,7 @@ impl App {
                 .map(|root| root.display().to_string()),
             sha256,
             raw: self.raw.as_ref().map(raw_target_of),
+            slice: self.slice.clone(),
         };
         match self.annotations.save(path) {
             Ok(()) => {
@@ -2766,11 +2778,14 @@ impl App {
             Message::FileOpenBinary => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Binary,
-                    title: "Open a program image",
+                    title: "Open a program image: PATH [slice=ARCH]",
                     value: self
                         .binary_path
                         .as_ref()
-                        .map(|path| path.display().to_string())
+                        .map(|path| match &self.slice {
+                            Some(slice) => format!("{} slice={slice}", path.display()),
+                            None => path.display().to_string(),
+                        })
                         .unwrap_or_default(),
                 });
             }
@@ -2818,11 +2833,27 @@ impl App {
                         return self.load_project();
                     }
                     PromptKind::Binary => {
+                        // The path — spaces and all — and `slice=ARCH` after
+                        // it for a universal Mach-O.
+                        let text = prompt.value.trim();
+                        let (path, slice) = match text.rsplit_once(char::is_whitespace) {
+                            Some((head, tail)) if tail.starts_with("slice=") => (
+                                PathBuf::from(head.trim_end()),
+                                Some(tail["slice=".len()..].to_string()),
+                            ),
+                            _ => (PathBuf::from(text), None),
+                        };
+                        if slice.as_deref() == Some("") {
+                            self.notice =
+                                Some("slice= needs the slice's architecture or position".into());
+                            return Task::none();
+                        }
                         if !path.is_file() {
                             self.notice = Some(format!("{} is not a file", path.display()));
                         } else {
                             self.binary_path = Some(path);
                             self.raw = None;
+                            self.slice = slice;
                             self.corpus_root = None;
                             self.kuna_root = None;
                             return self.load_project();
@@ -2885,6 +2916,7 @@ impl App {
                         }
                         self.binary_path = Some(path);
                         self.raw = Some(spec);
+                        self.slice = None;
                         self.corpus_root = None;
                         self.kuna_root = None;
                         return self.load_project();
@@ -2924,8 +2956,11 @@ impl App {
                                             self.kuna_root = None;
                                         }
                                     }
-                                    let reread = raw != self.raw && self.binary_path.is_some();
+                                    let slice = project.target.slice.clone();
+                                    let reread = (raw != self.raw || slice != self.slice)
+                                        && self.binary_path.is_some();
                                     self.raw = raw;
+                                    self.slice = slice;
                                     self.annotations = project;
                                     self.forget_changes();
                                     self.project_path = Some(path.clone());
@@ -7438,6 +7473,107 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|n| n.starts_with("Raw bytes are")));
+    }
+
+    #[test]
+    fn a_universal_macho_opens_as_the_slice_named_and_the_project_remembers() {
+        let fat = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/sample_fat.macho");
+        let mut app = App::boot(Config::default()).0;
+
+        // Without a slice the notice names them; with one, that image opens.
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged(fat.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("x86_64, arm64")),
+            "{:?}",
+            app.notice
+        );
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged(format!(
+            "{} slice=arm64",
+            fat.display()
+        )));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.project
+                .architecture
+                .as_deref()
+                .is_some_and(|language| language.starts_with("AARCH64")),
+            "{:?} {:?}",
+            app.project.architecture,
+            app.notice
+        );
+        assert_eq!(app.slice.as_deref(), Some("arm64"));
+        let _ = app.update(Message::FileOpenBinary);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some(format!("{} slice=arm64", fat.display()).as_str())
+        );
+        let _ = app.update(Message::PromptCancel);
+
+        // Raw bytes opened after it have no slice; a path with a space in
+        // it opens as the path it is.
+        let spaced = std::env::temp_dir().join(format!(
+            "ag ui spaced {}-{:?}.elf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::copy(sample_elf(), &spaced).expect("a copy with a space in its name");
+        let _ = app.update(Message::FileOpenRaw);
+        let _ = app.update(Message::PromptChanged(format!(
+            "{} x86-64 0x1060 offset=0x1060 length=0x18c",
+            sample_elf().display()
+        )));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.slice.is_none());
+        assert!(app.raw.is_some());
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged(spaced.display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.binary_path.as_deref(),
+            Some(spaced.as_path()),
+            "{:?}",
+            app.notice
+        );
+        assert!(app.raw.is_none() && app.slice.is_none());
+        assert!(app.provider.functions().len() > 1);
+        let _ = std::fs::remove_file(&spaced);
+        let _ = app.update(Message::FileOpenBinary);
+        let _ = app.update(Message::PromptChanged(format!(
+            "{} slice=arm64",
+            fat.display()
+        )));
+        let _ = app.update(Message::PromptSubmit);
+
+        // Saved, the project says which slice; opened on the same file in a
+        // fresh workbench, it reads that slice.
+        let file = std::env::temp_dir().join(format!(
+            "ag-ui-slice-{}-{:?}.agproj",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        app.save_project_to(&file);
+        assert_eq!(app.annotations.target.slice.as_deref(), Some("arm64"));
+        let mut again = App::boot(Config::default()).0;
+        again.binary_path = Some(fat.clone());
+        let _ = again.update(Message::FileOpenProject);
+        let _ = again.update(Message::PromptChanged(file.display().to_string()));
+        let _ = again.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            again
+                .project
+                .architecture
+                .as_deref()
+                .is_some_and(|language| language.starts_with("AARCH64")),
+            "{:?}",
+            again.notice
+        );
     }
 
     #[test]
