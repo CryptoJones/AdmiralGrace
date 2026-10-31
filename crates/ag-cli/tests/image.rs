@@ -2043,7 +2043,8 @@ fn a_run_of_field_stores_reads_as_a_struct_initializer() {
     assert!(kept.contains("  *(int *)a = b;\n  *(int *)(a + 4) = 2;"), "{kept}");
     // The globals an address names stay their own stores.
     let global = image("structs.elf", &["pseudocode", "init_global"]);
-    assert!(global.contains("  here = a;\n  *(int *)0x403004 = a + 1;"), "{global}");
+    assert!(global.contains("  here = a;\n  *(int *)0x4030"), "{global}");
+    assert!(global.contains(" = a + 1;\n  *(long *)0x4030"), "{global}");
     assert!(!global.contains("struct {"), "{global}");
     // The transpiler writes the stores a compiler reads.
     let cpp = image("structs.elf", &["transpile", "init"]);
@@ -2051,10 +2052,13 @@ fn a_run_of_field_stores_reads_as_a_struct_initializer() {
     assert!(!cpp.contains("struct {"), "{cpp}");
     // The emulator stores each field: the run writes the three fields.
     let run = image_json("structs.elf", &["emulate", "init", "--arg", "0x5000", "--arg", "9"]);
-    let written = run["memory"].as_array().or_else(|| run["written"].as_array());
     assert!(
         run.to_string().contains("wrote 3 fields at 0x5000"),
         "{run}"
     );
-    let _ = written;
+    // An indexed store into a global array is an address far from its
+    // pointer, not a field: the stores stay their own.
+    let indexed = image("structs.elf", &["pseudocode", "fill_pair"]);
+    assert!(!indexed.contains("struct {"), "{indexed}");
+    assert!(indexed.contains("= 1;") && indexed.contains("= 2;"), "{indexed}");
 }

@@ -1,5 +1,5 @@
-// A struct filled field by field through a pointer, and a global filled
-// by its address.
+// A struct filled field by field through a pointer, a global filled by
+// its address, and a global array filled by index.
 //
 // Built with:
 //   gcc -O1 -fno-pic -no-pie -nostdlib -static -o structs.elf structs.c
@@ -23,8 +23,16 @@ __attribute__((noinline)) void init_global(int v) {
     here.tag = 7;
 }
 
+long pairs[8];
+
+__attribute__((noinline)) void fill_pair(long i) {
+    pairs[i] = 1;
+    pairs[i + 1] = 2;
+}
+
 void _start(void) {
     init(&here, 1);
     init_global(2);
+    fill_pair(3);
     __asm__ volatile("mov $60, %eax\n syscall");
 }

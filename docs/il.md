@@ -117,9 +117,10 @@ A run of stores through one pointer at distinct offsets — `*(int *)a = b; *(in
 *(long *)(a + 8) = 7;`, a struct filled field by field — is read as one initializer,
 `*(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 7 };`: the pointer cast to a struct
 of the fields by their offsets, assigned the values in order. Two stores at least; the pointer
-no constant, so that the globals an address names stay their own stores; no field written twice
-or over another; and no value reading memory or calling, since the initializer stores them all
-at once. `--option struct-initializers keep` leaves the stores as they are. Rust reads it as
+no constant and the offsets under 4096, so that the globals an address names, indexed or not,
+stay their own stores; no field written twice or over another; and neither the pointer nor a
+value reading memory or calling, since the initializer reads the pointer once and stores them
+all at once. `--option struct-initializers keep` leaves the stores as they are. Rust reads it as
 `*(a as *mut Struct) = Struct { at_0: b, … }` and Python as `deref_struct(a) = {"at_0": b, …}`;
 the transpiler writes the stores a compiler reads, and the emulator stores each field at its
 offset.

@@ -5040,7 +5040,27 @@ fn merge_struct_initializers(resolved: &mut Vec<Resolved>) {
             },
             other => (other.clone(), 0),
         };
-        if base.is_constant() {
+        // A struct's fields lie close to its start: an offset far from the
+        // pointer is an address — a global array indexed by a variable, whose
+        // store is its own.
+        if base.is_constant() || offset >= 4096 {
+            return None;
+        }
+        let touches_memory = |node: &AstNode| {
+            node.any(&|n| {
+                matches!(
+                    n,
+                    AstNode::Deref { .. }
+                        | AstNode::Call { .. }
+                        | AstNode::Intrinsic { .. }
+                        | AstNode::Assign { .. }
+                        | AstNode::StructInit { .. }
+                )
+            })
+        };
+        // The pointer is read once for the initializer, so it must not come
+        // from memory a field could write.
+        if touches_memory(&base) {
             return None;
         }
         let reads_memory = rhs.any(&|n| {
@@ -5082,7 +5102,8 @@ fn merge_struct_initializers(resolved: &mut Vec<Resolved>) {
             }
             // A field written twice, or one over another, ends the run.
             let overlaps = run.iter().any(|(other, other_ty, _)| {
-                offset < other + width(other_ty) && *other < offset + width(&ty)
+                offset < other.saturating_add(width(other_ty))
+                    && *other < offset.saturating_add(width(&ty))
             });
             if overlaps {
                 break;
