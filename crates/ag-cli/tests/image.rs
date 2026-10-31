@@ -1424,6 +1424,31 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
 }
 
 #[test]
+fn a_stripped_image_lists_the_functions_its_unwind_data_names() {
+    let report = image("unwind_stripped.elf", &["symbols"]);
+    assert!(report.contains("0x401000 sub_401000\n"), "{report}");
+    assert!(report.contains("0x401014 sub_401014\n"), "{report}");
+    assert!(report.contains("0x401047 sub_401047\n"), "{report}");
+    let json = image_json("unwind_stripped.elf", &["symbols"]);
+    assert_eq!(json["functions"][1]["end"], serde_json::json!(0x401047));
+    let report = image("unwind_stripped.elf", &["disasm", "sub_401014"]);
+    assert!(report.contains("sub_401014"), "{report}");
+    let report = image("unwind.exe", &["symbols"]);
+    assert!(report.contains("0x140001090 sub_140001090\n"), "{report}");
+    let report = image("unwind_stripped.macho", &["symbols"]);
+    assert!(report.contains("0x100000440 sub_100000440\n"), "{report}");
+    // A function a symbol names has its end from the same data.
+    let json = image_json("sample.elf", &["symbols"]);
+    let add = json["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .find(|function| function["name"] == "add")
+        .expect("add");
+    assert_eq!(add["end"], serde_json::json!(0x1161));
+}
+
+#[test]
 fn a_swift_image_is_described_and_its_names_demangled() {
     let report = image("sample_swift_x86", &["swift"]);
     assert!(report.contains("types: 4"), "{report}");

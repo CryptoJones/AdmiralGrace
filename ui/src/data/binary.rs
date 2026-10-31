@@ -313,7 +313,12 @@ impl Provider for BinaryProvider {
             name,
             status: "Loaded".into(),
             start: Some(address),
-            end: section.map(|section| section.vma + section.size),
+            // The unwind data knows where the function ends; failing that,
+            // its section does.
+            end: self
+                .binary
+                .function_end(address)
+                .or_else(|| section.map(|section| section.vma + section.size)),
             provenance,
             mangled: self.binary.mangled_name(address).map(str::to_string),
             summary,

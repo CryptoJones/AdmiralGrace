@@ -11,6 +11,7 @@ kuna-sleigh.workspace = true
 kuna-base.workspace = true
 kuna-num.workspace = true
 cpp_demangle.workspace = true
+gimli.workspace = true
 msvc-demangler.workspace = true
 rustc-demangle.workspace = true
 iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info", "encoder", "code_asm"] }

@@ -45,6 +45,8 @@ pub struct Image {
     mangled: std::cell::OnceCell<BTreeMap<u64, MangledName>>,
     /// The Swift metadata the image carries, read once when asked.
     swift: std::cell::OnceCell<Option<crate::swift::SwiftMetadata>>,
+    /// The functions the unwind data names, by start, read once when asked.
+    unwind: std::cell::OnceCell<BTreeMap<u64, u64>>,
 }
 
 /// A mangled name the symbol table spells, and what it demangles to.
@@ -297,6 +299,7 @@ impl Image {
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),
+            unwind: std::cell::OnceCell::new(),
         })
     }
 
@@ -368,6 +371,7 @@ impl Image {
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),
+            unwind: std::cell::OnceCell::new(),
         })
     }
 
@@ -385,6 +389,24 @@ impl Image {
         self.swift
             .get_or_init(|| self.object().and_then(|_| crate::swift::read(&self.bytes)))
             .as_ref()
+    }
+
+    /// The functions the unwind data names — `.eh_frame`, `.pdata`, a
+    /// Mach-O's `__unwind_info` — as start to end, symbols or none. Empty
+    /// for an image without any, and for a raw image.
+    pub fn unwind_functions(&self) -> &BTreeMap<u64, u64> {
+        self.unwind.get_or_init(|| {
+            if self.object().is_none() {
+                return BTreeMap::new();
+            }
+            crate::unwind::read(&self.bytes)
+        })
+    }
+
+    /// Where the function starting at `address` ends, when the unwind data
+    /// says: the address past its last byte.
+    pub fn function_end(&self, address: u64) -> Option<u64> {
+        self.unwind_functions().get(&address).copied()
     }
 
     /// The loader's reading of the container, when there is one.
@@ -592,6 +614,30 @@ impl Image {
                     .any(|(start, end)| (*start..*end).contains(&imp));
                 if in_code && !named.contains(&imp) {
                     symbols.push((imp, name));
+                }
+            }
+            symbols.sort_by_key(|(address, _)| *address);
+        }
+        // The unwind data names the start of nearly every function, symbols
+        // or none: a function it alone knows is `sub_` and its address. An
+        // ELF's procedure linkage table is covered by one entry as a whole,
+        // and is stubs, not a function.
+        let unwind = self.unwind_functions();
+        if !unwind.is_empty() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _)| *address).collect();
+            let code: Vec<(u64, u64)> = self
+                .sections()
+                .into_iter()
+                .filter(|section| section.executable && !section.name.starts_with(".plt"))
+                .map(|section| (section.vma, section.vma.saturating_add(section.size)))
+                .collect();
+            for start in unwind.keys() {
+                let in_code = code
+                    .iter()
+                    .any(|(begin, end)| (*begin..*end).contains(start));
+                if in_code && !named.contains(start) {
+                    symbols.push((*start, format!("sub_{start:x}")));
                 }
             }
             symbols.sort_by_key(|(address, _)| *address);

@@ -115,6 +115,13 @@ pseudocode, where a name stands in code, uses the scope and the name alone: `geo
 3)`. `--filter` is a regular expression, so the brackets and question marks of a signature or a
 Microsoft name want escaping: `--filter 'area\(int'`.
 
+An image's unwind data — an ELF's `.eh_frame`, a PE's `.pdata`, a Mach-O's `__unwind_info` and
+`__eh_frame` — records the start and the end of nearly every function, since an exception has
+to unwind through each frame, and a stripped binary keeps it. Every function it names is in the
+function list, under its symbol or, with none, as `sub_` and its address; `symbols --json`
+carries each function's `end` where the unwind data says, and the workbench's inspector sizes
+a function by it.
+
 A Swift Mach-O describes its types in its `__swift5_*` sections, for the runtime and for
 reflection: `ag image FILE swift` prints them — each class, struct and enum with its module,
 its superclass, its fields or cases with their types, the protocols it conforms to and, for a
@@ -193,7 +200,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
-| `symbols` | The function symbols as `address name`, and the data symbols with their size. A C++ or Rust name is shown demangled, with its signature — `geometry::area(int, int)` for `_ZN8geometry4areaEii` or `?area@geometry@@YAHHH@Z` — and `--json` carries the mangled name beside it as `mangled`; `--filter` matches either. |
+| `symbols` | The function symbols as `address name` — the functions the unwind data alone knows as `sub_<address>` — and the data symbols with their size; `--json` carries each function's `end` where the unwind data says. A C++ or Rust name is shown demangled, with its signature — `geometry::area(int, int)` for `_ZN8geometry4areaEii` or `?area@geometry@@YAHHH@Z` — and `--json` carries the mangled name beside it as `mangled`; `--filter` matches either. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
 | `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then a comment that says what decided the return type (`// returns int: main reads eax after the call`, `// void: no caller reads the result`), then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result — and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |

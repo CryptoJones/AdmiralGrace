@@ -1868,6 +1868,52 @@ fn a_slice_of_a_universal_macho_is_a_program_whose_patches_land_in_its_part_of_t
 }
 
 #[test]
+fn a_stripped_images_functions_come_from_its_unwind_data_with_their_ends() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let binary = Binary::open(&fixtures.join("unwind_stripped.elf")).expect("loads");
+    let names: Vec<(u64, &str)> = binary
+        .functions()
+        .iter()
+        .map(|function| (function.address, function.name.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (0x401000, "sub_401000"),
+            (0x401014, "sub_401014"),
+            (0x401047, "sub_401047"),
+        ]
+    );
+    assert_eq!(binary.function_end(0x401014), Some(0x401047));
+    assert!(binary.disassembly(0x401014).is_some());
+    // The ends move with the image under another base.
+    let layout = ag_image::Layout {
+        base: Some(0x1000_0000),
+        segments: Vec::new(),
+    };
+    let moved =
+        Binary::open_with_layout(&fixtures.join("unwind_stripped.elf"), &layout).expect("loads");
+    let first = moved.functions()[0].address;
+    assert!(first >= 0x1000_0000);
+    assert_eq!(moved.function_end(first), Some(first + 0x14));
+    // No function's end runs past the next function's start, whatever the
+    // records say: a linker merges neighbouring compact entries.
+    for binary in [sample(), macho(), pe()] {
+        let functions = binary.functions();
+        for pair in functions.windows(2) {
+            if let Some(end) = binary.function_end(pair[0].address) {
+                assert!(end <= pair[1].address, "{:#x} ends at {end:#x}", pair[0].address);
+            }
+        }
+    }
+    // An image whose symbols name every function gets its ends from the
+    // same data.
+    assert_eq!(sample().function_end(0x1149), Some(0x1161));
+    assert_eq!(macho().function_end(0x1_0000_0420), Some(0x1_0000_0440));
+    assert!(pe().function_end(0x1400_01020).is_some());
+}
+
+#[test]
 fn a_swift_images_functions_are_named_demangled_and_its_types_are_read() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_swift_x86");
     let binary = Binary::open(&path).expect("loads");

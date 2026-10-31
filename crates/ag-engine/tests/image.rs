@@ -737,6 +737,82 @@ fn a_swift_image_names_its_types_fields_conformances_and_vtable_methods() {
 }
 
 #[test]
+fn the_unwind_data_names_the_functions_and_their_ends() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    // An ELF's `.eh_frame`: one entry per function, the end where the next
+    // begins.
+    let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    let image = Image::open(&elf).expect("loads");
+    let unwind = image.unwind_functions();
+    assert_eq!(unwind.get(&0x1149), Some(&0x1161), "add");
+    assert_eq!(unwind.get(&0x1161), Some(&0x1198), "sum_to");
+    assert_eq!(unwind.get(&0x1198), Some(&0x11ec), "main");
+    assert_eq!(image.function_end(0x1149), Some(0x1161));
+    assert_eq!(image.function_end(0x1000), None, "_init has no entry");
+    // The procedure linkage table's one entry is not a function.
+    assert!(image
+        .function_symbols()
+        .iter()
+        .all(|(_, name)| name != "sub_1020"));
+
+    // Stripped, the three functions are known from the unwind data alone.
+    let stripped = Image::open(&fixtures.join("unwind_stripped.elf")).expect("loads");
+    let names: Vec<(u64, String)> = stripped.function_symbols();
+    assert_eq!(
+        names,
+        [
+            (0x401000, "sub_401000".to_string()),
+            (0x401014, "sub_401014".to_string()),
+            (0x401047, "sub_401047".to_string()),
+        ]
+    );
+    assert_eq!(stripped.function_end(0x401000), Some(0x401014));
+    assert_eq!(stripped.function_end(0x401014), Some(0x401047));
+    assert!(stripped
+        .function_end(0x401047)
+        .is_some_and(|end| end > 0x401047));
+
+    // A PE's `.pdata`: begin and end of each.
+    let pe = Image::open(&fixtures.join("unwind.exe")).expect("loads");
+    let unwind = pe.unwind_functions();
+    assert_eq!(unwind.get(&0x1400_01000), Some(&0x1400_01066));
+    assert_eq!(unwind.get(&0x1400_01070), Some(&0x1400_01081));
+    assert_eq!(unwind.get(&0x1400_01090), Some(&0x1400_010d4));
+    let names: Vec<String> = pe
+        .function_symbols()
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(names, ["sub_140001000", "sub_140001070", "sub_140001090"]);
+
+    // A Mach-O's `__unwind_info`: the compact index, the sentinel the end
+    // of the last function.
+    let macho = Image::open(&fixtures.join("sample.macho")).expect("loads");
+    assert_eq!(
+        macho.function_end(0x1_0000_0420),
+        Some(0x1_0000_0440),
+        "_add"
+    );
+    assert_eq!(
+        macho.function_end(0x1_0000_0440),
+        Some(0x1_0000_0497),
+        "_main"
+    );
+    let stripped = Image::open(&fixtures.join("unwind_stripped.macho")).expect("loads");
+    let names: Vec<(u64, String)> = stripped.function_symbols();
+    assert_eq!(
+        names,
+        [
+            (0x1_0000_0420, "sub_100000420".to_string()),
+            (0x1_0000_0440, "sub_100000440".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn a_category_on_a_class_of_another_image_names_the_class_unknown() {
     use ag_engine::image::Image;
     use object::{Object, ObjectSection};

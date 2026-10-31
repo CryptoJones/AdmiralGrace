@@ -18,6 +18,7 @@ pub mod register;
 pub mod structure;
 pub mod swift;
 pub mod swift_demangle;
+pub mod unwind;
 
 pub use arch::Bitness;
 pub use ast::AstNode;
