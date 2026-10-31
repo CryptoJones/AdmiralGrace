@@ -219,6 +219,18 @@ pub enum ProjectCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Say which instruction set the code from an address onward decodes
+    /// in, on an architecture with more than one: `arm`, `thumb`, or `none`
+    /// to let the image say.
+    Mode {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address the mode starts at.
+        address: String,
+        /// `arm`, `thumb` or `none`.
+        mode: String,
+    },
     /// Move the whole image to a new base address, or put it back.
     Rebase {
         /// The project file to change.
@@ -292,6 +304,24 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             force,
         } => save(&target, &out, options, force),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
+        ProjectCmd::Mode {
+            file,
+            address,
+            mode,
+        } => {
+            let mode = match mode.trim().to_ascii_lowercase().as_str() {
+                "none" => None,
+                text => Some(
+                    ag_image::ArmMode::parse(text)
+                        .with_context(|| format!("{mode:?} is not a mode: arm, thumb or none"))?
+                        .label()
+                        .to_string(),
+                ),
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_mode(mode.as_deref())
+            })
+        }
         ProjectCmd::Rebase { file, base } => rebase(&target, &file, &base),
         ProjectCmd::Segment { file, edit } => segment(&target, &file, edit),
         ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
@@ -1094,6 +1124,9 @@ fn summarize(annotation: &Annotation) -> String {
             Some(text) => parts.push(format!("patch {patch} ({text})")),
             None => parts.push(format!("patch {patch}")),
         }
+    }
+    if let Some(mode) = &annotation.mode {
+        parts.push(format!("mode {mode}"));
     }
     if parts.is_empty() {
         "(empty)".to_string()

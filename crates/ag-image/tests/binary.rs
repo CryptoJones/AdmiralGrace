@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ag_image::{Binary, Edge, EdgeKind};
+use ag_image::{Binary, Edge, EdgeKind, Instruction};
 
 /// The sample ELF the engine's own tests read.
 fn sample_path() -> PathBuf {
@@ -1627,4 +1627,82 @@ fn the_base_is_the_formats_and_a_move_is_bounded_and_the_moved_image_is_written(
             .count(),
         5
     );
+}
+
+/// The Thumb object file built from `arm_sample.c`.
+fn arm_thumb_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/arm_thumb.elf")
+}
+
+#[test]
+fn an_arm_image_decodes_in_thumb_and_arm_by_its_symbols_and_the_analysts_marks() {
+    use ag_image::ArmMode;
+
+    let binary = Binary::open(&arm_thumb_path()).expect("the ARM fixture loads");
+    assert!(
+        binary.language().starts_with("ARM:LE:32"),
+        "{}",
+        binary.language()
+    );
+    assert!(binary.is_arm());
+    assert!(binary.supports_disassembly());
+    assert!(!binary.supports_pseudocode());
+    assert_eq!(binary.bitness(), None, "the x86 width is not ARM's");
+
+    // The functions are listed at their addresses, the Thumb bit off.
+    let names: Vec<(u64, &str)> = binary
+        .functions()
+        .iter()
+        .map(|function| (function.address, function.name.as_str()))
+        .collect();
+    assert!(names.contains(&(0x2_0000, "add")), "{names:?}");
+    assert!(names.contains(&(0x2_0038, "other_mode")), "{names:?}");
+    assert_eq!(binary.mode_at(0x2_0000), Some(ArmMode::Thumb));
+    assert_eq!(binary.mode_at(0x2_0038), Some(ArmMode::Arm));
+
+    // `add` decodes as Thumb: a two-byte add and a return, spelled as
+    // SLEIGH spells them; `sum` calls it and loops.
+    let add = binary.disassembly(0x2_0000).expect("add is decoded");
+    let lines: Vec<&Instruction> = add
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    assert_eq!(lines[0].mnemonic, "add");
+    assert_eq!(lines[0].bytes.len(), 2);
+    assert_eq!(lines[1].mnemonic, "bx");
+    assert_eq!(lines[1].operands, "lr");
+    let sum = binary.disassembly(0x2_0004).expect("sum is decoded");
+    assert!(sum.blocks.len() > 1, "sum loops");
+    assert!(sum
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|line| line.mnemonic == "bl" && line.call.is_some()));
+
+    // `other_mode` is ARM in a Thumb file, and decodes four bytes at a time;
+    // marked Thumb by the analyst, the same bytes read as Thumb words.
+    let other = binary.disassembly(0x2_0038).expect("other_mode is decoded");
+    assert!(other
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .all(|line| line.bytes.len() == 4));
+    assert!(binary.set_modes(BTreeMap::from([(0x2_0038_u64, ArmMode::Thumb)])));
+    assert!(!binary.set_modes(BTreeMap::from([(0x2_0038_u64, ArmMode::Thumb)])));
+    assert_eq!(binary.mode_at(0x2_0038), Some(ArmMode::Thumb));
+    let remarked = binary.disassembly(0x2_0038).expect("decoded again");
+    assert!(remarked
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|line| line.bytes.len() == 2));
+    assert!(binary.set_modes(BTreeMap::new()));
+    assert_eq!(binary.mode_at(0x2_0038), Some(ArmMode::Arm));
+
+    // Pseudocode is refused by name, and an x86 image has no modes.
+    let refused = binary.pseudocode(0x2_0000).expect_err("not lifted");
+    assert!(refused.reason.contains("ARM"), "{}", refused.reason);
+    assert_eq!(sample().mode_at(0x1149), None);
+    assert!(!sample().set_modes(BTreeMap::from([(0x1149_u64, ArmMode::Thumb)])));
 }

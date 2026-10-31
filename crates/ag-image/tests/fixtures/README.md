@@ -8,6 +8,9 @@ The images the image tests read, and how they were made.
 | `sample.macho` | A Mach-O (x86-64) executable. |
 | `sample32.elf` | A 32-bit ELF (i386) executable, statically linked with no C library. |
 | `sample.c` | The source all of them were built from. |
+| `arm_thumb.elf` | A 32-bit ARM ELF object file whose code is Thumb, but for one function built as ARM: what the SLEIGH decoder reads in both instruction sets, and switches between. |
+| `arm_arm.elf` | The same source built as ARM throughout. |
+| `arm_sample.c` | The source of the two ARM objects. |
 
 The 64-bit ELF the tests read is in `crates/ag-engine/tests/fixtures/sample.elf`; the
 engine's own tests read it, and the image tests read it from there.
@@ -122,3 +125,14 @@ at `0x804900d`, the unnamed routine at `0x8049010`.
 ```sh
 gcc -m32 -nostdlib -static -no-pie -Wl,-e,main -o boundaries32.elf boundaries.s
 ```
+
+The ARM objects were built with clang alone — an object file needs no linker and no C
+library — so they are rebuilt anywhere clang is:
+
+```sh
+clang --target=armv7a-none-eabi -mthumb -O1 -c arm_sample.c -o arm_thumb.elf
+clang --target=armv7a-none-eabi -marm   -O1 -c arm_sample.c -o arm_arm.elf
+```
+
+The loader places an object file's `.text` at `0x20000`; a Thumb function's symbol has its
+low bit set (`add` is `0x400001`), which is how the decoder learns its mode.

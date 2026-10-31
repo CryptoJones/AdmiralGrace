@@ -115,7 +115,7 @@ Filed 2026-10-26.
 
 ### Architectures and formats
 
-- [ ] Decode 32-bit ARM and Thumb, with per-address mode switching — [#320](https://github.com/CryptoJones/AdmiralGrace/issues/320)
+- [x] Decode 32-bit ARM and Thumb, with per-address mode switching — [#320](https://github.com/CryptoJones/AdmiralGrace/issues/320)
 - [ ] Decode and lift AArch64 — [#321](https://github.com/CryptoJones/AdmiralGrace/issues/321)
 - [ ] Load a raw binary with a base address, entry point, file offset and length — [#322](https://github.com/CryptoJones/AdmiralGrace/issues/322)
 - [ ] Universal (FAT) Mach-O: list the slices and pick one — [#323](https://github.com/CryptoJones/AdmiralGrace/issues/323)

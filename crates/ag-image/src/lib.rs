@@ -42,6 +42,7 @@ use std::sync::{Arc, Mutex};
 // The trait that spells one register the way the operand text does.
 use iced_x86::Formatter as _;
 
+use ag_engine::arm::ArmVariant;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
@@ -52,6 +53,7 @@ use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Image};
 use anyhow::{Context, Result};
 
+pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
@@ -362,6 +364,12 @@ pub struct Binary {
     language: String,
     /// The width of the program, when the native decoder reads its language.
     bitness: Option<Bitness>,
+    /// Which ARM specification the image decodes under, when it is 32-bit
+    /// ARM: the x86 decoder does not read it, this does.
+    arm: Option<ArmVariant>,
+    /// The instruction set each function's address starts in, as the
+    /// image's symbols say: a Thumb function's symbol has its low bit set.
+    symbol_modes: BTreeMap<u64, ArmMode>,
     entry: Option<u64>,
     /// The address the image is loaded at, as its format states it.
     base: Option<u64>,
@@ -383,6 +391,9 @@ pub struct Binary {
     /// first: a patch. The file is not changed; the image is read as if it
     /// had been.
     patches: Mutex<BTreeMap<u64, Vec<u8>>>,
+    /// The instruction set the analyst says an address onward decodes in,
+    /// over what the symbols say.
+    modes: Mutex<BTreeMap<u64, ArmMode>>,
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
@@ -440,7 +451,30 @@ impl Binary {
         // this image is. An image of another architecture has no bitness
         // here: it is read and reported, but not decoded.
         let bitness = X86IcedContext::of_language(&language).map(|decoder| decoder.bitness());
-        let entry = image.entry();
+        // 32-bit ARM is read by the SLEIGH decoder instead. A Thumb
+        // function's symbol carries its mode in its low bit, which is not
+        // part of its address.
+        let arm = ArmVariant::of_language(&language);
+        let unbit = |address: u64| if arm.is_some() { address & !1 } else { address };
+        let symbol_modes: BTreeMap<u64, ArmMode> = if arm.is_some() {
+            image
+                .function_symbols()
+                .into_iter()
+                .map(|(address, _)| {
+                    (
+                        address & !1,
+                        if address & 1 == 1 {
+                            ArmMode::Thumb
+                        } else {
+                            ArmMode::Arm
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let entry = image.entry().map(unbit);
 
         let sections: Vec<SectionInfo> = image
             .sections()
@@ -458,9 +492,13 @@ impl Binary {
         let mut functions: Vec<Function> = image
             .function_symbols()
             .into_iter()
-            .map(|(address, name)| Function { address, name })
+            .map(|(address, name)| Function {
+                address: unbit(address),
+                name,
+            })
             .collect();
         functions.sort_by_key(|function| function.address);
+        functions.dedup_by(|a, b| a.address == b.address);
 
         // The entry point is a function of the program even when no symbol
         // names it, so it is listed under the name the loader would give it.
@@ -514,6 +552,8 @@ impl Binary {
         Binary {
             language,
             bitness,
+            arm,
+            symbol_modes,
             entry,
             base: image.load_base(),
             sections,
@@ -526,6 +566,7 @@ impl Binary {
             options: Options::default(),
             table_hints: Mutex::new(BTreeMap::new()),
             patches: Mutex::new(BTreeMap::new()),
+            modes: Mutex::new(BTreeMap::new()),
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
@@ -586,6 +627,56 @@ impl Binary {
             }
             *held = patches;
         }
+        self.forget_decoded();
+        true
+    }
+
+    /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
+    /// addresses decode in one of two instruction sets.
+    pub fn is_arm(&self) -> bool {
+        self.arm.is_some()
+    }
+
+    /// Say which instruction set each of `modes`' addresses onward decodes
+    /// in, over what the image's symbols say, and say whether that changed
+    /// anything. What was decoded before is forgotten, since any of it may
+    /// have read the bytes in the other mode. An image that is not ARM has
+    /// no modes to tell.
+    pub fn set_modes(&self, modes: BTreeMap<u64, ArmMode>) -> bool {
+        if self.arm.is_none() {
+            return false;
+        }
+        if let Ok(mut held) = self.modes.lock() {
+            if *held == modes {
+                return false;
+            }
+            *held = modes;
+        }
+        self.forget_decoded();
+        true
+    }
+
+    /// The instruction set `address` decodes in, when the image is ARM: the
+    /// analyst's mark at or before it, else the symbol's, else the image's
+    /// own default.
+    pub fn mode_at(&self, address: u64) -> Option<ArmMode> {
+        let variant = self.arm?;
+        let marked = self
+            .modes
+            .lock()
+            .ok()
+            .and_then(|held| held.range(..=address).next_back().map(|(_, mode)| *mode));
+        Some(marked.unwrap_or_else(|| {
+            self.symbol_modes
+                .range(..=address)
+                .next_back()
+                .map_or(variant.default_mode, |(_, mode)| *mode)
+        }))
+    }
+
+    /// Forget everything decoded, walked and indexed: the bytes, or the
+    /// mode they are read in, have changed under it.
+    fn forget_decoded(&self) {
         for code in &self.file {
             if let Ok(mut cache) = code.decoded.lock() {
                 *cache = None;
@@ -605,7 +696,6 @@ impl Binary {
         if let Ok(mut held) = self.graph.lock() {
             *held = None;
         }
-        true
     }
 
     /// The address the image is loaded at: what its format states — a PE's
@@ -702,6 +792,10 @@ impl Binary {
         for datum in &mut self.data {
             datum.address = shift(datum.address);
         }
+        self.symbol_modes = std::mem::take(&mut self.symbol_modes)
+            .into_iter()
+            .map(|(address, mode)| (shift(address), mode))
+            .collect();
         self.imports = std::mem::take(&mut self.imports)
             .into_iter()
             .map(|(slot, name)| (shift(slot), name))
@@ -933,7 +1027,17 @@ impl Binary {
             return decoded;
         }
         let bytes = self.patched(&code.bytes, code.section.vma);
-        let decoded = Arc::new(decode_section(&bytes, code.section.vma, code.bitness));
+        let decoded = Arc::new(match self.arm {
+            Some(variant) => {
+                // The symbols' modes, with the analyst's marks over them.
+                let mut modes = self.symbol_modes.clone();
+                if let Ok(marks) = self.modes.lock() {
+                    modes.extend(marks.iter().map(|(address, mode)| (*address, *mode)));
+                }
+                decode_arm_section(variant, &bytes, code.section.vma, &modes)
+            }
+            None => decode_section(&bytes, code.section.vma, code.bitness),
+        });
         if let Ok(mut held) = code.decoded.lock() {
             *held = Some(Arc::clone(&decoded));
         }
@@ -1357,12 +1461,14 @@ impl Binary {
             .map(|function| function.name.as_str())
     }
 
-    /// Whether the native decoder can read this image.
+    /// Whether a decoder reads this image.
     ///
-    /// The decoder is x86, 32-bit or 64-bit as the language says, so an image
-    /// of another architecture is read and reported, but not disassembled.
+    /// The native decoder is x86, 32-bit or 64-bit as the language says, and
+    /// the SLEIGH decoder reads 32-bit little-endian ARM, in ARM and Thumb;
+    /// an image of another architecture is read and reported, but not
+    /// disassembled.
     pub fn supports_disassembly(&self) -> bool {
-        self.bitness.is_some()
+        self.bitness.is_some() || self.arm.is_some()
     }
 
     /// The disassembly of the function at `address`.
@@ -2243,6 +2349,44 @@ fn decode_section(bytes: &[u8], base: u64, bitness: Bitness) -> Decoded {
         text: context.text,
         bytes: bytes.to_vec(),
         base,
+    }
+}
+
+/// Decode the bytes of an ARM section into instructions and their text, in
+/// the instruction set each address is in.
+///
+/// SLEIGH prints the text as it decodes, so the two agree by construction.
+/// The registers an instruction names are not picked out — the rename of a
+/// register does not reach ARM yet — so each line names none.
+fn decode_arm_section(
+    variant: ArmVariant,
+    bytes: &[u8],
+    base: u64,
+    modes: &BTreeMap<u64, ArmMode>,
+) -> Decoded {
+    match ag_engine::arm::decode_section(variant, bytes, base, modes) {
+        Ok(decoded) => Decoded {
+            disasm: decoded.disasm,
+            text: decoded
+                .text
+                .into_iter()
+                .map(|(address, (mnemonic, operands))| (address, (mnemonic, operands, Vec::new())))
+                .collect(),
+            bytes: bytes.to_vec(),
+            base,
+        },
+        Err(error) => {
+            eprintln!("warning: the ARM section at {base:#x} did not decode: {error:#}");
+            Decoded {
+                disasm: Disasm {
+                    file_offset_of_segment: 0,
+                    instructions: Vec::new(),
+                },
+                text: HashMap::new(),
+                bytes: bytes.to_vec(),
+                base,
+            }
+        }
     }
 }
 

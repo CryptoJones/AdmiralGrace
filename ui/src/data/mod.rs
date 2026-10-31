@@ -455,6 +455,18 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// The instruction set `address` decodes in, when the provider reads an
+    /// ARM image: `arm` or `thumb`.
+    fn mode_at(&self, _address: u64) -> Option<String> {
+        None
+    }
+
+    /// Tell the provider which instruction set each of `modes`' addresses
+    /// onward decodes in, and say whether that changed anything.
+    fn set_modes(&self, _modes: BTreeMap<u64, String>) -> bool {
+        false
+    }
+
     /// Write a copy of the program with the patches told to the provider
     /// in it to `out`, when the provider reads a program image: how many
     /// bytes were written, or why none were.

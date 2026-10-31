@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 license = "MIT"
 
@@ -22,6 +22,11 @@ regex = "1"
 # The loader and analyzer tier of the kuna decompiler (Apache-2.0, see NOTICE),
 # pinned to a commit: the crates are not published.
 kuna-analysis = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b15010ac25431b8a6374e46b3" }
+# The SLEIGH runtime of the same tree, and the two crates its types come from:
+# the ARM and Thumb decoder reads Ghidra's processor specifications through it.
+kuna-sleigh = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b15010ac25431b8a6374e46b3" }
+kuna-base = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b15010ac25431b8a6374e46b3" }
+kuna-num = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b15010ac25431b8a6374e46b3" }
 
 [profile.release]
 opt-level = 2

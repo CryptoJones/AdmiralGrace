@@ -482,6 +482,10 @@ pub struct Annotation {
     /// How the bytes at the target are classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_type: Option<String>,
+    /// The instruction set the code from the target onward decodes in, on
+    /// an architecture with more than one: `arm` or `thumb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// How the constants in the instruction's operands are shown; see
     /// [`OperandFormat`]. A reader that does not know the field shows them
     /// as the analysis printed them and misreads nothing.
@@ -527,6 +531,7 @@ impl Annotation {
             tags: Vec::new(),
             color: None,
             byte_type: None,
+            mode: None,
         }
     }
 
@@ -551,6 +556,7 @@ impl Annotation {
             tags: Vec::new(),
             color: None,
             byte_type: None,
+            mode: None,
         }
     }
 
@@ -574,6 +580,7 @@ impl Annotation {
             tags: Vec::new(),
             color: None,
             byte_type: None,
+            mode: None,
         }
     }
 
@@ -677,6 +684,12 @@ impl Annotation {
         self.byte_type = byte_type.map(ByteType::label);
     }
 
+    /// Record which instruction set the code from the target onward decodes
+    /// in — `arm` or `thumb` — or clear it with `None`.
+    pub fn set_mode(&mut self, mode: Option<&str>) {
+        self.mode = mode.map(|mode| mode.trim().to_ascii_lowercase());
+    }
+
     /// How the constants in the instruction's operands are shown, when
     /// the record says and this program reads the spelling.
     pub fn operand_format(&self) -> Option<OperandFormat> {
@@ -746,6 +759,7 @@ impl Annotation {
             && self.tags.is_empty()
             && self.color.is_none()
             && self.byte_type.is_none()
+            && self.mode.is_none()
     }
 }
 
@@ -1217,6 +1231,18 @@ impl ProjectFile {
                 let bytes = a.patch_bytes()?;
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, bytes))
+            })
+            .collect()
+    }
+
+    /// The instruction set each marked address onward decodes in, by
+    /// address, as the records spell it.
+    pub fn modes(&self) -> BTreeMap<u64, String> {
+        self.places()
+            .filter_map(|a| {
+                let mode = a.mode.clone()?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, mode))
             })
             .collect()
     }

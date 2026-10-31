@@ -382,6 +382,21 @@ impl Provider for BinaryProvider {
         self.binary.base()
     }
 
+    fn mode_at(&self, address: u64) -> Option<String> {
+        self.binary
+            .mode_at(address)
+            .map(|mode| mode.label().to_string())
+    }
+
+    fn set_modes(&self, modes: BTreeMap<u64, String>) -> bool {
+        self.binary.set_modes(
+            modes
+                .into_iter()
+                .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
+                .collect(),
+        )
+    }
+
     fn section_end(&self, address: u64) -> Option<u64> {
         self.binary
             .section_of(address)

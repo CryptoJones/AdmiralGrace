@@ -1,4 +1,5 @@
 pub mod arch;
+pub mod arm;
 pub mod asm;
 pub mod ast;
 pub mod cfg;
