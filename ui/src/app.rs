@@ -2019,10 +2019,38 @@ impl App {
             return Vec::new();
         };
         let mut names = Vec::new();
+        let keep = |name: &str, names: &mut Vec<String>| {
+            if !name.is_empty()
+                && name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !names.iter().any(|known| known == name)
+            {
+                names.push(name.to_string());
+            }
+        };
         for line in body.lines() {
-            let Some(rest) = line.trim().strip_suffix(';') else {
+            let trimmed = line.trim();
+            // Python declares nothing; the emitter notes the locals as
+            // `# locals: int i, long total`.
+            if let Some(locals) = trimmed.strip_prefix("# locals:") {
+                for local in locals.split(',') {
+                    if let Some(name) = local.split_whitespace().last() {
+                        keep(name.trim_start_matches('*'), &mut names);
+                    }
+                }
+                continue;
+            }
+            let Some(rest) = trimmed.strip_suffix(';') else {
                 continue;
             };
+            // Rust: `let mut local_14: i32;`.
+            if let Some(binding) = rest.strip_prefix("let ") {
+                let binding = binding.strip_prefix("mut ").unwrap_or(binding);
+                if let Some((name, _ty)) = binding.split_once(':') {
+                    keep(name.trim(), &mut names);
+                }
+                continue;
+            }
             // A declaration is exactly two words: a type and a name.
             // `x = 5;` is three, and its last word is a value, not a name.
             let mut words = rest.split_whitespace();
@@ -2042,17 +2070,10 @@ impl App {
                 .split('[')
                 .next()
                 .unwrap_or("");
-            if name.is_empty()
-                || !name.starts_with(|c: char| c.is_alphabetic() || c == '_')
-                || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                || !type_name.contains(char::is_alphabetic)
-                || type_name.contains('(')
-            {
+            if !type_name.contains(char::is_alphabetic) || type_name.contains('(') {
                 continue;
             }
-            if !names.contains(&name.to_string()) {
-                names.push(name.to_string());
-            }
+            keep(name, &mut names);
         }
         names
     }
@@ -10222,6 +10243,34 @@ mod tests {
         let after = app.shown_reference_labels(&app.work.references);
         assert!(after.iter().any(|label| label == "decode"), "{after:?}");
         assert!(!after.iter().any(|label| label == "add"), "{after:?}");
+    }
+
+    #[test]
+    fn the_locals_are_found_in_rust_and_python_pseudocode_too() {
+        for (language, declaration) in [
+            ("rust", "let mut local_14: i32;"),
+            ("python", "# locals: long local_10, int local_14"),
+        ] {
+            let config = Config {
+                binary: Some(sample_elf()),
+                options: ag_image::Options::from_pairs([("language", language)])
+                    .expect("a language"),
+                ..Config::default()
+            };
+            let mut app = App::boot(config).0;
+            let _ = app.update(Message::FunctionSelected(0x1161));
+            let body = app.work.pseudocode.clone().unwrap_or_default();
+            assert!(body.contains(declaration), "{language}: {body}");
+            let declared = app.declared_variables();
+            assert!(
+                declared.contains(&"local_14".to_string()),
+                "{language}: {declared:?}"
+            );
+            assert!(
+                declared.contains(&"local_10".to_string()),
+                "{language}: {declared:?}"
+            );
+        }
     }
 
     #[test]

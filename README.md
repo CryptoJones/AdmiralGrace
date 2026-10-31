@@ -164,7 +164,9 @@ cargo run --bin ag -- image ./sample.elf emulate sum_to --arg 5
 The medium level also runs: `emulate` executes a function's statements against the image's
 memory, following calls into the image, and reports what it returned and why it stopped; and
 it compiles: `transpile` writes the functions as C++, a label per block and a `goto` for every
-way out, with a `main` to run one against the program it came from.
+way out, with a `main` to run one against the program it came from. The pseudocode itself
+reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
+each language's way.
 
 See [docs/il.md](docs/il.md).
 

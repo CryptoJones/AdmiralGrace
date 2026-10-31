@@ -1913,3 +1913,44 @@ fn a_function_is_transpiled_to_c_plus_plus_with_a_harness() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("name the functions"));
 }
+
+#[test]
+fn the_pseudocode_reads_as_rust_or_python_when_asked() {
+    let rust = image(
+        "sample.elf",
+        &["pseudocode", "sum_to", "--option", "language", "rust"],
+    );
+    assert!(rust.contains("fn sum_to(a: i32) -> i64 {"), "{rust}");
+    assert!(rust.contains("let mut local_14: i32;"), "{rust}");
+    assert!(rust.contains("while local_14 <= a {"), "{rust}");
+    assert!(
+        rust.contains("local_10 = local_10 + (local_14 as i64);"),
+        "{rust}"
+    );
+    let python = image(
+        "sample.elf",
+        &["pseudocode", "sum_to", "--option", "language", "python"],
+    );
+    assert!(python.contains("def sum_to(a):"), "{python}");
+    assert!(python.starts_with("# sum_to at "), "{python}");
+    assert!(!python.contains("//"), "{python}");
+    assert!(python.contains("  while local_14 <= a:"), "{python}");
+    assert!(
+        python.contains("    local_10 = local_10 + long(local_14)"),
+        "{python}"
+    );
+    assert!(python.contains("  return local_10"), "{python}");
+    assert!(!python.contains(';'), "{python}");
+    let objc = image(
+        "sample.elf",
+        &["pseudocode", "sum_to", "--option", "language", "objc"],
+    );
+    assert!(objc.contains("long sum_to(int a)"), "{objc}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "sum_to", "--option", "language", "cobol"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

@@ -1658,13 +1658,18 @@ fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
     }
 
     let name = report.name.as_deref().unwrap_or("entry");
+    // The header is a comment in the pseudocode's own language.
+    let comment = match image.options().language.name() {
+        "python" => "#",
+        _ => "//",
+    };
     match &report.reason {
         Some(reason) => {
-            println!("// {name} at {address:#x}: {reason}");
+            println!("{comment} {name} at {address:#x}: {reason}");
             Ok(1)
         }
         None => {
-            println!("// {name} at {address:#x}");
+            println!("{comment} {name} at {address:#x}");
             for line in &report.lines {
                 println!("{}", line.text);
             }

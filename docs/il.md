@@ -77,6 +77,21 @@ answer the same; in Rust, `Binary::emulate(address, args, limits)` runs
 the width and signedness their C type gives them; a comparison is a byte that is 1 or 0. A
 plugin's rewriter has already had the graph, as has an architecture that lifts its own.
 
+## The pseudocode's language
+
+The pseudocode reads as C unless the `language` option says otherwise — `--option language rust`,
+`objc` or `python`, on the command line of `ag image pseudocode`, the MCP server and the
+workbench: the same lift, spelled each language's way. Rust writes `fn sum_to(a: i32) -> i64 {`,
+declares a local as `let mut local_14: i32;`, casts with `x as i64`, turns a `switch` into a
+`match`, a `while (1)` into `loop` and a `do`/`while` into a `loop` that breaks, and a `goto`
+out of a loop into `break`; Objective-C is C with `YES` and `NO`; Python writes `def sum_to(a):`,
+blocks by indentation with `elif` and `while True:`, `and`/`or`, `True`, `x if c else y`,
+`deref_int(p)` for a load through a pointer, and the locals as a `# locals:` comment in place
+of declarations. It is pseudocode in each language, not a program: `long(x)` and
+`unsigned_int(x)` are the widths C would wrap to, `deref_T` and `addr` stand for loads and
+addresses the language has no spelling for, and `/` and `>>` keep C's meaning. The levels
+and the transpiler keep C, which a compiler reads. `docs/options.md` has the option.
+
 ## Transpiling to C++
 
 The medium level compiles. `ag image X transpile FUNCTION… [--all] [--no-follow] [--harness
