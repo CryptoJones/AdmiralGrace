@@ -19,6 +19,9 @@ pub struct External {
     pub name: String,
     /// Why there is no body, when the function is the image's own.
     pub reason: Option<String>,
+    /// The function's own signature, when its lift is known and it is
+    /// declared rather than defined.
+    pub signature: Option<String>,
 }
 
 /// A global the program defines: a datum the lift names, with the bytes
@@ -43,16 +46,9 @@ pub struct Program<'a> {
     pub harness: Option<&'a Stages>,
 }
 
-/// The names the C library declares in the headers the program includes,
-/// which are not declared again.
-const LIBRARY: &[&str] = &[
-    "printf", "puts", "putchar", "fprintf", "sprintf", "snprintf", "scanf", "sscanf", "getchar",
-    "fgets", "fputs", "fopen", "fclose", "fread", "fwrite", "fflush", "malloc", "calloc",
-    "realloc", "free", "exit", "abort", "atoi", "atol", "strtol", "strtoll", "strtoul", "rand",
-    "srand", "qsort", "memset", "memcpy", "memmove", "memcmp", "strlen", "strcmp", "strncmp",
-    "strcpy", "strncpy", "strcat", "strchr", "strstr", "strdup", "abs", "labs", "getenv", "system",
-    "time",
-];
+/// The functions the program declares exactly for its own use — the
+/// harness's and the refusals' — and so does not declare again as calls.
+const OWN: &[&str] = &["printf", "strtoll", "abort"];
 
 /// The program as C++.
 pub fn program(program: &Program) -> String {
@@ -60,9 +56,12 @@ pub fn program(program: &Program) -> String {
     out.push_str(
         "// Lifted by AdmiralGrace: the medium level of each function, a label per block.\n",
     );
-    out.push_str(
-        "#include <cstdint>\n#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n\n",
-    );
+    out.push_str("#include <cstdint>\n\n");
+    out.push_str("// What the program itself calls, declared exactly; no header is included,\n");
+    out.push_str("// so a function of the image may bear any name the C library has.\n");
+    out.push_str("extern \"C\" int printf(const char *, ...);\n");
+    out.push_str("extern \"C\" long long strtoll(const char *, char **, int);\n");
+    out.push_str("extern \"C\" void abort(void);\n\n");
     out.push_str("// A compare or test kept as a statement does nothing by itself.\n");
     out.push_str("template <class A, class B> static inline void __cmp(A, B) {}\n");
     out.push_str("template <class A, class B> static inline void __test(A, B) {}\n\n");
@@ -80,7 +79,7 @@ pub fn program(program: &Program) -> String {
         .collect();
     let mut declared = false;
     for external in &program.externals {
-        if defined.contains(external.name.as_str()) || LIBRARY.contains(&external.name.as_str()) {
+        if defined.contains(external.name.as_str()) || OWN.contains(&external.name.as_str()) {
             continue;
         }
         if !declared {
@@ -90,10 +89,13 @@ pub fn program(program: &Program) -> String {
         if let Some(reason) = &external.reason {
             out.push_str(&format!("// {}: {reason}\n", external.name));
         }
-        out.push_str(&format!(
-            "extern \"C\" long {}(...);\n",
-            identifier(&external.name)
-        ));
+        match &external.signature {
+            Some(signature) => out.push_str(&format!("{signature};\n")),
+            None => out.push_str(&format!(
+                "extern \"C\" long {}(...);\n",
+                identifier(&external.name)
+            )),
+        }
     }
     if declared {
         out.push('\n');
@@ -142,12 +144,8 @@ pub fn function(stages: &Stages) -> String {
         out.push_str(&format!("block_{:x}:\n", node.address));
         let mut returned = false;
         for statement in &node.statements {
-            let text = crate::emit::emit_node(&statement.node)
-                .trim_end()
-                .trim_end_matches(';')
-                .to_string();
             returned = matches!(statement.node, AstNode::Return { .. });
-            out.push_str(&format!("  {text};\n"));
+            out.push_str(&format!("  {};\n", statement_text(&statement.node)));
         }
         match &node.terminator {
             Terminator::Return => {
@@ -165,10 +163,7 @@ pub fn function(stages: &Stages) -> String {
             Terminator::Branch {
                 cond, taken, next, ..
             } => {
-                let cond = crate::emit::emit_node(cond)
-                    .trim_end()
-                    .trim_end_matches(';')
-                    .to_string();
+                let cond = text_of(cond);
                 out.push_str(&format!(
                     "  if ({cond}) goto {}; else goto {};\n",
                     label(stages, *taken),
@@ -176,10 +171,7 @@ pub fn function(stages: &Stages) -> String {
                 ));
             }
             Terminator::Switch { index, cases, .. } => {
-                let index = crate::emit::emit_node(index)
-                    .trim_end()
-                    .trim_end_matches(';')
-                    .to_string();
+                let index = text_of(index);
                 out.push_str(&format!("  switch ({index}) {{\n"));
                 for (values, target) in cases {
                     for value in values {
@@ -193,6 +185,95 @@ pub fn function(stages: &Stages) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+/// An expression as C a compiler reads, its names as identifiers.
+fn text_of(node: &AstNode) -> String {
+    crate::emit::emit_node_c(&renamed(node))
+        .trim_end()
+        .trim_end_matches(';')
+        .to_string()
+}
+
+/// A statement as C a compiler reads. An assignment of a function, an
+/// address or a string to an integer variable converts it, as the machine
+/// did by holding it in a register.
+fn statement_text(node: &AstNode) -> String {
+    if let AstNode::Assign { lhs, rhs } = node {
+        let converts = match rhs.as_ref() {
+            AstNode::FunctionName { .. }
+            | AstNode::AddressOf { .. }
+            | AstNode::StringLiteral { .. } => true,
+            AstNode::Cast { target, .. } => matches!(
+                target.as_ref(),
+                AstNode::FunctionName { .. }
+                    | AstNode::AddressOf { .. }
+                    | AstNode::StringLiteral { .. }
+            ),
+            _ => false,
+        };
+        if converts {
+            let left = text_of(lhs);
+            return format!("{left} = (decltype({left}))({})", text_of(rhs));
+        }
+    }
+    text_of(node)
+}
+
+/// The expression with every variable and function name spelled as the
+/// identifier the program declares it by.
+fn renamed(node: &AstNode) -> AstNode {
+    match node {
+        AstNode::Var { name } => AstNode::var(identifier(name)),
+        AstNode::FunctionName { name, address } => AstNode::FunctionName {
+            name: identifier(name),
+            address: *address,
+        },
+        AstNode::Assign { lhs, rhs } => AstNode::Assign {
+            lhs: Box::new(renamed(lhs)),
+            rhs: Box::new(renamed(rhs)),
+        },
+        AstNode::Binary { lhs, op, rhs } => AstNode::Binary {
+            lhs: Box::new(renamed(lhs)),
+            op: *op,
+            rhs: Box::new(renamed(rhs)),
+        },
+        AstNode::Deref { target } => AstNode::Deref {
+            target: Box::new(renamed(target)),
+        },
+        AstNode::AddressOf { target } => AstNode::AddressOf {
+            target: Box::new(renamed(target)),
+        },
+        AstNode::Cast { ty, target } => AstNode::Cast {
+            ty: ty.clone(),
+            target: Box::new(renamed(target)),
+        },
+        AstNode::Call { callee, args } => AstNode::Call {
+            callee: Box::new(renamed(callee)),
+            args: args.iter().map(renamed).collect(),
+        },
+        AstNode::Intrinsic { name, args } => AstNode::Intrinsic {
+            name: name.clone(),
+            args: args.iter().map(renamed).collect(),
+        },
+        AstNode::Return { value } => AstNode::Return {
+            value: value.as_ref().map(|value| Box::new(renamed(value))),
+        },
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => AstNode::Ternary {
+            cond: Box::new(renamed(cond)),
+            then: Box::new(renamed(then)),
+            otherwise: Box::new(renamed(otherwise)),
+        },
+        AstNode::ConstantCondition { holds, compared } => AstNode::ConstantCondition {
+            holds: *holds,
+            compared: Box::new(renamed(compared)),
+        },
+        other => other.clone(),
+    }
 }
 
 /// The function's signature: its return type, its name and its typed
@@ -253,11 +334,99 @@ pub fn identifier(name: &str) -> String {
         })
         .collect();
     const KEYWORDS: &[&str] = &[
-        "auto", "bool", "break", "case", "char", "class", "const", "continue", "default", "delete",
-        "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "int", "long",
-        "new", "operator", "private", "public", "register", "return", "short", "signed", "sizeof",
-        "static", "struct", "switch", "template", "this", "typedef", "union", "unsigned", "using",
-        "virtual", "void", "volatile", "while", "main",
+        "alignas",
+        "alignof",
+        "and",
+        "and_eq",
+        "asm",
+        "auto",
+        "bitand",
+        "bitor",
+        "bool",
+        "break",
+        "case",
+        "catch",
+        "char",
+        "char8_t",
+        "char16_t",
+        "char32_t",
+        "class",
+        "compl",
+        "concept",
+        "const",
+        "consteval",
+        "constexpr",
+        "constinit",
+        "const_cast",
+        "continue",
+        "co_await",
+        "co_return",
+        "co_yield",
+        "decltype",
+        "default",
+        "delete",
+        "do",
+        "double",
+        "dynamic_cast",
+        "else",
+        "enum",
+        "explicit",
+        "export",
+        "extern",
+        "false",
+        "float",
+        "for",
+        "friend",
+        "goto",
+        "if",
+        "inline",
+        "int",
+        "long",
+        "mutable",
+        "namespace",
+        "new",
+        "noexcept",
+        "not",
+        "not_eq",
+        "nullptr",
+        "operator",
+        "or",
+        "or_eq",
+        "private",
+        "protected",
+        "public",
+        "register",
+        "reinterpret_cast",
+        "requires",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "static_assert",
+        "static_cast",
+        "struct",
+        "switch",
+        "template",
+        "this",
+        "thread_local",
+        "throw",
+        "true",
+        "try",
+        "typedef",
+        "typeid",
+        "typename",
+        "union",
+        "unsigned",
+        "using",
+        "virtual",
+        "void",
+        "volatile",
+        "wchar_t",
+        "while",
+        "xor",
+        "xor_eq",
+        "main",
     ];
     if out.is_empty()
         || out.starts_with(|c: char| c.is_ascii_digit())
@@ -467,10 +636,17 @@ mod tests {
                 External {
                     name: "printf".to_string(),
                     reason: None,
+                    signature: None,
                 },
                 External {
                     name: "mystery".to_string(),
                     reason: Some("not lifted yet: the block ends in hlt".to_string()),
+                    signature: None,
+                },
+                External {
+                    name: "helper".to_string(),
+                    reason: None,
+                    signature: Some("int helper(int a)".to_string()),
                 },
             ],
             globals: vec![
@@ -488,6 +664,15 @@ mod tests {
             harness: Some(&stages()),
         });
         assert!(program.contains("#include <cstdint>"), "{program}");
+        assert!(
+            !program.contains("#include <cstdio>"),
+            "no header: {program}"
+        );
+        assert!(
+            program.contains("extern \"C\" int printf(const char *, ...);"),
+            "{program}"
+        );
+        assert!(program.contains("int helper(int a);"), "{program}");
         assert!(
             program.contains("static int32_t counter = (int32_t)0x7; // at 0x4010"),
             "{program}"
@@ -516,6 +701,33 @@ mod tests {
         assert_eq!(identifier("completed.0"), "completed_0");
         assert_eq!(identifier("main"), "_main");
         assert_eq!(identifier("9lives"), "_9lives");
+        assert_eq!(identifier("this"), "_this");
+        // A use is spelled as its declaration is, and a function held as a
+        // value converts to the integer it is held in.
+        let global = AstNode::Assign {
+            lhs: Box::new(AstNode::var("rax")),
+            rhs: Box::new(AstNode::AddressOf {
+                target: Box::new(AstNode::var("completed.0")),
+            }),
+        };
+        assert_eq!(
+            statement_text(&global),
+            "rax = (decltype(rax))(&completed_0)"
+        );
+        let function = AstNode::Assign {
+            lhs: Box::new(AstNode::var("rax")),
+            rhs: Box::new(AstNode::FunctionName {
+                name: "main".to_string(),
+                address: 0x1198,
+            }),
+        };
+        assert_eq!(statement_text(&function), "rax = (decltype(rax))(_main)");
+        let test = AstNode::binary(
+            AstNode::var("completed.0"),
+            BinaryOp::NotEqual,
+            AstNode::constant(0, 1),
+        );
+        assert_eq!(text_of(&test), "completed_0 != 0");
     }
 
     #[test]

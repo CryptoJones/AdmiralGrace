@@ -59,7 +59,10 @@ fn the_functions_are_written_as_c_plus_plus_with_their_callees_and_globals() {
     // Not followed: the callees are declared, not defined.
     let alone = image.transpile(&[main], false, None).expect("main lifts");
     assert!(!alone.contains("block_1161:"), "{alone}");
-    assert!(alone.contains("extern \"C\" long sum_to(...);"), "{alone}");
+    assert!(
+        alone.contains("long sum_to(int a);"),
+        "declared with its own signature: {alone}"
+    );
     assert!(image
         .transpile(&[address_of(&image, "_start")], true, None)
         .is_err());

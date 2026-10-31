@@ -80,6 +80,9 @@ struct Style {
     indent: String,
     constants: ConstantStyle,
     constant_conditions: ConstantConditions,
+    /// Whether a call of the Objective-C dispatcher reads as a message
+    /// send; off for text a C++ compiler is to read.
+    message_sends: bool,
 }
 
 impl Style {
@@ -88,6 +91,7 @@ impl Style {
             indent: " ".repeat(usize::from(options.indent)),
             constants: options.constant_style,
             constant_conditions: options.constant_conditions,
+            message_sends: true,
         }
     }
 }
@@ -411,6 +415,19 @@ pub fn emit_node(n: &AstNode) -> String {
     s
 }
 
+/// A node as C a compiler reads: as [`emit_node`], with a call of the
+/// Objective-C dispatcher left as the call it is.
+pub fn emit_node_c(n: &AstNode) -> String {
+    let mut s = String::new();
+    let style = Style {
+        message_sends: false,
+        ..Style::default()
+    };
+    emit_into(n, &mut s, 0, &style);
+    let _ = writeln!(s);
+    s
+}
+
 fn emit_into(n: &AstNode, out: &mut String, ind: usize, style: &Style) {
     let pad = |o: &mut String, i: usize| {
         for _ in 0..i {
@@ -557,7 +574,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
         AstNode::Call { callee, args } => {
             // A call of the Objective-C runtime's dispatcher with the
             // selector known reads as the message it sends.
-            if let Some(send) = message_send(callee, args, style) {
+            if let Some(send) = message_send(callee, args, style).filter(|_| style.message_sends) {
                 out.push_str(&send);
             } else {
                 expr(callee, out, true, style);
