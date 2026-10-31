@@ -164,10 +164,12 @@ See [docs/il.md](docs/il.md).
 
 ## Plugins
 
-A loader, an architecture or a tool is added without forking: in Rust, against the traits
-of `ag_engine::plugin` and `ag_image::plugin`; or in any language, as a command declared in
-a JSON manifest in a plugin directory (`AG_PLUGINS`, or `~/.config/ag/plugins`) that `ag`
-finds as it starts. `ag plugins` lists what is registered; `ag tool` runs a plugin's tool.
+A loader, an architecture, a tool or a rewriter — which changes a function's medium-level
+graph as it is lifted, for work such as control-flow unflattening — is added without
+forking: in Rust, against the traits of `ag_engine::plugin` and `ag_image::plugin`; or in any
+language, as a command declared in a JSON manifest in a plugin directory (`AG_PLUGINS`, or
+`~/.config/ag/plugins`) that `ag` finds as it starts. `ag plugins` lists what is registered;
+`ag tool` runs a plugin's tool.
 
 ```bash
 cargo run --bin ag -- plugins

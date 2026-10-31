@@ -18,8 +18,8 @@ use ag_engine::plugin::ExternalTool;
 // on the image alone has the whole of it.
 pub use ag_engine::plugin::{
     architecture_for, architectures, loader_for, loaders, manifest_dirs, read_manifest,
-    register_architecture, register_loader, Architecture, DecodedSection, LoadedImage, Loader,
-    Manifest,
+    register_architecture, register_loader, register_rewriter, rewriters, Architecture,
+    DecodedSection, ExternalRewriter, LoadedImage, Loader, Manifest, Rewrite, Rewriter,
 };
 
 use crate::Binary;

@@ -153,6 +153,97 @@ fn the_plugins_are_listed_from_their_manifest_and_a_bad_manifest_is_reported() {
 }
 
 #[test]
+fn a_manifests_rewriter_cuts_the_loop_out_of_sum_to_and_is_listed() {
+    if !has_python() {
+        eprintln!("python3 is not on this machine: the rewriter is not run");
+        return;
+    }
+    let dir = Dir::new("rewrite");
+    std::fs::write(
+        dir.0.join("cut.py"),
+        r#"
+import json, sys
+graph = json.load(sys.stdin)
+if graph["name"] != "sum_to":
+    json.dump({}, sys.stdout)
+    sys.exit(0)
+returning = next(b["id"] for b in graph["blocks"] if b["terminator"]["kind"] == "return")
+step = next(b["id"] for b in graph["blocks"] if any("+" in s["text"] for s in b["statements"]))
+json.dump({"edits": [
+    {"op": "copy", "from": step, "statement": 0, "to": returning, "at": 0},
+    {"op": "goto", "block": graph["entry"], "target": returning},
+    {"op": "prune"},
+]}, sys.stdout)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.0.join("cut.json"),
+        serde_json::json!({
+            "name": "cut",
+            "rewriters": [{ "name": "cut-loop", "command": ["python3", dir.0.join("cut.py")] }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let sample =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["il", "sum_to", "--level", "high"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("for ("), "{stdout}");
+    assert!(stdout.contains("local_10 + (long)local_14"), "{stdout}");
+    assert!(stdout.contains("return local_10"), "{stdout}");
+    // Another function is left as it was; the pseudocode follows too.
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["pseudocode", "main"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("sum_to("));
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["pseudocode", "sum_to"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("for ("));
+    // Listed with the rest.
+    let output = ag(&dir.0).arg("plugins").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("rewriters: cut-loop"), "{stdout}");
+    let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["rewriters"][0], "cut-loop");
+    assert_eq!(report["manifests"][0]["rewriters"][0], "cut-loop");
+    // A rewriter that answers badly refuses the function, by name.
+    std::fs::write(
+        dir.0.join("bad.json"),
+        r#"{ "name": "bad", "rewriters": [{ "name": "garbler", "command": ["sh", "-c", "cat >/dev/null; echo '{\"edits\": [{\"op\": \"goto\", \"block\": 0, \"target\": 99}]}'"] }] }"#,
+    )
+    .unwrap();
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["il", "main", "--level", "medium"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("the rewriter garbler") && stdout.contains("no block 99"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn a_loader_that_fails_hands_the_file_on_and_a_slow_tool_is_ended() {
     let dir = Dir::new("fallback");
     // A loader claiming every ELF, and failing; a tool that never answers

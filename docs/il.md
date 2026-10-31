@@ -26,7 +26,9 @@ item's `addresses` are the machine addresses it came from; `correspondence(a, b)
 engine, and the `addresses` in the JSON, map an item of one level onto the items of another
 that share an address. A function the lifter refuses — 32-bit code, an instruction it does
 not read — has no level; a thunk has its instructions at the lifted level and nothing at the
-others.
+others. A plugin's rewriter (`docs/plugins.md`) changes the medium level before it is
+structured, so the medium and high levels and the pseudocode show what it left, while the
+lifted and low levels stay the machine's and the lifter's.
 
 ## SSA form
 

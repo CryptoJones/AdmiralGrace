@@ -689,6 +689,18 @@ fn lift_inner(
     };
     lifter.decide_return(entry, &lifted)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
+    // The plugins' rewriters have the graph before it is structured; one
+    // that changed it has it analyzed again.
+    let (nodes, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
+    let analysis = if rewritten {
+        let successors: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|node| node.terminator.successors())
+            .collect();
+        structure::analyze(&successors, 0, |node| nodes[node].address)?
+    } else {
+        analysis
+    };
     let medium = if keep { nodes.clone() } else { Vec::new() };
     let body = structure::structure(&nodes, &analysis, 0, options);
     let high = if keep { body.clone() } else { Vec::new() };
