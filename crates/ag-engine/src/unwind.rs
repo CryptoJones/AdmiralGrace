@@ -11,7 +11,11 @@
 //! at run time, so it is what names the functions no symbol does, and what
 //! says where each one ends.
 //!
-//! Every count and every chain is bounded against a crafted file.
+//! Every count and every chain is bounded against a crafted file. The ends
+//! are what the records say; a linker merges neighbouring compact entries
+//! that unwind alike, and a chained PE entry may describe code moved away
+//! from its function, so the image caps each end at the next function's
+//! start before it shows one.
 
 use std::collections::BTreeMap;
 
@@ -32,7 +36,8 @@ pub fn read(bytes: &[u8]) -> BTreeMap<u64, u64> {
     let Ok(file) = object::File::parse(bytes) else {
         return functions;
     };
-    if !file.is_little_endian() {
+    // A relocatable object's addresses are the loader's to place.
+    if !file.is_little_endian() || file.kind() == object::ObjectKind::Relocatable {
         return functions;
     }
     match file.format() {
@@ -107,9 +112,16 @@ fn eh_frame(file: &object::File, name: &str, functions: &mut BTreeMap<u64, u64>)
     }
 }
 
-/// The `RUNTIME_FUNCTION`s of a PE's `.pdata`: begin and end as RVAs, and
-/// the unwind info, whose chain leads a split function back to its start.
+/// The `RUNTIME_FUNCTION`s of an x86-64 PE's `.pdata`: begin and end as
+/// RVAs, and the unwind info, whose chain leads a split function back to
+/// its start. A chained piece stretches its function only where it follows
+/// on from it; a piece moved elsewhere — cold code, a profile's doing —
+/// is left to the next function's start. (An ARM64 PE packs its table
+/// differently, and is not read.)
 fn pdata(file: &object::File, functions: &mut BTreeMap<u64, u64>) {
+    if file.architecture() != object::Architecture::X86_64 {
+        return;
+    }
     let Some(section) = file.section_by_name(".pdata") else {
         return;
     };
@@ -128,25 +140,32 @@ fn pdata(file: &object::File, functions: &mut BTreeMap<u64, u64>) {
             let Ok(data) = section.data() else {
                 continue;
             };
-            if address >= start && address.wrapping_sub(start) as usize + len <= data.len() {
-                let offset = address.wrapping_sub(start) as usize;
-                return data.get(offset..offset + len);
+            if address < start {
+                continue;
+            }
+            let offset = usize::try_from(address - start).ok()?;
+            let stop = offset.checked_add(len)?;
+            if stop <= data.len() {
+                return data.get(offset..stop);
             }
         }
         None
     };
+    // The primaries first, then the chained pieces against them.
+    let mut pieces: Vec<(u64, u64, u64)> = Vec::new();
     for index in 0..(data.len() / 12).min(MOST_FUNCTIONS) {
         let entry = index * 12;
-        let (Some(mut begin), Some(end), Some(mut info)) = (
+        let (Some(piece_begin), Some(end), Some(mut info)) = (
             read_u32(data, entry),
             read_u32(data, entry + 4),
             read_u32(data, entry + 8),
         ) else {
             break;
         };
-        if begin == 0 && end == 0 {
+        if piece_begin == 0 && end == 0 {
             continue;
         }
+        let mut begin = piece_begin;
         let end = base.wrapping_add(u64::from(end));
         // A chained entry describes a piece of a function whose start is
         // the primary entry's, reached through the unwind info's flags.
@@ -171,7 +190,24 @@ fn pdata(file: &object::File, functions: &mut BTreeMap<u64, u64>) {
             begin = primary_begin;
             info = primary_info;
         }
-        note(functions, base.wrapping_add(u64::from(begin)), end);
+        if begin == piece_begin {
+            note(functions, base.wrapping_add(u64::from(begin)), end);
+        } else {
+            pieces.push((
+                base.wrapping_add(u64::from(begin)),
+                base.wrapping_add(u64::from(piece_begin)),
+                end,
+            ));
+        }
+    }
+    pieces.sort_unstable_by_key(|(_, begin, _)| *begin);
+    for (primary, begin, end) in pieces {
+        match functions.get_mut(&primary) {
+            // A piece that follows straight on stretches its function.
+            Some(known) if begin <= *known && end > *known => *known = end,
+            Some(_) => {}
+            None => note(functions, primary, end),
+        }
     }
 }
 

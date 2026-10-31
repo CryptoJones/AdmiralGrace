@@ -1896,6 +1896,16 @@ fn a_stripped_images_functions_come_from_its_unwind_data_with_their_ends() {
     let first = moved.functions()[0].address;
     assert!(first >= 0x1000_0000);
     assert_eq!(moved.function_end(first), Some(first + 0x14));
+    // No function's end runs past the next function's start, whatever the
+    // records say: a linker merges neighbouring compact entries.
+    for binary in [sample(), macho(), pe()] {
+        let functions = binary.functions();
+        for pair in functions.windows(2) {
+            if let Some(end) = binary.function_end(pair[0].address) {
+                assert!(end <= pair[1].address, "{:#x} ends at {end:#x}", pair[0].address);
+            }
+        }
+    }
     // An image whose symbols name every function gets its ends from the
     // same data.
     assert_eq!(sample().function_end(0x1149), Some(0x1161));

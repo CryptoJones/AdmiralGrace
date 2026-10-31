@@ -556,11 +556,25 @@ impl Binary {
         functions.sort_by_key(|function| function.address);
         functions.dedup_by(|a, b| a.address == b.address);
 
-        // The unwind data says where a function ends, symbols or none.
+        // The unwind data says where a function ends, symbols or none —
+        // capped at the next function's start, since a linker merges the
+        // compact entries of neighbours that unwind alike, and a chained
+        // entry may reach code moved away from its function.
         let function_ends: BTreeMap<u64, u64> = image
             .unwind_functions()
             .iter()
-            .map(|(start, end)| (unbit(*start), *end))
+            .map(|(start, end)| {
+                let start = unbit(*start);
+                let next = functions
+                    .iter()
+                    .map(|function| function.address)
+                    .find(|address| *address > start);
+                let end = match next {
+                    Some(next) => (*end).min(next),
+                    None => *end,
+                };
+                (start, end)
+            })
             .collect();
 
         // A C++ or Rust symbol is shown as the name the source spelled; the
