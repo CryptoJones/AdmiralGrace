@@ -536,6 +536,11 @@ fn collect_names(node: &AstNode, names: &mut Vec<String>) {
             collect_names(then, names);
             collect_names(otherwise, names);
         }
+        AstNode::StructInit { fields } => {
+            for field in fields {
+                collect_names(&field.value, names);
+            }
+        }
         AstNode::Label { .. }
         | AstNode::Goto { .. }
         | AstNode::Constant { .. }

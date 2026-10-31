@@ -94,6 +94,13 @@ pub enum AstNode {
     StringLiteral {
         text: String,
     },
+    /// A struct initializer: the fields a run of stores through one pointer
+    /// wrote, each with its type and its offset from the pointer, in offset
+    /// order. Assigned to the pointer cast to the struct's type —
+    /// `*(struct { int at_0; long at_8; } *)p = { 1, 2 };`.
+    StructInit {
+        fields: Vec<StructField>,
+    },
     ConditionTrue,
     ConditionFalse,
     /// A condition that is the constant `holds`, and the comparison it
@@ -162,6 +169,7 @@ impl AstNode {
             }
             Self::Call { callee, args } => callee.any(pred) || args.iter().any(|a| a.any(pred)),
             Self::Intrinsic { args, .. } => args.iter().any(|a| a.any(pred)),
+            Self::StructInit { fields } => fields.iter().any(|f| f.value.any(pred)),
             Self::Return { value } => value.as_deref().is_some_and(|v| v.any(pred)),
             Self::If {
                 cond,
@@ -211,6 +219,7 @@ impl AstNode {
                 callee.reads_var(name) || args.iter().any(|a| a.reads_var(name))
             }
             Self::Intrinsic { args, .. } => args.iter().any(|a| a.reads_var(name)),
+            Self::StructInit { fields } => fields.iter().any(|f| f.value.reads_var(name)),
             Self::Return { value } => value.as_deref().is_some_and(|v| v.reads_var(name)),
             Self::If { cond, .. } | Self::IfGoto { cond, .. } => cond.reads_var(name),
             Self::Loop { cond, body, .. } => {
@@ -328,6 +337,16 @@ impl AstNode {
                 callee: sub(callee),
                 args: args.into_iter().map(|a| a.replace(target, with)).collect(),
             },
+            Self::StructInit { fields } => Self::StructInit {
+                fields: fields
+                    .into_iter()
+                    .map(|f| StructField {
+                        ty: f.ty,
+                        offset: f.offset,
+                        value: f.value.replace(target, with),
+                    })
+                    .collect(),
+            },
             Self::Return { value } => Self::Return {
                 value: value.map(sub),
             },
@@ -373,6 +392,16 @@ impl AstNode {
                 callee: sub(callee),
                 args: args.into_iter().map(|a| a.substitute(name, with)).collect(),
             },
+            Self::StructInit { fields } => Self::StructInit {
+                fields: fields
+                    .into_iter()
+                    .map(|f| StructField {
+                        ty: f.ty,
+                        offset: f.offset,
+                        value: f.value.substitute(name, with),
+                    })
+                    .collect(),
+            },
             Self::Return { value } => Self::Return {
                 value: value.map(sub),
             },
@@ -387,6 +416,22 @@ impl AstNode {
             },
             other => other,
         }
+    }
+}
+
+/// One field of a [`AstNode::StructInit`]: its C type, its offset in bytes
+/// from the struct's start, and the value stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField {
+    pub ty: String,
+    pub offset: u64,
+    pub value: AstNode,
+}
+
+impl StructField {
+    /// The field's name: `at_` and its offset.
+    pub fn name(&self) -> String {
+        format!("at_{}", self.offset)
     }
 }
 

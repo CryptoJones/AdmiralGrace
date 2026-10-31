@@ -163,14 +163,14 @@ use std::fmt;
 use iced_x86::Mnemonic;
 
 use crate::arch::Bitness;
-use crate::ast::{AstNode, BinaryOp};
+use crate::ast::{AstNode, BinaryOp, StructField};
 use crate::cfg::{JumpTable, ProcedureCfg};
 use crate::cfgwalk::{resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
     Builtins, DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads,
-    ReturnLiveness, SlotNames, TailCalls, UnsignedCompare,
+    ReturnLiveness, SlotNames, StructInitializers, TailCalls, UnsignedCompare,
 };
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
@@ -4888,6 +4888,9 @@ impl Lifter<'_> {
         if self.options.builtins == Builtins::Recognize {
             self.merge_stack_strings(&mut resolved);
         }
+        if self.options.struct_initializers == StructInitializers::Recognize {
+            merge_struct_initializers(&mut resolved);
+        }
         Ok(resolved)
     }
 
@@ -5002,6 +5005,128 @@ impl Lifter<'_> {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+/// A run of stores through one pointer at distinct offsets — `*(T *)p`,
+/// `*(T *)(p + k)` — becomes one struct initializer: the pointer cast to a
+/// struct of the fields by offset, assigned the values in order. Two stores
+/// at least; the pointer no constant, so that the globals an address names
+/// stay their own; the fields not overlapping; and no value reading memory
+/// or calling, since the initializer stores them all at once.
+fn merge_struct_initializers(resolved: &mut Vec<Resolved>) {
+    // The store a statement is, when it is one through a pointer at an
+    // offset: the pointer, the offset, the pointee type and the value.
+    let store = |node: &AstNode| -> Option<(AstNode, u64, String, AstNode)> {
+        let AstNode::Assign { lhs, rhs } = node else {
+            return None;
+        };
+        let AstNode::Deref { target } = lhs.as_ref() else {
+            return None;
+        };
+        let AstNode::Cast { ty, target } = target.as_ref() else {
+            return None;
+        };
+        let pointee = ty.trim_end().strip_suffix('*')?.trim();
+        if pointee.is_empty() || pointee.starts_with("struct {") {
+            return None;
+        }
+        let (base, offset) = match target.as_ref() {
+            AstNode::Binary {
+                lhs,
+                op: BinaryOp::Add,
+                rhs,
+            } => match rhs.as_ref() {
+                AstNode::Constant { value, .. } => ((**lhs).clone(), *value),
+                _ => return None,
+            },
+            other => (other.clone(), 0),
+        };
+        if base.is_constant() {
+            return None;
+        }
+        let reads_memory = rhs.any(&|n| {
+            matches!(
+                n,
+                AstNode::Deref { .. }
+                    | AstNode::Call { .. }
+                    | AstNode::Intrinsic { .. }
+                    | AstNode::Assign { .. }
+                    | AstNode::StructInit { .. }
+            )
+        });
+        if reads_memory {
+            return None;
+        }
+        Some((base, offset, pointee.to_string(), (**rhs).clone()))
+    };
+    let width = |ty: &str| -> u64 {
+        if ty.ends_with('*') {
+            8
+        } else {
+            u64::from(crate::emulate::type_of(ty).0 / 8)
+        }
+    };
+    let mut i = 0;
+    while i < resolved.len() {
+        let mut j = i;
+        let mut run: Vec<(u64, String, AstNode)> = Vec::new();
+        let mut base: Option<AstNode> = None;
+        while j < resolved.len() {
+            let (temp, node, _) = &resolved[j];
+            let Some((pointer, offset, ty, value)) =
+                (temp.is_none()).then(|| store(node)).flatten()
+            else {
+                break;
+            };
+            if base.as_ref().is_some_and(|base| *base != pointer) {
+                break;
+            }
+            // A field written twice, or one over another, ends the run.
+            let overlaps = run.iter().any(|(other, other_ty, _)| {
+                offset < other + width(other_ty) && *other < offset + width(&ty)
+            });
+            if overlaps {
+                break;
+            }
+            base.get_or_insert(pointer);
+            run.push((offset, ty, value));
+            j += 1;
+        }
+        if run.len() >= 2 {
+            let base = base.expect("a run has a pointer");
+            run.sort_by_key(|(offset, _, _)| *offset);
+            let fields: Vec<StructField> = run
+                .into_iter()
+                .map(|(offset, ty, value)| StructField { ty, offset, value })
+                .collect();
+            let struct_type = format!(
+                "struct {{ {} }} *",
+                fields
+                    .iter()
+                    .map(|field| format!("{} {};", field.ty, field.name()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let addresses = sorted(
+                resolved[i..j]
+                    .iter()
+                    .flat_map(|(_, _, addresses)| addresses.iter().copied()),
+            );
+            let node = AstNode::Assign {
+                lhs: Box::new(AstNode::Deref {
+                    target: Box::new(AstNode::Cast {
+                        ty: struct_type,
+                        target: Box::new(base),
+                    }),
+                }),
+                rhs: Box::new(AstNode::StructInit { fields }),
+            };
+            resolved.splice(i..j, [(None, node, addresses)]);
+            i += 1;
+            continue;
+        }
+        i = j.max(i + 1);
+    }
+}
 
 /// The string a run of constant stores puts on the stack: the lowest
 /// offset written, the builtin that reads it back and the arguments after
@@ -7218,5 +7343,30 @@ mod tests {
             refused(&[0xf2, 0x0f, 0x11, 0x07, 0xc3]),
             "not lifted yet: movsd"
         );
+    }
+
+    #[test]
+    fn a_run_of_field_stores_is_a_struct_initializer() {
+        // mov [rdi], esi; mov dword [rdi+4], 2; mov qword [rdi+8], 7; ret
+        let code = [
+            0x89, 0x37, 0xc7, 0x47, 0x04, 0x02, 0x00, 0x00, 0x00, 0x48, 0xc7, 0x47, 0x08, 0x07,
+            0x00, 0x00, 0x00, 0xc3,
+        ];
+        let text = c(&code);
+        assert!(
+            text.contains("  *(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 7 };"),
+            "{text}"
+        );
+        let kept = c_with(&code, &names, &[("struct-initializers", "keep")]);
+        assert!(
+            kept.contains("  *(int *)a = b;\n  *(int *)(a + 4) = 2;\n  *(long *)(a + 8) = 7;"),
+            "{kept}"
+        );
+        // Two stores to one field are two stores.
+        // mov dword [rdi], 1; mov dword [rdi], 2; ret
+        let twice = c(&[
+            0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, 0xc7, 0x07, 0x02, 0x00, 0x00, 0x00, 0xc3,
+        ]);
+        assert!(!twice.contains("struct {"), "{twice}");
     }
 }

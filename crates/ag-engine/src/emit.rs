@@ -168,6 +168,10 @@ fn rust_type(ty: &str) -> String {
     if let Some(pointee) = ty.strip_suffix('*') {
         return format!("*mut {}", rust_type(pointee));
     }
+    // An anonymous struct of fields by offset has no Rust spelling.
+    if ty.starts_with("struct {") {
+        return "Struct".to_string();
+    }
     let words: Vec<&str> = ty
         .split_whitespace()
         .filter(|word| !matches!(*word, "const" | "volatile" | "signed"))
@@ -1360,11 +1364,14 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
             // Python has no pointers: a read of memory, typed by the cast.
             Language::Python => match target.as_ref() {
                 AstNode::Cast { ty, target } if ty.trim_end().ends_with('*') => {
-                    // `long *` reads a long; `long **` reads a pointer to one.
-                    let pointee = ty.trim_end()[..ty.trim_end().len() - 1]
-                        .trim()
-                        .replace(' ', "_")
-                        .replace('*', "_ptr");
+                    // `long *` reads a long; `long **` reads a pointer to one;
+                    // a struct's fields are the struct.
+                    let pointee = ty.trim_end()[..ty.trim_end().len() - 1].trim();
+                    let pointee = if pointee.starts_with("struct {") {
+                        "struct".to_string()
+                    } else {
+                        pointee.replace(' ', "_").replace('*', "_ptr")
+                    };
                     let _ = write!(out, "deref_{pointee}(");
                     expr(target, out, false, style);
                     out.push(')');
@@ -1437,6 +1444,42 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
         }
         AstNode::FunctionName { name, .. } => out.push_str(name),
         AstNode::StringLiteral { text } => out.push_str(&string_literal(text)),
+        // The fields in order: C's initializer list, Rust's and Python's
+        // named forms.
+        AstNode::StructInit { fields } => match style.language {
+            Language::Rust => {
+                out.push_str("Struct { ");
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "{}: ", field.name());
+                    expr(&field.value, out, false, style);
+                }
+                out.push_str(" }");
+            }
+            Language::Python => {
+                out.push('{');
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "\"{}\": ", field.name());
+                    expr(&field.value, out, false, style);
+                }
+                out.push('}');
+            }
+            Language::C | Language::ObjC => {
+                out.push_str("{ ");
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    expr(&field.value, out, false, style);
+                }
+                out.push_str(" }");
+            }
+        },
         AstNode::Return { value } => {
             out.push_str("return");
             if let Some(value) = value {
@@ -2796,6 +2839,50 @@ mod tests {
             ],
             "{}",
             broken.text()
+        );
+    }
+
+    #[test]
+    fn a_struct_initializer_reads_in_each_language() {
+        use crate::ast::StructField;
+        let field = |ty: &str, offset: u64, value: AstNode| StructField {
+            ty: ty.to_string(),
+            offset,
+            value,
+        };
+        let node = AstNode::Assign {
+            lhs: Box::new(AstNode::Deref {
+                target: Box::new(AstNode::Cast {
+                    ty: "struct { int at_0; int at_4; long at_8; } *".to_string(),
+                    target: Box::new(AstNode::var("a")),
+                }),
+            }),
+            rhs: Box::new(AstNode::StructInit {
+                fields: vec![
+                    field("int", 0, AstNode::var("b")),
+                    field("int", 4, AstNode::constant(2, 4)),
+                    field("long", 8, AstNode::constant(7, 8)),
+                ],
+            }),
+        };
+        let text = |language: &str| {
+            let options = Options::from_pairs([("language", language)]).expect("a language");
+            let style = Style::of(&options);
+            let mut out = String::new();
+            emit_into(&node, &mut out, 0, &style);
+            out.trim_end().to_string()
+        };
+        assert_eq!(
+            text("c"),
+            "*(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 7 };"
+        );
+        assert_eq!(
+            text("rust"),
+            "*(a as *mut Struct) = Struct { at_0: b, at_4: 2, at_8: 7 };"
+        );
+        assert_eq!(
+            text("python"),
+            "deref_struct(a) = {\"at_0\": b, \"at_4\": 2, \"at_8\": 7}"
         );
     }
 }

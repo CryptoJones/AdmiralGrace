@@ -2028,3 +2028,33 @@ fn inlined_memory_operations_read_as_builtins() {
     let low = image("builtins.elf", &["il", "rep_copy", "--level", "low"]);
     assert!(low.contains("__builtin_memcpy("), "{low}");
 }
+
+#[test]
+fn a_run_of_field_stores_reads_as_a_struct_initializer() {
+    let text = image("structs.elf", &["pseudocode", "init"]);
+    assert!(
+        text.contains("  *(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 0x1122334455667788 };"),
+        "{text}"
+    );
+    let kept = image(
+        "structs.elf",
+        &["pseudocode", "init", "--option", "struct-initializers", "keep"],
+    );
+    assert!(kept.contains("  *(int *)a = b;\n  *(int *)(a + 4) = 2;"), "{kept}");
+    // The globals an address names stay their own stores.
+    let global = image("structs.elf", &["pseudocode", "init_global"]);
+    assert!(global.contains("  here = a;\n  *(int *)0x403004 = a + 1;"), "{global}");
+    assert!(!global.contains("struct {"), "{global}");
+    // The transpiler writes the stores a compiler reads.
+    let cpp = image("structs.elf", &["transpile", "init"]);
+    assert!(cpp.contains("*(int *)((char *)a + 4) = 2;"), "{cpp}");
+    assert!(!cpp.contains("struct {"), "{cpp}");
+    // The emulator stores each field: the run writes the three fields.
+    let run = image_json("structs.elf", &["emulate", "init", "--arg", "0x5000", "--arg", "9"]);
+    let written = run["memory"].as_array().or_else(|| run["written"].as_array());
+    assert!(
+        run.to_string().contains("wrote 3 fields at 0x5000"),
+        "{run}"
+    );
+    let _ = written;
+}

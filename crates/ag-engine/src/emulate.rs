@@ -528,6 +528,33 @@ impl Machine<'_> {
     /// Run one statement.
     fn execute(&mut self, node: &AstNode, step: &mut Step) -> Result<(), Why> {
         match node {
+            // A struct initializer through a pointer: each field stored at
+            // its offset, at its own width.
+            AstNode::Assign { lhs, rhs } if matches!(rhs.as_ref(), AstNode::StructInit { .. }) => {
+                let AstNode::StructInit { fields } = rhs.as_ref() else {
+                    unreachable!("matched above");
+                };
+                let AstNode::Deref { target } = lhs.as_ref() else {
+                    return Err(Why(format!("a struct stored to {}", one_line(lhs))));
+                };
+                let base = match target.as_ref() {
+                    AstNode::Cast { target, .. } => target.as_ref(),
+                    other => other,
+                };
+                let Some(address) = self.eval(base)?.value else {
+                    return Err(Why(format!(
+                        "the store through {} goes to an unknown address",
+                        one_line(base)
+                    )));
+                };
+                for field in fields {
+                    let (bits, signed) = type_of(&field.ty);
+                    let value = self.eval(&field.value)?.cast(bits, signed);
+                    self.store(address.wrapping_add(field.offset), value)?;
+                }
+                step.note = Some(format!("wrote {} fields at {address:#x}", fields.len()));
+                Ok(())
+            }
             AstNode::Assign { lhs, rhs } => {
                 let value = self.eval(rhs)?;
                 match lhs.as_ref() {
@@ -673,7 +700,9 @@ impl Machine<'_> {
                 },
             },
             AstNode::Register { reg } => Val::unknown(reg.bit_size, true),
-            AstNode::StringLiteral { .. } | AstNode::FunctionName { .. } => Val::unknown(64, false),
+            AstNode::StringLiteral { .. }
+            | AstNode::FunctionName { .. }
+            | AstNode::StructInit { .. } => Val::unknown(64, false),
             AstNode::ConditionTrue => Val::known(1, 8, false),
             AstNode::ConditionFalse => Val::known(0, 8, false),
             AstNode::ConstantCondition { holds, .. } => Val::known(u64::from(*holds), 8, false),

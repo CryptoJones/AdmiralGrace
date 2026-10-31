@@ -171,7 +171,9 @@ condition, a turned-round branch, a switch — recorded in the project file. Dea
 lift keeps is greyed out, and one variable's unused stores can be dropped on their own.
 `rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset`, and a string put
 on the stack word by word, or byte by byte, as one `__builtin_strcpy`
-(`--option builtins keep` for the stores). The text's layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
+(`--option builtins keep` for the stores); a struct filled field by field through a pointer
+reads as one initializer (`--option struct-initializers keep` for the stores). The text's
+layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
 `wrap 80`, `call-hints names` — with rainbow braces and indent guides in the workbench, and a
 formatter plugin has the last word on the lines.
 

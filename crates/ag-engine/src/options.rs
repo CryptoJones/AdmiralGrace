@@ -309,6 +309,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "struct-initializers",
+        phase: Phase::Lift,
+        tier: Tier::Transform,
+        kind: Kind::Choice(&["recognize", "keep"]),
+        default: "recognize",
+        description: "A run of stores through one pointer at distinct offsets — `*(int *)a = b; *(int *)(a + 4) = 2; *(long *)(a + 8) = 7;` — read as one struct initializer, `*(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 7 };`, or kept as the stores they are. Two stores at least, their values reading no memory.",
+        symptoms: &[
+            symptom(
+                "a row of `*(int *)(a + 4) = …;` stores that fill a struct field by field",
+                "recognize",
+            ),
+            symptom(
+                "a struct initializer where the stores themselves are wanted",
+                "keep",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "dead-compares",
         phase: Phase::Lift,
         tier: Tier::Transform,
@@ -663,6 +681,16 @@ pub enum Builtins {
     Keep,
 }
 
+/// What becomes of a run of stores through one pointer at distinct offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StructInitializers {
+    /// One struct initializer.
+    #[default]
+    Recognize,
+    /// The stores, one by one.
+    Keep,
+}
+
 /// What becomes of a `cmp` or `test` no branch reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeadCompares {
@@ -772,6 +800,7 @@ pub struct Options {
     pub operand_order: OperandOrder,
     pub unsigned_compare: UnsignedCompare,
     pub builtins: Builtins,
+    pub struct_initializers: StructInitializers,
     pub dead_compares: DeadCompares,
     pub dead_code: DeadCode,
     pub tail_calls: TailCalls,
@@ -956,6 +985,7 @@ impl Default for Options {
             operand_order: OperandOrder::default(),
             unsigned_compare: UnsignedCompare::default(),
             builtins: Builtins::default(),
+            struct_initializers: StructInitializers::default(),
             dead_compares: DeadCompares::default(),
             dead_code: DeadCode::default(),
             tail_calls: TailCalls::default(),
@@ -1100,6 +1130,16 @@ impl Options {
                     spec,
                     value,
                     &[("recognize", Builtins::Recognize), ("keep", Builtins::Keep)],
+                )?
+            }
+            "struct-initializers" => {
+                self.struct_initializers = choose(
+                    spec,
+                    value,
+                    &[
+                        ("recognize", StructInitializers::Recognize),
+                        ("keep", StructInitializers::Keep),
+                    ],
                 )?
             }
             "dead-compares" => {
@@ -1288,6 +1328,10 @@ impl Options {
                 "builtins" => match self.builtins {
                     Builtins::Recognize => "recognize",
                     Builtins::Keep => "keep",
+                },
+                "struct-initializers" => match self.struct_initializers {
+                    StructInitializers::Recognize => "recognize",
+                    StructInitializers::Keep => "keep",
                 },
                 "dead-compares" => match self.dead_compares {
                     DeadCompares::Drop => "drop",

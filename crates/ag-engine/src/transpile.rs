@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::AstNode;
+use crate::ast::{AstNode, BinaryOp};
 use crate::lift::Stages;
 use crate::structure::Terminator;
 
@@ -199,6 +199,42 @@ fn text_of(node: &AstNode) -> String {
 /// address or a string to an integer variable converts it, as the machine
 /// did by holding it in a register.
 fn statement_text(node: &AstNode) -> String {
+    // A struct initializer is the stores it stands for: a compiler reads no
+    // anonymous struct in a cast.
+    if let AstNode::Assign { lhs, rhs } = node {
+        if let (AstNode::Deref { target }, AstNode::StructInit { fields }) =
+            (lhs.as_ref(), rhs.as_ref())
+        {
+            let base = match target.as_ref() {
+                AstNode::Cast { target, .. } => target.as_ref(),
+                other => other,
+            };
+            return fields
+                .iter()
+                .map(|field| {
+                    let pointer = AstNode::binary(
+                        AstNode::Cast {
+                            ty: "char *".to_string(),
+                            target: Box::new(base.clone()),
+                        },
+                        BinaryOp::Add,
+                        AstNode::constant(field.offset, 8),
+                    );
+                    let store = AstNode::Assign {
+                        lhs: Box::new(AstNode::Deref {
+                            target: Box::new(AstNode::Cast {
+                                ty: format!("{} *", field.ty),
+                                target: Box::new(pointer),
+                            }),
+                        }),
+                        rhs: Box::new(field.value.clone()),
+                    };
+                    statement_text(&store)
+                })
+                .collect::<Vec<_>>()
+                .join(";\n  ");
+        }
+    }
     // A builtin's pointer arguments are the integers the machine held;
     // the compiler's builtin wants pointers.
     if let AstNode::Intrinsic { name, args } = node {
@@ -285,6 +321,16 @@ fn renamed(node: &AstNode) -> AstNode {
         AstNode::Intrinsic { name, args } => AstNode::Intrinsic {
             name: name.clone(),
             args: args.iter().map(renamed).collect(),
+        },
+        AstNode::StructInit { fields } => AstNode::StructInit {
+            fields: fields
+                .iter()
+                .map(|field| crate::ast::StructField {
+                    ty: field.ty.clone(),
+                    offset: field.offset,
+                    value: renamed(&field.value),
+                })
+                .collect(),
         },
         AstNode::Return { value } => AstNode::Return {
             value: value.as_ref().map(|value| Box::new(renamed(value))),
