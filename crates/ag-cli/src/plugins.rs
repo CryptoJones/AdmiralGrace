@@ -32,7 +32,13 @@ pub fn list(json: bool) -> Result<i32> {
         .collect();
     let architectures: Vec<Value> = ag_image::plugin::architectures()
         .iter()
-        .map(|arch| json!({ "name": arch.name(), "languages": arch.languages() }))
+        .map(|arch| {
+            json!({
+                "name": arch.name(),
+                "languages": arch.languages(),
+                "lifts": arch.languages().iter().any(|language| arch.lifts(language)),
+            })
+        })
         .collect();
     let tools: Vec<Value> = ag_image::plugin::tools()
         .iter()

@@ -599,6 +599,103 @@ pub fn lift_stages(
     )
 }
 
+/// The stages of a function an architecture lifted itself
+/// ([`crate::plugin::Architecture::lift`]): its medium-level graph goes
+/// through the registered rewriters and is analyzed and structured as the
+/// lifter's own would be. The chains are the function's blocks in `cfg`, by
+/// the nodes' addresses, for the lifted level; there is no low level.
+pub fn lift_graph(
+    graph: crate::plugin::LiftedGraph,
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    address: u64,
+    name: &str,
+    options: &Options,
+) -> Result<Stages, NotLifted> {
+    let crate::plugin::LiftedGraph {
+        return_type,
+        params,
+        locals,
+        entry,
+        nodes,
+        frame,
+    } = graph;
+    if nodes.is_empty() {
+        return Err(NotLifted::new("the architecture lifted no blocks"));
+    }
+    if entry >= nodes.len() {
+        return Err(NotLifted::new(format!(
+            "the architecture's entry is block {entry} of {}",
+            nodes.len()
+        )));
+    }
+    let successors = |nodes: &[Node]| -> Vec<Vec<usize>> {
+        nodes
+            .iter()
+            .map(|node| node.terminator.successors())
+            .collect()
+    };
+    // The chains: one per node, holding the instructions of the block of
+    // `cfg` that starts where the node does.
+    let stage_chains: Vec<StageChain> = nodes
+        .iter()
+        .map(|node| {
+            let instructions = cfg
+                .blocks
+                .iter()
+                .find(|block| block.from == node.address)
+                .map(|block| {
+                    disasm
+                        .instructions
+                        .iter()
+                        .filter(|ins| ins.address >= block.from && ins.address < block.to)
+                        .map(|ins| ins.address)
+                        .collect()
+                })
+                .unwrap_or_default();
+            StageChain {
+                address: node.address,
+                instructions,
+                successors: node.terminator.successors(),
+            }
+        })
+        .collect();
+    let analysis = structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?;
+    let (nodes, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
+    let medium_analysis = if rewritten {
+        structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?
+    } else {
+        analysis.clone()
+    };
+    let body = structure::structure(&nodes, &medium_analysis, entry, options);
+    let mut types: BTreeMap<String, String> = BTreeMap::new();
+    for variable in params.iter().chain(&locals) {
+        types.insert(variable.name.clone(), variable.ty.clone());
+    }
+    let function = LiftedFunction {
+        name: name.to_string(),
+        address,
+        return_type,
+        params,
+        locals,
+        body: body.clone(),
+        frame,
+        thunk: None,
+        return_reason: None,
+    };
+    Ok(Stages {
+        chains: stage_chains,
+        low: Vec::new(),
+        medium: nodes,
+        high: body,
+        function,
+        analysis,
+        medium_analysis,
+        stack_pointer: BTreeMap::new(),
+        types,
+    })
+}
+
 /// The lift; the stages are kept when `keep`, and empty otherwise, so the
 /// pseudocode's path pays for none of their text and copies.
 #[allow(clippy::too_many_arguments)]

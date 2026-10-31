@@ -34,7 +34,10 @@ pub use lift::{
 };
 pub use options::{OptionError, Options};
 pub use pipeline::{DecompilerOptions, Disasm};
-pub use plugin::{Architecture, DecodedSection, LoadedImage, Loader, Manifest, Rewrite, Rewriter};
+pub use plugin::{
+    Architecture, DecodedSection, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest,
+    RecoveredBlock, Rewrite, Rewriter,
+};
 pub use procedure::FunctionSignature;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};
 pub use structure::{Node, Terminator};

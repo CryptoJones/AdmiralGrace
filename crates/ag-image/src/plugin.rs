@@ -19,7 +19,8 @@ use ag_engine::plugin::ExternalTool;
 pub use ag_engine::plugin::{
     architecture_for, architectures, loader_for, loaders, manifest_dirs, read_manifest,
     register_architecture, register_loader, register_rewriter, rewriters, Architecture,
-    DecodedSection, ExternalRewriter, LoadedImage, Loader, Manifest, Rewrite, Rewriter,
+    DecodedSection, ExternalRewriter, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest,
+    RecoveredBlock, Rewrite, Rewriter,
 };
 
 use crate::Binary;

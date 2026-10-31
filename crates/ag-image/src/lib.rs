@@ -1787,6 +1787,10 @@ impl Binary {
     /// disassembled, but no function of it is lifted.
     pub fn supports_pseudocode(&self) -> bool {
         self.bitness == Some(Bitness::Bits64)
+            || self
+                .plugin_arch
+                .as_ref()
+                .is_some_and(|arch| arch.lifts(&self.language))
     }
 
     /// The calling convention the functions are lifted with: the one the
@@ -1873,16 +1877,19 @@ impl Binary {
             .code_name(address)
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
-        let stages = ag_engine::lift::lift_stages(
-            &decoded.disasm,
-            &cfg,
-            address,
-            &name,
-            code.bitness,
-            self.abi(),
-            &ImageSymbols(self),
-            &self.options,
-        )?;
+        let stages = match self.architecture_stages(&decoded, &cfg, address, &name) {
+            Some(stages) => stages?,
+            None => ag_engine::lift::lift_stages(
+                &decoded.disasm,
+                &cfg,
+                address,
+                &name,
+                code.bitness,
+                self.abi(),
+                &ImageSymbols(self),
+                &self.options,
+            )?,
+        };
         let text = |at: u64| decoded.text.get(&at).cloned();
         let function = il::build(level, &stages, &decoded.disasm, &text, casts);
         if !ssa {
@@ -1918,6 +1925,9 @@ impl Binary {
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
 
+        if let Some(stages) = self.architecture_stages(&decoded, &cfg, address, &name) {
+            return stages.map(|stages| emit_function(&stages.function, &self.options));
+        }
         let function = lift_function(
             &decoded.disasm,
             &cfg,
@@ -2090,7 +2100,60 @@ impl Binary {
     /// the functions of the image: a `jmp` to another of them, or through
     /// a GOT slot that holds an import, ends the graph as a tail call.
     fn walk(&self, disasm: &Disasm, address: u64) -> ProcedureCfg {
+        // An architecture that recovers its own blocks — delay slots,
+        // hardware loops, a bytecode — is asked first; one that fails is
+        // reported and the engine walks after all.
+        if let Some(arch) = &self.plugin_arch {
+            match arch.blocks(&self.language, disasm, address) {
+                Some(Ok(blocks)) => return cfg_from_blocks(&blocks, disasm),
+                Some(Err(error)) => eprintln!(
+                    "warning: {} did not recover the blocks of {address:#x}: {error}",
+                    arch.name()
+                ),
+                None => {}
+            }
+        }
         resolve_branches_among(disasm, address, self)
+    }
+
+    /// The stages of a function the image's architecture lifts itself, when
+    /// it is a plugin's that does; `None` leaves it to the engine's lifter.
+    fn architecture_stages(
+        &self,
+        decoded: &Decoded,
+        cfg: &ProcedureCfg,
+        address: u64,
+        name: &str,
+    ) -> Option<Result<ag_engine::lift::Stages, NotLifted>> {
+        let arch = self.plugin_arch.as_ref()?;
+        if !arch.lifts(&self.language) {
+            return None;
+        }
+        let code = ag_engine::plugin::FunctionCode {
+            language: &self.language,
+            address,
+            name,
+            disasm: &decoded.disasm,
+            cfg,
+            bytes: &decoded.bytes,
+            base: decoded.base,
+        };
+        let graph = match arch.lift(&code)? {
+            Ok(graph) => graph,
+            Err(error) => {
+                return Some(Err(NotLifted {
+                    reason: format!("{}: {error}", arch.name()),
+                }))
+            }
+        };
+        Some(ag_engine::lift::lift_graph(
+            graph,
+            &decoded.disasm,
+            cfg,
+            address,
+            name,
+            &self.options,
+        ))
     }
 
     /// What the callers of the function at `address` do with its result:
@@ -2779,6 +2842,42 @@ fn decode_arm_section(
 /// Decode the bytes of a section through a plugin's architecture; a
 /// section it cannot decode is reported and left empty, as the engine's
 /// own decoders leave one.
+/// A control-flow graph from the blocks an architecture recovered: each
+/// block's instructions are the decoded ones in its range, its call sites
+/// the ones that call, and its successors as the architecture said.
+fn cfg_from_blocks(blocks: &[ag_engine::plugin::RecoveredBlock], disasm: &Disasm) -> ProcedureCfg {
+    let mut blocks: Vec<&ag_engine::plugin::RecoveredBlock> = blocks.iter().collect();
+    blocks.sort_by_key(|block| block.from);
+    blocks.dedup_by_key(|block| block.from);
+    let mut cfg = ProcedureCfg::default();
+    for (index, block) in blocks.iter().enumerate() {
+        let mut successors = block.successors.clone();
+        successors.dedup();
+        cfg.blocks.push(ag_engine::cfg::BasicBlock {
+            from: block.from,
+            to: block.to.max(block.from),
+            successor_addresses: successors,
+            ..ag_engine::cfg::BasicBlock::default()
+        });
+        cfg.index_by_address.insert(block.from, index as u32);
+        for instruction in disasm
+            .instructions
+            .iter()
+            .filter(|ins| ins.address >= block.from && ins.address < block.to)
+        {
+            if matches!(instruction.flow, Flow::Call(_) | Flow::IndirectCall) {
+                cfg.call_sites.push(instruction.address);
+            }
+        }
+        for call in &block.calls {
+            if !cfg.call_targets.contains(call) {
+                cfg.call_targets.push(*call);
+            }
+        }
+    }
+    cfg
+}
+
 fn decode_plugin_section(
     arch: &dyn ag_engine::plugin::Architecture,
     language: &str,

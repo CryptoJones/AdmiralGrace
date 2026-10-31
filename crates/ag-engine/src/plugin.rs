@@ -38,9 +38,10 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Bitness;
 use crate::ast::AstNode;
+use crate::cfg::ProcedureCfg;
 use crate::cpu_context::{DecodedInsn, Flow};
 use crate::image::Section;
-use crate::lift::{NotLifted, Statement, StatementKind};
+use crate::lift::{NotLifted, Statement, StatementKind, Variable};
 use crate::pipeline::Disasm;
 use crate::structure::{Node, Terminator};
 
@@ -103,6 +104,84 @@ pub trait Architecture: Send + Sync {
         bytes: &[u8],
         base: u64,
     ) -> Result<DecodedSection, String>;
+    /// Whether the architecture lifts the functions of `language` itself
+    /// ([`Architecture::lift`]); the engine's lifter reads x86-64 alone, so
+    /// an image of another language has pseudocode only through this.
+    fn lifts(&self, _language: &str) -> bool {
+        false
+    }
+    /// The basic blocks of the function entered at `entry`, when the
+    /// architecture recovers them itself — an instruction set with delay
+    /// slots, hardware loops or a bytecode whose flow the decoder's `Flow`
+    /// cannot say; `None` leaves the walk to the engine, which follows the
+    /// flows. The blocks are in address order, each ending where the next
+    /// begins or the code does.
+    fn blocks(
+        &self,
+        _language: &str,
+        _disasm: &Disasm,
+        _entry: u64,
+    ) -> Option<Result<Vec<RecoveredBlock>, String>> {
+        None
+    }
+    /// Lift a whole function at once, with the context an instruction alone
+    /// does not have, to the medium level: blocks of statements over
+    /// variables, each ending in a return, a goto, a branch or a switch.
+    /// The engine structures the graph into pseudocode and gives it its
+    /// levels, after the registered rewriters. `None` leaves the function
+    /// to the engine's lifter; `Err` refuses it with the reason.
+    fn lift(&self, _function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
+        None
+    }
+}
+
+/// A basic block an architecture recovered itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredBlock {
+    /// The address of the first instruction.
+    pub from: u64,
+    /// The address after the last instruction.
+    pub to: u64,
+    /// The addresses of the blocks control can go on to; none for a block
+    /// that returns or ends the procedure.
+    pub successors: Vec<u64>,
+    /// The functions the block calls, by address.
+    pub calls: Vec<u64>,
+}
+
+/// A function an architecture lifted itself, at the medium level.
+#[derive(Debug, Clone)]
+pub struct LiftedGraph {
+    /// The C return type: `void` when nothing is returned.
+    pub return_type: String,
+    /// The parameters, in order.
+    pub params: Vec<Variable>,
+    /// The locals, in the order they are declared.
+    pub locals: Vec<Variable>,
+    /// The index of the node the function is entered at.
+    pub entry: usize,
+    /// The nodes: each with the address that labels it, its statements and
+    /// how it leaves.
+    pub nodes: Vec<Node>,
+    /// The instructions no statement came from: the frame, the no-ops.
+    pub frame: Vec<u64>,
+}
+
+/// What an architecture is handed to lift a function.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionCode<'a> {
+    pub language: &'a str,
+    /// The function's entry address.
+    pub address: u64,
+    pub name: &'a str,
+    /// The decoded instructions of the function's section.
+    pub disasm: &'a Disasm,
+    /// The function's control-flow graph: the architecture's own blocks
+    /// when it recovered them, the engine's walk otherwise.
+    pub cfg: &'a ProcedureCfg,
+    /// The section's bytes, from `base`.
+    pub bytes: &'a [u8],
+    pub base: u64,
 }
 
 /// A rewriter changes a function's medium-level graph — the blocks of
@@ -897,6 +976,376 @@ pub struct ExternalArchitecture {
     pub bitness: Bitness,
     pub command: Vec<String>,
     pub timeout: Duration,
+    /// The command that recovers a function's blocks, when the manifest
+    /// gives one.
+    pub blocks: Option<Vec<String>>,
+    /// The command that lifts a whole function, when the manifest gives one.
+    pub lift: Option<Vec<String>>,
+}
+
+impl ExternalArchitecture {
+    /// Run one of the architecture's commands with a JSON request; its JSON
+    /// answer.
+    fn ask(
+        &self,
+        command: &[String],
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let input = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+        let output = run_command(command, &input, self.timeout)?;
+        serde_json::from_slice(&output)
+            .map_err(|error| format!("{}: the answer is not JSON: {error}", self.name))
+    }
+}
+
+/// The instructions of a section as JSON for a command: each its address,
+/// its length, its flow by name and the target the flow names.
+fn instructions_json(disasm: &Disasm) -> Vec<serde_json::Value> {
+    disasm
+        .instructions
+        .iter()
+        .map(|instruction| {
+            let (flow, target) = flow_name(&instruction.flow);
+            let mut row = serde_json::json!({
+                "address": instruction.address,
+                "address_hex": format!("{:#x}", instruction.address),
+                "length": instruction.length,
+                "flow": flow,
+            });
+            if let Some(target) = target {
+                row["target"] = serde_json::json!(target);
+                row["target_hex"] = serde_json::json!(format!("{target:#x}"));
+            }
+            row
+        })
+        .collect()
+}
+
+/// A flow by the name the architecture conversation spells it, and the
+/// target it names.
+fn flow_name(flow: &Flow) -> (&'static str, Option<u64>) {
+    match flow {
+        Flow::Next => ("next", None),
+        Flow::UnconditionalBranch(target) => ("jump", Some(*target)),
+        Flow::ConditionalBranch(target) => ("branch", Some(*target)),
+        Flow::IndirectBranch => ("indirect-jump", None),
+        Flow::Call(target) => ("call", Some(*target)),
+        Flow::IndirectCall => ("indirect-call", None),
+        Flow::Return => ("return", None),
+        Flow::Halt => ("halt", None),
+        Flow::Trap => ("trap", None),
+        Flow::Interrupt => ("interrupt", None),
+        Flow::Syscall => ("syscall", None),
+        Flow::Invalid => ("invalid", None),
+        _ => ("next", None),
+    }
+}
+
+/// Bytes as lower-case hex, two digits each.
+fn hex_text(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The numbers in a JSON list, each a number or hex text; none for
+/// anything else.
+fn numbers(value: Option<&serde_json::Value>) -> Vec<u64> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(number)
+        .collect()
+}
+
+/// A lifted function as a command answers it: its `return_type`, `params`
+/// and `locals` (each a `name` and a `type`), its `entry`, its `frame`,
+/// and its `blocks` — each an `address`, its `statements` (each the
+/// `addresses` it came from and an `expr`, an expression tree as
+/// [`expression`] reads it) and a `terminator` (`return`; `goto` with a
+/// `target`; `branch` with a `cond` tree, `taken` and `next`; `switch`
+/// with an `index` tree and `cases` of `values` and a `target`).
+pub fn graph_of(answer: &serde_json::Value) -> Result<LiftedGraph, String> {
+    let object = answer
+        .as_object()
+        .ok_or("the lifted function is a JSON object")?;
+    let variables = |key: &str| -> Result<Vec<Variable>, String> {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|row| {
+                let name = row
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| format!("a variable of {key} has a name"))?;
+                let ty = row
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("long");
+                Ok(Variable {
+                    ty: ty.to_string(),
+                    name: name.to_string(),
+                })
+            })
+            .collect()
+    };
+    let blocks = object
+        .get("blocks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("the lifted function lists `blocks`")?;
+    let mut nodes = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        let address = block
+            .get("address")
+            .and_then(number)
+            .ok_or_else(|| format!("block {index} has an address"))?;
+        let mut statements = Vec::new();
+        for (at, row) in block
+            .get("statements")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let expr = row
+                .get("expr")
+                .ok_or_else(|| format!("statement {at} of block {index} has an `expr`"))?;
+            statements.push(Statement {
+                node: expression(expr)
+                    .map_err(|error| format!("statement {at} of block {index}: {error}"))?,
+                addresses: numbers(row.get("addresses")),
+                kind: StatementKind::Plain,
+            });
+        }
+        let terminator = block
+            .get("terminator")
+            .ok_or_else(|| format!("block {index} has a terminator"))?;
+        let kind = terminator
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("block {index}'s terminator names its kind"))?;
+        let addresses = numbers(terminator.get("addresses"));
+        let target_of = |key: &str| -> Result<usize, String> {
+            terminator
+                .get(key)
+                .and_then(number)
+                .map(|target| target as usize)
+                .ok_or_else(|| format!("block {index}'s {kind} names `{key}`"))
+        };
+        let terminator = match kind {
+            "return" => Terminator::Return,
+            "goto" => Terminator::Goto {
+                target: target_of("target")?,
+                addresses,
+            },
+            "branch" => Terminator::Branch {
+                cond: expression(
+                    terminator
+                        .get("cond")
+                        .ok_or_else(|| format!("block {index}'s branch has a `cond`"))?,
+                )
+                .map_err(|error| format!("block {index}'s branch: {error}"))?,
+                taken: target_of("taken")?,
+                next: target_of("next")?,
+                addresses,
+            },
+            "switch" => Terminator::Switch {
+                index: expression(
+                    terminator
+                        .get("index")
+                        .ok_or_else(|| format!("block {index}'s switch has an `index`"))?,
+                )
+                .map_err(|error| format!("block {index}'s switch: {error}"))?,
+                cases: terminator
+                    .get("cases")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|case| {
+                        let values: Vec<i64> = case
+                            .get("values")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|value| {
+                                value.as_i64().or_else(|| number(value).map(|v| v as i64))
+                            })
+                            .collect();
+                        let target = case.get("target").and_then(number).ok_or_else(|| {
+                            format!("a case of block {index}'s switch names its target")
+                        })?;
+                        Ok((values, target as usize))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+                addresses,
+            },
+            other => {
+                return Err(format!(
+                    "block {index}'s terminator is return, goto, branch or switch, not {other:?}"
+                ))
+            }
+        };
+        nodes.push(Node {
+            address,
+            statements,
+            terminator,
+        });
+    }
+    let graph = LiftedGraph {
+        return_type: object
+            .get("return_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("void")
+            .to_string(),
+        params: variables("params")?,
+        locals: variables("locals")?,
+        entry: object
+            .get("entry")
+            .and_then(number)
+            .map_or(0, |entry| entry as usize),
+        nodes,
+        frame: numbers(object.get("frame")),
+    };
+    Rewrite::new(0, "", graph.entry, graph.nodes.clone())
+        .validate()
+        .map_err(|error| format!("the lifted function has {error}"))?;
+    Ok(graph)
+}
+
+/// An expression as a command spells it, as a tree: a number is a constant
+/// (8 bytes wide), a string a variable, `true` and `false` a condition
+/// that always holds or never does; an object is one of `{"const": n,
+/// "width": bytes}`, `{"var": name}`, `{"string": text}`, `{"binary": op,
+/// "lhs": …, "rhs": …}` with the operator spelled as C (`+ - * / % & | ^
+/// << >> == != < <= > >= && ||`), `{"assign": lhs, "rhs": …}`, `{"deref":
+/// …}`, `{"address_of": …}`, `{"call": name or tree, "args": […],
+/// "address": n}`, `{"return": … or null}`, `{"cast": type, "target": …}`
+/// or `{"intrinsic": name, "args": […]}`.
+pub fn expression(value: &serde_json::Value) -> Result<AstNode, String> {
+    use crate::ast::BinaryOp;
+    match value {
+        serde_json::Value::Number(_) => number(value)
+            .map(|value| AstNode::constant(value, 8))
+            .ok_or_else(|| "a constant is a whole number".to_string()),
+        serde_json::Value::String(name) => Ok(AstNode::var(name.clone())),
+        serde_json::Value::Bool(true) => Ok(AstNode::ConditionTrue),
+        serde_json::Value::Bool(false) => Ok(AstNode::ConditionFalse),
+        serde_json::Value::Object(object) => {
+            let sub = |key: &str| -> Result<AstNode, String> {
+                object
+                    .get(key)
+                    .ok_or_else(|| format!("`{key}` is missing"))
+                    .and_then(expression)
+            };
+            let args = || -> Result<Vec<AstNode>, String> {
+                object
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(expression)
+                    .collect()
+            };
+            if let Some(constant) = object.get("const") {
+                let width = object
+                    .get("width")
+                    .and_then(number)
+                    .map_or(8, |width| width as u32);
+                return number(constant)
+                    .or_else(|| constant.as_i64().map(|v| v as u64))
+                    .map(|value| AstNode::constant(value, width))
+                    .ok_or_else(|| "a constant is a whole number".to_string());
+            }
+            if let Some(name) = object.get("var").and_then(serde_json::Value::as_str) {
+                return Ok(AstNode::var(name));
+            }
+            if let Some(text) = object.get("string").and_then(serde_json::Value::as_str) {
+                return Ok(AstNode::StringLiteral {
+                    text: text.to_string(),
+                });
+            }
+            if let Some(op) = object.get("binary").and_then(serde_json::Value::as_str) {
+                let op = match op {
+                    "+" => BinaryOp::Add,
+                    "-" => BinaryOp::Sub,
+                    "*" => BinaryOp::Mul,
+                    "/" => BinaryOp::Div,
+                    "%" => BinaryOp::Mod,
+                    "&" => BinaryOp::And,
+                    "|" => BinaryOp::Or,
+                    "^" => BinaryOp::Xor,
+                    "<<" => BinaryOp::Shl,
+                    ">>" => BinaryOp::Shr,
+                    "==" => BinaryOp::Equal,
+                    "!=" => BinaryOp::NotEqual,
+                    "<" => BinaryOp::Less,
+                    "<=" => BinaryOp::LessEqual,
+                    ">" => BinaryOp::Greater,
+                    ">=" => BinaryOp::GreaterEqual,
+                    "&&" => BinaryOp::LogicalAnd,
+                    "||" => BinaryOp::LogicalOr,
+                    other => return Err(format!("no such operator: {other:?}")),
+                };
+                return Ok(AstNode::binary(sub("lhs")?, op, sub("rhs")?));
+            }
+            if object.contains_key("assign") {
+                return Ok(AstNode::Assign {
+                    lhs: Box::new(sub("assign")?),
+                    rhs: Box::new(sub("rhs")?),
+                });
+            }
+            if object.contains_key("deref") {
+                return Ok(AstNode::Deref {
+                    target: Box::new(sub("deref")?),
+                });
+            }
+            if object.contains_key("address_of") {
+                return Ok(AstNode::AddressOf {
+                    target: Box::new(sub("address_of")?),
+                });
+            }
+            if let Some(callee) = object.get("call") {
+                let callee = match callee {
+                    serde_json::Value::String(name) => AstNode::FunctionName {
+                        name: name.clone(),
+                        address: object.get("address").and_then(number).unwrap_or(0),
+                    },
+                    other => expression(other)?,
+                };
+                return Ok(AstNode::Call {
+                    callee: Box::new(callee),
+                    args: args()?,
+                });
+            }
+            if object.contains_key("return") {
+                let value = match object.get("return") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(Box::new(expression(value)?)),
+                };
+                return Ok(AstNode::Return { value });
+            }
+            if let Some(ty) = object.get("cast").and_then(serde_json::Value::as_str) {
+                return Ok(AstNode::Cast {
+                    ty: ty.to_string(),
+                    target: Box::new(sub("target")?),
+                });
+            }
+            if let Some(name) = object.get("intrinsic").and_then(serde_json::Value::as_str) {
+                return Ok(AstNode::Intrinsic {
+                    name: name.to_string(),
+                    args: args()?,
+                });
+            }
+            Err(format!(
+                "an expression is a const, var, string, binary, assign, deref, address_of, call, return, cast or intrinsic, not {}",
+                object.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        }
+        other => Err(format!(
+            "an expression is a number, a string, a boolean or an object, not {other}"
+        )),
+    }
 }
 
 /// A tool that is a command, as a manifest declares it; `ag_image::plugin`
@@ -1115,12 +1564,18 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
                 _ => return Err(format!("a bitness of {value} is not 16, 32 or 64")),
             },
         };
+        let optional_command = |key: &str| -> Option<Vec<String>> {
+            let command = strings(entry.get(key));
+            (!command.is_empty()).then(|| resolve_command(&command, &dir))
+        };
         architectures.push(ExternalArchitecture {
             name: entry_name(entry, index),
             languages,
             bitness,
             command: command_of(entry, "architecture")?,
             timeout: timeout_of(entry)?,
+            blocks: optional_command("blocks"),
+            lift: optional_command("lift"),
         });
     }
     let mut tools = Vec::new();
@@ -1469,6 +1924,71 @@ impl Loader for ExternalLoader {
 impl Architecture for ExternalArchitecture {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn lifts(&self, _language: &str) -> bool {
+        self.lift.is_some()
+    }
+
+    fn blocks(
+        &self,
+        language: &str,
+        disasm: &Disasm,
+        entry: u64,
+    ) -> Option<Result<Vec<RecoveredBlock>, String>> {
+        let command = self.blocks.as_ref()?;
+        let request = serde_json::json!({
+            "language": language,
+            "entry": entry,
+            "entry_hex": format!("{entry:#x}"),
+            "instructions": instructions_json(disasm),
+        });
+        Some(self.ask(command, &request).and_then(|answer| {
+            let rows = answer
+                .get("blocks")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("{}: the answer lists `blocks`", self.name))?;
+            rows.iter()
+                .map(|row| {
+                    let from = row.get("from").and_then(number).ok_or_else(|| {
+                        format!("{}: a block names where it is `from`", self.name)
+                    })?;
+                    let to = row.get("to").and_then(number).ok_or_else(|| {
+                        format!("{}: a block names where it runs `to`", self.name)
+                    })?;
+                    Ok(RecoveredBlock {
+                        from,
+                        to,
+                        successors: numbers(row.get("successors")),
+                        calls: numbers(row.get("calls")),
+                    })
+                })
+                .collect()
+        }))
+    }
+
+    fn lift(&self, function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
+        let command = self.lift.as_ref()?;
+        let request = serde_json::json!({
+            "language": function.language,
+            "function": function.address,
+            "function_hex": format!("{:#x}", function.address),
+            "name": function.name,
+            "base": function.base,
+            "base_hex": format!("{:#x}", function.base),
+            "bytes": hex_text(function.bytes),
+            "instructions": instructions_json(function.disasm),
+            "blocks": function.cfg.blocks.iter().map(|block| serde_json::json!({
+                "from": block.from,
+                "from_hex": format!("{:#x}", block.from),
+                "to": block.to,
+                "to_hex": format!("{:#x}", block.to),
+                "successors": block.successor_addresses,
+            })).collect::<Vec<_>>(),
+        });
+        Some(self.ask(command, &request).and_then(|answer| {
+            graph_of(&answer).map_err(|error| format!("{}: {error}", self.name))
+        }))
     }
 
     fn languages(&self) -> Vec<String> {
@@ -1898,6 +2418,84 @@ mod tests {
     }
 
     #[test]
+    fn a_commands_expression_trees_and_lifted_function_read_back() {
+        let tree = serde_json::json!({
+            "assign": "x",
+            "rhs": { "binary": "+", "lhs": { "deref": { "var": "p" } }, "rhs": { "const": 1, "width": 4 } }
+        });
+        let node = expression(&tree).unwrap();
+        assert_eq!(
+            crate::emit::emit_node(&node)
+                .trim_end()
+                .trim_end_matches(';'),
+            "x = *p + 1"
+        );
+        let call = expression(&serde_json::json!({
+            "call": "puts", "address": "0x300", "args": [{ "string": "hi" }, 7, true]
+        }))
+        .unwrap();
+        assert!(
+            matches!(&call, AstNode::Call { callee, args } if matches!(**callee, AstNode::FunctionName { ref name, address: 0x300 } if name == "puts") && args.len() == 3)
+        );
+        assert!(matches!(
+            expression(&serde_json::json!({ "return": { "cast": "long", "target": "x" } }))
+                .unwrap(),
+            AstNode::Return { value: Some(_) }
+        ));
+        assert!(
+            expression(&serde_json::json!({ "binary": "<>", "lhs": 1, "rhs": 2 }))
+                .unwrap_err()
+                .contains("no such operator")
+        );
+        assert!(expression(&serde_json::json!({ "fold": 1 })).is_err());
+        assert!(expression(&serde_json::json!([1])).is_err());
+
+        let graph = graph_of(&serde_json::json!({
+            "return_type": "int",
+            "params": [{ "name": "n", "type": "int" }],
+            "locals": [{ "name": "flag" }],
+            "entry": 0,
+            "frame": ["0x100"],
+            "blocks": [
+                { "address": "0x100", "statements": [{ "addresses": ["0x102"], "expr": { "call": "sub_10a", "args": [] } }],
+                  "terminator": { "kind": "branch", "cond": "flag", "taken": 1, "next": 2, "addresses": ["0x104"] } },
+                { "address": "0x106", "statements": [], "terminator": { "kind": "goto", "target": 2 } },
+                { "address": "0x108", "statements": [{ "addresses": ["0x108"], "expr": { "return": "n" } }],
+                  "terminator": { "kind": "return" } }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(graph.return_type, "int");
+        assert_eq!(graph.params[0].name, "n");
+        assert_eq!(graph.locals[0].ty, "long", "a type unsaid is long");
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.frame, vec![0x100]);
+        assert!(matches!(
+            graph.nodes[0].terminator,
+            Terminator::Branch {
+                taken: 1,
+                next: 2,
+                ..
+            }
+        ));
+        // A block pointing outside the function is refused.
+        let error = graph_of(&serde_json::json!({
+            "blocks": [{ "address": 1, "terminator": { "kind": "goto", "target": 4 } }]
+        }))
+        .unwrap_err();
+        assert!(error.contains("block 0 leading to block 4"), "{error}");
+        assert!(graph_of(
+            &serde_json::json!({ "blocks": [{ "address": 1, "terminator": { "kind": "fly" } }] })
+        )
+        .is_err());
+        assert_eq!(hex_text(&[0x54, 0x4f, 0x01]), "544f01");
+        assert_eq!(
+            flow_name(&Flow::ConditionalBranch(0x104)),
+            ("branch", Some(0x104))
+        );
+    }
+
+    #[test]
     fn numbers_read_as_json_numbers_or_hex_text() {
         assert_eq!(number(&serde_json::json!(16)), Some(16));
         assert_eq!(number(&serde_json::json!("0x10")), Some(16));
@@ -2003,6 +2601,8 @@ mod tests {
             languages: vec!["FIXED:LE:32:default".to_string()],
             bitness: Bitness::Bits32,
             timeout: DEFAULT_TIMEOUT,
+            blocks: None,
+            lift: None,
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),

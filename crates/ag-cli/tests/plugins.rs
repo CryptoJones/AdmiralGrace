@@ -98,10 +98,72 @@ json.dump({"tool": request["tool"], "image": request["image"], "project": reques
 "#,
     )
     .unwrap();
+    std::fs::write(
+        dir.join("blocks.py"),
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+ins = {i["address"]: i for i in r["instructions"]}
+order = sorted(ins)
+after = {a: (order[k + 1] if k + 1 < len(order) else None) for k, a in enumerate(order)}
+end = order[-1] + ins[order[-1]]["length"]
+blocks, work = [], [r["entry"]]
+while work:
+    start = work.pop()
+    if start not in ins or any(b["from"] == start for b in blocks):
+        continue
+    a, succ = start, []
+    while a is not None and a in ins:
+        flow = ins[a].get("flow", "next")
+        if flow in ("jump", "branch"):
+            slot = after[a]
+            rest = after[slot] if slot is not None else None
+            succ = [ins[a]["target"]] + ([rest] if flow == "branch" and rest is not None else [])
+            a = rest
+            break
+        if flow == "return":
+            a = after[a]
+            break
+        a = after[a]
+    blocks.append({"from": start, "to": a if a is not None else end, "successors": succ})
+    work.extend(succ)
+blocks.sort(key=lambda b: b["from"])
+json.dump({"blocks": blocks}, sys.stdout)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lift.py"),
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+ins = {i["address"]: i for i in r["instructions"]}
+blocks = r["blocks"]
+index = {b["from"]: k for k, b in enumerate(blocks)}
+out = []
+for b in blocks:
+    addrs = [a for a in sorted(ins) if b["from"] <= a < b["to"]]
+    stmts = [{"addresses": [a], "expr": {"call": "sub_%x" % ins[a]["target"], "args": []}}
+             for a in addrs if ins[a].get("flow") == "call"]
+    term = {"kind": "return"}
+    for a in addrs:
+        flow = ins[a].get("flow", "next")
+        if flow == "branch":
+            target = ins[a]["target"]
+            rest = [s for s in b["successors"] if s != target][0]
+            term = {"kind": "branch", "cond": {"var": "flag"}, "taken": index[target], "next": index[rest], "addresses": [a]}
+        elif flow == "jump":
+            term = {"kind": "goto", "target": index[ins[a]["target"]], "addresses": [a]}
+    out.append({"address": b["from"], "statements": stmts, "terminator": term})
+json.dump({"return_type": "void", "params": [], "locals": [{"name": "flag", "type": "int"}], "entry": 0, "blocks": out}, sys.stdout)
+"#,
+    )
+    .unwrap();
     let manifest = serde_json::json!({
         "name": "toy",
         "loaders": [{ "name": "toyfile", "magic": "544f5921", "command": ["python3", dir.join("load.py")] }],
-        "architectures": [{ "name": "toycpu", "languages": ["TOYCPU:LE:32:default"], "bitness": 32, "command": ["python3", dir.join("decode.py")] }],
+        "architectures": [{ "name": "toycpu", "languages": ["TOYCPU:LE:32:default"], "bitness": 32, "command": ["python3", dir.join("decode.py")],
+                            "blocks": ["python3", dir.join("blocks.py")], "lift": ["python3", dir.join("lift.py")] }],
         "tools": [{ "name": "double", "description": "Doubles n.", "command": ["python3", dir.join("count.py")], "inputSchema": { "type": "object", "properties": { "n": { "type": "integer" } } } }]
     });
     std::fs::write(dir.join("toy.json"), manifest.to_string()).unwrap();
@@ -150,6 +212,65 @@ fn the_plugins_are_listed_from_their_manifest_and_a_bad_manifest_is_reported() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("no tool is called"));
+}
+
+#[test]
+fn a_manifests_architecture_recovers_the_blocks_and_lifts_the_toy_function() {
+    if !has_python() {
+        eprintln!("python3 is not on this machine: the toy plugin is not run");
+        return;
+    }
+    let dir = Dir::new("toy-lift");
+    write_toy_plugin(&dir.0);
+    let toy = dir.0.join("program.toy");
+    // 0x100: br 0x104 with the nop at 0x102 in its delay slot; 0x103: ret;
+    // 0x104: nop; 0x105: ret.
+    std::fs::write(&toy, b"TOY!\x06\x03\x04\x00\x01\x00\x01").unwrap();
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&toy)
+        .args(["cfg", "start", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ranges: Vec<(u64, u64)> = graph["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| {
+            (
+                block["from"].as_u64().unwrap(),
+                block["to"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(ranges, [(0x100, 0x103), (0x103, 0x104), (0x104, 0x106)]);
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&toy)
+        .args(["pseudocode", "start"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("void start("), "{text}");
+    assert!(text.contains("if (") && text.contains("flag"), "{text}");
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&toy)
+        .args(["il", "start", "--level", "medium"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("if (flag) goto block_104 else goto block_103"),
+        "{text}"
+    );
+    let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["architectures"][0]["lifts"], true);
 }
 
 #[test]

@@ -32,7 +32,8 @@ registered, as text or with `--json`.
     { "name": "toyfile", "magic": "544f5921", "command": ["python3", "/opt/toy/load.py"] }
   ],
   "architectures": [
-    { "name": "toycpu", "languages": ["TOY:LE:8:default"], "bitness": 32, "command": ["python3", "/opt/toy/decode.py"] }
+    { "name": "toycpu", "languages": ["TOY:LE:8:default"], "bitness": 32, "command": ["python3", "/opt/toy/decode.py"],
+      "blocks": ["python3", "/opt/toy/blocks.py"], "lift": ["python3", "/opt/toy/lift.py"] }
   ],
   "tools": [
     { "name": "count_strings", "description": "How many strings match a pattern.", "command": ["python3", "/opt/toy/count.py"],
@@ -48,7 +49,9 @@ A loader names the `magic` — the hex of the bytes a file of its format starts 
 the engine offers it every file that starts so, before its own loaders; a loader that fails
 is reported on standard error and the engine's own loaders read the file after all, so a
 loader with a common magic cannot keep a program from opening. An architecture names the
-`languages` it decodes (the language ids a loader reports) and its `bitness` (16, 32 or 64).
+`languages` it decodes (the language ids a loader reports) and its `bitness` (16, 32 or 64),
+and may give two more commands: `blocks`, which recovers a function's basic blocks itself,
+and `lift`, which lifts a whole function at once (below).
 A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
 Schema of its arguments (an object). A rewriter needs only its command: every function lifted
 passes through it. An entry without a `name` is named for the manifest,
@@ -102,7 +105,58 @@ may list the registers the operands name, so a rename reaches them; `memory` may
 address a memory operand names, so a reference to data or a string is found. An instruction
 outside the section, or running past its end, or on an address already given, is left out
 with a warning. An image a plugin's architecture decodes has its listing, its graph and its
-cross references; the lifter does not read it, so it has no pseudocode.
+cross references; the engine's lifter reads x86-64 alone, so it has pseudocode only when the
+architecture lifts it itself:
+
+**An architecture's `blocks` command**, when the manifest gives one, recovers a function's
+basic blocks where the flows alone cannot — delay slots, hardware loops, a bytecode whose
+jumps the decoder cannot read. It is given `{"language": "…", "entry": 256, "instructions":
+[ {"address": 256, "length": 2, "flow": "branch", "target": 260}, … ]}` (each number with a
+`_hex` twin beside it) and answers `{"blocks": [ {"from": 256, "to": 259, "successors": [260,
+259], "calls": []}, … ]}`: the blocks in address order, each ending where the next begins or
+the code does, with the blocks control goes on to and the functions it calls. Without the
+command, or when it fails (reported on standard error), the engine walks the flows.
+
+**An architecture's `lift` command**, when the manifest gives one, lifts a whole function at
+once, with the context one instruction does not have, to the medium level (`docs/il.md`): it
+is given the function — `{"language": "…", "function": 256, "name": "start", "base": 256,
+"bytes": "<hex of the section>", "instructions": [ … ], "blocks": [ {"from": 256, "to": 259,
+"successors": [260, 259]}, … ]}` — and answers with its graph:
+
+```json
+{ "return_type": "void", "params": [], "locals": [ { "name": "flag", "type": "int" } ], "entry": 0, "frame": [],
+  "blocks": [
+    { "address": 256, "statements": [ { "addresses": [258], "expr": { "call": "sub_10a", "args": [] } } ],
+      "terminator": { "kind": "branch", "cond": { "var": "flag" }, "taken": 2, "next": 1, "addresses": [256] } },
+    { "address": 259, "statements": [], "terminator": { "kind": "return" } },
+    { "address": 260, "statements": [], "terminator": { "kind": "return" } }
+  ] }
+```
+
+A block's `terminator` is `return`, `goto` (a `target` block), `branch` (a `cond`, the block
+`taken` when it holds, the `next` otherwise) or `switch` (an `index` and `cases`, each its
+`values` and `target`), with the `addresses` it came from. A statement's `expr`, a branch's
+`cond` and a switch's `index` are expression trees:
+
+| Tree | Expression |
+|---|---|
+| a number; `{"const": 1, "width": 4}` | A constant, 8 bytes wide unless `width` says. |
+| a string; `{"var": "x"}` | A variable: a parameter or a local by name. |
+| `{"string": "text"}` | A string literal. |
+| `true`, `false` | A condition that always holds, or never. |
+| `{"binary": "+", "lhs": …, "rhs": …}` | An operator spelled as C: `+ - * / % & \| ^ << >> == != < <= > >= && \|\|`. |
+| `{"assign": lhs, "rhs": …}` | An assignment. |
+| `{"deref": …}`, `{"address_of": …}` | `*p`, `&x`. |
+| `{"call": "name", "address": 768, "args": […]}` | A call to a function by name (its address when known), or to the tree given as `call`. |
+| `{"return": …}`, `{"return": null}` | A return, with or without a value. |
+| `{"cast": "long", "target": …}` | A C cast. |
+| `{"intrinsic": "name", "args": […]}` | A builtin the pseudocode spells by name. |
+
+The engine runs the registered rewriters over the graph, analyzes and structures it into the
+pseudocode as it does its own lift's, and gives the function its levels: the lifted level by
+the function's blocks, the medium and high levels from the graph, and no low level. An answer
+that is not such a graph, a block pointing outside the function, a command that fails or runs
+out of time, refuses the function with the architecture's name.
 
 **A tool** is given `{"tool": "…", "image": "<path>", "project": "<path or null>",
 "arguments": {…}}` — the image's path and the project file's, so it can open them itself
@@ -195,7 +249,13 @@ plugin::register_loader(Arc::new(Toy));
   `decode_section(language, bytes, base) -> DecodedSection`: the engine's `Disasm` of
   `DecodedInsn`s with their `Flow`, and the text of each. Registered with
   `register_architecture`; an image whose language no built-in decoder reads is decoded by
-  the registered architecture that names it.
+  the registered architecture that names it. Three more have defaults: `lifts(language)`
+  (false), `blocks(language, disasm, entry) -> Option<Result<Vec<RecoveredBlock>>>` (the
+  function's blocks recovered by the architecture; `None` leaves the walk to the engine) and
+  `lift(&FunctionCode) -> Option<Result<LiftedGraph>>` (a whole function lifted at once to
+  `Node`s over `AstNode`s, with its `params`, `locals`, `return_type`, `entry` and
+  `frame`; `None` leaves it to the engine's lifter). `Rewrite::statement(node, addresses)`
+  makes a statement; the engine structures the graph and gives it its levels.
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.
