@@ -255,6 +255,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 )),
                 Item::new(separator()),
                 Item::new(item_button(
+                    "Slice backward from variable…",
+                    "",
+                    Message::ViewSliceBackward,
+                )),
+                Item::new(item_button(
+                    "Slice forward from variable…",
+                    "",
+                    Message::ViewSliceForward,
+                )),
+                Item::new(item_button("Clear slice", "", Message::ViewSliceClear)),
+                Item::new(separator()),
+                Item::new(item_button(
                     if app.rainbow_braces {
                         "Rainbow braces: on"
                     } else {

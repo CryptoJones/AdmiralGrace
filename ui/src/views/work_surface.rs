@@ -628,7 +628,13 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
             Some(note) => format!("{text}  ; {}", note.text),
             None => text,
         };
-        let dead = app.work.dead_lines.contains(&index);
+        // A line outside the slice on screen is dimmed as dead code is.
+        let dead = app.work.dead_lines.contains(&index)
+            || app
+                .work
+                .slice
+                .as_ref()
+                .is_some_and(|slice| slice.dims(index));
         let spans = spans(&shown, dead, &decor, &mut depth);
         list = list.push(pseudocode_row(index, spans, addresses, selection));
     }

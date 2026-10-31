@@ -149,6 +149,19 @@ pub enum ImageCmd {
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Print it sliced: the statements the value of VAR depends on —
+        /// at the statement at ADDRESS, any of its line's addresses, or at
+        /// the function's end without one — and the control statements
+        /// that hold them; the other lines are comments. `return` at the
+        /// end is the value the function returns.
+        #[arg(long, value_name = "VAR[@ADDRESS]")]
+        slice: Option<String>,
+        /// Slice forward: the statements the value of VAR affects.
+        #[arg(long, requires = "slice")]
+        forward: bool,
+        /// Leave the lines outside the slice out, rather than as comments.
+        #[arg(long = "slice-hide", requires = "slice")]
+        slice_hide: bool,
     },
     /// The function at one level of the lift: the machine's instructions
     /// (`lifted`), the lifter's statements over temporaries (`low`), the
@@ -666,6 +679,22 @@ struct LineJson {
     /// Whether the line is dead code the `dead-code` option kept: a store
     /// nothing reads, a branch that goes one way.
     dead: bool,
+    /// Whether the slice keeps the line, when the pseudocode is sliced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_slice: Option<bool>,
+}
+
+/// What a sliced pseudocode was sliced by, as JSON.
+#[derive(Debug, Serialize)]
+pub(crate) struct SliceJson {
+    /// The variable; `return` for the value the function returns.
+    variable: String,
+    /// The address of the statement it is taken at; `null` for the end.
+    address: Option<u64>,
+    /// The address, as a hex string.
+    address_hex: Option<String>,
+    /// `backward` or `forward`.
+    direction: &'static str,
 }
 
 /// The pseudocode of a function, as JSON.
@@ -691,6 +720,9 @@ pub(crate) struct PseudocodeJson {
     pub(crate) text: Option<String>,
     /// The lines, each with the addresses it came from.
     lines: Vec<LineJson>,
+    /// What the pseudocode is sliced by, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slice: Option<SliceJson>,
 }
 
 /// Open the image `binary` the way the `image` commands read it: under the
@@ -870,7 +902,28 @@ pub fn run(
             ..
         } => cfg(&image, &target, json, svg.as_deref(), pdf.as_deref()),
         ImageCmd::Calls { target, json, .. } => calls(&image, target.as_deref(), json),
-        ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
+        ImageCmd::Pseudocode {
+            target,
+            json,
+            slice,
+            forward,
+            slice_hide,
+            ..
+        } => {
+            let slice = slice
+                .map(|criterion| {
+                    let direction = if forward {
+                        ag_image::SliceDirection::Forward
+                    } else {
+                        ag_image::SliceDirection::Backward
+                    };
+                    ag_image::SliceCriterion::parse(&criterion)
+                        .map(|criterion| (criterion, direction, slice_hide))
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                })
+                .transpose()?;
+            pseudocode(&image, &target, json, slice)
+        }
         ImageCmd::Il {
             target,
             level,
@@ -1716,7 +1769,12 @@ pub(crate) fn cfg_json(graph: &ag_image::ControlFlowGraph) -> CfgJson {
 /// A function the lifter refuses is reported with the reason: as a comment
 /// on stdout and exit code 1 as text, and as `lifted: false` with the
 /// `reason` as JSON, so an agent reading the JSON need not parse an error.
-fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
+fn pseudocode(
+    image: &Binary,
+    target: &str,
+    json: bool,
+    slice: Option<(ag_image::SliceCriterion, ag_image::SliceDirection, bool)>,
+) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
         "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
@@ -1724,7 +1782,11 @@ fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
     );
 
     let address = resolve(image, target)?;
-    let report = pseudocode_json(image, address);
+    let report = match &slice {
+        Some((criterion, direction, _)) => sliced_json(image, address, criterion, *direction)
+            .map_err(|error| anyhow::anyhow!("{error}"))?,
+        None => pseudocode_json(image, address),
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1733,10 +1795,7 @@ fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
 
     let name = report.name.as_deref().unwrap_or("entry");
     // The header is a comment in the pseudocode's own language.
-    let comment = match image.options().language.name() {
-        "python" => "#",
-        _ => "//",
-    };
+    let comment = comment_of(image);
     match &report.reason {
         Some(reason) => {
             println!("{comment} {name} at {address:#x}: {reason}");
@@ -1744,55 +1803,132 @@ fn pseudocode(image: &Binary, target: &str, json: bool) -> Result<i32> {
         }
         None => {
             println!("{comment} {name} at {address:#x}");
-            for line in &report.lines {
-                println!("{}", line.text);
+            match &slice {
+                Some((criterion, direction, hide)) => {
+                    println!("{comment} {} slice of {criterion}", direction.name());
+                    println!("{}", sliced_text(&report, *hide, comment));
+                }
+                None => {
+                    for line in &report.lines {
+                        println!("{}", line.text);
+                    }
+                }
             }
             Ok(0)
         }
     }
 }
 
+/// How a line comment opens in the language the image's pseudocode is
+/// printed in.
+pub(crate) fn comment_of(image: &Binary) -> &'static str {
+    match image.options().language.name() {
+        "python" => "#",
+        _ => "//",
+    }
+}
+
+/// The text of a sliced pseudocode: the lines the slice keeps as they are,
+/// the others left out when `hide` says so and otherwise commented out
+/// with `comment` where their text begins, so the indentation still reads.
+pub(crate) fn sliced_text(report: &PseudocodeJson, hide: bool, comment: &str) -> String {
+    let mut out = Vec::with_capacity(report.lines.len());
+    for line in &report.lines {
+        if line.in_slice != Some(false) {
+            out.push(line.text.clone());
+        } else if !hide {
+            let text = line.text.trim_start();
+            let pad = &line.text[..line.text.len() - text.len()];
+            out.push(format!("{pad}{comment} {text}"));
+        }
+    }
+    out.join("\n")
+}
+
 /// The pseudocode of one function, or the reason it has none.
 pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
-    let name = image.function_name(address).map(str::to_string);
     match image.pseudocode(address) {
-        Ok(pseudocode) => PseudocodeJson {
-            function: address,
-            function_hex: format!("{address:#x}"),
-            name,
-            lifted: true,
-            reason: None,
-            return_type: pseudocode.return_type.clone(),
-            return_reason: pseudocode.return_reason.clone(),
-            text: Some(pseudocode.text()),
-            lines: pseudocode
-                .lines
-                .iter()
-                .enumerate()
-                .map(|(index, line)| LineJson {
-                    line: index + 1,
-                    text: line.text.clone(),
-                    dead: pseudocode.dead_lines.contains(&index),
-                    addresses: line.addresses.clone(),
-                    addresses_hex: line
-                        .addresses
-                        .iter()
-                        .map(|address| format!("{address:#x}"))
-                        .collect(),
-                })
-                .collect(),
-        },
-        Err(error) => PseudocodeJson {
-            function: address,
-            function_hex: format!("{address:#x}"),
-            name,
-            lifted: false,
-            reason: Some(error.to_string()),
-            return_type: None,
-            return_reason: None,
-            text: None,
-            lines: Vec::new(),
-        },
+        Ok(pseudocode) => lifted_json(image, address, &pseudocode, None),
+        Err(error) => refused_json(image, address, &error),
+    }
+}
+
+/// The pseudocode of one function sliced, or the reason it has none; or,
+/// when it has, why the criterion is no criterion of it.
+pub(crate) fn sliced_json(
+    image: &Binary,
+    address: u64,
+    criterion: &ag_image::SliceCriterion,
+    direction: ag_image::SliceDirection,
+) -> std::result::Result<PseudocodeJson, String> {
+    if let Err(error) = image.pseudocode(address) {
+        return Ok(refused_json(image, address, &error));
+    }
+    let pseudocode = image
+        .sliced_pseudocode(address, criterion, direction)
+        .map_err(|error| error.reason)?;
+    let slice = SliceJson {
+        variable: criterion.variable.clone(),
+        address: criterion.at,
+        address_hex: criterion.at.map(|at| format!("{at:#x}")),
+        direction: direction.name(),
+    };
+    Ok(lifted_json(image, address, &pseudocode, Some(slice)))
+}
+
+/// The JSON of a function the lifter read.
+fn lifted_json(
+    image: &Binary,
+    address: u64,
+    pseudocode: &ag_image::Pseudocode,
+    slice: Option<SliceJson>,
+) -> PseudocodeJson {
+    PseudocodeJson {
+        function: address,
+        function_hex: format!("{address:#x}"),
+        name: image.function_name(address).map(str::to_string),
+        lifted: true,
+        reason: None,
+        return_type: pseudocode.return_type.clone(),
+        return_reason: pseudocode.return_reason.clone(),
+        text: Some(pseudocode.text()),
+        lines: pseudocode
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| LineJson {
+                line: index + 1,
+                text: line.text.clone(),
+                dead: pseudocode.dead_lines.contains(&index),
+                in_slice: pseudocode
+                    .slice_lines
+                    .as_ref()
+                    .map(|kept| kept.contains(&index)),
+                addresses: line.addresses.clone(),
+                addresses_hex: line
+                    .addresses
+                    .iter()
+                    .map(|address| format!("{address:#x}"))
+                    .collect(),
+            })
+            .collect(),
+        slice,
+    }
+}
+
+/// The JSON of a function the lifter refused.
+fn refused_json(image: &Binary, address: u64, error: &ag_image::NotLifted) -> PseudocodeJson {
+    PseudocodeJson {
+        function: address,
+        function_hex: format!("{address:#x}"),
+        name: image.function_name(address).map(str::to_string),
+        lifted: false,
+        reason: Some(error.to_string()),
+        return_type: None,
+        return_reason: None,
+        text: None,
+        lines: Vec::new(),
+        slice: None,
     }
 }
 
@@ -3042,6 +3178,9 @@ mod tests {
                 json: false,
                 options: vec!["loop-form".into(), "sometimes".into()],
                 project: None,
+                slice: None,
+                forward: false,
+                slice_hide: false,
             },
         )
         .expect_err("a bad value is refused");
@@ -3058,6 +3197,9 @@ mod tests {
                 json: false,
                 options: vec!["loop-shape".into(), "while".into()],
                 project: None,
+                slice: None,
+                forward: false,
+                slice_hide: false,
             },
         )
         .expect_err("an unknown name is refused");

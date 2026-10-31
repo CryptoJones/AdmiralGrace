@@ -177,6 +177,14 @@ pub enum Message {
     /// Take one variable's dead stores out of the pseudocode, or put them
     /// back.
     EditDeadStores,
+    /// Slice the pseudocode backward from the variable at the selected
+    /// line: the lines its value does not depend on dimmed.
+    ViewSliceBackward,
+    /// Slice the pseudocode forward from the variable at the selected
+    /// line: the lines its value does not affect dimmed.
+    ViewSliceForward,
+    /// Show the whole pseudocode again.
+    ViewSliceClear,
     /// Assemble an instruction over the bytes at the selection.
     EditAssemble,
     /// Fill the selected instruction with the architecture's no-op.
@@ -298,6 +306,9 @@ pub enum PromptKind {
     Inline,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
+    /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
+    /// `NAME@end`; forward or backward.
+    Slice { forward: bool },
     /// The address the image is moved to, or `none`.
     Rebase,
     /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
@@ -502,6 +513,25 @@ impl IlOption {
     }
 }
 
+/// A slice of the pseudocode on screen: what it was taken of, and the
+/// lines it keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceView {
+    /// The variable, as the pseudocode declares it, and where it is taken.
+    pub criterion: ag_image::SliceCriterion,
+    /// Which way the slice runs.
+    pub direction: ag_image::SliceDirection,
+    /// The lines, counted from zero, the slice keeps.
+    pub lines: BTreeSet<usize>,
+}
+
+impl SliceView {
+    /// Whether the line, counted from zero, is outside the slice.
+    pub fn dims(&self, line: usize) -> bool {
+        !self.lines.contains(&line)
+    }
+}
+
 /// The center work surface.
 #[derive(Debug, Default)]
 pub struct WorkSurface {
@@ -546,6 +576,9 @@ pub struct WorkSurface {
     /// The lines of it, counted from zero, that are dead code the analysis
     /// kept: a store nothing reads, a branch that goes one way.
     pub dead_lines: BTreeSet<usize>,
+    /// The slice the pseudocode is shown under, when one is: the lines
+    /// outside it are dimmed the way dead code is.
+    pub slice: Option<SliceView>,
     /// The line of the pseudocode last clicked, counted from zero, while
     /// the selection is still one of its addresses: which of the lines
     /// sharing an instruction the analyst meant.
@@ -2401,6 +2434,8 @@ impl App {
         self.work.references = self.provider.references(address);
         self.work.line_addresses = self.provider.line_addresses(address);
         self.work.dead_lines = self.provider.dead_lines(address);
+        // A slice is of the function it was taken in.
+        self.work.slice = None;
 
         if record_history {
             self.history.push(self.selection);
@@ -3044,6 +3079,7 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
         self.refresh_bytes();
     }
@@ -3061,8 +3097,100 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
         self.refresh_bytes();
+    }
+
+    /// Take the slice on screen again over the pseudocode as it now reads;
+    /// a slice whose variable or statement is gone is cleared, and the
+    /// notice says why.
+    fn refresh_slice(&mut self) {
+        let (Some(function), Some(slice)) = (self.work.listing_of, self.work.slice.take()) else {
+            return;
+        };
+        match self
+            .provider
+            .slice_lines(function, &slice.criterion, slice.direction)
+        {
+            Ok(lines) => self.work.slice = Some(SliceView { lines, ..slice }),
+            Err(reason) => self.notice = Some(format!("The slice is cleared: {reason}")),
+        }
+    }
+
+    /// What a slice prompt opens with: the variable the selected line
+    /// assigns, or else the first declared variable it names, at an address
+    /// of that line — one no other line holds, where there is one; with no
+    /// line selected, the first declared variable at the end. Each name as
+    /// the screen shows it.
+    fn slice_suggestion(&self) -> String {
+        let declared = self.declared_variables();
+        let key = self
+            .work
+            .listing_of
+            .map(|function| self.annotation_key(function));
+        let shown = |name: &str| {
+            key.as_ref()
+                .and_then(|key| self.annotations.variable_name(key, name))
+                .unwrap_or_else(|| name.to_string())
+        };
+        let body = self.work.pseudocode.as_deref().unwrap_or_default();
+        let line = self.selection.address().and_then(|address| {
+            self.work
+                .selected_line
+                .filter(|line| {
+                    self.work
+                        .line_addresses
+                        .get(line)
+                        .is_some_and(|addresses| addresses.contains(&address))
+                })
+                .or_else(|| {
+                    self.work
+                        .line_addresses
+                        .iter()
+                        .find(|(_, addresses)| addresses.contains(&address))
+                        .map(|(line, _)| *line)
+                })
+        });
+        let Some(line) = line else {
+            return declared.first().map(|name| shown(name)).unwrap_or_default();
+        };
+        let text = body.lines().nth(line).unwrap_or_default();
+        let words: Vec<&str> = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let assigned = text
+            .trim()
+            .split_once(" = ")
+            .map(|(lhs, _)| lhs.trim())
+            .filter(|lhs| declared.iter().any(|name| name == lhs));
+        let variable = assigned
+            .map(str::to_string)
+            .or_else(|| {
+                words
+                    .iter()
+                    .find(|word| declared.iter().any(|name| name == *word))
+                    .map(|word| word.to_string())
+            })
+            .or_else(|| declared.first().cloned())
+            .unwrap_or_default();
+        let addresses = self
+            .work
+            .line_addresses
+            .get(&line)
+            .cloned()
+            .unwrap_or_default();
+        let unique = addresses.iter().find(|address| {
+            self.work
+                .line_addresses
+                .iter()
+                .all(|(other, held)| *other == line || !held.contains(address))
+        });
+        match unique.or(addresses.first()) {
+            Some(address) => format!("{}@{address:#x}", shown(&variable)),
+            None => shown(&variable),
+        }
     }
 
     /// The site an override at the selection speaks to: the branch or the
@@ -3105,6 +3233,7 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
     }
 
@@ -3119,6 +3248,7 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
     }
 
@@ -3145,6 +3275,7 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
     }
 
@@ -3176,6 +3307,7 @@ impl App {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
         }
     }
 
@@ -3340,6 +3472,29 @@ impl App {
                     title: "Drop dead stores of variables (NAME, NAME keep, …)",
                     value: dropped.join(", "),
                 });
+            }
+
+            Message::ViewSliceBackward | Message::ViewSliceForward => {
+                if self.work.listing_of.is_none() || self.work.pseudocode.is_none() {
+                    self.notice = Some("Open a function to slice its pseudocode".into());
+                    return Task::none();
+                }
+                let forward = matches!(message, Message::ViewSliceForward);
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Slice { forward },
+                    title: if forward {
+                        "Slice forward from variable (NAME, NAME@ADDRESS, NAME@end)"
+                    } else {
+                        "Slice backward from variable (NAME, NAME@ADDRESS, NAME@end, return)"
+                    },
+                    value: self.slice_suggestion(),
+                });
+            }
+
+            Message::ViewSliceClear => {
+                if self.work.slice.take().is_some() {
+                    self.notice = Some("The slice is cleared".into());
+                }
             }
 
             Message::EditOverride => {
@@ -4365,6 +4520,53 @@ impl App {
                                 self.annotations
                                     .write_patch(kind, &key, Some((&bytes, Some(text))));
                             }
+                        }
+                    }
+                    PromptKind::Slice { forward } => {
+                        let Some(function) = self.work.listing_of else {
+                            self.notice = Some("Open a function to slice its pseudocode".into());
+                            return Task::none();
+                        };
+                        let mut criterion = match ag_image::SliceCriterion::parse(&prompt.value) {
+                            Ok(criterion) => criterion,
+                            Err(reason) => {
+                                self.notice = Some(reason);
+                                return Task::none();
+                            }
+                        };
+                        // A name the analyst gave stands for the declared one.
+                        let key = self.annotation_key(function);
+                        if let Some(declared) = self.declared_variables().into_iter().find(|name| {
+                            self.annotations.variable_name(&key, name).as_deref()
+                                == Some(criterion.variable.as_str())
+                        }) {
+                            criterion.variable = declared;
+                        }
+                        let direction = if forward {
+                            ag_image::SliceDirection::Forward
+                        } else {
+                            ag_image::SliceDirection::Backward
+                        };
+                        match self.provider.slice_lines(function, &criterion, direction) {
+                            Ok(lines) => {
+                                let total = self
+                                    .work
+                                    .pseudocode
+                                    .as_deref()
+                                    .map(|body| body.lines().count())
+                                    .unwrap_or_default();
+                                self.notice = Some(format!(
+                                    "The {} slice of {criterion} keeps {} of {total} lines",
+                                    direction.name(),
+                                    lines.len()
+                                ));
+                                self.work.slice = Some(SliceView {
+                                    criterion,
+                                    direction,
+                                    lines,
+                                });
+                            }
+                            Err(reason) => self.notice = Some(reason),
                         }
                     }
                     PromptKind::DeadStores => {
@@ -10880,6 +11082,92 @@ mod tests {
         assert!(app.annotations.annotation_for("0x1149").is_none());
         let _ = app.update(Message::FunctionSelected(0x1198));
         assert!(main(&app).contains("sum_to(add(a, 3))"), "{}", main(&app));
+    }
+
+    #[test]
+    fn a_slice_dims_the_lines_outside_it_and_clears() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        let line_of = |needle: &str| {
+            body.lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {body}"))
+        };
+        let sum = line_of("local_10 = local_10 + (long)local_14;");
+        let start = line_of("local_10 = 0;");
+        let head = line_of("for (local_14 = 1;");
+        let end = line_of("return local_10;");
+
+        // The prompt opens on the variable the clicked line assigns, at an
+        // address of that line alone.
+        let address = app.work.line_addresses[&sum][0];
+        let _ = app.update(Message::PseudocodeLineSelected(sum, address));
+        let _ = app.update(Message::ViewSliceBackward);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::Slice { forward: false });
+        assert!(prompt.value.starts_with("local_10@0x"), "{}", prompt.value);
+        let _ = app.update(Message::PromptSubmit);
+        let slice = app.work.slice.clone().expect("a slice");
+        assert!(
+            !slice.dims(sum) && !slice.dims(start) && !slice.dims(head),
+            "{slice:?}"
+        );
+        assert!(slice.dims(end), "{slice:?}");
+
+        // The counter, by the name the analyst gave it, at the end: the sum
+        // is not its.
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("local_14=i".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::ViewSliceBackward);
+        let _ = app.update(Message::PromptChanged("i".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let slice = app.work.slice.clone().expect("a slice");
+        assert_eq!(slice.criterion.variable, "local_14");
+        assert!(
+            slice.dims(sum) && slice.dims(start) && !slice.dims(head),
+            "{slice:?}"
+        );
+
+        // Forward from the parameter: the loop it bounds, and what that
+        // decides.
+        let _ = app.update(Message::ViewSliceForward);
+        let _ = app.update(Message::PromptChanged("a".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let slice = app.work.slice.clone().expect("a slice");
+        assert_eq!(slice.direction, ag_image::SliceDirection::Forward);
+        assert!(
+            !slice.dims(head) && !slice.dims(sum) && slice.dims(start),
+            "{slice:?}"
+        );
+
+        // A variable the function lacks is said, and the slice stands.
+        let _ = app.update(Message::ViewSliceBackward);
+        let _ = app.update(Message::PromptChanged("nothing".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("no variable nothing")),
+            "{:?}",
+            app.notice
+        );
+        assert!(app.work.slice.is_some());
+
+        // Cleared, every line reads again; another function starts unsliced.
+        let _ = app.update(Message::ViewSliceClear);
+        assert!(app.work.slice.is_none());
+        let _ = app.update(Message::ViewSliceBackward);
+        let _ = app.update(Message::PromptChanged("return".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.work.slice.is_some());
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(app.work.slice.is_none());
     }
 
     #[test]

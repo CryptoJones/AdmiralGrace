@@ -426,6 +426,19 @@ pub trait Provider: Send + Sync {
         BTreeSet::new()
     }
 
+    /// The lines of the pseudocode, counted from zero, that the slice of
+    /// `criterion` taken `direction` keeps — the lines of
+    /// [`Provider::pseudocode`] — or why there is no such slice. A provider
+    /// that cannot slice says so.
+    fn slice_lines(
+        &self,
+        _address: u64,
+        _criterion: &ag_image::SliceCriterion,
+        _direction: ag_image::SliceDirection,
+    ) -> Result<BTreeSet<usize>, String> {
+        Err("This project's pseudocode cannot be sliced: open a program image".to_string())
+    }
+
     /// Tell the analysis which variables' dead stores to take out of the
     /// pseudocode, by the address of the function declaring each, and say
     /// whether that changed anything.

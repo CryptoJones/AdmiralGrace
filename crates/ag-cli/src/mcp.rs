@@ -200,6 +200,21 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
+            name: "slice",
+            description: "The pseudocode of one function sliced, as decompile prints it: backward, the statements the value of a variable depends on — the assignments whose values reach it, through loops, and the conditions deciding whether they run — or forward, the statements that value affects. The criterion is the variable at the statement at an address (any of its line's addresses), or at the function's end without one; `return` at the end is the value the function returns. The control statements holding a kept statement stay; the other lines are commented out, or left out with `hide`. A call reads and may write all memory — what pointers point at, a variable whose address is taken, a global — so a call whose arguments or result reach the value is kept, and with it what wrote memory before it.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "variable": { "type": "string", "description": "The variable, as the pseudocode declares it; `return` for the return value." },
+                    "address": { "type": "string", "description": "The address of the statement the variable is taken at; the function's end without one." },
+                    "direction": { "type": "string", "enum": ["backward", "forward"], "description": "Backward (the default): what the value depends on. Forward: what it affects." },
+                    "hide": { "type": "boolean", "description": "Leave the lines outside the slice out rather than commented out (default false)." },
+                },
+                "required": ["target", "variable"]
+            }),
+        },
+        Tool {
             name: "il",
             description: "The function at one level of the lift — lifted (the machine's instructions with the registers each touches), low (the lifter's statements over temporaries and slots), medium (statements over variables on the block graph) or high (the structured body) — each item with the addresses it came from, in SSA form when asked.",
             schema: json!({
@@ -823,6 +838,42 @@ impl Server {
                         pseudocode.reason.unwrap_or_default()
                     ))
                 }
+            }
+            "slice" => {
+                let address = self.function(&text("target")?)?;
+                let variable = text("variable")?;
+                let at = optional_text("address")?
+                    .map(|at| parse_address(&at))
+                    .transpose()?;
+                let direction = match optional_text("direction")?.as_deref() {
+                    None | Some("backward") => ag_image::SliceDirection::Backward,
+                    Some("forward") => ag_image::SliceDirection::Forward,
+                    Some(other) => {
+                        return Err(format!(
+                            "\"direction\" is backward or forward, not {other:?}"
+                        ))
+                    }
+                };
+                let hide = flag("hide", false)?;
+                let criterion = ag_image::SliceCriterion {
+                    variable: variable.trim().to_string(),
+                    at,
+                };
+                let report =
+                    crate::image::sliced_json(&self.image, address, &criterion, direction)?;
+                if !report.lifted {
+                    return Err(format!(
+                        "{} at {address:#x} was not lifted: {}",
+                        self.image.function_name(address).unwrap_or("the function"),
+                        report.reason.unwrap_or_default()
+                    ));
+                }
+                let comment = crate::image::comment_of(&self.image);
+                Ok(Answer::text(format!(
+                    "{comment} {} slice of {criterion}\n{}",
+                    direction.name(),
+                    crate::image::sliced_text(&report, hide, comment)
+                )))
             }
             "il" => {
                 let address = self.function(&text("target")?)?;
@@ -1987,6 +2038,7 @@ mod tests {
                 "search",
                 "disassemble",
                 "decompile",
+                "slice",
                 "il",
                 "emulate",
                 "transpile",
@@ -2067,6 +2119,48 @@ mod tests {
         let code = call(&mut server, "decompile", json!({ "target": "0x1198" }));
         assert_eq!(code["isError"], false);
         assert!(text_of(&code).contains("main("), "{}", text_of(&code));
+
+        // sum_to's counter at the end: the loop is its, the sum is not.
+        let sliced = call(
+            &mut server,
+            "slice",
+            json!({ "target": "sum_to", "variable": "local_14" }),
+        );
+        assert_eq!(sliced["isError"], false);
+        let text = text_of(&sliced);
+        assert!(
+            text.starts_with("// backward slice of local_14 at the end\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n  // local_10 = 0;\n"), "{text}");
+        assert!(
+            text.contains("\n  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n"),
+            "{text}"
+        );
+        // Forward from main's call result, with the rest left out.
+        let sliced = call(
+            &mut server,
+            "slice",
+            json!({ "target": "main", "variable": "a", "direction": "forward", "hide": true }),
+        );
+        let text = text_of(&sliced);
+        assert!(text.contains("v2 = sum_to(add(a, 3));"), "{text}");
+        assert!(!text.contains("//   "), "{text}");
+        // A criterion the function lacks, or a direction that is none, is
+        // the tool's error.
+        let missing = call(
+            &mut server,
+            "slice",
+            json!({ "target": "main", "variable": "nothing" }),
+        );
+        assert_eq!(missing["isError"], true);
+        assert!(text_of(&missing).contains("main names no variable nothing"));
+        let sideways = call(
+            &mut server,
+            "slice",
+            json!({ "target": "main", "variable": "a", "direction": "sideways" }),
+        );
+        assert_eq!(sideways["isError"], true);
 
         let graph = call(
             &mut server,
