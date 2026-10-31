@@ -720,7 +720,7 @@ pub enum Language {
     /// Objective-C: C with `YES` and `NO`, and message sends as they are.
     ObjC,
     /// Python: `def f(a):`, blocks by indentation, `and`/`or`, `True`,
-    /// `x if c else y`, no declarations.
+    /// `x if c else y`, the locals as a `# locals:` comment.
     Python,
 }
 

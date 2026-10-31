@@ -1932,6 +1932,8 @@ fn the_pseudocode_reads_as_rust_or_python_when_asked() {
         &["pseudocode", "sum_to", "--option", "language", "python"],
     );
     assert!(python.contains("def sum_to(a):"), "{python}");
+    assert!(python.starts_with("# sum_to at "), "{python}");
+    assert!(!python.contains("//"), "{python}");
     assert!(python.contains("  while local_14 <= a:"), "{python}");
     assert!(
         python.contains("    local_10 = local_10 + long(local_14)"),

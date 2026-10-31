@@ -158,10 +158,13 @@ fn rust_type(ty: &str) -> String {
     let base: Vec<&str> = words.iter().copied().filter(|w| *w != "unsigned").collect();
     let width = match base.join(" ").as_str() {
         "char" => "8",
-        "short" => "16",
+        "short" | "short int" => "16",
         "int" | "" => "32",
-        "long" | "long long" => "64",
+        "long" | "long long" | "long int" | "long long int" => "64",
         "void" => return "()".to_string(),
+        "float" => return "f32".to_string(),
+        "double" | "long double" => return "f64".to_string(),
+        "_Bool" | "bool" => return "bool".to_string(),
         other => return other.to_string(),
     };
     format!("{}{width}", if unsigned { "u" } else { "i" })
@@ -325,11 +328,12 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
         });
     }
 
-    emit_statements(&function.body, 1, &mut lines, &style);
+    let start = lines.len();
+    emit_statements(&function.body, 1, &mut lines, &style, None);
 
     match style.language {
         Language::Python => {
-            if function.body.is_empty() {
+            if only_comments(&lines[start..]) {
                 lines.push(Line {
                     text: format!("{}pass", style.indent),
                     addresses: Vec::new(),
@@ -349,10 +353,40 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
     }
 }
 
+/// Whether every line is a comment — or there is none — so that a Python
+/// block needs a `pass` to be a block at all.
+fn only_comments(lines: &[Line]) -> bool {
+    lines
+        .iter()
+        .all(|line| line.text.trim_start().starts_with('#'))
+}
+
+/// The label a statement is, when it is one: what a `goto` out of the loop
+/// before it means to reach.
+fn label_of(statement: Option<&Statement>) -> Option<&str> {
+    match statement {
+        Some(Statement {
+            kind: StatementKind::Plain,
+            node: AstNode::Label { name, .. },
+            ..
+        }) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// Print statements at `depth` levels of indentation, each language's way:
 /// C and Objective-C with braces, Rust with braces and `match` and `loop`,
-/// Python by indentation with `elif` and `while True`.
-fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>, style: &Style) {
+/// Python by indentation with `elif` and `while True`. `exit` is the label
+/// right after the innermost enclosing loop, when there is one: a `goto`
+/// to it from inside the loop leaves the loop, which Rust and Python say
+/// with `break`.
+fn emit_statements(
+    statements: &[Statement],
+    depth: usize,
+    lines: &mut Vec<Line>,
+    style: &Style,
+    exit: Option<&str>,
+) {
     let pad = style.indent.repeat(depth);
     let language = style.language;
     let brace = !matches!(language, Language::Python);
@@ -364,18 +398,21 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
             });
         }
     };
-    let body = |statements: &[Statement], lines: &mut Vec<Line>| {
-        if statements.is_empty() && !brace {
+    let body = |statements: &[Statement], lines: &mut Vec<Line>, exit: Option<&str>| {
+        let start = lines.len();
+        emit_statements(statements, depth + 1, lines, style, exit);
+        // A Python block of nothing, or of comments alone, is `pass`.
+        if !brace && only_comments(&lines[start..]) {
             lines.push(Line {
                 text: format!("{pad}{}pass", style.indent),
                 addresses: Vec::new(),
             });
-        } else {
-            emit_statements(statements, depth + 1, lines, style);
         }
     };
     let semicolon = style.terminator();
-    for statement in statements {
+    for (index, statement) in statements.iter().enumerate() {
+        // The label after a loop is where a `goto` out of the loop goes.
+        let after = label_of(statements.get(index + 1));
         match &statement.kind {
             StatementKind::Plain => match &statement.node {
                 // A label sits one level out from the statements it names;
@@ -394,6 +431,9 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                 AstNode::Goto { label, .. } => {
                     let text = match language {
                         Language::C | Language::ObjC => format!("goto {label};"),
+                        // Out of the enclosing loop to the label after it:
+                        // a break, in a language without a goto.
+                        _ if exit == Some(label.as_str()) => format!("break{semicolon}"),
                         _ => style.comment(&format!("goto {label}")),
                     };
                     push(lines, format!("{pad}{text}"), &statement.addresses);
@@ -429,7 +469,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                     ),
                     &statement.addresses,
                 );
-                body(then_part, lines);
+                body(then_part, lines, exit);
                 if !else_part.is_empty() {
                     lines.push(Line {
                         text: if brace {
@@ -439,7 +479,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         },
                         addresses: Vec::new(),
                     });
-                    body(else_part, lines);
+                    body(else_part, lines, exit);
                 }
                 close(lines);
             }
@@ -456,7 +496,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                                 addresses: Vec::new(),
                             });
                         }
-                        emit_statements(&arm.body, depth + 1, lines, style);
+                        emit_statements(&arm.body, depth + 1, lines, style, exit);
                     }
                     close(lines);
                 }
@@ -468,11 +508,23 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                     for arm in arms {
                         let values: Vec<String> =
                             arm.values.iter().map(|v| v.to_string()).collect();
+                        let inner = without_trailing_break(&arm.body);
+                        if inner.is_empty() {
+                            lines.push(Line {
+                                text: format!(
+                                    "{pad}{}{} => {{}}",
+                                    style.indent,
+                                    values.join(" | ")
+                                ),
+                                addresses: Vec::new(),
+                            });
+                            continue;
+                        }
                         lines.push(Line {
                             text: format!("{pad}{}{} => {{", style.indent, values.join(" | ")),
                             addresses: Vec::new(),
                         });
-                        emit_statements(without_trailing_break(&arm.body), depth + 2, lines, style);
+                        emit_statements(inner, depth + 2, lines, style, exit);
                         lines.push(Line {
                             text: format!("{pad}{}}}", style.indent),
                             addresses: Vec::new(),
@@ -509,20 +561,22 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                                 Vec::new()
                             },
                         });
-                        body(without_trailing_break(&arm.body), lines);
+                        body(without_trailing_break(&arm.body), lines, exit);
                     }
                 }
             },
             StatementKind::While { body: inner } => {
+                let cond = condition(&statement.node, style);
+                let head = match language {
+                    // Rust says `loop`, not `while true`.
+                    Language::Rust if cond == "true" => "loop {".to_string(),
+                    _ => style.head("while", &cond),
+                };
                 lines.push(Line {
-                    text: format!(
-                        "{pad}{}{}",
-                        style.head("while", &condition(&statement.node, style)),
-                        constant_note(&statement.node, style)
-                    ),
+                    text: format!("{pad}{head}{}", constant_note(&statement.node, style)),
                     addresses: statement.addresses.clone(),
                 });
-                body(inner, lines);
+                body(inner, lines, after);
                 close(lines);
             }
             StatementKind::DoWhile { body: inner } => match language {
@@ -531,7 +585,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         text: format!("{pad}do {{"),
                         addresses: Vec::new(),
                     });
-                    emit_statements(inner, depth + 1, lines, style);
+                    emit_statements(inner, depth + 1, lines, style, after);
                     lines.push(Line {
                         text: format!(
                             "{pad}}} while ({});{}",
@@ -546,7 +600,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         text: format!("{pad}loop {{"),
                         addresses: Vec::new(),
                     });
-                    emit_statements(inner, depth + 1, lines, style);
+                    emit_statements(inner, depth + 1, lines, style, after);
                     lines.push(Line {
                         text: format!(
                             "{pad}{}if !({}) {{ break; }}{}",
@@ -563,7 +617,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         text: format!("{pad}while True:"),
                         addresses: Vec::new(),
                     });
-                    body(inner, lines);
+                    body(inner, lines, after);
                     lines.push(Line {
                         text: format!(
                             "{pad}{}if not ({}):{}",
@@ -595,7 +649,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         ),
                         addresses: statement.addresses.clone(),
                     });
-                    emit_statements(inner, depth + 1, lines, style);
+                    emit_statements(inner, depth + 1, lines, style, after);
                     close(lines);
                 }
                 Language::Rust | Language::Python => {
@@ -613,7 +667,7 @@ fn emit_statements(statements: &[Statement], depth: usize, lines: &mut Vec<Line>
                         ),
                         addresses: statement.addresses.clone(),
                     });
-                    emit_statements(inner, depth + 1, lines, style);
+                    emit_statements(inner, depth + 1, lines, style, after);
                     push(
                         lines,
                         format!(
@@ -913,7 +967,11 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
             // Python has no pointers: a read of memory, typed by the cast.
             Language::Python => match target.as_ref() {
                 AstNode::Cast { ty, target } if ty.trim_end().ends_with('*') => {
-                    let pointee = ty.trim_end().trim_end_matches('*').trim().replace(' ', "_");
+                    // `long *` reads a long; `long **` reads a pointer to one.
+                    let pointee = ty.trim_end()[..ty.trim_end().len() - 1]
+                        .trim()
+                        .replace(' ', "_")
+                        .replace('*', "_ptr");
                     let _ = write!(out, "deref_{pointee}(");
                     expr(target, out, false, style);
                     out.push(')');
@@ -1375,6 +1433,129 @@ mod tests {
         emit_function(&every_statement(), &options).text()
     }
 
+    /// A loop a switch arm leaves by a goto to the label after the loop,
+    /// and a loop whose body is a label alone.
+    fn a_switch_leaves_a_loop() -> LiftedFunction {
+        use crate::lift::{Statement, StatementKind, SwitchArm};
+        let var = AstNode::var;
+        let plain = |node: AstNode, at: u64| Statement {
+            node,
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        };
+        let goto = |label: &str, at: u64| {
+            plain(
+                AstNode::Goto {
+                    label: label.to_string(),
+                    address: at,
+                },
+                at,
+            )
+        };
+        let label = |name: &str, at: u64| {
+            plain(
+                AstNode::Label {
+                    name: name.to_string(),
+                    address: at,
+                },
+                at,
+            )
+        };
+        LiftedFunction {
+            name: "g".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![Variable {
+                ty: "int".to_string(),
+                name: "a".to_string(),
+            }],
+            locals: Vec::new(),
+            body: vec![
+                Statement {
+                    node: AstNode::ConditionTrue,
+                    addresses: vec![0x20],
+                    kind: StatementKind::While {
+                        body: vec![Statement {
+                            node: var("a"),
+                            addresses: vec![0x24],
+                            kind: StatementKind::Switch {
+                                arms: vec![
+                                    SwitchArm {
+                                        values: vec![1],
+                                        body: vec![goto("block_40", 0x28)],
+                                    },
+                                    SwitchArm {
+                                        values: vec![2],
+                                        body: vec![goto("block_60", 0x2c)],
+                                    },
+                                ],
+                            },
+                        }],
+                    },
+                },
+                label("block_40", 0x40),
+                Statement {
+                    node: AstNode::ConditionTrue,
+                    addresses: vec![0x50],
+                    kind: StatementKind::While {
+                        body: vec![label("block_54", 0x54)],
+                    },
+                },
+                label("block_60", 0x60),
+                plain(
+                    AstNode::Return {
+                        value: Some(Box::new(var("a"))),
+                    },
+                    0x64,
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        }
+    }
+
+    #[test]
+    fn a_goto_out_of_a_loop_is_a_break_in_rust_and_python() {
+        let text = |language: &str| {
+            let options = Options::from_pairs([("language", language)]).expect("a language");
+            emit_function(&a_switch_leaves_a_loop(), &options).text()
+        };
+        let c = text("c");
+        assert!(c.contains("goto block_40;"), "{c}");
+        assert!(c.contains("block_40:"), "{c}");
+        // The arm leaving the loop breaks; the arm going past the next loop
+        // keeps the goto as a comment, since no break reaches it.
+        let rust = text("rust");
+        assert!(rust.contains("1 => {\n        break;\n      }"), "{rust}");
+        assert!(
+            rust.contains("2 => {\n        // goto block_60\n      }"),
+            "{rust}"
+        );
+        assert!(rust.contains("\n  loop {\n"), "{rust}");
+        assert!(!rust.contains("while true"), "{rust}");
+        let python = text("python");
+        assert!(python.contains("    if a == 1:\n      break\n"), "{python}");
+        assert!(
+            python.contains("    elif a == 2:\n      # goto block_60\n      pass\n"),
+            "{python}"
+        );
+        // A block of a label alone is a block still.
+        assert!(
+            python.contains("  while True:\n  # block_54:\n    pass\n"),
+            "{python}"
+        );
+    }
+
+    #[test]
+    fn rust_types_cover_floats_and_bool() {
+        assert_eq!(rust_type("float"), "f32");
+        assert_eq!(rust_type("double"), "f64");
+        assert_eq!(rust_type("_Bool"), "bool");
+        assert_eq!(rust_type("long int"), "i64");
+        assert_eq!(rust_type("unsigned short int"), "u16");
+    }
+
     #[test]
     fn the_pseudocode_reads_as_c_rust_objective_c_or_python() {
         let c = rendered("c");
@@ -1386,7 +1567,7 @@ mod tests {
         let rust = rendered("rust");
         assert_eq!(
             rust,
-            "// returns long: main reads rax after the call\nfn f(a: i32) -> i64 {\n  let mut i: i32;\n  let mut total: i64;\n\n  i = 0;\n  while i < a {\n    total = total + (i as i64);\n    i = i + 1;\n  }\n  if a == 0 {\n    return 0;\n  } else {\n    total = total * 2;\n  }\n  match a {\n    1 | 2 => {\n      total = 1;\n    }\n    3 => {\n    }\n    _ => {}\n  }\n  loop {\n    total = total >> 1;\n    if !(total > 0x64) { break; }\n  }\n  while true {\n    total = if total && a { total } else { *(a as *mut i64) };\n  }\n  return total;\n}",
+            "// returns long: main reads rax after the call\nfn f(a: i32) -> i64 {\n  let mut i: i32;\n  let mut total: i64;\n\n  i = 0;\n  while i < a {\n    total = total + (i as i64);\n    i = i + 1;\n  }\n  if a == 0 {\n    return 0;\n  } else {\n    total = total * 2;\n  }\n  match a {\n    1 | 2 => {\n      total = 1;\n    }\n    3 => {}\n    _ => {}\n  }\n  loop {\n    total = total >> 1;\n    if !(total > 0x64) { break; }\n  }\n  loop {\n    total = if total && a { total } else { *(a as *mut i64) };\n  }\n  return total;\n}",
             "{rust}"
         );
         let python = rendered("python");

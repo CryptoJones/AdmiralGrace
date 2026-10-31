@@ -196,7 +196,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "decompile",
-            description: "The pseudocode of one function, as C, with the reason when the function could not be lifted.",
+            description: "The pseudocode of one function — as C, or in the `language` option's language when the server was started with one — with the reason when the function could not be lifted.",
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
