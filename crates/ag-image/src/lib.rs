@@ -57,6 +57,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
+pub use ag_engine::image::{raw_arch, raw_language, RawSpec, RAW_ARCHITECTURES};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::Bitness;
@@ -436,7 +437,21 @@ impl Binary {
     /// is an error that names what is wrong.
     pub fn open_with_layout(path: &Path, layout: &Layout) -> Result<Binary> {
         let image = Image::open(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut binary = Binary::from_image(&image);
+        Self::from_opened(&image, layout)
+    }
+
+    /// Read the file at `path` as raw bytes, loaded as `spec` says, under
+    /// the analyst's `layout`: firmware, shellcode, a dump — a file with no
+    /// container to say where it loads or what it is.
+    pub fn open_raw_with_layout(path: &Path, spec: &RawSpec, layout: &Layout) -> Result<Binary> {
+        let image = Image::open_raw(path, spec)
+            .with_context(|| format!("reading {} as raw bytes", path.display()))?;
+        Self::from_opened(&image, layout)
+    }
+
+    /// An image the loader read, under `layout`.
+    fn from_opened(image: &Image, layout: &Layout) -> Result<Binary> {
+        let mut binary = Binary::from_image(image);
         binary.apply_layout(layout, image.file_bytes())?;
         Ok(binary)
     }

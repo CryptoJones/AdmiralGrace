@@ -433,7 +433,7 @@ fn a_color_is_set_normalized_and_cleared() {
     let report = show_json(&file);
     assert_eq!(
         report["format"],
-        serde_json::json!(5),
+        serde_json::json!(6),
         "a block record names the version"
     );
     let annotations = report["annotations"].as_array().expect("the annotations");
@@ -1046,7 +1046,7 @@ fn the_image_is_rebased_and_its_segments_edited_through_the_project() {
     assert!(!ok);
     assert!(stderr.contains("already"), "{stderr}");
     let report = show_json(&file);
-    assert_eq!(report["format"], serde_json::json!(5));
+    assert_eq!(report["format"], serde_json::json!(6));
     assert_eq!(report["layout"]["base"], serde_json::json!("0x400000"));
     assert_eq!(
         report["layout"]["segments"].as_array().map(Vec::len),
@@ -1180,4 +1180,232 @@ fn a_mode_mark_on_an_x86_image_changes_nothing() {
     let (ok, after, stderr) = image(&["disasm", "add", "--project", &file.text()]);
     assert!(ok, "{stderr}");
     assert_eq!(before, after, "x86 has one instruction set");
+}
+
+#[test]
+fn a_project_remembers_how_raw_bytes_load() {
+    let file = TempFile::new("raw");
+    let sample = fixture("sample.elf");
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let sample = sample.display().to_string();
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "--entry",
+        "0x1149",
+        "save",
+        "--out",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["target"]["raw"]["arch"], serde_json::json!("x86-64"));
+    assert_eq!(report["target"]["raw"]["base"], serde_json::json!("0x1060"));
+    assert_eq!(
+        report["target"]["raw"]["length"],
+        serde_json::json!("0x18c")
+    );
+
+    // Every command after reads the target as the project says, flags or not.
+    let (ok, stdout, stderr) = run(&[
+        "image",
+        &sample,
+        "disasm",
+        "0x1149",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("endbr64"), "{stdout}");
+    let (ok, _, stderr) = run(&["project", &sample, "nop", "--file", &file.text(), "0x1149"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = run(&[
+        "image",
+        &sample,
+        "disasm",
+        "0x1149",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("nop"), "{stdout}");
+
+    // Flags that disagree with the project are refused, in both commands;
+    // the same flags again are fine.
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "aarch64",
+        "--base",
+        "0x9000",
+        "patch",
+        "--file",
+        &file.text(),
+        "0x9000",
+        "90",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("but") && stderr.contains("says"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = run(&[
+        "image",
+        &sample,
+        "--raw",
+        "aarch64",
+        "--base",
+        "0x9000",
+        "info",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("the project says"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "--entry",
+        "0x1149",
+        "show",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+}
+
+#[test]
+fn raw_flags_that_disagree_with_a_project_are_refused_everywhere() {
+    let sample = fixture("sample.elf").display().to_string();
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // A project of raw bytes: other raw flags are refused by every reader.
+    let raw = TempFile::new("raw-disagree");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "save",
+        "--out",
+        &raw.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    for args in [
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "show",
+            &raw.text(),
+        ],
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "tags",
+            &raw.text(),
+        ],
+        vec![
+            "project",
+            &sample,
+            "--raw",
+            "aarch64",
+            "--base",
+            "0x9000",
+            "write-patched",
+            "--file",
+            &raw.text(),
+            "--out",
+            "/nonexistent/dir/out",
+        ],
+    ] {
+        let (ok, _, stderr) = run(&args);
+        assert!(!ok, "{args:?}");
+        assert!(
+            stderr.contains("but") && stderr.contains("says"),
+            "{args:?}: {stderr}"
+        );
+    }
+
+    // A project made for the container refuses raw flags in both commands.
+    let plain = TempFile::new("raw-plain");
+    let (ok, _, stderr) = run(&["project", &sample, "save", "--out", &plain.text()]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "image",
+        &sample,
+        "--raw",
+        "x86",
+        "--base",
+        "0x1060",
+        "info",
+        "--project",
+        &plain.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("it is not raw bytes"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86",
+        "--base",
+        "0x1060",
+        "patch",
+        "--file",
+        &plain.text(),
+        "0x1149",
+        "90",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("it is not raw bytes"), "{stderr}");
 }

@@ -86,3 +86,133 @@ fn bytes_outside_every_section_are_none() {
     assert!(image.bytes_from(0xdead_0000).is_none());
     assert!(image.section_bytes(0xdead_0000).is_none());
 }
+
+#[test]
+fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
+    use ag_engine::image::{raw_language, Image, RawSpec};
+
+    // The sample ELF's `.text`, read as raw bytes from its file offset, at
+    // its own address: the same bytes the loader finds.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    let spec = RawSpec {
+        language: raw_language("x86-64")
+            .expect("a known architecture")
+            .to_string(),
+        base: 0x1060,
+        entry: Some(0x1149),
+        offset: 0x1060,
+        length: Some(0x18c),
+    };
+    let raw = Image::open_raw(&path, &spec).expect("raw bytes load");
+    assert_eq!(raw.language(), "x86:LE:64:default:gcc");
+    assert_eq!(raw.entry(), Some(0x1149));
+    let sections = raw.sections();
+    assert_eq!(sections.len(), 1);
+    assert_eq!(
+        (sections[0].vma, sections[0].size, sections[0].executable),
+        (0x1060, 0x18c, true)
+    );
+    assert_eq!(raw.executable_ranges(), vec![(0x1060, 0x18c)]);
+    assert!(raw.function_symbols().is_empty());
+    assert!(raw.import_slots().is_empty());
+    assert_eq!(raw.load_base(), Some(0x1060));
+    let loaded = Image::open(&path).expect("the ELF loads");
+    assert_eq!(raw.bytes_from(0x1149), loaded.bytes_from(0x1149));
+    assert_eq!(raw.raw().and_then(|spec| spec.length), Some(0x18c));
+
+    // The rest of the file, when no length is said; and what does not fit.
+    let rest = Image::open_raw(
+        &path,
+        &RawSpec {
+            length: None,
+            ..spec.clone()
+        },
+    )
+    .expect("loads");
+    assert_eq!(
+        rest.sections()[0].size,
+        std::fs::metadata(&path).unwrap().len() - 0x1060
+    );
+    let refused = Image::open_raw(
+        &path,
+        &RawSpec {
+            offset: 0x1_0000_0000,
+            ..spec.clone()
+        },
+    )
+    .expect_err("past the end")
+    .to_string();
+    assert!(refused.contains("past the end"), "{refused}");
+    let refused = Image::open_raw(
+        &path,
+        &RawSpec {
+            entry: Some(0x10),
+            ..spec.clone()
+        },
+    )
+    .expect_err("outside")
+    .to_string();
+    assert!(refused.contains("outside the bytes"), "{refused}");
+
+    // Raw Thumb firmware: the entry's low bit is the one mode hint.
+    let thumb = Image::open_raw(
+        &path,
+        &RawSpec {
+            language: raw_language("thumb").unwrap().to_string(),
+            entry: Some(0x1061),
+            ..spec.clone()
+        },
+    )
+    .expect("loads");
+    assert_eq!(thumb.arm_mode_hints(), vec![(0x1060, true)]);
+    assert_eq!(raw_language("sparc"), None);
+    assert_eq!(
+        ag_engine::image::raw_arch("ARM:LE:32:Cortex:default"),
+        Some("thumb")
+    );
+    assert_eq!(
+        ag_engine::image::raw_arch("x86:LE:64:default:gcc"),
+        Some("x86-64")
+    );
+    assert_eq!(ag_engine::image::raw_arch("x86:LE:64:default:clang"), None);
+
+    // Nowhere to load: address 0, no bytes, or past a 32-bit program's space.
+    for (spec, says) in [
+        (
+            RawSpec {
+                base: 0,
+                ..spec.clone()
+            },
+            "address 0",
+        ),
+        (
+            RawSpec {
+                length: Some(0),
+                ..spec.clone()
+            },
+            "no bytes",
+        ),
+        (
+            RawSpec {
+                language: raw_language("x86").unwrap().to_string(),
+                base: 0xffff_ff80,
+                length: Some(0x100),
+                entry: None,
+                ..spec.clone()
+            },
+            "past the top",
+        ),
+        (
+            RawSpec {
+                base: 0xffff_ffff_ffff_ff00,
+                length: Some(0x100),
+                entry: None,
+                ..spec.clone()
+            },
+            "past the top",
+        ),
+    ] {
+        let refused = Image::open_raw(&path, &spec).expect_err(says).to_string();
+        assert!(refused.contains(says), "{refused}");
+    }
+}

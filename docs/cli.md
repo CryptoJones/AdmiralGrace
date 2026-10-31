@@ -85,7 +85,14 @@ corpus-format` describes both layouts.
 ## Reading a program image
 
 `ag image` reads a program image: an ELF, PE, COFF or Mach-O file, parsed by the engine's
-own loader rather than read out of a corpus.
+own loader rather than read out of a corpus — or raw bytes, with `--raw ARCH --base ADDRESS`
+before the subcommand: firmware, shellcode, a dump, a file with no container to say where
+it loads. `ARCH` is `x86-64`, `x86`, `arm`, `thumb` (Cortex-M: Thumb throughout, under the ARMv7
+specification) or `aarch64`; the base cannot be 0, where nothing is mapped;
+`--entry`, `--offset` into the file and `--length` apply when they are not the start and the
+rest of the file. The bytes are one section of code, and the entry, when named, is a
+function. `ag project TARGET --raw … save` records the same in the project file, and every
+command that reads the project reads the target that way after, flags or not.
 
 ```sh
 # The language, the entry point and the sections
@@ -117,6 +124,9 @@ cargo run --bin ag -- image ./sample.elf data
 
 # All of the above, written as a directory of JSON and text
 cargo run --bin ag -- image ./sample.elf export ./sample.ag
+
+# Raw bytes: a Thumb firmware image loaded at 0x8000000, its entry named
+cargo run --bin ag -- image ./firmware.bin --raw thumb --base 0x8000000 --entry 0x8000101 disasm 0x8000100
 ```
 
 ## `ag image` subcommands

@@ -58,10 +58,13 @@ enum Cmd {
         /// The topic to print; without one, the topics are listed.
         topic: Option<String>,
     },
-    /// Report on a program image: an ELF, PE, COFF or Mach-O file.
+    /// Report on a program image: an ELF, PE, COFF or Mach-O file, or raw
+    /// bytes with `--raw`.
     Image {
         /// The program image to read.
         binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
         #[command(subcommand)]
         cmd: image::ImageCmd,
     },
@@ -69,6 +72,8 @@ enum Cmd {
     Project {
         /// The target binary the project describes.
         binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
         #[command(subcommand)]
         cmd: project::ProjectCmd,
     },
@@ -259,7 +264,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             print,
         } => Ok(skill::run(agent, project, dir, force, print)),
         Cmd::Docs { topic } => Ok(docs::run(topic.as_deref())),
-        Cmd::Image { binary, cmd } => image::run(&binary, cmd),
+        Cmd::Image { binary, raw, cmd } => image::run(&binary, raw.spec()?, cmd),
         Cmd::Asm { text, at, bits } => {
             let address = ag_corpus::parse_addr(&at)?;
             let bitness = match bits {
@@ -271,7 +276,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             println!("{}", ag_corpus::project::hex_of_bytes(&bytes));
             Ok(0)
         }
-        Cmd::Project { binary, cmd } => project::run(binary, cmd),
+        Cmd::Project { binary, raw, cmd } => project::run(binary, raw.spec()?, cmd),
         Cmd::Catalog {
             json,
             markdown: _,

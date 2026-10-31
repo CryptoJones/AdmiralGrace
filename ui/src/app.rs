@@ -69,6 +69,8 @@ pub enum Message {
     FileSaveProjectAs,
     /// Write a copy of the program with the patches in it.
     FileWritePatched,
+    /// Open a file as raw bytes, loaded where the analyst says.
+    FileOpenRaw,
     /// Say which instruction set the code from the selection onward is in.
     EditMode,
     /// Move the whole image to a new base address.
@@ -222,6 +224,8 @@ pub enum PromptKind {
     ProjectSave,
     /// Where the copy of the program with the patches in it goes.
     WritePatched,
+    /// Raw bytes to open: `PATH ARCH BASE [entry=ADDRESS] [offset=N] [length=N]`.
+    Raw,
     /// The instruction set from the selection onward: `arm`, `thumb`, or
     /// `none` to let the image say.
     Mode,
@@ -546,6 +550,9 @@ pub struct App {
     pub kuna_root: Option<PathBuf>,
     /// The program image currently open.
     pub binary_path: Option<PathBuf>,
+    /// How the program is read as raw bytes, when it is: a file with no
+    /// container to say where it loads.
+    pub raw: Option<ag_image::RawSpec>,
     /// The file the next submit of the patched-program prompt writes over,
     /// once the analyst has been told it is there.
     pub confirm_write: Option<PathBuf>,
@@ -645,6 +652,7 @@ impl App {
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
+            raw: None,
             confirm_write: None,
             layout_failed: None,
             options: config.options,
@@ -722,12 +730,18 @@ impl App {
         } else {
             (ag_image::Layout::default(), None)
         };
-        let loaded = match BinaryProvider::load_with(path, self.options, &layout) {
+        let raw = self.raw.clone();
+        let loaded = match BinaryProvider::load_with(path, self.options, &layout, raw.as_ref()) {
             // When the layout is what the image cannot take, the program
             // is read as the loader reads it, and the analyst is told.
             Err(error) if layout != ag_image::Layout::default() => {
                 layout_failed = Some(error.to_string());
-                BinaryProvider::load_with(path, self.options, &ag_image::Layout::default())
+                BinaryProvider::load_with(
+                    path,
+                    self.options,
+                    &ag_image::Layout::default(),
+                    raw.as_ref(),
+                )
             }
             loaded => loaded,
         };
@@ -816,6 +830,7 @@ impl App {
         self.corpus_root = None;
         self.kuna_root = None;
         self.binary_path = None;
+        self.raw = None;
         self.methods_path = None;
         self.kuna = None;
         self.annotations =
@@ -1712,6 +1727,7 @@ impl App {
                 .as_ref()
                 .map(|root| root.display().to_string()),
             sha256,
+            raw: self.raw.as_ref().map(raw_target_of),
         };
         match self.annotations.save(path) {
             Ok(()) => {
@@ -2735,6 +2751,18 @@ impl App {
                 });
             }
 
+            Message::FileOpenRaw => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Raw,
+                    title: "Open raw bytes: PATH ARCH BASE [entry=ADDRESS] [offset=N] [length=N]",
+                    value: self
+                        .binary_path
+                        .as_ref()
+                        .map(|path| format!("{} ", path.display()))
+                        .unwrap_or_default(),
+                });
+            }
+
             Message::FileOpenBinary => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Binary,
@@ -2768,6 +2796,7 @@ impl App {
                         } else {
                             self.corpus_root = Some(path);
                             self.kuna_root = None;
+                            self.raw = None;
                             return self.load_project();
                         }
                     }
@@ -2780,6 +2809,7 @@ impl App {
                         } else {
                             self.kuna_root = Some(path);
                             self.corpus_root = None;
+                            self.raw = None;
                             return self.load_project();
                         }
                     }
@@ -2792,21 +2822,127 @@ impl App {
                             self.notice = Some(format!("{} is not a file", path.display()));
                         } else {
                             self.binary_path = Some(path);
+                            self.raw = None;
                             self.corpus_root = None;
                             self.kuna_root = None;
                             return self.load_project();
                         }
                     }
+                    PromptKind::Raw => {
+                        let words: Vec<&str> = prompt.value.split_whitespace().collect();
+                        let [path, arch, base, rest @ ..] = words.as_slice() else {
+                            self.notice = Some(
+                                "Raw bytes are PATH ARCH BASE, with entry=, offset= and length= after when they apply"
+                                    .into(),
+                            );
+                            return Task::none();
+                        };
+                        let path = PathBuf::from(path);
+                        if !path.is_file() {
+                            self.notice = Some(format!("{} is not a file", path.display()));
+                            return Task::none();
+                        }
+                        let Some(language) = ag_image::raw_language(arch) else {
+                            self.notice = Some(format!(
+                                "Not an architecture raw bytes are read as: {arch:?} ({})",
+                                ag_image::RAW_ARCHITECTURES
+                            ));
+                            return Task::none();
+                        };
+                        let Some(base) = parse_number(base) else {
+                            self.notice = Some(format!("Not an address: {base:?}"));
+                            return Task::none();
+                        };
+                        let mut spec = ag_image::RawSpec {
+                            language: language.to_string(),
+                            base,
+                            entry: None,
+                            offset: 0,
+                            length: None,
+                        };
+                        for word in rest {
+                            let Some((key, value)) = word.split_once('=') else {
+                                self.notice = Some(format!(
+                                    "Not part of raw bytes: {word:?} (entry=, offset= or length=)"
+                                ));
+                                return Task::none();
+                            };
+                            let Some(number) = parse_number(value) else {
+                                self.notice = Some(format!("Not a number: {value:?}"));
+                                return Task::none();
+                            };
+                            match key {
+                                "entry" => spec.entry = Some(number),
+                                "offset" => spec.offset = number,
+                                "length" => spec.length = Some(number),
+                                _ => {
+                                    self.notice = Some(format!(
+                                        "Not part of raw bytes: {key:?} (entry=, offset= or length=)"
+                                    ));
+                                    return Task::none();
+                                }
+                            }
+                        }
+                        self.binary_path = Some(path);
+                        self.raw = Some(spec);
+                        self.corpus_root = None;
+                        self.kuna_root = None;
+                        return self.load_project();
+                    }
                     PromptKind::ProjectOpen => {
                         if !path.is_file() {
-                            self.notice =
-                                Some(format!("{} is not a file", path.display()));
+                            self.notice = Some(format!("{} is not a file", path.display()));
                         } else {
                             match ag_corpus::project::ProjectFile::load(&path) {
                                 Ok(project) => {
+                                    // A project of raw bytes says how its
+                                    // program loads; the program is read
+                                    // that way, as the project's.
+                                    let raw = match project.target.raw.as_ref().map(raw_of_target) {
+                                        Some(Ok(spec)) => Some(spec),
+                                        Some(Err(reason)) => {
+                                            self.notice = Some(format!(
+                                                "Could not open {}: {reason}",
+                                                path.display()
+                                            ));
+                                            return Task::none();
+                                        }
+                                        None => None,
+                                    };
+                                    // A project with no program open names
+                                    // its own: it is opened.
+                                    if self.binary_path.is_none() && raw.is_some() {
+                                        if let Some(target) = project
+                                            .target
+                                            .path
+                                            .as_deref()
+                                            .map(PathBuf::from)
+                                            .filter(|target| target.is_file())
+                                        {
+                                            self.binary_path = Some(target);
+                                            self.corpus_root = None;
+                                            self.kuna_root = None;
+                                        }
+                                    }
+                                    let reread = raw != self.raw && self.binary_path.is_some();
+                                    self.raw = raw;
                                     self.annotations = project;
                                     self.forget_changes();
                                     self.project_path = Some(path.clone());
+                                    if reread {
+                                        if let Some(binary) = self.binary_path.clone() {
+                                            // The annotations are this
+                                            // program's, read anew.
+                                            self.annotations_root = Some(binary.clone());
+                                            let task = self.load_binary(&binary);
+                                            self.notice = Some(format!(
+                                                "Opened project {} and read {} as it says",
+                                                path.display(),
+                                                binary.display()
+                                            ));
+                                            return task;
+                                        }
+                                    }
                                     // A project with a layout reads the
                                     // program again under it; the reload
                                     // tells the patches and notes itself.
@@ -4402,6 +4538,37 @@ fn layout_of(project: &ag_corpus::project::ProjectFile) -> Result<ag_image::Layo
         });
     }
     Ok(ag_image::Layout { base, segments })
+}
+
+/// How raw bytes load, as the project file records it.
+fn raw_target_of(spec: &ag_image::RawSpec) -> ag_corpus::project::RawTarget {
+    let arch = ag_image::raw_arch(&spec.language)
+        .expect("a raw language the prompt handed out has its word");
+    ag_corpus::project::RawTarget {
+        arch: arch.to_string(),
+        base: format!("{:#x}", spec.base),
+        entry: spec.entry.map(|entry| format!("{entry:#x}")),
+        offset: (spec.offset != 0).then(|| format!("{:#x}", spec.offset)),
+        length: spec.length.map(|length| format!("{length:#x}")),
+    }
+}
+
+/// How raw bytes load, as the project file says, in the image's terms.
+fn raw_of_target(raw: &ag_corpus::project::RawTarget) -> Result<ag_image::RawSpec, String> {
+    let language = ag_image::raw_language(&raw.arch).ok_or_else(|| {
+        format!(
+            "the project's raw target names {:?}, not an architecture raw bytes are read as",
+            raw.arch
+        )
+    })?;
+    let number = |text: &str| parse_number(text).ok_or_else(|| format!("{text:?} is not a number"));
+    Ok(ag_image::RawSpec {
+        language: language.to_string(),
+        base: number(&raw.base)?,
+        entry: raw.entry.as_deref().map(number).transpose()?,
+        offset: raw.offset.as_deref().map(number).transpose()?.unwrap_or(0),
+        length: raw.length.as_deref().map(number).transpose()?,
+    })
 }
 
 /// A number as the analyst types it: decimal, or hex with `0x`.
@@ -7182,6 +7349,95 @@ mod tests {
         let _ = again.update(Message::PromptSubmit);
         assert_eq!(main_at(&again), Some(0x1198), "{:?}", again.notice);
         assert!(again.annotations.layout.base.is_none());
+    }
+
+    #[test]
+    fn raw_bytes_open_where_the_analyst_says_and_the_project_remembers() {
+        let mut app = App::boot(Config::default()).0;
+        let sample = sample_elf().display().to_string();
+
+        // The sample's `.text` as raw bytes: the entry is the one function.
+        let _ = app.update(Message::FileOpenRaw);
+        let _ = app.update(Message::PromptChanged(format!(
+            "{sample} x86-64 0x1060 entry=0x1149 offset=0x1060 length=0x18c"
+        )));
+        let _ = app.update(Message::PromptSubmit);
+        let names: Vec<(u64, String)> = app
+            .provider
+            .functions()
+            .into_iter()
+            .map(|row| (row.address, row.name))
+            .collect();
+        assert_eq!(
+            names,
+            [(0x1149, "entry_0x1149".to_string())],
+            "{:?}",
+            app.notice
+        );
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        assert_eq!(app.work.listing[0].mnemonic, "endbr64");
+        assert!(app.raw.is_some());
+
+        // Saved, the project says how the bytes load; opened in a fresh
+        // workbench on the same file, it reads them that way.
+        let file = std::env::temp_dir().join(format!(
+            "ag-ui-raw-{}-{:?}.agproj",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        app.save_project_to(&file);
+        assert_eq!(
+            app.annotations
+                .target
+                .raw
+                .as_ref()
+                .map(|raw| raw.arch.as_str()),
+            Some("x86-64")
+        );
+        let mut again = App::boot(Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        })
+        .0;
+        assert!(
+            again.provider.functions().len() > 1,
+            "the ELF, as the loader reads it"
+        );
+        let _ = again.update(Message::FileOpenProject);
+        let _ = again.update(Message::PromptChanged(file.display().to_string()));
+        let _ = again.update(Message::PromptSubmit);
+        assert_eq!(again.provider.functions().len(), 1, "{:?}", again.notice);
+        assert!(again.raw.is_some());
+
+        // A raw project opened with no program open opens its own.
+        let mut alone = App::boot(Config::default()).0;
+        let _ = alone.update(Message::FileOpenProject);
+        let _ = alone.update(Message::PromptChanged(file.display().to_string()));
+        let _ = alone.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(
+            alone.binary_path.as_deref(),
+            Some(sample_elf().as_path()),
+            "{:?}",
+            alone.notice
+        );
+        assert_eq!(alone.provider.functions().len(), 1, "{:?}", alone.notice);
+
+        // What is not raw bytes is refused by name.
+        let _ = app.update(Message::FileOpenRaw);
+        let _ = app.update(Message::PromptChanged(format!("{sample} sparc 0x1000")));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not an architecture")));
+        let _ = app.update(Message::FileOpenRaw);
+        let _ = app.update(Message::PromptChanged(format!("{sample} x86-64")));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Raw bytes are")));
     }
 
     #[test]
