@@ -847,6 +847,19 @@ fn emit_statements(
                 // The end of a path after a call that never returns: said by
                 // nothing, as the reader knows the callee.
                 AstNode::Intrinsic { name, .. } if name == crate::lift::UNREACHABLE => {}
+                // Where the walk did not go on: said as a note, since no
+                // statement of the program stands there.
+                node if crate::lift::halted_target(node).is_some() => {
+                    let target = crate::lift::halted_target(node).expect("checked above");
+                    push(
+                        lines,
+                        format!(
+                            "{pad}{}",
+                            style.comment(&format!("not analyzed: {target:#x}"))
+                        ),
+                        &statement.addresses,
+                    );
+                }
                 node => {
                     let mut text = String::new();
                     emit_into(node, &mut text, 0, style);

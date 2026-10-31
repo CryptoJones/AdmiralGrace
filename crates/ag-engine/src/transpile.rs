@@ -235,6 +235,11 @@ fn statement_text(node: &AstNode) -> String {
                 .join(";\n  ");
         }
     }
+    // Where the walk did not go on, the program traps: the code there is
+    // not analyzed, and nothing stands in for it.
+    if crate::lift::halted_target(node).is_some() {
+        return "__builtin_trap()".to_string();
+    }
     // A builtin's pointer arguments are the integers the machine held;
     // the compiler's builtin wants pointers.
     if let AstNode::Intrinsic { name, args } = node {

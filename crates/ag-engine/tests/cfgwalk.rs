@@ -1,7 +1,7 @@
 use ag_engine::cfgwalk::{resolve_branches, resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::X86IcedContext;
 use ag_engine::pipeline::Disasm;
-use ag_engine::TailCall;
+use ag_engine::{Halt, HaltReason, TailCall};
 
 // 0x1000: test eax,eax      ; 85 c0
 // 0x1002: je  x             ; 74 0c   -> 0x1010
@@ -838,4 +838,242 @@ fn code_that_falls_into_the_next_function_tail_calls_it() {
     assert_eq!(cfg.tail_calls.len(), 1, "{cfg:?}");
     assert_eq!(cfg.tail_calls[0].site, 0x1000);
     assert_eq!(cfg.tail_calls[0].target, 0x1005);
+}
+
+/// The analyst's words on the walk, by site, among functions that never
+/// return.
+struct Guided {
+    taken: &'static [(u64, bool)],
+    next: &'static [(u64, bool)],
+    noreturn: &'static [u64],
+}
+
+impl Entries for Guided {
+    fn is_function(&self, _address: u64) -> bool {
+        false
+    }
+
+    fn is_import_slot(&self, _slot: u64) -> bool {
+        false
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        !self.noreturn.contains(&callee)
+    }
+
+    fn follows_taken(&self, site: u64) -> Option<bool> {
+        self.taken
+            .iter()
+            .find(|(at, _)| *at == site)
+            .map(|(_, on)| *on)
+    }
+
+    fn follows_next(&self, site: u64) -> Option<bool> {
+        self.next
+            .iter()
+            .find(|(at, _)| *at == site)
+            .map(|(_, on)| *on)
+    }
+}
+
+/// The graph of `bytes` at 0x1000 walked under `words`.
+fn guided_cfg(bytes: &[u8], words: &Guided) -> ag_engine::ProcedureCfg {
+    let mut ctx = X86IcedContext::default();
+    let disasm = Disasm::decode(&mut ctx, bytes, 0x1000).unwrap();
+    let cfg = resolve_branches_among(&disasm, 0x1000, words);
+    assert_well_formed(&cfg);
+    cfg
+}
+
+// 0x1000: test eax,eax  ; 85 c0
+// 0x1002: je 0x1005     ; 74 01
+// 0x1004: ret           ; c3
+// 0x1005: ret           ; c3
+#[test]
+fn taken_off_leaves_the_branch_target_out_and_records_the_halt() {
+    let bytes = [0x85, 0xc0, 0x74, 0x01, 0xc3, 0xc3];
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[(0x1002, false)],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 2, "{cfg:?}");
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1004]);
+    assert!(!cfg.index_by_address.contains_key(&0x1005));
+    assert_eq!(
+        cfg.halts,
+        vec![Halt {
+            site: 0x1002,
+            target: 0x1005,
+            why: HaltReason::Said,
+        }]
+    );
+    // `next off` leaves the fall-through out instead.
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[(0x1002, false)],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1005]);
+    assert!(!cfg.index_by_address.contains_key(&0x1004));
+    assert_eq!(
+        cfg.halts,
+        vec![Halt {
+            site: 0x1002,
+            target: 0x1004,
+            why: HaltReason::Said,
+        }]
+    );
+    // Told nothing, the walk follows both sides.
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 3, "{cfg:?}");
+    assert!(cfg.halts.is_empty());
+}
+
+// 0x1000: call 0x1010   ; e8 0b 00 00 00
+// 0x1005: ret           ; c3
+#[test]
+fn next_off_at_a_call_leaves_the_return_out_and_next_on_takes_it_back() {
+    let bytes = [0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3];
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[(0x1000, false)],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(cfg.call_sites, vec![0x1000]);
+    // A call that does not return is no halt: nothing is left unanalyzed.
+    assert!(cfg.halts.is_empty(), "{:?}", cfg.halts);
+    // `next on` goes on after a call the walk takes for one that never
+    // returns.
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[(0x1000, true)],
+            noreturn: &[0x1010],
+        },
+    );
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1005]);
+}
+
+// 0x1000: jmp 0x1003    ; eb 01
+// 0x1002: ret           ; c3
+// 0x1003: (bad)         ; 06
+// 0x1004: ret           ; c3
+#[test]
+fn a_jump_into_bytes_that_do_not_decode_halts_by_itself_unless_told_to_follow() {
+    let bytes = [0xeb, 0x01, 0xc3, 0x06, 0xc3];
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(
+        cfg.halts,
+        vec![Halt {
+            site: 0x1000,
+            target: 0x1003,
+            why: HaltReason::Invalid,
+        }]
+    );
+    // `taken on` follows it anyway, onto the bytes that end the block.
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[(0x1000, true)],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1003]);
+    assert!(block(&cfg, 0x1003).successor_addresses.is_empty());
+    assert!(cfg.halts.is_empty(), "{:?}", cfg.halts);
+}
+
+// 0x1000: je 0x1003     ; 74 01
+// 0x1002: mov eax, 0xc3 ; b8 c3 00 00 00 — the target is its second byte
+// 0x1007: ret           ; c3
+#[test]
+fn a_branch_into_the_middle_of_an_instruction_halts_by_itself() {
+    let bytes = [0x74, 0x01, 0xb8, 0xc3, 0x00, 0x00, 0x00, 0xc3];
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1002]);
+    assert_eq!(
+        cfg.halts,
+        vec![Halt {
+            site: 0x1000,
+            target: 0x1003,
+            why: HaltReason::Invalid,
+        }]
+    );
+}
+
+// 0x1000: je 0x1003     ; 74 01
+// 0x1002: (bad)         ; 06
+// 0x1003: ret           ; c3
+#[test]
+fn a_fall_through_that_does_not_decode_halts_by_itself() {
+    let bytes = [0x74, 0x01, 0x06, 0xc3];
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(block(&cfg, 0x1000).successor_addresses, vec![0x1003]);
+    assert!(!cfg.index_by_address.contains_key(&0x1002));
+    assert_eq!(
+        cfg.halts,
+        vec![Halt {
+            site: 0x1000,
+            target: 0x1002,
+            why: HaltReason::Invalid,
+        }]
+    );
+    // `next on` goes into it anyway.
+    let cfg = guided_cfg(
+        &bytes,
+        &Guided {
+            taken: &[],
+            next: &[(0x1000, true)],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(
+        block(&cfg, 0x1000).successor_addresses,
+        vec![0x1003, 0x1002]
+    );
+    assert!(cfg.halts.is_empty());
 }

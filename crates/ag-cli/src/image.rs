@@ -491,6 +491,19 @@ pub(crate) struct CfgJson {
     edges: Vec<EdgeJson>,
     /// The jump tables the function's indirect jumps read.
     switches: Vec<SwitchJson>,
+    /// The sides of branches the walk did not follow.
+    halts: Vec<HaltJson>,
+}
+
+/// A side of a branch the walk did not follow, as JSON.
+#[derive(Debug, Serialize)]
+pub(crate) struct HaltJson {
+    /// The address of the instruction the side leaves from.
+    site: u64,
+    /// Where the side goes.
+    target: u64,
+    /// Why it was not followed: `said` or `invalid`.
+    why: &'static str,
 }
 
 /// One jump table of a function, as JSON.
@@ -1612,6 +1625,19 @@ fn cfg(
         }
     }
 
+    // A side the walk did not follow, and why.
+    if !graph.halts.is_empty() {
+        println!("halts:");
+        for halt in &graph.halts {
+            println!(
+                "  {:#x} -> {:#x}: {}",
+                halt.site,
+                halt.target,
+                halt.why.text()
+            );
+        }
+    }
+
     Ok(0)
 }
 
@@ -1637,6 +1663,18 @@ pub(crate) fn cfg_json(graph: &ag_image::ControlFlowGraph) -> CfgJson {
                     .into_iter()
                     .map(|(values, target)| CaseJson { values, target })
                     .collect(),
+            })
+            .collect(),
+        halts: graph
+            .halts
+            .iter()
+            .map(|halt| HaltJson {
+                site: halt.site,
+                target: halt.target,
+                why: match halt.why {
+                    ag_image::HaltReason::Said => "said",
+                    ag_image::HaltReason::Invalid => "invalid",
+                },
             })
             .collect(),
     }

@@ -759,7 +759,8 @@ impl Annotation {
 
     /// The kinds of judgment call an override speaks to, as the file
     /// spells them.
-    pub const OVERRIDE_KINDS: [&'static str; 4] = ["guard", "fold", "invert", "switch"];
+    pub const OVERRIDE_KINDS: [&'static str; 6] =
+        ["guard", "fold", "invert", "switch", "taken", "next"];
 
     /// Say `on` about the judgment call `kind` at the address — `true` to
     /// allow it, `false` to prevent it — or leave it to the lift with
@@ -2366,8 +2367,16 @@ mod tests {
         assert!(record.is_empty());
         assert!(record.set_override("guard", Some(false)));
         assert!(record.set_override("fold", Some(true)));
+        assert!(record.set_override("taken", Some(false)));
+        assert!(record.set_override("next", Some(true)));
         assert!(!record.set_override("tail", Some(true)), "no such kind");
         assert!(!record.is_empty());
+        assert_eq!(
+            record.overrides_label(),
+            "fold on, guard off, next on, taken off"
+        );
+        assert!(record.set_override("taken", None));
+        assert!(record.set_override("next", None));
         assert_eq!(record.overrides_label(), "fold on, guard off");
         assert!(record.set_override("fold", None));
         assert_eq!(record.overrides_label(), "guard off");

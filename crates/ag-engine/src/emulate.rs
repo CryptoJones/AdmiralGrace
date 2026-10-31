@@ -202,6 +202,9 @@ pub enum Stop {
     /// The path ended after a call to a function that never returns, at
     /// the call.
     NoReturn { at: Option<u64> },
+    /// The path went where the walk did not go on, from the branch at `at`
+    /// to `target`: the code there is not analyzed.
+    Halted { at: Option<u64>, target: u64 },
 }
 
 impl Stop {
@@ -219,6 +222,11 @@ impl Stop {
                 format!("stopped at {at:#x}: the call does not return")
             }
             Stop::NoReturn { at: None } => "stopped: the call does not return".to_string(),
+            Stop::Halted {
+                at: Some(at),
+                target,
+            } => format!("stopped at {at:#x}: {target:#x} is not analyzed"),
+            Stop::Halted { at: None, target } => format!("stopped: {target:#x} is not analyzed"),
         }
     }
 }
@@ -449,6 +457,14 @@ impl Machine<'_> {
                     AstNode::Intrinsic { name, .. } if name == crate::lift::UNREACHABLE => {
                         self.steps.push(step);
                         return Stop::NoReturn { at: address };
+                    }
+                    // Where the walk did not go on: the run cannot either.
+                    node if crate::lift::halted_target(node).is_some() => {
+                        self.steps.push(step);
+                        return Stop::Halted {
+                            at: address,
+                            target: crate::lift::halted_target(node).expect("checked above"),
+                        };
                     }
                     node => {
                         let result = self.execute(node, &mut step);

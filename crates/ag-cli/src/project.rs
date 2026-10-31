@@ -168,7 +168,10 @@ pub enum ProjectCmd {
     },
     /// Allow or prevent one of the lift's judgment calls at an address: a
     /// branch read as a guard, a condition folded to a constant, a condition
-    /// turned round, an indirect jump read as a switch.
+    /// turned round, an indirect jump read as a switch — or one of the
+    /// walk's: a branch followed to its target, an instruction followed by
+    /// the next. A side the walk does not follow is not analyzed; the walk
+    /// also halts by itself at a target that does not decode.
     Override {
         /// The project file to change.
         #[arg(long)]
@@ -176,7 +179,8 @@ pub enum ProjectCmd {
         /// The address of the instruction the call is made at — the branch,
         /// the compare, the indirect jump — with its space when it names one.
         address: String,
-        /// The judgment call: `guard`, `fold`, `invert` or `switch`.
+        /// The judgment call: `guard`, `fold`, `invert`, `switch`, `taken`
+        /// (the branch's target) or `next` (the instruction after).
         kind: String,
         /// `on` to allow it, `off` to prevent it, `clear` to leave it to
         /// the lift.
@@ -497,7 +501,7 @@ pub fn run(
             let kind = kind.trim().to_ascii_lowercase();
             anyhow::ensure!(
                 Annotation::OVERRIDE_KINDS.contains(&kind.as_str()),
-                "the kind is guard, fold, invert or switch, not {kind:?}"
+                "the kind is guard, fold, invert, switch, taken or next, not {kind:?}"
             );
             let on = match state.trim().to_ascii_lowercase().as_str() {
                 "on" | "allow" | "yes" | "true" => Some(true),

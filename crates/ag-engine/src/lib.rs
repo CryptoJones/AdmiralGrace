@@ -27,7 +27,10 @@ pub mod unwind;
 
 pub use arch::Bitness;
 pub use ast::{AstNode, StructField};
-pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg, TailCall};
+pub use cfg::{
+    BasicBlock, CfgLoop, Halt, HaltReason, HighLevelBlock, HighLevelProcedure, ProcedureCfg,
+    TailCall,
+};
 pub use emit::{Line, Pseudocode};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};

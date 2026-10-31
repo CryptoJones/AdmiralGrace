@@ -523,8 +523,9 @@ pub struct LiftedFunction {
     /// teardown, and the no-ops. The signature line stands for them.
     pub frame: Vec<u64>,
     /// What is known of the function besides its return: that it does not
-    /// return, or does not return under a condition — printed as comments
-    /// after the one that says what decided the return type.
+    /// return, or does not return under a condition, and where the walk did
+    /// not go on and why — printed as comments after the one that says what
+    /// decided the return type.
     pub notes: Vec<String>,
     /// What is known of the calls the function makes, by the call's
     /// address: that the callee does not return when the arguments are
@@ -930,7 +931,15 @@ fn lift_inner(
         }
         types.insert("flags".to_string(), "flags".to_string());
     }
-    let function = lifter.finish(name, entry, &chains, body)?;
+    let mut function = lifter.finish(name, entry, &chains, body)?;
+    // Where the walk did not go on, and why.
+    for halt in &cfg.halts {
+        function.notes.push(format!(
+            "analysis halted at {:#x}: {}",
+            halt.target,
+            halt.why.text()
+        ));
+    }
     if keep {
         for variable in function.params.iter().chain(&function.locals) {
             types.insert(variable.name.clone(), variable.ty.clone());
@@ -1267,12 +1276,19 @@ enum End {
     /// next function's entry, when the call is the last instruction
     /// before it: the walk keeps a function from running into the next.
     NoReturn,
+    /// Where the walk did not go on: a side of a branch it did not follow
+    /// to `target`, from the instruction at `site` — the analyst said not
+    /// to, or the target does not decode. A chain of no instructions is
+    /// the side itself, standing in for the code that is not analyzed; a
+    /// chain of instructions ends in a jump the walk did not follow, or in
+    /// an instruction it did not go on from.
+    Halted { site: u64, target: u64 },
 }
 
 impl End {
     fn successors(&self) -> Vec<usize> {
         match self {
-            End::Return | End::Leave | End::NoReturn => Vec::new(),
+            End::Return | End::Leave | End::NoReturn | End::Halted { .. } => Vec::new(),
             End::Jump(target) | End::Fall(target) => vec![*target],
             End::Branch { taken, next } => vec![*taken, *next],
             End::Switch { cases, .. } => {
@@ -1309,7 +1325,9 @@ struct Chain {
 /// `symbols` names (a walk told the image's entries stops there too; one
 /// told nothing follows it into the callee, which this does not), or an
 /// indirect one; a chain that ends in a trap is refused as `the block ends
-/// in <mnemonic>`.
+/// in <mnemonic>`. A side of a branch the walk halted at is a chain of its
+/// own, after the others, with no instructions: it says the code there is
+/// not analyzed, and goes nowhere.
 fn chains(
     disasm: &Disasm,
     cfg: &ProcedureCfg,
@@ -1395,58 +1413,96 @@ fn chains(
             .copied()
             .ok_or_else(|| NotLifted::new(format!("jumps to {address:#x}")))
     };
-    raw.into_iter()
-        .map(|(address, instructions, successors)| {
-            let Some(last) = instructions.last() else {
-                return Err(NotLifted::new(format!("no code at {address:#x}")));
-            };
-            let after = last.address + last.length as u64;
-            let end = match last.flow {
-                Flow::Return => End::Return,
-                _ if leaves(last) => End::Leave,
-                Flow::IndirectBranch => {
-                    let table = table_at(last.address)
-                        .expect("an indirect jump that does not leave reads a table")
-                        .clone();
-                    let mut cases = Vec::new();
-                    for (values, target) in table.cases() {
-                        cases.push((values, node_at(target)?));
-                    }
-                    End::Switch { table, cases }
+    // The halted sides, each a chain after the others, by site and target.
+    let halted = |site: u64, target: u64| {
+        cfg.halts
+            .iter()
+            .any(|halt| halt.site == site && halt.target == target)
+    };
+    let mut sides: Vec<(u64, u64)> = Vec::new();
+    let mut side_at = |site: u64, target: u64| {
+        let position = sides
+            .iter()
+            .position(|side| *side == (site, target))
+            .unwrap_or_else(|| {
+                sides.push((site, target));
+                sides.len() - 1
+            });
+        index.len() + position
+    };
+    let mut out = Vec::with_capacity(raw.len());
+    for (address, instructions, successors) in raw {
+        let Some(last) = instructions.last() else {
+            return Err(NotLifted::new(format!("no code at {address:#x}")));
+        };
+        let site = last.address;
+        let after = last.address + last.length as u64;
+        let mut go = |target: u64| {
+            if halted(site, target) {
+                Ok(side_at(site, target))
+            } else {
+                node_at(target)
+            }
+        };
+        let end = match last.flow {
+            Flow::Return => End::Return,
+            _ if leaves(last) => End::Leave,
+            Flow::IndirectBranch => {
+                let table = table_at(last.address)
+                    .expect("an indirect jump that does not leave reads a table")
+                    .clone();
+                let mut cases = Vec::new();
+                for (values, target) in table.cases() {
+                    cases.push((values, go(target)?));
                 }
-                Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
-                // A conditional branch that leaves the function has no
-                // chain to go to on the taken side, and the lifter has no
-                // statement for "return a call, or go on": refused by name.
-                Flow::ConditionalBranch(target) if tail_call_at(last.address) => {
+                End::Switch { table, cases }
+            }
+            Flow::UnconditionalBranch(target) if halted(site, target) => {
+                End::Halted { site, target }
+            }
+            Flow::UnconditionalBranch(target) => End::Jump(node_at(target)?),
+            // A conditional branch that leaves the function has no
+            // chain to go to on the taken side, and the lifter has no
+            // statement for "return a call, or go on": refused by name.
+            Flow::ConditionalBranch(target) if tail_call_at(last.address) => {
+                return Err(NotLifted::new(format!(
+                    "a conditional branch leaves the function for {target:#x} at {:#x}",
+                    last.address
+                )))
+            }
+            Flow::ConditionalBranch(target) if target == after => End::Jump(go(after)?),
+            Flow::ConditionalBranch(target) => End::Branch {
+                taken: go(target)?,
+                next: go(after)?,
+            },
+            Flow::Call(_) | Flow::IndirectCall if successors.is_empty() => End::NoReturn,
+            // An instruction the walk did not go on from.
+            _ if successors.is_empty() && halted(site, after) => End::Halted {
+                site,
+                target: after,
+            },
+            _ => match successors.as_slice() {
+                [next] if *next == after => End::Fall(node_at(after)?),
+                _ => {
                     return Err(NotLifted::new(format!(
-                        "a conditional branch leaves the function for {target:#x} at {:#x}",
-                        last.address
+                        "the block ends in {}",
+                        mnemonic_name(last)
                     )))
                 }
-                Flow::ConditionalBranch(target) if target == after => End::Jump(node_at(after)?),
-                Flow::ConditionalBranch(target) => End::Branch {
-                    taken: node_at(target)?,
-                    next: node_at(after)?,
-                },
-                Flow::Call(_) | Flow::IndirectCall if successors.is_empty() => End::NoReturn,
-                _ => match successors.as_slice() {
-                    [next] if *next == after => End::Fall(node_at(after)?),
-                    _ => {
-                        return Err(NotLifted::new(format!(
-                            "the block ends in {}",
-                            mnemonic_name(last)
-                        )))
-                    }
-                },
-            };
-            Ok(Chain {
-                address,
-                instructions,
-                end,
-            })
-        })
-        .collect()
+            },
+        };
+        out.push(Chain {
+            address,
+            instructions,
+            end,
+        });
+    }
+    out.extend(sides.into_iter().map(|(site, target)| Chain {
+        address: target,
+        instructions: Vec::new(),
+        end: End::Halted { site, target },
+    }));
+    Ok(out)
 }
 
 /// The expression `node` without the `- offset` the compiler put on a
@@ -1602,6 +1658,24 @@ fn ends_without_return(statements: &[Statement]) -> bool {
 /// The statement that marks the end of a path after a call that never
 /// returns: `__builtin_unreachable()`, as the compilers name it.
 pub const UNREACHABLE: &str = "__builtin_unreachable";
+
+/// The statement that marks where the walk did not go on — a side of a
+/// branch the analyst said not to follow, or one whose target does not
+/// decode — with the target's address as its one argument. The path ends
+/// there, as it does after [`UNREACHABLE`]; the pseudocode says the code
+/// at the target is not analyzed, and the transpiler traps.
+pub const HALTED: &str = "__analysis_halted";
+
+/// The target of a statement that is [`HALTED`], when it is one.
+pub fn halted_target(node: &AstNode) -> Option<u64> {
+    match node {
+        AstNode::Intrinsic { name, args } if name == HALTED => match args.as_slice() {
+            [AstNode::Constant { value, .. }] => Some(*value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 /// Whether any statement, at any depth, satisfies `pred`.
 fn any_statement(statements: &[Statement], pred: &dyn Fn(&Statement) -> bool) -> bool {
@@ -2262,9 +2336,25 @@ impl<'a> Lifter<'a> {
         Err(NotLifted::new("the loops do not settle"))
     }
 
+    /// Mark the end of a path where the walk did not go on from `site` to
+    /// `target`.
+    fn halted(&mut self, site: u64, target: u64) {
+        self.statements.push(Stmt::Builtin {
+            name: HALTED,
+            args: vec![Value::node(AstNode::constant(target, 8), 64, vec![site])],
+            addresses: vec![site],
+        });
+    }
+
     /// Lift one chain from the current state, and say how it leaves.
     fn lift_chain(&mut self, chain: &Chain) -> Result<Terminator, NotLifted> {
         self.pending_compare = None;
+        // A side the walk did not follow: the marker says the code there
+        // is not analyzed, and the path ends with it.
+        if let (End::Halted { site, target }, []) = (&chain.end, chain.instructions.as_slice()) {
+            self.halted(*site, *target);
+            return Ok(Terminator::Return);
+        }
         let (last, body) = chain
             .instructions
             .split_last()
@@ -2296,6 +2386,16 @@ impl<'a> Lifter<'a> {
             }
             End::Leave => {
                 self.tail_jump(last)?;
+                Ok(Terminator::Return)
+            }
+            // A jump the walk did not follow does nothing of its own; an
+            // instruction it did not go on from is made, and the path ends
+            // after it.
+            End::Halted { site, target } => {
+                if !branches(last) {
+                    self.step(last)?;
+                }
+                self.halted(site, target);
                 Ok(Terminator::Return)
             }
             End::Fall(target) => {
@@ -4935,10 +5035,12 @@ impl<'a> Lifter<'a> {
         );
 
         // What the body says of the function's return besides the width:
-        // that it never comes back, or does not under a condition.
+        // that it never comes back, or does not under a condition. A path
+        // the walk did not follow may come back, for all the lift knows.
         let never_returns = !body.is_empty()
             && !any_statement(&body, &|statement| {
                 matches!(statement.node, AstNode::Return { .. })
+                    || halted_target(&statement.node).is_some()
             });
         let local_names: Vec<String> = locals.iter().map(|local| local.name.clone()).collect();
         let noreturn_when = if never_returns {
@@ -8200,5 +8302,192 @@ mod tests {
         assert!(noreturn_conditions(&body, &locals).is_empty());
         let body = vec![store("v1"), guard(is_zero("a"), 1)];
         assert_eq!(noreturn_conditions(&body, &locals), vec![is_zero("a")]);
+    }
+
+    /// The analyst's words on the walk, by site.
+    struct Guided {
+        taken: &'static [(u64, bool)],
+        next: &'static [(u64, bool)],
+    }
+
+    impl crate::cfgwalk::Entries for Guided {
+        fn is_function(&self, _address: u64) -> bool {
+            false
+        }
+
+        fn is_import_slot(&self, _slot: u64) -> bool {
+            false
+        }
+
+        fn follows_taken(&self, site: u64) -> Option<bool> {
+            self.taken
+                .iter()
+                .find(|(at, _)| *at == site)
+                .map(|(_, on)| *on)
+        }
+
+        fn follows_next(&self, site: u64) -> Option<bool> {
+            self.next
+                .iter()
+                .find(|(at, _)| *at == site)
+                .map(|(_, on)| *on)
+        }
+    }
+
+    /// The stages of `bytes` walked under the analyst's `words`.
+    fn guided_stages(bytes: &[u8], words: &Guided) -> Stages {
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: decode(bytes),
+        };
+        let cfg = crate::cfgwalk::resolve_branches_among(&disasm, BASE, words);
+        lift_stages(
+            &disasm,
+            &cfg,
+            BASE,
+            "f",
+            Bitness::Bits64,
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        )
+        .expect("the code lifts")
+    }
+
+    /// No memory, no calls followed.
+    struct Nowhere;
+
+    impl crate::emulate::World for Nowhere {
+        fn read(&self, _address: u64, _len: usize) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn address_of(&self, _name: &str) -> Option<u64> {
+            None
+        }
+    }
+
+    // 0x1000: test edi, edi ; 85 ff
+    // 0x1002: je 0x1005     ; 74 01
+    // 0x1004: ret           ; c3
+    // 0x1005: (bad)         ; 06 — no instruction in 64-bit code
+    const INTO_JUNK: &[u8] = &[0x85, 0xff, 0x74, 0x01, 0xc3, 0x06];
+
+    #[test]
+    fn a_branch_into_bytes_that_do_not_decode_is_not_analyzed_and_says_so() {
+        let stages = guided_stages(
+            INTO_JUNK,
+            &Guided {
+                taken: &[],
+                next: &[],
+            },
+        );
+        let text = without_reason(&emit_function(&stages.function, &Options::default()));
+        assert_eq!(
+            text,
+            "// analysis halted at 0x1005: the target does not decode\n\
+             void f(int a)\n{\n  if (a == 0) {\n    // not analyzed: 0x1005\n  }\n  return;\n}"
+        );
+        // A path that goes there stops there; one that does not returns.
+        let run = crate::emulate::run(&stages, &[0], &Nowhere, &Default::default());
+        assert_eq!(
+            run.stop,
+            crate::emulate::Stop::Halted {
+                at: Some(0x1002),
+                target: 0x1005
+            }
+        );
+        assert_eq!(run.stop.text(), "stopped at 0x1002: 0x1005 is not analyzed");
+        let run = crate::emulate::run(&stages, &[1], &Nowhere, &Default::default());
+        assert_eq!(run.stop, crate::emulate::Stop::Returned(None));
+        // The C++ traps there, and compiles.
+        let program = crate::transpile::program(&crate::transpile::Program {
+            functions: vec![&stages],
+            ..Default::default()
+        });
+        assert!(program.contains("__builtin_trap();"), "{program}");
+        assert!(!program.contains("__analysis_halted"), "{program}");
+    }
+
+    #[test]
+    fn a_side_the_analyst_says_not_to_follow_is_not_analyzed() {
+        // `taken off` at the je leaves the ret at 0x1005 out.
+        // 0x1000 test edi, edi; 0x1002 je 0x1005; 0x1004 ret; 0x1005 ret
+        let bytes = [0x85, 0xff, 0x74, 0x01, 0xc3, 0xc3];
+        let stages = guided_stages(
+            &bytes,
+            &Guided {
+                taken: &[(0x1002, false)],
+                next: &[],
+            },
+        );
+        let text = without_reason(&emit_function(&stages.function, &Options::default()));
+        assert!(
+            text.contains("  if (a == 0) {\n    // not analyzed: 0x1005\n  }\n  return;"),
+            "{text}"
+        );
+        assert!(
+            text.contains("// analysis halted at 0x1005: told to"),
+            "{text}"
+        );
+        // `next off` halts the fall-through instead: the guard turns round.
+        let stages = guided_stages(
+            &bytes,
+            &Guided {
+                taken: &[],
+                next: &[(0x1002, false)],
+            },
+        );
+        let text = without_reason(&emit_function(&stages.function, &Options::default()));
+        assert!(text.contains("// not analyzed: 0x1004"), "{text}");
+        assert!(
+            text.contains("// analysis halted at 0x1004: told to"),
+            "{text}"
+        );
+        // A halted path is no proof the function never returns.
+        assert!(!text.contains("does not return"), "{text}");
+        // `taken on` follows a target that does not decode, and the lift
+        // refuses the bytes it finds there as it always did.
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: decode(INTO_JUNK),
+        };
+        let cfg = crate::cfgwalk::resolve_branches_among(
+            &disasm,
+            BASE,
+            &Guided {
+                taken: &[(0x1002, true)],
+                next: &[],
+            },
+        );
+        assert!(cfg.halts.is_empty(), "{:?}", cfg.halts);
+        assert!(lift_function(
+            &disasm,
+            &cfg,
+            BASE,
+            "f",
+            Bitness::Bits64,
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_jump_the_walk_does_not_follow_ends_its_path() {
+        // 0x1000 test edi, edi; 0x1002 je 0x1007; 0x1004 jmp 0x1008;
+        // 0x1006 ret; 0x1007 ret; 0x1008 (bad)
+        let bytes = [0x85, 0xff, 0x74, 0x03, 0xeb, 0x02, 0xc3, 0xc3, 0x06];
+        let stages = guided_stages(
+            &bytes,
+            &Guided {
+                taken: &[],
+                next: &[],
+            },
+        );
+        let text = without_reason(&emit_function(&stages.function, &Options::default()));
+        assert!(text.contains("// not analyzed: 0x1008"), "{text}");
+        assert!(text.contains("return;"), "{text}");
     }
 }

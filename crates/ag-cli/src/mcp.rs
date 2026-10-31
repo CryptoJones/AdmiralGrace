@@ -325,12 +325,12 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "set_override",
-            description: "Allow or prevent one of the lift's judgment calls at a site in the project file — the address of the branch or the indirect jump, the last of the pseudocode line's addresses: `guard` (a branch whose one arm never falls through read as a guard the rest follows), `fold` (a condition comparing an expression with itself folded to the constant it is), `invert` (the condition turned round with its arms), `switch` (the indirect jump read as a switch through a jump table; off, the function is not lifted and says why). The pseudocode is read again with the word. The project is saved.",
+            description: "Allow or prevent one of the lift's judgment calls at a site in the project file — the address of the branch or the indirect jump, the last of the pseudocode line's addresses: `guard` (a branch whose one arm never falls through read as a guard the rest follows), `fold` (a condition comparing an expression with itself folded to the constant it is), `invert` (the condition turned round with its arms), `switch` (the indirect jump read as a switch through a jump table; off, the function is not lifted and says why), `taken` (the walk follows the branch to its target — a conditional branch's taken side, a jump's target, a jump table's cases; off, the side is not analyzed and the pseudocode says `// not analyzed: <target>` there; on, a target whose bytes do not decode is followed, where the walk halts by itself), `next` (the walk goes on to the instruction after — a conditional branch's fall-through, a call's return; off at a call, the callee does not return). The pseudocode is read again with the word. The project is saved.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "address": address,
-                    "kind": { "type": "string", "enum": ["guard", "fold", "invert", "switch"], "description": "The judgment call." },
+                    "kind": { "type": "string", "enum": ["guard", "fold", "invert", "switch", "taken", "next"], "description": "The judgment call." },
                     "on": { "type": ["boolean", "null"], "description": "true (the default) to allow, false to prevent, null to leave it to the lift." },
                 },
                 "required": ["address", "kind"]
@@ -990,7 +990,7 @@ impl Server {
                 let kind = text("kind")?;
                 if !ag_corpus::project::Annotation::OVERRIDE_KINDS.contains(&kind.as_str()) {
                     return Err(format!(
-                        "the kind is guard, fold, invert or switch, not {kind:?}"
+                        "the kind is guard, fold, invert, switch, taken or next, not {kind:?}"
                     ));
                 }
                 let on = match arguments.get("on") {

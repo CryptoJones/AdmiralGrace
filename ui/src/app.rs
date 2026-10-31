@@ -3292,7 +3292,7 @@ impl App {
                     .unwrap_or_default();
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Override,
-                    title: "Override (guard|fold|invert|switch on|off|clear)",
+                    title: "Override (guard|fold|invert|switch|taken|next on|off|clear)",
                     value: current,
                 });
             }
@@ -4378,14 +4378,14 @@ impl App {
                                     (parts.next(), parts.next(), parts.next())
                                 else {
                                     self.notice = Some(
-                                        "An override is KIND on|off|clear: guard, fold, invert or switch"
+                                        "An override is KIND on|off|clear: guard, fold, invert, switch, taken or next"
                                             .into(),
                                     );
                                     return Task::none();
                                 };
                                 if !ag_corpus::project::Annotation::OVERRIDE_KINDS.contains(&kind) {
                                     self.notice = Some(format!(
-                                        "The kind is guard, fold, invert or switch, not {kind:?}"
+                                        "The kind is guard, fold, invert, switch, taken or next, not {kind:?}"
                                     ));
                                     return Task::none();
                                 }
@@ -4404,7 +4404,8 @@ impl App {
                             }
                             if words.is_empty() {
                                 self.notice = Some(
-                                    "An override is KIND on|off|clear: guard, fold, invert or switch".into(),
+                                    "An override is KIND on|off|clear: guard, fold, invert, switch, taken or next"
+                                        .into(),
                                 );
                                 return Task::none();
                             }
