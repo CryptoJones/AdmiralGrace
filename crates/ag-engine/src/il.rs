@@ -1040,13 +1040,16 @@ fn replace_word(text: &str, word: &str, with: &str) -> String {
     out
 }
 
-/// The text cut into the spans inside string literals and the spans
-/// outside them, in order, each flagged.
+/// The text cut into the spans that are string literals or `/* … */`
+/// comments — protected, no name in them is a variable — and the spans
+/// between them, in order, each flagged.
 fn spans(text: &str) -> Vec<(bool, &str)> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut quoted = false;
+    let mut comment = false;
     let mut escaped = false;
+    let mut previous = None;
     for (at, c) in text.char_indices() {
         if quoted {
             if escaped {
@@ -1058,16 +1061,25 @@ fn spans(text: &str) -> Vec<(bool, &str)> {
                 start = at + 1;
                 quoted = false;
             }
-        } else if c == '"' {
-            if at > start {
-                out.push((false, &text[start..at]));
+        } else if comment {
+            if c == '/' && previous == Some('*') && at > start + 2 {
+                out.push((true, &text[start..at + 1]));
+                start = at + 1;
+                comment = false;
             }
-            start = at;
-            quoted = true;
+        } else if c == '"' || (c == '*' && previous == Some('/')) {
+            let open = if c == '"' { at } else { at - 1 };
+            if open > start {
+                out.push((false, &text[start..open]));
+            }
+            start = open;
+            quoted = c == '"';
+            comment = !quoted;
         }
+        previous = Some(c);
     }
     if start < text.len() {
-        out.push((quoted, &text[start..]));
+        out.push((quoted || comment, &text[start..]));
     }
     out
 }
@@ -1129,7 +1141,12 @@ fn project_versions(high: &mut IlFunction, medium: &IlFunction) {
                 continue;
             }
             // A condition: the branch that tests it names what it reads.
-            let names = names_of(part);
+            // The names the header itself reads: not a cast's type, a
+            // callee, or a field.
+            let names: Vec<String> = names_of(part)
+                .into_iter()
+                .filter(|name| item.uses.contains(name))
+                .collect();
             let tester = shared.iter().find(|(_, candidate)| {
                 candidate.defines.is_empty()
                     && (candidate.text.starts_with("if (")
@@ -1169,10 +1186,30 @@ fn header_parts(text: &str) -> Option<(&str, Vec<&str>)> {
         .strip_prefix(" (")?
         .strip_suffix(')')?;
     Some(if keyword == "for" {
-        (keyword, inside.split("; ").collect())
+        (keyword, split_outside_literals(inside, "; "))
     } else {
         (keyword, vec![inside])
     })
+}
+
+/// `text` split at each `separator` outside its string literals.
+fn split_outside_literals<'a>(text: &'a str, separator: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut at = 0;
+    for (protected, span) in spans(text) {
+        if !protected {
+            let mut rest = 0;
+            while let Some(found) = span[rest..].find(separator) {
+                parts.push(&text[start..at + rest + found]);
+                rest += found + separator.len();
+                start = at + rest;
+            }
+        }
+        at += span.len();
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 /// The identifiers in a piece of text, outside its string literals.
@@ -1200,7 +1237,10 @@ fn names_of(text: &str) -> Vec<String> {
                 previous = Some(c);
             }
         }
-        if !word.is_empty() && !word.starts_with(|c: char| c.is_ascii_digit()) {
+        if !word.is_empty()
+            && !word.starts_with(|c: char| c.is_ascii_digit())
+            && previous != Some('.')
+        {
             push_once(&mut names, word);
         }
     }
@@ -1296,6 +1336,16 @@ mod tests {
         );
         assert_eq!(replace_word("b > a", "a", "a#1"), "b > a#1");
         assert_eq!(strip_versions("f(\"#1\", x#1)"), "f(\"#1\", x)");
+        assert_eq!(
+            replace_word("x = unknown /* a after the call */ + a", "a", "a#0"),
+            "x = unknown /* a after the call */ + a#0"
+        );
+        assert_eq!(names_of("p->next"), vec!["p"]);
+        assert_eq!(names_of("(long)i < n"), vec!["long", "i", "n"]);
+        assert_eq!(
+            split_outside_literals("x = f(\"a; b\"); y = 1; z", "; "),
+            vec!["x = f(\"a; b\")", "y = 1", "z"]
+        );
         assert_eq!(names_of("p->a + s.a + a * 10 + \"b\""), vec!["p", "s", "a"]);
     }
 
@@ -1436,9 +1486,9 @@ mod tests {
             &mut block,
             item(
                 &[0x14],
-                "if (x#2 <= a#0) goto block_20 else goto block_30",
+                "if (x#2 <= a#0 + p#0->a) goto block_20 else goto block_30",
                 &[],
-                &["x#2", "a#0"],
+                &["x#2", "a#0", "p#0"],
             ),
         );
         push_item(
@@ -1493,6 +1543,12 @@ mod tests {
             &mut block,
             item(&[0x40], "while (z)", &[], &["z"]),
         );
+        // A cast's type and a field are not names the header reads.
+        push_item(
+            &mut high,
+            &mut block,
+            item(&[0x14], "if ((long)x <= p->a)", &[], &["x", "p"]),
+        );
         high.blocks.push(block);
         let ssa = to_ssa(&high, &Analysis::default(), Some(&medium));
         assert!(ssa.ssa);
@@ -1507,6 +1563,7 @@ mod tests {
         assert_eq!(texts[2], "printf(\"x = %d\\n\", x#2)");
         // A header with no medium statement at its addresses keeps its names.
         assert_eq!(texts[3], "while (z)");
+        assert_eq!(texts[4], "if ((long)x#2 <= p#0->a)");
         // Without the medium level there is no SSA form of the high.
         assert!(!to_ssa(&high, &Analysis::default(), None).ssa);
     }

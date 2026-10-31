@@ -513,8 +513,10 @@ pub fn lift_function(
     symbols: &dyn Symbols,
     options: &Options,
 ) -> Result<LiftedFunction, NotLifted> {
-    lift_stages(disasm, cfg, entry, name, bitness, abi, symbols, options)
-        .map(|stages| stages.function)
+    lift_inner(
+        disasm, cfg, entry, name, bitness, abi, symbols, options, false,
+    )
+    .map(|stages| stages.function)
 }
 
 /// The stages of a lift, kept for the intermediate languages: the chains
@@ -575,6 +577,25 @@ pub fn lift_stages(
     symbols: &dyn Symbols,
     options: &Options,
 ) -> Result<Stages, NotLifted> {
+    lift_inner(
+        disasm, cfg, entry, name, bitness, abi, symbols, options, true,
+    )
+}
+
+/// The lift; the stages are kept when `keep`, and empty otherwise, so the
+/// pseudocode's path pays for none of their text and copies.
+#[allow(clippy::too_many_arguments)]
+fn lift_inner(
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    entry: u64,
+    name: &str,
+    bitness: Bitness,
+    abi: Abi,
+    symbols: &dyn Symbols,
+    options: &Options,
+    keep: bool,
+) -> Result<Stages, NotLifted> {
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
     }
@@ -618,31 +639,35 @@ pub fn lift_stages(
     }
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
     let lifted = lifter.lift_chains(&chains, &analysis)?;
-    let names = LowNames {
-        temps: &lifter.temps,
-        slots: options.stack_slot_names,
+    let low: Vec<Vec<LowStatement>> = if keep {
+        let names = LowNames {
+            temps: &lifter.temps,
+            slots: options.stack_slot_names,
+        };
+        lifted
+            .iter()
+            .map(|(statements, terminator)| {
+                let mut rows: Vec<LowStatement> = statements
+                    .iter()
+                    .map(|statement| statement.low(&names))
+                    .collect();
+                if let Some(end) = low_terminator(terminator) {
+                    rows.push(end);
+                }
+                rows
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
-    let low: Vec<Vec<LowStatement>> = lifted
-        .iter()
-        .map(|(statements, terminator)| {
-            let mut rows: Vec<LowStatement> = statements
-                .iter()
-                .map(|statement| statement.low(&names))
-                .collect();
-            if let Some(end) = low_terminator(terminator) {
-                rows.push(end);
-            }
-            rows
-        })
-        .collect();
     lifter.decide_return(entry, &lifted)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
-    let medium = nodes.clone();
+    let medium = if keep { nodes.clone() } else { Vec::new() };
     let body = structure::structure(&nodes, &analysis, 0, options);
-    let high = body.clone();
+    let high = if keep { body.clone() } else { Vec::new() };
     let function = lifter.finish(name, entry, &chains, body)?;
     Ok(Stages {
-        chains: stage_chains,
+        chains: if keep { stage_chains } else { Vec::new() },
         low,
         medium,
         high,
@@ -712,9 +737,8 @@ impl Sym {
                 crate::il::names_in(node),
             ),
             Sym::Stack(offset) => {
-                // The address of a slot.
-                let slot = names.slot(*offset);
-                (format!("&{slot}"), vec![slot])
+                // The address of a slot: no version of its value is read.
+                (format!("&{}", names.slot(*offset)), Vec::new())
             }
             Sym::Entry(index) => {
                 // The value a register held when the function was entered.
