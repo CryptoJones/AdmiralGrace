@@ -1813,3 +1813,46 @@ fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
     let json: serde_json::Value = serde_json::from_str(&report).expect("JSON");
     assert_eq!(json["classes"].as_array().map(Vec::len), Some(0));
 }
+
+#[test]
+fn the_levels_render_options_decorate_the_text_and_the_json_has_the_fields() {
+    let text = image(
+        "sample.elf",
+        &[
+            "il",
+            "sum_to",
+            "--level",
+            "medium",
+            "--casts",
+            "--opcodes",
+            "--stack-pointer",
+        ],
+    );
+    assert!(
+        text.contains("[assign] local_14 = (int)1  ; sp = entry-0x8"),
+        "{text}"
+    );
+    let lifted = image(
+        "sample.elf",
+        &["il", "sum_to", "--level", "lifted", "--flags", "--types"],
+    );
+    assert!(
+        lifted.contains(
+            "cmp eax,[rbp-14h]  ; flags: reads none, writes CF PF AF ZF SF OF  ; types: eax: int, rbp: long"
+        ),
+        "{lifted}"
+    );
+    let plain = image("sample.elf", &["il", "sum_to", "--level", "lifted"]);
+    assert!(!plain.contains("flags:"), "{plain}");
+    let report = image_json("sample.elf", &["il", "sum_to", "--level", "medium"]);
+    let item = report["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["text"] == "local_14 = 1")
+        .expect("the init");
+    assert_eq!(item["opcode"], "assign");
+    assert_eq!(item["stack_pointer"], -8);
+    assert_eq!(item["types"], serde_json::json!([["local_14", "int"]]));
+    assert_eq!(item["flags_read"], serde_json::json!([]));
+}

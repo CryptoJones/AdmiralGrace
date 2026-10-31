@@ -451,6 +451,9 @@ fn decode_with(
                     rip_relative_address: None,
                     absolute_address,
                     switch_indices: false,
+                    opcode: 0,
+                    flags_read: 0,
+                    flags_written: 0,
                 });
                 decoded.text.insert(cursor, (printed.mnemonic, operands));
                 cursor = next;
@@ -483,6 +486,9 @@ fn decode_with(
                     rip_relative_address: None,
                     absolute_address: None,
                     switch_indices: false,
+                    opcode: 0,
+                    flags_read: 0,
+                    flags_written: 0,
                 });
                 decoded.text.insert(
                     cursor,

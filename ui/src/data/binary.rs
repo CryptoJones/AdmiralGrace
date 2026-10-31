@@ -433,8 +433,14 @@ impl Provider for BinaryProvider {
         self.binary.section_of(address).is_some()
     }
 
-    fn il(&self, address: u64, level: ag_image::Level, ssa: bool) -> Option<ag_image::IlFunction> {
-        self.binary.il(address, level, ssa).ok()
+    fn il(
+        &self,
+        address: u64,
+        level: ag_image::Level,
+        ssa: bool,
+        casts: bool,
+    ) -> Option<ag_image::IlFunction> {
+        self.binary.il_with(address, level, ssa, casts).ok()
     }
 
     fn write_patched(&self, out: &Path) -> Option<Result<usize, String>> {

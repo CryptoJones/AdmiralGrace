@@ -233,3 +233,135 @@ fn a_function_the_lifter_refuses_has_no_levels_and_a_thunk_has_an_empty_body() {
     assert_eq!(Level::parse("high"), Some(Level::High));
     assert_eq!(Level::ALL.len(), 4);
 }
+
+#[test]
+fn every_item_carries_its_opcode_flags_stack_pointer_and_types_and_the_casts_are_explicit() {
+    let image = sample();
+    let lifted = image.il(SUM_TO, Level::Lifted, false).expect("lifted");
+    let cmp = lifted.items_at(0x118d)[0];
+    assert_eq!(cmp.opcode.as_deref(), Some("Cmp_r32_rm32"));
+    assert!(cmp.flags_read.is_empty(), "{cmp:?}");
+    assert!(cmp.flags_written.iter().any(|f| f == "ZF"), "{cmp:?}");
+    assert_eq!(cmp.stack_pointer, Some(-8));
+    assert!(
+        cmp.types
+            .iter()
+            .any(|(name, ty)| name == "eax" && ty == "int"),
+        "{cmp:?}"
+    );
+    let mov = lifted.items_at(0x118a)[0];
+    assert_eq!(
+        mov.types,
+        vec![
+            ("eax".to_string(), "int".to_string()),
+            ("rbp".to_string(), "long".to_string())
+        ],
+        "{mov:?}"
+    );
+    let frame = lifted.items_at(0x1166)[0];
+    assert!(
+        frame
+            .types
+            .iter()
+            .any(|(name, ty)| name == "rbp" && ty == "long"),
+        "{frame:?}"
+    );
+    // The chain's last instruction has its stack pointer too.
+    assert_eq!(lifted.items_at(0x1190)[0].stack_pointer, Some(-8));
+    assert_eq!(lifted.items_at(0x117b)[0].stack_pointer, Some(-8));
+    let jle = lifted.items_at(0x1190)[0];
+    assert!(jle.flags_read.iter().any(|f| f == "ZF"), "{jle:?}");
+    // The push is before the stack pointer moved; the notes are shown on request.
+    assert_eq!(lifted.items_at(0x1165)[0].stack_pointer, Some(0));
+    let text = lifted.render(&ag_image::Render::ALL);
+    assert!(
+        text.contains(
+            "[Cmp_r32_rm32] cmp eax,[rbp-14h]  ; sp = entry-0x8  ; flags: reads none, writes "
+        ),
+        "{text}"
+    );
+    assert_eq!(lifted.text(), lifted.render(&ag_image::Render::default()));
+    assert!(!lifted.text().contains("sp = entry"));
+
+    let medium = image.il(SUM_TO, Level::Medium, false).expect("medium");
+    let init = medium
+        .items
+        .iter()
+        .find(|item| item.text == "local_14 = 1")
+        .expect("init");
+    assert_eq!(init.opcode.as_deref(), Some("assign"));
+    assert_eq!(init.stack_pointer, Some(-8));
+    assert_eq!(
+        init.types,
+        vec![("local_14".to_string(), "int".to_string())]
+    );
+    let branch = medium
+        .items
+        .iter()
+        .find(|item| item.text.starts_with("if ("))
+        .expect("branch");
+    assert_eq!(branch.opcode.as_deref(), Some("branch"));
+    assert!(
+        branch
+            .types
+            .iter()
+            .any(|(name, ty)| name == "a" && ty == "int"),
+        "{branch:?}"
+    );
+    let goto = medium
+        .items
+        .iter()
+        .find(|item| item.opcode.as_deref() == Some("goto"))
+        .expect("goto");
+    assert_eq!(goto.stack_pointer, Some(-8), "{goto:?}");
+    assert!(medium
+        .items
+        .iter()
+        .any(|item| item.opcode.as_deref() == Some("return")));
+
+    // Casts: every constant with its width, in its own cached build.
+    let casts = image
+        .il_with(SUM_TO, Level::Medium, false, true)
+        .expect("casts");
+    assert!(
+        casts.text().contains("local_14 = (int)1"),
+        "{}",
+        casts.text()
+    );
+    assert!(
+        casts.text().contains("local_10 = (long)0"),
+        "{}",
+        casts.text()
+    );
+    assert!(!medium.text().contains("(int)1"));
+    let low = image
+        .il_with(SUM_TO, Level::Low, false, true)
+        .expect("low casts");
+    assert!(
+        low.text().contains("local_14:32 = (int)1"),
+        "{}",
+        low.text()
+    );
+    assert_eq!(low.items[0].opcode.as_deref(), Some("store"));
+    assert!(low
+        .items
+        .iter()
+        .any(|item| item.opcode.as_deref() == Some("branch")));
+    let high = image
+        .il_with(SUM_TO, Level::High, true, true)
+        .expect("high");
+    assert!(
+        high.text().contains("for (local_14#1 = (int)1;"),
+        "{}",
+        high.text()
+    );
+    assert!(high
+        .items
+        .iter()
+        .any(|item| item.opcode.as_deref() == Some("for")));
+    // A φ names its kind and the type of what it merges.
+    let ssa = image.il(SUM_TO, Level::Medium, true).expect("ssa");
+    let phi = ssa.items.iter().find(|item| item.phi).expect("phi");
+    assert_eq!(phi.types.len(), 1, "{phi:?}");
+    assert_eq!(phi.stack_pointer, Some(-8), "{phi:?}");
+}

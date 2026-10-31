@@ -538,6 +538,12 @@ pub struct Stages {
     pub function: LiftedFunction,
     /// The analysis of the chain graph: its order, dominators and loops.
     pub analysis: Analysis,
+    /// The stack pointer's offset from the entry's before each instruction,
+    /// where the lifter knew it.
+    pub stack_pointer: BTreeMap<u64, i64>,
+    /// The C type of every name the levels use: parameters, locals, slots,
+    /// temporaries, the flags.
+    pub types: BTreeMap<String, String>,
 }
 
 /// One chain of a lift: a run of blocks the lift reads as one.
@@ -556,6 +562,12 @@ pub struct StageChain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowStatement {
     pub text: String,
+    /// The statement with its casts explicit: every constant with its
+    /// width, a value stored at another width cast to it.
+    pub casts: String,
+    /// What kind of statement it is: `store`, `call`, `assign`, `return`,
+    /// `compare`, `branch`, `switch`.
+    pub kind: &'static str,
     pub addresses: Vec<u64>,
     /// What the statement writes: a temporary, a slot, a variable, a
     /// register.
@@ -635,6 +647,8 @@ fn lift_inner(
             high: Vec::new(),
             function,
             analysis,
+            stack_pointer: BTreeMap::new(),
+            types: BTreeMap::new(),
         });
     }
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
@@ -660,12 +674,60 @@ fn lift_inner(
     } else {
         Vec::new()
     };
+    // The slots the chains store to, with their widths, for the types.
+    let stored: Vec<(i64, u32)> = if keep {
+        lifted
+            .iter()
+            .flat_map(|(statements, _)| statements)
+            .filter_map(|statement| match statement {
+                Stmt::Store { offset, bits, .. } => Some((*offset, *bits)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     lifter.decide_return(entry, &lifted)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
     let medium = if keep { nodes.clone() } else { Vec::new() };
     let body = structure::structure(&nodes, &analysis, 0, options);
     let high = if keep { body.clone() } else { Vec::new() };
+    let stack_pointer = if keep {
+        std::mem::take(&mut lifter.stack_pointers)
+    } else {
+        BTreeMap::new()
+    };
+    let mut types: BTreeMap<String, String> = BTreeMap::new();
+    if keep {
+        for (offset, bits) in &lifter.locals {
+            types.insert(
+                local_name(options.stack_slot_names, *offset),
+                type_name(*bits).to_string(),
+            );
+        }
+        for temp in &lifter.temps {
+            types.insert(
+                temp.name.clone(),
+                type_name(temp.bits.unwrap_or(64)).to_string(),
+            );
+        }
+        for saved in &lifter.saved {
+            types.insert(saved.name.clone(), saved.ty.clone());
+        }
+        // A slot that never became a variable is typed by its stores.
+        for (offset, bits) in stored {
+            types
+                .entry(local_name(options.stack_slot_names, offset))
+                .or_insert_with(|| type_name(bits).to_string());
+        }
+        types.insert("flags".to_string(), "flags".to_string());
+    }
     let function = lifter.finish(name, entry, &chains, body)?;
+    if keep {
+        for variable in function.params.iter().chain(&function.locals) {
+            types.insert(variable.name.clone(), variable.ty.clone());
+        }
+    }
     Ok(Stages {
         chains: if keep { stage_chains } else { Vec::new() },
         low,
@@ -673,6 +735,8 @@ fn lift_inner(
         high,
         function,
         analysis,
+        stack_pointer,
+        types,
     })
 }
 
@@ -684,6 +748,11 @@ fn low_terminator(terminator: &Terminator) -> Option<LowStatement> {
             cond, addresses, ..
         } => Some(LowStatement {
             text: format!("branch if {}", one_line(&crate::emit::emit_node(cond))),
+            casts: format!(
+                "branch if {}",
+                one_line(&crate::emit::emit_node(&crate::il::with_casts(cond)))
+            ),
+            kind: "branch",
             addresses: addresses.clone(),
             defines: Vec::new(),
             uses: crate::il::names_in(cond),
@@ -692,6 +761,11 @@ fn low_terminator(terminator: &Terminator) -> Option<LowStatement> {
             index, addresses, ..
         } => Some(LowStatement {
             text: format!("switch on {}", one_line(&crate::emit::emit_node(index))),
+            casts: format!(
+                "switch on {}",
+                one_line(&crate::emit::emit_node(&crate::il::with_casts(index)))
+            ),
+            kind: "switch",
             addresses: addresses.clone(),
             defines: Vec::new(),
             uses: crate::il::names_in(index),
@@ -730,8 +804,12 @@ impl LowNames<'_> {
 impl Sym {
     /// The symbolic value's text, and the name it reads when it is one
     /// thing read.
-    fn low_text(&self, names: &LowNames) -> (String, Vec<String>) {
+    fn low_text(&self, names: &LowNames, casts: bool) -> (String, Vec<String>) {
         match self {
+            Sym::Node(node) if casts => (
+                one_line(&crate::emit::emit_node(&crate::il::with_casts(node))),
+                crate::il::names_in(node),
+            ),
             Sym::Node(node) => (
                 one_line(&crate::emit::emit_node(node)),
                 crate::il::names_in(node),
@@ -756,8 +834,8 @@ impl Sym {
 }
 
 impl Value {
-    fn low_text(&self, names: &LowNames) -> (String, Vec<String>) {
-        self.sym.low_text(names)
+    fn low_text(&self, names: &LowNames, casts: bool) -> (String, Vec<String>) {
+        self.sym.low_text(names, casts)
     }
 }
 
@@ -773,6 +851,11 @@ impl Stmt {
                 let temp = names.temp(*temp);
                 LowStatement {
                     text: format!("{temp} = {}", one_line(&crate::emit::emit_node(node))),
+                    casts: format!(
+                        "{temp} = {}",
+                        one_line(&crate::emit::emit_node(&crate::il::with_casts(node)))
+                    ),
+                    kind: "call",
                     addresses: addresses.clone(),
                     defines: vec![temp],
                     uses: crate::il::names_in(node),
@@ -784,10 +867,25 @@ impl Stmt {
                 value,
                 addresses,
             } => {
-                let (text, uses) = value.low_text(names);
+                let (text, uses) = value.low_text(names, false);
                 let slot = names.slot(*offset);
+                // A value stored at another width than it has is cast to it,
+                // whole.
+                let cast_text = if value.bits != *bits {
+                    match &value.sym {
+                        Sym::Node(node) => one_line(&crate::emit::emit_node(&crate::il::cast_to(
+                            type_name(*bits),
+                            node,
+                        ))),
+                        _ => format!("({}){}", type_name(*bits), value.low_text(names, true).0),
+                    }
+                } else {
+                    value.low_text(names, true).0
+                };
                 LowStatement {
                     text: format!("{slot}:{bits} = {text}"),
+                    casts: format!("{slot}:{bits} = {cast_text}"),
+                    kind: "store",
                     addresses: addresses.clone(),
                     defines: vec![slot],
                     uses,
@@ -798,7 +896,8 @@ impl Stmt {
                 value,
                 addresses,
             } => {
-                let (text, uses) = value.low_text(names);
+                let (text, uses) = value.low_text(names, false);
+                let (cast_text, _) = value.low_text(names, true);
                 let defines = match lhs {
                     AstNode::Var { .. } | AstNode::Register { .. } => crate::il::names_in(lhs),
                     _ => Vec::new(),
@@ -808,8 +907,11 @@ impl Stmt {
                 if defines.is_empty() {
                     uses.extend(crate::il::names_in(lhs));
                 }
+                let left = one_line(&crate::emit::emit_node(lhs));
                 LowStatement {
-                    text: format!("{} = {text}", one_line(&crate::emit::emit_node(lhs))),
+                    text: format!("{left} = {text}"),
+                    casts: format!("{left} = {cast_text}"),
+                    kind: "assign",
                     addresses: addresses.clone(),
                     defines,
                     uses,
@@ -820,21 +922,29 @@ impl Stmt {
                 leftover,
                 addresses,
             } => {
-                let (text, uses) = match value {
+                let (text, casts, uses) = match value {
                     Some(value) => {
-                        let (text, uses) = value.low_text(names);
-                        (format!("return {text}"), uses)
+                        let (text, uses) = value.low_text(names, false);
+                        let (cast_text, _) = value.low_text(names, true);
+                        (
+                            format!("return {text}"),
+                            format!("return {cast_text}"),
+                            uses,
+                        )
                     }
                     None => match leftover {
                         Some(temp) => {
                             let temp = names.temp(*temp);
-                            (format!("return /* {temp} left in rax */"), vec![temp])
+                            let text = format!("return /* {temp} left in rax */");
+                            (text.clone(), text, vec![temp])
                         }
-                        None => ("return".to_string(), Vec::new()),
+                        None => ("return".to_string(), "return".to_string(), Vec::new()),
                     },
                 };
                 LowStatement {
                     text,
+                    casts,
+                    kind: "return",
                     addresses: addresses.clone(),
                     defines: Vec::new(),
                     uses,
@@ -846,11 +956,15 @@ impl Stmt {
                 rhs,
                 addresses,
             } => {
-                let (left, mut uses) = lhs.low_text(names);
-                let (right, more) = rhs.low_text(names);
+                let (left, mut uses) = lhs.low_text(names, false);
+                let (right, more) = rhs.low_text(names, false);
+                let (left_cast, _) = lhs.low_text(names, true);
+                let (right_cast, _) = rhs.low_text(names, true);
                 uses.extend(more);
                 LowStatement {
                     text: format!("flags = {name}({left}, {right})"),
+                    casts: format!("flags = {name}({left_cast}, {right_cast})"),
+                    kind: "compare",
                     addresses: addresses.clone(),
                     defines: vec!["flags".to_string()],
                     uses,
@@ -1409,6 +1523,9 @@ struct Lifter<'a> {
     address_taken: BTreeSet<i64>,
     /// The slots that are variables, with their width.
     locals: BTreeMap<i64, u32>,
+    /// The stack pointer's offset from the entry's before each instruction,
+    /// where it is known, for the levels.
+    stack_pointers: BTreeMap<u64, i64>,
     /// The parameters read so far: position to width.
     params: BTreeMap<usize, u32>,
     temps: Vec<Temp>,
@@ -1440,6 +1557,7 @@ impl<'a> Lifter<'a> {
             state: State::initial(),
             address_taken: BTreeSet::new(),
             locals: BTreeMap::new(),
+            stack_pointers: BTreeMap::new(),
             params: BTreeMap::new(),
             temps: Vec::new(),
             saved: Vec::new(),
@@ -1457,6 +1575,7 @@ impl<'a> Lifter<'a> {
     /// the registers that became variables.
     fn reset(&mut self) {
         self.state = State::initial();
+        self.stack_pointers.clear();
         self.locals.clear();
         self.params.clear();
         self.temps.clear();
@@ -1620,6 +1739,9 @@ impl<'a> Lifter<'a> {
         for ins in body {
             self.step(ins)?;
         }
+        // The chain's last instruction is stepped by some ends and not
+        // others; the stack pointer before it is noted either way.
+        self.note_stack_pointer(last.address);
         match chain.end {
             End::Return => {
                 self.step(last)?;
@@ -2726,7 +2848,16 @@ impl<'a> Lifter<'a> {
 
     // ---- instructions -----------------------------------------------------
 
+    /// Note the stack pointer's offset from the entry's, as it stands
+    /// before the instruction at `address`, when it is known.
+    fn note_stack_pointer(&mut self, address: u64) {
+        if let Some(Sym::Stack(offset)) = self.state.regs.get(&RSP).map(|value| &value.sym) {
+            self.stack_pointers.insert(address, *offset);
+        }
+    }
+
     fn step(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        self.note_stack_pointer(ins.address);
         let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
         match mnemonic {
             Mnemonic::Nop | Mnemonic::Endbr64 => Ok(()),

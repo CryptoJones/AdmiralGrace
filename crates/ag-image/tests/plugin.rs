@@ -87,6 +87,9 @@ impl Architecture for ToyCpu {
                 rip_relative_address: None,
                 absolute_address: None,
                 switch_indices: false,
+                opcode: 0,
+                flags_read: 0,
+                flags_written: 0,
             });
             decoded
                 .text

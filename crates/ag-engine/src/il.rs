@@ -74,7 +74,7 @@ impl Level {
 }
 
 /// One item of a level: an instruction, a statement, a φ.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IlItem {
     /// The item's number in the function, from 0.
     pub id: usize,
@@ -93,6 +93,54 @@ pub struct IlItem {
     pub uses: Vec<String>,
     /// Whether the item is a φ of SSA form.
     pub phi: bool,
+    /// What the item is: at the lifted level the instruction's form as the
+    /// decoder numbers it (`Mov_r32_rm32`), at the others the statement's
+    /// kind — `assign`, `store`, `call`, `intrinsic`, `return`, `compare`,
+    /// `branch`, `switch`, `goto`, `label`, `break`, `continue`,
+    /// `expression`, `if`, `else`, `while`, `do`, `for`, `case`, `phi`.
+    /// None for an instruction the decoder has no form for.
+    pub opcode: Option<String>,
+    /// The flags the instruction reads, at the lifted level: `CF`, `ZF`, …
+    pub flags_read: Vec<String>,
+    /// The flags the instruction writes, at the lifted level.
+    pub flags_written: Vec<String>,
+    /// The stack pointer's offset from the entry's before the item's first
+    /// instruction, where the lifter knew it.
+    pub stack_pointer: Option<i64>,
+    /// The C type of each name the item reads or writes, by its plain
+    /// name: `local_14: int`; at the lifted level the registers as the
+    /// text spells them, typed by their width: `eax: int`. A temporary
+    /// whose width was never read is `long`; a slot stored at two widths
+    /// has the first; the flags are `flags`.
+    pub types: Vec<(String, String)>,
+}
+
+/// What a level's text shows beside each item, over the item itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Render {
+    /// The item's opcode before it, in brackets.
+    pub opcodes: bool,
+    /// The flags an instruction reads and writes.
+    pub flags: bool,
+    /// The stack pointer's offset from the entry's.
+    pub stack_pointer: bool,
+    /// The type of every name the item uses.
+    pub types: bool,
+}
+
+impl Render {
+    /// Everything shown.
+    pub const ALL: Render = Render {
+        opcodes: true,
+        flags: true,
+        stack_pointer: true,
+        types: true,
+    };
+
+    /// Whether anything is shown beside the items.
+    pub fn any(self) -> bool {
+        self.opcodes || self.flags || self.stack_pointer || self.types
+    }
 }
 
 /// One block of a level: a chain of the lift at the lifted, low and
@@ -124,6 +172,54 @@ impl IlFunction {
     /// The function as text: a header, then each block's label and its
     /// items, indented by depth.
     pub fn text(&self) -> String {
+        self.render(&Render::default())
+    }
+
+    /// One item as text, with what `render` asks for beside it: its opcode
+    /// in brackets before it, then notes — the stack pointer, the flags,
+    /// the types — each after `  ; `.
+    pub fn item_text(&self, item: &IlItem, render: &Render) -> String {
+        let mut text = String::new();
+        if render.opcodes {
+            if let Some(opcode) = &item.opcode {
+                text.push_str(&format!("[{opcode}] "));
+            }
+        }
+        text.push_str(&item.text);
+        if render.stack_pointer {
+            if let Some(offset) = item.stack_pointer {
+                text.push_str(&format!("  ; sp = entry{}", offset_text(offset)));
+            }
+        }
+        if render.flags && !(item.flags_read.is_empty() && item.flags_written.is_empty()) {
+            let list = |flags: &[String]| {
+                if flags.is_empty() {
+                    "none".to_string()
+                } else {
+                    flags.join(" ")
+                }
+            };
+            text.push_str(&format!(
+                "  ; flags: reads {}, writes {}",
+                list(&item.flags_read),
+                list(&item.flags_written)
+            ));
+        }
+        if render.types && !item.types.is_empty() {
+            text.push_str(&format!(
+                "  ; types: {}",
+                item.types
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {ty}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        text
+    }
+
+    /// The function as text with what `render` asks for beside each item.
+    pub fn render(&self, render: &Render) -> String {
         let mut out = format!(
             "; {} at {:#x}: {} level{}\n",
             self.name,
@@ -159,7 +255,7 @@ impl IlFunction {
                 out.push_str(&format!(
                     "  {at}  {}{}\n",
                     "    ".repeat(item.depth),
-                    item.text
+                    self.item_text(item, render)
                 ));
             }
         }
@@ -172,6 +268,186 @@ impl IlFunction {
             .iter()
             .filter(|item| item.addresses.contains(&address))
             .collect()
+    }
+}
+
+/// A stack offset as text after `entry`: nothing, `-0x14`, `+0x8`.
+fn offset_text(offset: i64) -> String {
+    match offset {
+        0 => String::new(),
+        negative if negative < 0 => format!("-{:#x}", -negative),
+        positive => format!("+{positive:#x}"),
+    }
+}
+
+/// The width a general register's spelling names, in bits: `rax` 64,
+/// `eax` 32, `ax` 16, `al` 8, `r8d` 32; none for another register.
+pub fn register_width(name: &str) -> Option<u32> {
+    let name = name.to_ascii_lowercase();
+    const WIDE: [&str; 9] = [
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip",
+    ];
+    const WORD: [&str; 8] = ["ax", "bx", "cx", "dx", "si", "di", "bp", "sp"];
+    const BYTE: [&str; 12] = [
+        "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "bpl", "spl",
+    ];
+    if WIDE.contains(&name.as_str()) {
+        return Some(64);
+    }
+    if let Some(rest) = name.strip_prefix('e') {
+        if WORD.contains(&rest) || rest == "ip" {
+            return Some(32);
+        }
+    }
+    if WORD.contains(&name.as_str()) {
+        return Some(16);
+    }
+    if BYTE.contains(&name.as_str()) {
+        return Some(8);
+    }
+    // r8 to r15, and their d, w and b (or l) parts.
+    let numbered = name.strip_prefix('r')?;
+    let (digits, suffix) = numbered.split_at(numbered.trim_end_matches(['d', 'w', 'b', 'l']).len());
+    let number: u32 = digits.parse().ok()?;
+    if !(8..=15).contains(&number) {
+        return None;
+    }
+    match suffix {
+        "" => Some(64),
+        "d" => Some(32),
+        "w" => Some(16),
+        "b" | "l" => Some(8),
+        _ => None,
+    }
+}
+
+/// `node` cast to `ty`: a constant cast once, to that type; anything else
+/// wrapped whole, its own constants spelled with their widths.
+pub fn cast_to(ty: &str, node: &AstNode) -> AstNode {
+    match node {
+        AstNode::Constant { .. } => AstNode::Cast {
+            ty: ty.to_string(),
+            target: Box::new(node.clone()),
+        },
+        AstNode::Cast { ty: own, .. } if own == ty => node.clone(),
+        other => AstNode::Cast {
+            ty: ty.to_string(),
+            target: Box::new(with_casts(other)),
+        },
+    }
+}
+
+/// The expression with its casts explicit: every constant spelled with the
+/// type of its width — `(int)1`, `(long)0` — except under a cast already,
+/// or where it is the constant directly dereferenced or taken the address
+/// of. The right side of an assignment, both sides of an operator, a call's
+/// arguments and a return's value are walked; a condition or a loop's
+/// header is not.
+pub fn with_casts(node: &AstNode) -> AstNode {
+    fn walk(node: &AstNode, under: bool) -> AstNode {
+        match node {
+            AstNode::Constant { width_bytes, .. } if !under => AstNode::Cast {
+                ty: crate::lift::type_name(width_bytes * 8).to_string(),
+                target: Box::new(node.clone()),
+            },
+            AstNode::Cast { ty, target } => AstNode::Cast {
+                ty: ty.clone(),
+                target: Box::new(walk(target, true)),
+            },
+            AstNode::Binary { lhs, op, rhs } => AstNode::Binary {
+                lhs: Box::new(walk(lhs, false)),
+                op: *op,
+                rhs: Box::new(walk(rhs, false)),
+            },
+            AstNode::Assign { lhs, rhs } => AstNode::Assign {
+                lhs: lhs.clone(),
+                rhs: Box::new(walk(rhs, false)),
+            },
+            AstNode::Deref { target } => AstNode::Deref {
+                target: Box::new(walk(target, true)),
+            },
+            AstNode::AddressOf { target } => AstNode::AddressOf {
+                target: Box::new(walk(target, true)),
+            },
+            AstNode::Call { callee, args } => AstNode::Call {
+                callee: callee.clone(),
+                args: args.iter().map(|arg| walk(arg, false)).collect(),
+            },
+            AstNode::Intrinsic { name, args } => AstNode::Intrinsic {
+                name: name.clone(),
+                args: args.iter().map(|arg| walk(arg, false)).collect(),
+            },
+            AstNode::Return { value } => AstNode::Return {
+                value: value.as_ref().map(|value| Box::new(walk(value, false))),
+            },
+            other => other.clone(),
+        }
+    }
+    walk(node, false)
+}
+
+/// The expression as it is, or with its casts explicit.
+fn maybe_casts(node: &AstNode, casts: bool) -> std::borrow::Cow<'_, AstNode> {
+    if casts {
+        std::borrow::Cow::Owned(with_casts(node))
+    } else {
+        std::borrow::Cow::Borrowed(node)
+    }
+}
+
+/// What kind of statement an expression is, for the item's opcode.
+fn node_kind(node: &AstNode) -> &'static str {
+    match node {
+        AstNode::Assign { .. } => "assign",
+        AstNode::Call { .. } => "call",
+        AstNode::Intrinsic { .. } => "intrinsic",
+        AstNode::Return { .. } => "return",
+        AstNode::Goto { .. } => "goto",
+        AstNode::Label { .. } => "label",
+        AstNode::IfGoto { .. } => "branch",
+        AstNode::Break => "break",
+        AstNode::Continue => "continue",
+        _ => "expression",
+    }
+}
+
+/// The C type of a name the levels use, when it is known: from the lift's
+/// table, or `long` for a register's value at entry.
+fn type_of(name: &str, types: &BTreeMap<String, String>) -> Option<String> {
+    let plain = name.rsplit_once('#').map_or(name, |(plain, _)| plain);
+    types.get(plain).cloned().or_else(|| {
+        plain
+            .strip_prefix("entry")
+            .filter(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+            .map(|_| "long".to_string())
+    })
+}
+
+/// Give every item its stack pointer and the types of its names, from the
+/// lift's tables; an item that has types already — a lifted-level
+/// instruction's registers — keeps them.
+fn decorate(function: &mut IlFunction, stages: &Stages) {
+    for item in &mut function.items {
+        if item.stack_pointer.is_none() {
+            item.stack_pointer = item
+                .addresses
+                .iter()
+                .min()
+                .and_then(|address| stages.stack_pointer.get(address).copied());
+        }
+        if item.types.is_empty() {
+            for name in item.defines.iter().chain(&item.uses) {
+                let plain = name
+                    .rsplit_once('#')
+                    .map_or(name.as_str(), |(plain, _)| plain);
+                if item.types.iter().any(|(known, _)| known == plain) {
+                    continue;
+                }
+                if let Some(ty) = type_of(plain, &stages.types) {
+                    item.types.push((plain.to_string(), ty));
+                }
+            }
+        }
     }
 }
 
@@ -292,6 +568,7 @@ pub fn build(
     stages: &Stages,
     disasm: &Disasm,
     text: &dyn Fn(u64) -> Option<(String, String, Vec<String>)>,
+    casts: bool,
 ) -> IlFunction {
     let mut function = IlFunction {
         name: stages.function.name.clone(),
@@ -314,7 +591,7 @@ pub fn build(
                     let Some(instruction) = disasm.instruction_at(*address) else {
                         continue;
                     };
-                    let (mnemonic, operands, _) = text(*address).unwrap_or_else(|| {
+                    let (mnemonic, operands, registers) = text(*address).unwrap_or_else(|| {
                         (
                             format!("op{:x}", instruction.mnemonic),
                             String::new(),
@@ -345,6 +622,22 @@ pub fn build(
                     } else {
                         format!("{mnemonic} {operands}{flow}")
                     };
+                    // The registers as the text spells them, typed by the
+                    // width each spelling names: `eax: int`, `rax: long`.
+                    let types: Vec<(String, String)> = registers
+                        .iter()
+                        .filter_map(|register| {
+                            register_width(register).map(|bits| {
+                                (register.clone(), crate::lift::type_name(bits).to_string())
+                            })
+                        })
+                        .collect();
+                    let names = |bits: u32| -> Vec<String> {
+                        crate::cpu_context::flag_names(bits)
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect()
+                    };
                     push_item(
                         &mut function,
                         &mut block,
@@ -357,6 +650,11 @@ pub fn build(
                             defines,
                             uses,
                             phi: false,
+                            opcode: crate::cpu_context::opcode_name(instruction.opcode),
+                            flags_read: names(instruction.flags_read),
+                            flags_written: names(instruction.flags_written),
+                            types,
+                            ..Default::default()
                         },
                     );
                 }
@@ -383,10 +681,16 @@ pub fn build(
                             block: index,
                             depth: 0,
                             addresses: statement.addresses.clone(),
-                            text: statement.text.clone(),
+                            text: if casts {
+                                statement.casts.clone()
+                            } else {
+                                statement.text.clone()
+                            },
                             defines: statement.defines.clone(),
                             uses: statement.uses.clone(),
                             phi: false,
+                            opcode: Some(statement.kind.to_string()),
+                            ..Default::default()
                         },
                     );
                 }
@@ -411,10 +715,12 @@ pub fn build(
                             block: index,
                             depth: 0,
                             addresses: statement.addresses.clone(),
-                            text: line(&statement.node),
+                            text: line(&maybe_casts(&statement.node, casts)),
                             defines,
                             uses,
                             phi: false,
+                            opcode: Some(node_kind(&statement.node).to_string()),
+                            ..Default::default()
                         },
                     );
                 }
@@ -423,6 +729,7 @@ pub fn build(
                     Terminator::Goto { target, addresses } => {
                         stages.medium.get(*target).map(|to| {
                             (
+                                "goto",
                                 format!("goto block_{:x}", to.address),
                                 addresses.clone(),
                                 Vec::new(),
@@ -435,9 +742,10 @@ pub fn build(
                         next,
                         addresses,
                     } => Some((
+                        "branch",
                         format!(
                             "if ({}) goto block_{:x} else goto block_{:x}",
-                            line(cond),
+                            line(&maybe_casts(cond, casts)),
                             stages.medium.get(*taken).map_or(0, |to| to.address),
                             stages.medium.get(*next).map_or(0, |to| to.address)
                         ),
@@ -449,9 +757,10 @@ pub fn build(
                         cases,
                         addresses,
                     } => Some((
+                        "switch",
                         format!(
                             "switch ({}) {}",
-                            line(switched),
+                            line(&maybe_casts(switched, casts)),
                             cases
                                 .iter()
                                 .map(|(values, to)| format!(
@@ -470,7 +779,7 @@ pub fn build(
                         names_in(switched),
                     )),
                 };
-                if let Some((text, addresses, uses)) = end {
+                if let Some((kind, text, addresses, uses)) = end {
                     // A fall-through has no jump of its own: it is the last
                     // instruction's, so the item still maps onto the listing.
                     let addresses = if addresses.is_empty() {
@@ -495,6 +804,8 @@ pub fn build(
                             defines: Vec::new(),
                             uses,
                             phi: false,
+                            opcode: Some(kind.to_string()),
+                            ..Default::default()
                         },
                     );
                 }
@@ -508,10 +819,11 @@ pub fn build(
                 successors: Vec::new(),
                 items: Vec::new(),
             };
-            high_items(&stages.high, 0, &mut function, &mut block);
+            high_items(&stages.high, 0, &mut function, &mut block, casts);
             function.blocks.push(block);
         }
     }
+    decorate(&mut function, stages);
     function
 }
 
@@ -521,10 +833,11 @@ fn push_once(names: &mut Vec<String>, name: String) {
     }
 }
 
-fn push_item(function: &mut IlFunction, block: &mut IlBlock, mut item: IlItem) {
+fn push_item(function: &mut IlFunction, block: &mut IlBlock, mut item: IlItem) -> usize {
     item.id = function.items.len();
     block.items.push(item.id);
     function.items.push(item);
+    function.items.len() - 1
 }
 
 /// Where an instruction's flow goes, as a note after it.
@@ -552,10 +865,12 @@ fn high_items(
     depth: usize,
     function: &mut IlFunction,
     block: &mut IlBlock,
+    casts: bool,
 ) {
     for statement in statements {
         let (defines, uses) = defines_and_uses(&statement.node);
-        let item = |text: String, defines: Vec<String>, uses: Vec<String>| IlItem {
+        let node = maybe_casts(&statement.node, casts);
+        let item = |kind: &str, text: String, defines: Vec<String>, uses: Vec<String>| IlItem {
             id: 0,
             block: 0,
             depth,
@@ -564,10 +879,16 @@ fn high_items(
             defines,
             uses,
             phi: false,
+            opcode: Some(kind.to_string()),
+            ..Default::default()
         };
         match &statement.kind {
             StatementKind::Plain => {
-                push_item(function, block, item(line(&statement.node), defines, uses));
+                push_item(
+                    function,
+                    block,
+                    item(node_kind(&statement.node), line(&node), defines, uses),
+                );
             }
             StatementKind::If {
                 then_part,
@@ -576,16 +897,16 @@ fn high_items(
                 push_item(
                     function,
                     block,
-                    item(format!("if ({})", line(&statement.node)), Vec::new(), uses),
+                    item("if", format!("if ({})", line(&node)), Vec::new(), uses),
                 );
-                high_items(then_part, depth + 1, function, block);
+                high_items(then_part, depth + 1, function, block, casts);
                 if !else_part.is_empty() {
                     push_item(
                         function,
                         block,
-                        item("else".to_string(), Vec::new(), Vec::new()),
+                        item("else", "else".to_string(), Vec::new(), Vec::new()),
                     );
-                    high_items(else_part, depth + 1, function, block);
+                    high_items(else_part, depth + 1, function, block, casts);
                 }
             }
             StatementKind::While { body } => {
@@ -593,25 +914,27 @@ fn high_items(
                     function,
                     block,
                     item(
-                        format!("while ({})", line(&statement.node)),
+                        "while",
+                        format!("while ({})", line(&node)),
                         Vec::new(),
                         uses,
                     ),
                 );
-                high_items(body, depth + 1, function, block);
+                high_items(body, depth + 1, function, block, casts);
             }
             StatementKind::DoWhile { body } => {
                 push_item(
                     function,
                     block,
-                    item("do".to_string(), Vec::new(), Vec::new()),
+                    item("do", "do".to_string(), Vec::new(), Vec::new()),
                 );
-                high_items(body, depth + 1, function, block);
+                high_items(body, depth + 1, function, block, casts);
                 push_item(
                     function,
                     block,
                     item(
-                        format!("while ({})", line(&statement.node)),
+                        "while",
+                        format!("while ({})", line(&node)),
                         Vec::new(),
                         uses,
                     ),
@@ -631,24 +954,26 @@ fn high_items(
                     function,
                     block,
                     item(
+                        "for",
                         format!(
                             "for ({}; {}; {})",
-                            line(&init.node),
-                            line(&statement.node),
-                            line(&step.node)
+                            line(&maybe_casts(&init.node, casts)),
+                            line(&node),
+                            line(&maybe_casts(&step.node, casts))
                         ),
                         defines,
                         init_uses,
                     ),
                 );
-                high_items(body, depth + 1, function, block);
+                high_items(body, depth + 1, function, block, casts);
             }
             StatementKind::Switch { arms } => {
                 push_item(
                     function,
                     block,
                     item(
-                        format!("switch ({})", line(&statement.node)),
+                        "switch",
+                        format!("switch ({})", line(&node)),
                         Vec::new(),
                         uses,
                     ),
@@ -668,9 +993,11 @@ fn high_items(
                             defines: Vec::new(),
                             uses: Vec::new(),
                             phi: false,
+                            opcode: Some("case".to_string()),
+                            ..Default::default()
                         },
                     );
-                    high_items(&arm.body, depth + 2, function, block);
+                    high_items(&arm.body, depth + 2, function, block, casts);
                 }
             }
         }
@@ -806,6 +1133,18 @@ pub fn to_ssa(
         for name in names {
             let id = out.items.len();
             let address = out.blocks[*block].address;
+            let types = out
+                .items
+                .iter()
+                .flat_map(|item| &item.types)
+                .find(|(known, _)| known == name)
+                .cloned()
+                .into_iter()
+                .collect();
+            let stack_pointer = out.blocks[*block]
+                .items
+                .first()
+                .and_then(|first| out.items[*first].stack_pointer);
             out.items.push(IlItem {
                 id,
                 block: *block,
@@ -815,6 +1154,10 @@ pub fn to_ssa(
                 defines: vec![name.clone()],
                 uses: Vec::new(),
                 phi: true,
+                opcode: Some("phi".to_string()),
+                types,
+                stack_pointer,
+                ..Default::default()
             });
             phi_items[*block].push((name.clone(), id));
             ids.push(id);
@@ -1349,6 +1692,97 @@ mod tests {
         assert_eq!(names_of("p->a + s.a + a * 10 + \"b\""), vec!["p", "s", "a"]);
     }
 
+    #[test]
+    fn the_render_options_decorate_an_item_and_casts_spell_every_constant() {
+        let item = IlItem {
+            text: "local_14 = local_14 + 1".to_string(),
+            opcode: Some("assign".to_string()),
+            stack_pointer: Some(-0x20),
+            types: vec![("local_14".to_string(), "int".to_string())],
+            ..Default::default()
+        };
+        let function = IlFunction {
+            name: "f".to_string(),
+            address: 0,
+            level: Level::Medium,
+            ssa: false,
+            blocks: Vec::new(),
+            items: Vec::new(),
+        };
+        assert_eq!(
+            function.item_text(&item, &Render::default()),
+            "local_14 = local_14 + 1"
+        );
+        assert_eq!(
+            function.item_text(&item, &Render::ALL),
+            "[assign] local_14 = local_14 + 1  ; sp = entry-0x20  ; types: local_14: int"
+        );
+        let lifted = IlItem {
+            text: "cmp eax,[rbp-14h]".to_string(),
+            opcode: Some("Cmp_r32_rm32".to_string()),
+            flags_written: vec!["CF".to_string(), "ZF".to_string()],
+            stack_pointer: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            function.item_text(
+                &lifted,
+                &Render {
+                    flags: true,
+                    stack_pointer: true,
+                    ..Render::default()
+                }
+            ),
+            "cmp eax,[rbp-14h]  ; sp = entry  ; flags: reads none, writes CF ZF"
+        );
+        assert_eq!(offset_text(8), "+0x8");
+        let node = AstNode::Assign {
+            lhs: Box::new(AstNode::var("x")),
+            rhs: Box::new(AstNode::binary(
+                AstNode::constant(1, 4),
+                crate::ast::BinaryOp::Add,
+                AstNode::Cast {
+                    ty: "long".to_string(),
+                    target: Box::new(AstNode::constant(2, 4)),
+                },
+            )),
+        };
+        assert_eq!(line(&with_casts(&node)), "x = (int)1 + (long)2");
+        assert_eq!(line(&node), "x = 1 + (long)2");
+        assert_eq!(node_kind(&node), "assign");
+        let mut types = BTreeMap::new();
+        types.insert("x".to_string(), "int".to_string());
+        assert_eq!(type_of("x#3", &types).as_deref(), Some("int"));
+        assert_eq!(type_of("entry5", &types).as_deref(), Some("long"));
+        assert_eq!(type_of("r1_0", &types), None);
+        assert_eq!(register_width("eax"), Some(32));
+        assert_eq!(register_width("RBP"), Some(64));
+        assert_eq!(register_width("ax"), Some(16));
+        assert_eq!(register_width("al"), Some(8));
+        assert_eq!(register_width("r8d"), Some(32));
+        assert_eq!(register_width("r15"), Some(64));
+        assert_eq!(register_width("r9b"), Some(8));
+        assert_eq!(register_width("xmm0"), None);
+        assert_eq!(register_width("r16"), None);
+        let sum = AstNode::binary(
+            AstNode::var("x"),
+            crate::ast::BinaryOp::Add,
+            AstNode::constant(8, 4),
+        );
+        assert_eq!(line(&cast_to("int", &sum)), "(int)(x + (int)8)");
+        assert_eq!(line(&cast_to("long", &AstNode::constant(0, 4))), "(long)0");
+        assert_eq!(
+            line(&cast_to(
+                "long",
+                &AstNode::Cast {
+                    ty: "long".to_string(),
+                    target: Box::new(AstNode::var("y"))
+                }
+            )),
+            "(long)y"
+        );
+    }
+
     /// A statement for a test: its text, what it defines, what it uses.
     type Statement<'a> = (&'a str, &'a [&'a str], &'a [&'a str]);
 
@@ -1384,6 +1818,7 @@ mod tests {
                         defines: defines.iter().map(|d| d.to_string()).collect(),
                         uses: uses.iter().map(|u| u.to_string()).collect(),
                         phi: false,
+                        ..Default::default()
                     },
                 );
             }
@@ -1475,6 +1910,7 @@ mod tests {
             defines: defines.iter().map(|d| d.to_string()).collect(),
             uses: uses.iter().map(|u| u.to_string()).collect(),
             phi: false,
+            ..Default::default()
         };
         push_item(
             &mut medium,

@@ -205,36 +205,48 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let view_menu = Item::with_menu(
         root_button("View"),
-        Menu::new(vec![
-            Item::new(item_button(
-                "Show navigator",
-                "Ctrl+B",
-                Message::ViewToggleNavigator,
-            )),
-            Item::new(item_button(
-                "Show inspector",
-                "Ctrl+I",
-                Message::ViewToggleInspector,
-            )),
-            Item::new(item_button(
-                "Show bottom panel",
-                "Ctrl+J",
-                Message::ViewToggleBottom,
-            )),
-            Item::new(separator()),
-            Item::new(item_button(
-                "Cycle the pane's level",
-                "F7",
-                Message::ViewCycleLevel,
-            )),
-            Item::new(item_button(
-                "Toggle SSA form",
-                "Shift+F7",
-                Message::ViewToggleSsa,
-            )),
-            Item::new(separator()),
-            Item::new(item_button("Reset layout", "", Message::ViewResetLayout)),
-        ])
+        Menu::new(
+            vec![
+                Item::new(item_button(
+                    "Show navigator",
+                    "Ctrl+B",
+                    Message::ViewToggleNavigator,
+                )),
+                Item::new(item_button(
+                    "Show inspector",
+                    "Ctrl+I",
+                    Message::ViewToggleInspector,
+                )),
+                Item::new(item_button(
+                    "Show bottom panel",
+                    "Ctrl+J",
+                    Message::ViewToggleBottom,
+                )),
+                Item::new(separator()),
+                Item::new(item_button(
+                    "Cycle the pane's level",
+                    "F7",
+                    Message::ViewCycleLevel,
+                )),
+                Item::new(item_button(
+                    "Toggle SSA form",
+                    "Shift+F7",
+                    Message::ViewToggleSsa,
+                )),
+                Item::new(separator()),
+            ]
+            .into_iter()
+            .chain(
+                crate::app::IlOption::ALL
+                    .into_iter()
+                    .map(|option| Item::new(il_option_button(app, option))),
+            )
+            .chain(vec![
+                Item::new(separator()),
+                Item::new(item_button("Reset layout", "", Message::ViewResetLayout)),
+            ])
+            .collect::<Vec<_>>(),
+        )
         .width(240.0),
     );
 
@@ -339,6 +351,20 @@ fn root_button(label: &str) -> Element<'static, Message> {
             ..button::Style::default()
         })
         .into()
+}
+
+/// A View menu item for one of a level's options, marked when it is on.
+fn il_option_button(app: &App, option: crate::app::IlOption) -> Element<'static, Message> {
+    let label = format!(
+        "{} {}",
+        if app.work.il_option(option) {
+            "✓"
+        } else {
+            "  "
+        },
+        option.label()
+    );
+    item_button(&label, "", Message::ViewToggleIlOption(option))
 }
 
 /// A menu entry with an optional shortcut hint.

@@ -153,9 +153,15 @@ class Session:
     def control_flow(self, target):
         return self.call("control_flow", target=str(target))
 
-    def il(self, target, level="medium", ssa=False):
-        """The function at one level of the lift: lifted, low, medium or high."""
-        return self.call("il", target=str(target), level=level, ssa=ssa)
+    def il(self, target, level="medium", ssa=False, **options):
+        """The function at one level of the lift: lifted, low, medium or high.
+
+        The options are the render flags — opcodes, flags, stack_pointer,
+        types — which decorate the text, and casts, which spells every
+        constant with its width; the JSON carries the opcodes, flags, stack
+        pointers and types of every item whatever is asked.
+        """
+        return self.call("il", target=str(target), level=level, ssa=ssa, **options)
 
     def callers(self, target):
         return self.call("callers", target=str(target))

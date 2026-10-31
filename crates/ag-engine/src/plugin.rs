@@ -836,6 +836,9 @@ impl Architecture for ExternalArchitecture {
                 rip_relative_address: None,
                 absolute_address: row.get("memory").and_then(number),
                 switch_indices: false,
+                opcode: 0,
+                flags_read: 0,
+                flags_written: 0,
             });
             decoded.text.insert(
                 address,

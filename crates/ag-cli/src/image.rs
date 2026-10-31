@@ -164,6 +164,23 @@ pub enum ImageCmd {
         /// a φ where paths meet.
         #[arg(long)]
         ssa: bool,
+        /// Each item's opcode before it: the instruction's form at the
+        /// lifted level, the statement's kind at the others.
+        #[arg(long)]
+        opcodes: bool,
+        /// The flags each instruction reads and writes, at the lifted level.
+        #[arg(long)]
+        flags: bool,
+        /// The stack pointer's offset from the entry's before each item.
+        #[arg(long = "stack-pointer")]
+        stack_pointer: bool,
+        /// The type of every name an item reads or writes.
+        #[arg(long)]
+        types: bool,
+        /// Explicit casts: every constant with the type of its width, a
+        /// value stored at another width cast to it.
+        #[arg(long)]
+        casts: bool,
         /// Report as JSON.
         #[arg(long)]
         json: bool,
@@ -777,9 +794,27 @@ pub fn run(
             target,
             level,
             ssa,
+            opcodes,
+            flags,
+            stack_pointer,
+            types,
+            casts,
             json,
             ..
-        } => il(&image, &target, &level, ssa, json),
+        } => il(
+            &image,
+            &target,
+            &level,
+            ssa,
+            ag_image::Render {
+                opcodes,
+                flags,
+                stack_pointer,
+                types,
+            },
+            casts,
+            json,
+        ),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
             dir,
@@ -1617,7 +1652,15 @@ pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
 }
 
 /// Report the function at one level of the lift.
-fn il(image: &Binary, target: &str, level: &str, ssa: bool, json: bool) -> Result<i32> {
+fn il(
+    image: &Binary,
+    target: &str,
+    level: &str,
+    ssa: bool,
+    render: ag_image::Render,
+    casts: bool,
+    json: bool,
+) -> Result<i32> {
     anyhow::ensure!(
         image.supports_pseudocode(),
         "the lifter reads 64-bit x86, and this image is {}",
@@ -1627,12 +1670,12 @@ fn il(image: &Binary, target: &str, level: &str, ssa: bool, json: bool) -> Resul
         anyhow::anyhow!("the level is lifted, low, medium or high, not {level:?}")
     })?;
     let address = resolve(image, target)?;
-    match image.il(address, level, ssa) {
+    match image.il_with(address, level, ssa, casts) {
         Ok(function) => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&il_json(&function))?);
             } else {
-                print!("{}", function.text());
+                print!("{}", function.render(&render));
             }
             Ok(0)
         }
@@ -1680,6 +1723,11 @@ pub(crate) fn il_json(function: &ag_image::IlFunction) -> serde_json::Value {
             "defines": item.defines,
             "uses": item.uses,
             "phi": item.phi,
+            "opcode": item.opcode,
+            "flags_read": item.flags_read,
+            "flags_written": item.flags_written,
+            "stack_pointer": item.stack_pointer,
+            "types": item.types.iter().map(|(name, ty)| serde_json::json!([name, ty])).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
 }

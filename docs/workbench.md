@@ -208,7 +208,11 @@ not read shows the disassembly, and the status line says so; the pane keeps its 
 next function. The margin's arrows and the block lookups follow the disassembly, and the
 arrows are drawn for the disassembly and the lifted level, whose rows are the instructions.
 The analyst's names for variables and registers reach the disassembly and the pseudocode, not
-yet a level's text. The levels are described in `docs/il.md`.
+yet a level's text. Under **View**, five options decorate a level's rows and are marked when
+on: **Opcodes** (the instruction's form, or the statement's kind, before the item), **Flag
+use** (what an instruction reads and writes, at the lifted level), **Stack pointer** (its
+offset from the entry's), **Types** (of every name the item uses) and **Explicit casts**
+(every constant with its width). The levels are described in `docs/il.md`.
 
 ## Debugging
 
