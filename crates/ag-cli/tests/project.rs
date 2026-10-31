@@ -2075,3 +2075,134 @@ fn a_function_marked_inline_reads_as_its_body_in_its_callers() {
         "{stderr}"
     );
 }
+
+#[test]
+fn opaque_predicates_are_found_and_patched_out_of_the_pseudocode() {
+    let file = TempFile::new("opaque");
+    let ag = |args: &[&str]| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("opaque.elf"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    // Every shape the fixture holds is found, and the honest branch is not.
+    let listed = ag(&["opaque", "--all"]);
+    for (site, function, taken, why) in [
+        (
+            "0x401029",
+            "even_product",
+            "never taken",
+            "(input + 1) * input is always even",
+        ),
+        (
+            "0x401066",
+            "even_sum",
+            "always taken",
+            "input + (input * input) is always even",
+        ),
+        (
+            "0x401096",
+            "never_zero",
+            "never taken",
+            "input | 1 is always odd",
+        ),
+        (
+            "0x4010c4",
+            "square_below",
+            "never taken",
+            "(unsigned int)(input * input) is unsigned, never below 0",
+        ),
+        ("0x4010e4", "zeroed", "never taken", "eax is 0 here"),
+        ("0x401101", "carried", "always taken", "stc sets the carry"),
+        (
+            "0x40111f",
+            "itself",
+            "never taken",
+            "edi is compared with itself",
+        ),
+    ] {
+        let line = listed
+            .lines()
+            .find(|line| line.starts_with(site))
+            .unwrap_or_else(|| panic!("{site} is not listed:\n{listed}"));
+        assert!(line.contains(function), "{line}");
+        assert!(line.contains(taken), "{line}");
+        assert!(line.ends_with(why), "{line}");
+    }
+    assert_eq!(listed.lines().count(), 7, "{listed}");
+    assert!(!listed.contains("honest"), "{listed}");
+    let json: serde_json::Value =
+        serde_json::from_str(&ag(&["opaque", "even_sum", "--json"])).expect("JSON");
+    assert_eq!(json[0]["site_hex"], "0x401066");
+    assert_eq!(json[0]["always"], true);
+    assert_eq!(json[0]["patch"], "eb 0c");
+    assert_eq!(json[0]["patch_text"], "jmp 0x401074");
+
+    // A dry run says what it would patch and writes nothing.
+    let (ok, stdout, stderr) = project_with(
+        "opaque.elf",
+        &["opaque", "--file", &file.text(), "--all", "--dry-run"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("7 patches not saved (--dry-run)"),
+        "{stdout}"
+    );
+    assert!(!file.path().exists());
+
+    let before = ag(&["pseudocode", "even_product"]);
+    assert!(
+        before.contains("if ((((input + 1) * input) & 1) != 0) {"),
+        "{before}"
+    );
+    let (ok, stdout, stderr) =
+        project_with("opaque.elf", &["opaque", "--file", &file.text(), "--all"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("7 opaque predicates patched"), "{stdout}");
+    // The patches are the project's own: an always taken branch is a jmp
+    // to its target in its two bytes, a never taken one two nops.
+    let (ok, shown, _) = project_with("opaque.elf", &["show", &file.text()]);
+    assert!(ok);
+    assert!(
+        shown.contains("0x401066  patch EB 0C (jmp 0x401074)"),
+        "{shown}"
+    );
+    assert!(shown.contains("0x401029  patch 90 90 (nop x2)"), "{shown}");
+
+    // Read with them, the branches are gone from the pseudocode, and none
+    // is found again.
+    let project = file.text();
+    for (function, body) in [
+        ("even_product", "  return a + 1;\n"),
+        ("even_sum", "  return a + 2;\n"),
+        ("zeroed", "  return a + 5;\n"),
+        ("itself", "  return a + a;\n"),
+    ] {
+        let text = ag(&["pseudocode", function, "--project", &project]);
+        assert!(!text.contains("if ("), "{text}");
+        assert!(text.contains(body), "{text}");
+    }
+    let disasm = ag(&["disasm", "carried", "--project", &project]);
+    assert!(disasm.contains("0x401101 eb 07 jmp"), "{disasm}");
+    assert_eq!(
+        ag(&["opaque", "--all", "--project", &project]),
+        "no opaque predicates\n"
+    );
+
+    // And they come off like any patch.
+    let (ok, _, stderr) = project_with(
+        "opaque.elf",
+        &["patch", "--file", &file.text(), "0x401029", "none"],
+    );
+    assert!(ok, "{stderr}");
+    let again = ag(&["opaque", "--all", "--project", &project]);
+    assert!(again.starts_with("0x401029  even_product"), "{again}");
+}

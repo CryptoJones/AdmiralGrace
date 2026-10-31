@@ -360,6 +360,21 @@ pub struct DataSymbolEntry {
 }
 
 pub use corpus::is_corpus;
+
+/// An opaque predicate and the patch that takes it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaquePatch {
+    /// The address of the conditional branch.
+    pub site: u64,
+    /// Whether the branch is always taken; never taken when not.
+    pub always: bool,
+    /// Why it is decided.
+    pub why: String,
+    /// The bytes written over the branch, as long as it is.
+    pub bytes: Vec<u8>,
+    /// The instruction they spell: `jmp 0x401020`, `nop x2`.
+    pub text: String,
+}
 pub use kuna::is_kuna_export;
 
 /// Read access to the open project.
@@ -458,6 +473,13 @@ pub trait Provider: Send + Sync {
     /// changed anything.
     fn set_site_overrides(&self, _overrides: BTreeMap<u64, ag_image::SiteOverride>) -> bool {
         false
+    }
+
+    /// The opaque predicates of the function at `function` — its branches
+    /// decided whatever the input — each with the patch that takes it out,
+    /// as the image reads now. A provider with no code of its own has none.
+    fn opaque_patches(&self, _function: u64) -> Vec<OpaquePatch> {
+        Vec::new()
     }
 
     /// Read the analysis with the analyst's `patches` written over the

@@ -15,6 +15,7 @@ pub mod inline;
 pub mod lift;
 pub mod liveness;
 pub mod objc;
+pub mod opaque;
 pub mod options;
 pub mod pipeline;
 pub mod plugin;

@@ -198,6 +198,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+R",
                 Message::EditNopRange,
             )),
+            Item::new(item_button(
+                "Patch opaque predicates",
+                "",
+                Message::EditOpaque,
+            )),
             Item::new(separator()),
             Item::new(item_button("Rebase image…", "", Message::EditRebase)),
             Item::new(item_button("Add segment…", "", Message::EditSegmentAdd)),

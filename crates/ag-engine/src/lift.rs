@@ -5212,8 +5212,8 @@ fn callers_verdict(symbols: &dyn Symbols, address: u64, visited: &mut BTreeSet<u
 }
 
 /// A condition code, as the conditional jumps spell it.
-#[derive(Debug, Clone, Copy)]
-enum Cc {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cc {
     E,
     Ne,
     L,
@@ -5250,7 +5250,7 @@ impl Cc {
 
 /// The condition code of a conditional instruction of the `family` — `j`,
 /// `set` or `cmov` — or `None` for another instruction.
-fn cc_of(mnemonic: Mnemonic, family: &str) -> Option<Cc> {
+pub(crate) fn cc_of(mnemonic: Mnemonic, family: &str) -> Option<Cc> {
     let name = format!("{mnemonic:?}").to_ascii_lowercase();
     let suffix = name.strip_prefix(family)?;
     Some(match suffix {
@@ -5980,7 +5980,7 @@ fn op_name(op: BinaryOp) -> &'static str {
 }
 
 /// The name of a general register at a width.
-fn gpr_name(index: u32, bits: u32) -> String {
+pub(crate) fn gpr_name(index: u32, bits: u32) -> String {
     const NAMES: [[&str; 4]; 8] = [
         ["rax", "eax", "ax", "al"],
         ["rcx", "ecx", "cx", "cl"],

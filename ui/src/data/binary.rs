@@ -410,6 +410,23 @@ impl Provider for BinaryProvider {
         self.binary.set_patches(patches)
     }
 
+    fn opaque_patches(&self, function: u64) -> Vec<super::OpaquePatch> {
+        self.binary
+            .opaque_predicates(function)
+            .into_iter()
+            .filter_map(|opaque| {
+                let (bytes, text) = self.binary.opaque_patch(&opaque)?;
+                Some(super::OpaquePatch {
+                    site: opaque.site,
+                    always: opaque.always,
+                    why: opaque.why,
+                    bytes,
+                    text,
+                })
+            })
+            .collect()
+    }
+
     fn bitness(&self) -> Option<ag_image::Bitness> {
         self.binary.bitness()
     }

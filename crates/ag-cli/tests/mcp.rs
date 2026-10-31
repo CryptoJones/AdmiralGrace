@@ -239,3 +239,82 @@ fn a_function_is_marked_inline_through_the_server() {
     );
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn opaque_predicates_are_listed_and_patched_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-opaque-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("opaque.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, name, arguments) in [
+            (1, "opaque_predicates", r#"{"all":true}"#),
+            (
+                2,
+                "patch_opaque_predicates",
+                r#"{"targets":["zeroed"],"dry_run":true}"#,
+            ),
+            (
+                3,
+                "patch_opaque_predicates",
+                r#"{"targets":["zeroed","even_sum"]}"#,
+            ),
+            (4, "decompile", r#"{"target":"even_sum"}"#),
+            (5, "opaque_predicates", r#"{"targets":["even_sum"]}"#),
+        ] {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 5);
+    for reply in &replies {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    let listed = &replies[0]["result"]["structuredContent"]["opaque"];
+    assert_eq!(listed.as_array().unwrap().len(), 7, "{listed:?}");
+    assert_eq!(listed[4]["function"], "zeroed");
+    assert_eq!(listed[4]["taken"], "never taken");
+    assert_eq!(listed[4]["why"], "eax is 0 here");
+    assert_eq!(listed[4]["patch"], "90 90");
+    // The dry run saves nothing.
+    assert_eq!(replies[1]["result"]["structuredContent"]["saved"], false);
+    assert_eq!(replies[2]["result"]["structuredContent"]["patched"], 2);
+    let decompiled = replies[3]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!decompiled.contains("if ("), "{decompiled}");
+    assert!(
+        replies[4]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no opaque predicates"),
+        "{:?}",
+        replies[4]
+    );
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    let patches = saved.patches();
+    assert_eq!(patches.get(&0x4010e4), Some(&vec![0x90, 0x90]));
+    assert_eq!(patches.get(&0x401066), Some(&vec![0xeb, 0x0c]));
+    assert_eq!(patches.len(), 2);
+    let _ = std::fs::remove_file(&project);
+}

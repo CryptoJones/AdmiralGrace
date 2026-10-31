@@ -66,6 +66,7 @@ pub use ag_engine::image::{
 pub use ag_engine::objc::{
     ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
 };
+pub use ag_engine::opaque::Opaque;
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::swift::{
@@ -2513,6 +2514,39 @@ impl Binary {
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
         self.stages_of(code, &decoded, &cfg, address, &name)
+    }
+
+    /// The opaque predicates of the function at `address`: its conditional
+    /// branches decided whatever the input, by the flags its blocks set to
+    /// known values and by the conditions of its lift when it is lifted.
+    /// Read off the image as it is now, patches and all; none for code
+    /// that is not x86. See `ag_engine::opaque`.
+    pub fn opaque_predicates(&self, address: u64) -> Vec<Opaque> {
+        if self.plugin_arch.is_some() || self.bitness.is_none() {
+            return Vec::new();
+        }
+        let Some(code) = self.code_at(address) else {
+            return Vec::new();
+        };
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        let stages = self.stages(address).ok();
+        ag_engine::opaque::opaque_predicates(&decoded.disasm, &cfg, stages.as_deref())
+    }
+
+    /// The bytes that patch an opaque predicate out, the length of the
+    /// branch kept, and the instruction they spell: `jmp 0x401020` for one
+    /// always taken, `nop x2` for one never taken. `None` where the branch
+    /// is no longer at the site, or its target is out of the jump's reach.
+    pub fn opaque_patch(&self, opaque: &Opaque) -> Option<(Vec<u8>, String)> {
+        let code = self.code_at(opaque.site)?;
+        let decoded = self.decoded_of(code);
+        let ins = decoded
+            .disasm
+            .instructions
+            .iter()
+            .find(|ins| ins.address == opaque.site)?;
+        ag_engine::opaque::patch(ins, opaque.always)
     }
 
     fn stages_of(
