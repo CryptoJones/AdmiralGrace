@@ -525,7 +525,6 @@ impl Renames {
         self.colors.get(&format!("{address:#x}")).copied()
     }
 
-    /// The analyst's highlight on the block starting at `from`.
     /// The analyst's text on the block starting at `from`, when there is one.
     pub(crate) fn block_label(&self, from: u64) -> Option<&str> {
         self.block_labels
@@ -540,6 +539,7 @@ impl Renames {
             .map(String::as_str)
     }
 
+    /// The analyst's highlight on the block starting at `from`.
     pub(crate) fn block_color(&self, from: u64) -> Option<iced::Color> {
         self.block_colors.get(&format!("{from:#x}")).copied()
     }
@@ -1360,8 +1360,6 @@ impl App {
         references
     }
 
-    /// Open the highlight prompt for the selection, or for the block
-    /// holding it.
     /// Ask for the text on the block holding the selection, or for its
     /// group, with what it has now.
     fn block_text_prompt(&mut self, group: bool) -> Task<Message> {
@@ -1400,6 +1398,8 @@ impl App {
         Task::none()
     }
 
+    /// Open the highlight prompt for the selection, or for the block
+    /// holding it.
     fn color_prompt(&mut self, block: bool) -> Task<Message> {
         let Some(address) = self.selection.address() else {
             self.notice = Some("Select something to highlight".into());
@@ -5551,6 +5551,30 @@ mod tests {
         };
 
         let none = keyboard::Modifiers::empty();
+        // The graph's keys: text and a group for the block, and the
+        // arrows bare.
+        let character = |c: &str, modifiers: keyboard::Modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character(c.into()),
+            modified_key: Key::Character(c.into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyL),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(
+            shortcut(character("l", ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditBlockText
+        ));
+        assert!(matches!(shortcut(character("g", ctrl)), Message::EditGroup));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::ArrowUp, none)),
+            Message::GraphMove(crate::views::graph::Direction::Up)
+        ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::ArrowLeft, none)),
+            Message::GraphMove(crate::views::graph::Direction::Left)
+        ));
         assert!(matches!(
             shortcut(named(keyboard::key::Named::F2, none)),
             Message::EditRename
@@ -6492,7 +6516,12 @@ mod tests {
         let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Down));
         let moved = app.selection.address().expect("a selection");
         assert_ne!(moved, entry);
-        assert!(app.work.graph.blocks.iter().any(|block| block.from == moved));
+        assert!(app
+            .work
+            .graph
+            .blocks
+            .iter()
+            .any(|block| block.from == moved));
         // Up comes back.
         let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Up));
         assert_eq!(app.selection.address(), Some(entry));

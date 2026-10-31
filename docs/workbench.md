@@ -126,7 +126,9 @@ A minimap of the whole graph sits in the pane's bottom right corner — every bl
 selected one bright, the part of the graph the pane shows outlined — and a click on it moves
 the view there. The arrow keys walk the graph while the tab is open: Down follows the
 fall-through out of the selected block, Up goes to the block that reaches it, Left and Right
-move along its row. **Block text…** (Ctrl+Shift+L, or the inspector's button) puts the
+move along its row. The keys reach the graph from any pane, so Up and Down typed into a
+filter field while the tab is open move the selection too. **Block text…** (Ctrl+Shift+L, or
+the inspector's button, or the Edit menu) puts the
 analyst's own title on the block holding the selection, in place of its range of addresses;
 **Group…** (Ctrl+G) puts the block in a named group, and every block of the function in one
 group is drawn as one node under the name, with a line per member and the ways in and out of

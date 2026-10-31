@@ -150,6 +150,19 @@ pub struct GraphNode {
     /// The group the node stands for, when it is several blocks drawn as
     /// one: the group's name, and how many blocks are in it.
     pub group: Option<(String, usize)>,
+    /// The blocks the node stands for, as `(from, to)`: the one block, or
+    /// a group's members — which need not be side by side, so the span
+    /// from `from` to `to` may hold blocks of other nodes.
+    pub members: Vec<(u64, u64)>,
+}
+
+impl GraphNode {
+    /// Whether `address` is in a block the node stands for.
+    pub fn contains(&self, address: u64) -> bool {
+        self.members
+            .iter()
+            .any(|(from, to)| *from <= address && address < *to)
+    }
 }
 
 /// A way the selection moves through the graph by the keyboard.
@@ -278,6 +291,7 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
                     color: renamed.block_color(block.from).or(renamed.function_color()),
                     label: renamed.block_label(block.from).map(str::to_string),
                     group: Some((name.clone(), members.len())),
+                    members: members.iter().map(|(from, to, _)| (*from, *to)).collect(),
                 };
             }
             // Each instruction takes a row, and an above-comment takes one
@@ -315,6 +329,7 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
                 color: renamed.block_color(block.from).or(renamed.function_color()),
                 label: renamed.block_label(block.from).map(str::to_string),
                 group: None,
+                members: vec![(block.from, block.to)],
             }
         })
         .collect();
@@ -371,6 +386,8 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
             edge.to = node_of(edge.to);
         }
         edges.retain(|edge| edge.from != edge.to || !groups.contains_key(&edge.from));
+        // The first of the two keeps its kind: a node standing for several
+        // blocks has no one way out to color the arrow by.
         let mut seen = HashSet::new();
         edges.retain(|edge| seen.insert((edge.from, edge.to)));
     }
@@ -461,23 +478,28 @@ fn grouped_blocks(
     if by_name.is_empty() {
         return (graph.blocks.clone(), HashMap::new());
     }
-    let mut groups = HashMap::new();
+    // Every member's start is the start of its group, so a way into a
+    // member of any group — this one or another — is a way to the group.
     let mut merged: HashMap<u64, u64> = HashMap::new();
+    for (_, members) in &by_name {
+        let from = members.iter().map(|block| block.from).min().unwrap_or(0);
+        for block in members {
+            merged.insert(block.from, from);
+        }
+    }
+    let mut groups = HashMap::new();
     let mut blocks = Vec::new();
     for (name, members) in &by_name {
         let from = members.iter().map(|block| block.from).min().unwrap_or(0);
         let to = members.iter().map(|block| block.to).max().unwrap_or(0);
-        let inside: HashSet<u64> = members.iter().map(|block| block.from).collect();
         let mut successors: Vec<u64> = members
             .iter()
             .flat_map(|block| block.successors.iter().copied())
-            .filter(|successor| !inside.contains(successor))
+            .map(|successor| merged.get(&successor).copied().unwrap_or(successor))
+            .filter(|successor| *successor != from)
             .collect();
         successors.sort_unstable();
         successors.dedup();
-        for block in members {
-            merged.insert(block.from, from);
-        }
         groups.insert(
             from,
             (
@@ -527,7 +549,7 @@ pub fn neighbour(layout: &GraphLayout, current: u64, direction: Direction) -> Op
     let node = layout
         .nodes
         .iter()
-        .find(|node| node.from <= current && current < node.to)
+        .find(|node| node.contains(current))
         .or_else(|| layout.nodes.iter().find(|node| node.from == current))?;
     let by_start = |from: u64| layout.nodes.iter().find(|node| node.from == from);
     let nearest = |rank: usize| -> Option<u64> {
@@ -549,10 +571,14 @@ pub fn neighbour(layout: &GraphLayout, current: u64, direction: Direction) -> Op
                 .iter()
                 .filter(|edge| edge.from == node.from && edge.to != node.from)
                 .collect();
+            // The fall-through first, then a way to a row below before a
+            // way back up, the nearest row first.
             out.sort_by_key(|edge| {
+                let rank = by_start(edge.to).map_or(usize::MAX, |other| other.rank);
                 (
                     edge.kind != ag_image::EdgeKind::Fallthrough,
-                    by_start(edge.to).map_or(usize::MAX, |other| other.rank),
+                    rank <= node.rank,
+                    rank,
                 )
             });
             out.first()
@@ -565,9 +591,11 @@ pub fn neighbour(layout: &GraphLayout, current: u64, direction: Direction) -> Op
                 .iter()
                 .filter(|edge| edge.to == node.from && edge.from != node.from)
                 .collect();
-            // The nearest row above first.
+            // A way from a row above before a loop back from below, the
+            // nearest row first.
             into.sort_by_key(|edge| {
-                std::cmp::Reverse(by_start(edge.from).map_or(0, |other| other.rank))
+                let rank = by_start(edge.from).map_or(0, |other| other.rank);
+                (rank >= node.rank, std::cmp::Reverse(rank))
             });
             into.first()
                 .map(|edge| edge.from)
@@ -952,7 +980,7 @@ impl GraphProgram {
         let width = node.width * scale;
         let height = node.height * scale;
 
-        let focused = selected.is_some_and(|address| address >= node.from && address < node.to);
+        let focused = selected.is_some_and(|address| node.contains(address));
 
         let path = canvas::Path::rounded_rectangle(
             Point::new(x, y),
@@ -1467,9 +1495,7 @@ impl canvas::Program<Message> for GraphProgram {
                     .with_width(1.0),
             );
             for node in &self.layout.nodes {
-                let focused = self
-                    .selected
-                    .is_some_and(|address| address >= node.from && address < node.to);
+                let focused = self.selected.is_some_and(|address| node.contains(address));
                 let tint = match (focused, node.color) {
                     (true, _) => color::CYAN,
                     (false, Some(tint)) => tinted(color::CARD, tint, 0.6),
@@ -1873,6 +1899,58 @@ mod tests {
         // The group sits below the entry and above the join.
         assert!(group.rank > layout.nodes[0].rank);
         assert!(join.rank > group.rank);
+    }
+
+    #[test]
+    fn a_way_from_one_group_to_another_reaches_the_other_group() {
+        // 0x1000 -> 0x1010 -> 0x1030; 0x1000 -> 0x1020 -> 0x1030; with
+        // {0x1010} one group and {0x1020, 0x1030} another, so the first
+        // group's way out lands in a member of the second.
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010, 0x1020], 2),
+            block(0x1010, 0x1020, vec![0x1030], 3),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![], 1),
+        ]);
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_group(0x1010, "a");
+        renamed.set_block_group(0x1020, "b");
+        renamed.set_block_group(0x1030, "b");
+        let (blocks, _) = grouped_blocks(&graph, &renamed);
+        let a = blocks.iter().find(|block| block.from == 0x1010).expect("a");
+        assert_eq!(a.successors, [0x1020]);
+        let layout = layout(&graph, &renamed);
+        let rank_of = |from: u64| layout.nodes.iter().find(|n| n.from == from).unwrap().rank;
+        assert!(rank_of(0x1010) > rank_of(0x1000));
+        assert!(rank_of(0x1020) > rank_of(0x1010));
+        // A group of blocks apart holds its members and nothing between.
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_group(0x1000, "ends");
+        renamed.set_block_group(0x1030, "ends");
+        let apart = super::layout(&graph, &renamed);
+        let ends = apart.nodes.iter().find(|n| n.from == 0x1000).unwrap();
+        assert_eq!(ends.members, [(0x1000, 0x1010), (0x1030, 0x1040)]);
+        assert!(ends.contains(0x1034));
+        assert!(!ends.contains(0x1014));
+        assert_eq!(neighbour(&apart, 0x1014, Direction::Right), Some(0x1020));
+    }
+
+    #[test]
+    fn the_arrows_prefer_the_rows_they_are_named_for() {
+        // A loop: 0x1000 -> 0x1010 (header) -> 0x1020 -> 0x1030 -> 0x1010;
+        // 0x1030 -> 0x1040 leaves.
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010], 1),
+            block(0x1010, 0x1020, vec![0x1020], 1),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![0x1010, 0x1040], 2),
+            block(0x1040, 0x1050, vec![], 1),
+        ]);
+        let layout = layout(&graph, &crate::app::Renames::default());
+        // Up from the header goes to the entry above, not the latch below.
+        assert_eq!(neighbour(&layout, 0x1010, Direction::Up), Some(0x1000));
+        // Down from the latch takes the way out below over the loop back.
+        assert_eq!(neighbour(&layout, 0x1030, Direction::Down), Some(0x1040));
     }
 
     #[test]

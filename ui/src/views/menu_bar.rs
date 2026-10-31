@@ -105,6 +105,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditColorBlock,
             )),
             Item::new(item_button(
+                "Block text…",
+                "Ctrl+Shift+L",
+                Message::EditBlockText,
+            )),
+            Item::new(item_button("Group…", "Ctrl+G", Message::EditGroup)),
+            Item::new(item_button(
                 "Add cross reference…",
                 "Ctrl+X",
                 Message::EditReference,
