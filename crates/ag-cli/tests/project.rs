@@ -1097,3 +1097,87 @@ fn the_image_is_rebased_and_its_segments_edited_through_the_project() {
     assert!(ok, "{stderr}");
     assert!(stdout.contains("0x1198 main"), "{stdout}");
 }
+
+#[test]
+fn a_mode_mark_switches_how_an_arm_address_decodes() {
+    let file = TempFile::new("mode");
+    let image = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("arm_thumb.elf"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let count_lines = |report: &str| report.lines().filter(|line| line.contains("0x200")).count();
+
+    // `other_mode` is ARM by its symbol; marked Thumb, its bytes read as
+    // Thumb words, so the listing changes.
+    let (ok, before, stderr) = image(&["disasm", "other_mode"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project_with(
+        "arm_thumb.elf",
+        &["mode", "--file", &file.text(), "0x20038", "thumb"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("mode thumb"), "{stdout}");
+    let (ok, after, stderr) = image(&["disasm", "other_mode", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert_ne!(before, after);
+    assert!(
+        count_lines(&after) != count_lines(&before) || !after.contains("bl "),
+        "{after}"
+    );
+
+    // The x86 no-op has no place in ARM code.
+    let (ok, _, stderr) =
+        project_with("arm_thumb.elf", &["nop", "--file", &file.text(), "0x20000"]);
+    assert!(!ok);
+    assert!(stderr.contains("not x86"), "{stderr}");
+
+    // Taken off, the symbol's mode is back; a mode that is not one is refused.
+    let (ok, _, stderr) = project_with(
+        "arm_thumb.elf",
+        &["mode", "--file", &file.text(), "0x20038", "none"],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, again, _) = image(&["disasm", "other_mode", "--project", &file.text()]);
+    assert!(ok);
+    assert_eq!(before, again);
+    let (ok, _, stderr) = project_with(
+        "arm_thumb.elf",
+        &["mode", "--file", &file.text(), "0x20038", "x86"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("is not a mode"), "{stderr}");
+}
+
+#[test]
+fn a_mode_mark_on_an_x86_image_changes_nothing() {
+    let file = TempFile::new("mode-x86");
+    let image = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("sample.elf"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, before, stderr) = image(&["disasm", "add"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["mode", "--file", &file.text(), "0x1149", "thumb"]);
+    assert!(ok, "{stderr}");
+    let (ok, after, stderr) = image(&["disasm", "add", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert_eq!(before, after, "x86 has one instruction set");
+}

@@ -387,6 +387,25 @@ The assembler knows the instructions patching reaches for — moves, arithmetic,
 pushes and pops, branches to an address, `nop`, `ret`, `int3` and their kin — and refuses
 anything else by name rather than guess.
 
+A 32-bit ARM image is decoded too, in both its instruction sets: the SLEIGH decoder reads
+Ghidra's ARM specification, and the mode of each address — ARM or Thumb — comes from the
+image's symbols (a Thumb function's symbol has its low bit set), from the instructions
+themselves (`blx` to an address switches it), and from the analyst:
+
+- **Decode from here as ARM or Thumb…** (Edit menu) says which instruction set the code from
+  the selection onward is in, until the next mark or symbol that says otherwise; the prompt
+  offers the mode the address has now, and `none` lets the image say again. The listing, the
+  graph and the calls read the function again at once, and undo covers the mark like every
+  other. `ag project mode` records the same for `ag image … --project` to read.
+
+ARM is decoded, walked and listed; it is not lifted to pseudocode yet, and the assembler and
+the no-op fill are x86's. The decode reads each section once from its start, so a `blx` that
+reaches backwards, or into another section, does not switch what was already read; the
+prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/
+`tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
+are not reached by the graph; and a call or jump through a register under a condition is read
+as falling through.
+
 The image itself can be corrected, when the loader read it at the wrong base or missed a
 segment:
 

@@ -22,6 +22,22 @@ fn fixture(name: &str) -> PathBuf {
     }
 }
 
+/// Run `ag image <fixture> <args>` and return whether it succeeded, with
+/// what it printed.
+fn image_result(name: &str, args: &[&str]) -> (bool, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture(name))
+        .args(args)
+        .output()
+        .expect("the ag binary runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 /// Run `ag image <fixture> <args>` and return what it printed.
 fn image(name: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
@@ -1249,4 +1265,57 @@ fn ag_asm_prints_the_bytes_of_an_instruction() {
         .expect("the ag binary runs");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not assembled"));
+}
+
+#[test]
+fn an_arm_object_is_decoded_in_thumb_and_arm_and_the_project_switches_the_mode() {
+    let report = image("arm_thumb.elf", &["info"]);
+    assert!(report.contains("language: ARM:LE:32"), "{report}");
+    let report = image("arm_thumb.elf", &["symbols"]);
+    assert!(
+        report.contains("0x20000 add\n"),
+        "the Thumb bit is not the address: {report}"
+    );
+    assert!(report.contains("0x20038 other_mode\n"), "{report}");
+
+    // Thumb: the two-byte add and the return, as SLEIGH spells them.
+    let report = image("arm_thumb.elf", &["disasm", "add"]);
+    assert!(report.contains("add r0,r1"), "{report}");
+    assert!(report.contains("bx lr"), "{report}");
+    let report = image("arm_thumb.elf", &["disasm", "sum"]);
+    assert!(report.contains("bl "), "sum calls add: {report}");
+    let report = image("arm_thumb.elf", &["cfg", "sum"]);
+    assert!(
+        report.lines().filter(|line| line.contains("->")).count() >= 2,
+        "sum loops: {report}"
+    );
+    let report = image("arm_thumb.elf", &["calls"]);
+    assert!(report.contains("add"), "{report}");
+
+    // ARM throughout: every instruction four bytes.
+    let report = image("arm_arm.elf", &["disasm", "add", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&report).expect("JSON");
+    let lengths: Vec<usize> = json["blocks"]
+        .as_array()
+        .expect("blocks")
+        .iter()
+        .flat_map(|block| block["instructions"].as_array().expect("instructions"))
+        .map(|line| {
+            line["bytes"]
+                .as_str()
+                .expect("bytes")
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .count()
+                / 2
+        })
+        .collect();
+    assert!(
+        !lengths.is_empty() && lengths.iter().all(|len| *len == 4),
+        "{lengths:?}"
+    );
+
+    // The pseudocode is refused by name, not printed as nonsense.
+    let (ok, stdout, stderr) = image_result("arm_thumb.elf", &["pseudocode", "add"]);
+    assert!(!ok || stdout.contains("ARM"), "{stdout}{stderr}");
 }

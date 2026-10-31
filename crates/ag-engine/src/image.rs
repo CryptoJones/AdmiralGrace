@@ -79,6 +79,53 @@ impl Image {
         &self.bytes
     }
 
+    /// What the image says about which instruction set its 32-bit ARM code
+    /// is in, as `(address, thumb)`: the entry point's low bit, which the
+    /// loader clears; the assembler's `$t` and `$a` mapping symbols, which
+    /// mark where the mode changes; and every function symbol with its low
+    /// bit set, which is a Thumb function. Empty for every other
+    /// architecture.
+    pub fn arm_mode_hints(&self) -> Vec<(u64, bool)> {
+        use object::read::{Object, ObjectSymbol};
+        if !self.language().starts_with("ARM:") {
+            return Vec::new();
+        }
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let mut hints = Vec::new();
+        // An ELF's or a PE's entry carries the mode in its low bit; a
+        // Mach-O's entry is a file offset, and says nothing here.
+        let format = file.format();
+        let entry = file.entry();
+        if entry != 0 && matches!(format, object::BinaryFormat::Elf | object::BinaryFormat::Pe) {
+            hints.push((entry & !1, entry & 1 == 1));
+        }
+        for symbol in file.symbols() {
+            let Ok(name) = symbol.name() else { continue };
+            // A mapping symbol is `$t` or `$a`, with a `.suffix` at times.
+            match name.split('.').next().unwrap_or(name) {
+                "$t" => hints.push((symbol.address(), true)),
+                "$a" => hints.push((symbol.address(), false)),
+                _ => {
+                    // An ELF function symbol says its mode in its low bit,
+                    // Thumb or ARM; a Mach-O marks Thumb elsewhere, so its
+                    // even symbols say nothing.
+                    if symbol.kind() == object::SymbolKind::Text {
+                        if symbol.address() & 1 == 1 {
+                            hints.push((symbol.address() & !1, true));
+                        } else if format == object::BinaryFormat::Elf {
+                            hints.push((symbol.address(), false));
+                        }
+                    }
+                }
+            }
+        }
+        hints.sort();
+        hints.dedup();
+        hints
+    }
+
     /// The address the image is loaded at, as its format states it: a PE's
     /// image base, else the page of the lowest segment the file holds bytes
     /// for — an ELF's first `PT_LOAD`, a Mach-O's `__TEXT`. An image whose

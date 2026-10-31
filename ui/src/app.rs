@@ -69,6 +69,8 @@ pub enum Message {
     FileSaveProjectAs,
     /// Write a copy of the program with the patches in it.
     FileWritePatched,
+    /// Say which instruction set the code from the selection onward is in.
+    EditMode,
     /// Move the whole image to a new base address.
     EditRebase,
     /// Add a segment the loader missed.
@@ -220,6 +222,9 @@ pub enum PromptKind {
     ProjectSave,
     /// Where the copy of the program with the patches in it goes.
     WritePatched,
+    /// The instruction set from the selection onward: `arm`, `thumb`, or
+    /// `none` to let the image say.
+    Mode,
     /// The address the image is moved to, or `none`.
     Rebase,
     /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
@@ -851,6 +856,7 @@ impl App {
         // of the analyst's patches and notes: it is told them again.
         if kept {
             self.tell_patches();
+            self.tell_modes();
             self.tell_jump_tables();
         }
         task
@@ -2229,6 +2235,7 @@ impl App {
                         | PromptKind::Assemble
                         | PromptKind::Nop
                         | PromptKind::Bytes
+                        | PromptKind::Mode
                 )
             }),
             _ => false,
@@ -2239,6 +2246,7 @@ impl App {
             if before != self.annotations.annotations {
                 self.record_change(before);
                 self.tell_patches();
+                self.tell_modes();
                 self.tell_jump_tables();
             }
         }
@@ -2299,6 +2307,22 @@ impl App {
     /// a patch changes the instructions, so every view follows.
     fn tell_patches(&mut self) {
         if !self.provider.set_patches(self.annotations.patches()) {
+            return;
+        }
+        self.refresh_functions();
+        self.refresh_listing();
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+        }
+        self.refresh_bytes();
+    }
+
+    /// Tell the analysis which instruction set the analyst's marks put each
+    /// address onward in, and read the function on screen again when that
+    /// changed anything: every line of it may read differently.
+    fn tell_modes(&mut self) {
+        if !self.provider.set_modes(self.annotations.modes()) {
             return;
         }
         self.refresh_functions();
@@ -2560,6 +2584,7 @@ impl App {
                 self.refresh_functions();
                 self.refresh_listing();
                 self.tell_patches();
+                self.tell_modes();
                 self.tell_jump_tables();
             }
 
@@ -2577,6 +2602,7 @@ impl App {
                 self.refresh_functions();
                 self.refresh_listing();
                 self.tell_patches();
+                self.tell_modes();
                 self.tell_jump_tables();
             }
 
@@ -2798,6 +2824,7 @@ impl App {
                                         }
                                     }
                                     self.tell_patches();
+                                    self.tell_modes();
                                     self.tell_jump_tables();
                                     self.refresh_functions();
                                     self.notice =
@@ -2817,6 +2844,33 @@ impl App {
                     }
                     PromptKind::WritePatched => {
                         self.write_patched_to(&path);
+                    }
+                    PromptKind::Mode => {
+                        let text = prompt.value.trim().to_ascii_lowercase();
+                        if let Some(address) = self.selection.address() {
+                            let key = self.annotation_key(address);
+                            let kind = self.kind_at(address);
+                            let mode = match text.as_str() {
+                                "" | "none" => None,
+                                text => match ag_image::ArmMode::parse(text) {
+                                    Some(mode) => Some(mode.label().to_string()),
+                                    None => {
+                                        self.notice = Some(format!(
+                                            "Not an instruction set: {text:?} (arm, thumb or none)"
+                                        ));
+                                        return Task::none();
+                                    }
+                                },
+                            };
+                            self.annotations
+                                .annotation_mut(kind, &key)
+                                .set_mode(mode.as_deref());
+                            self.annotations.prune();
+                            self.notice = Some(match &mode {
+                                Some(mode) => format!("From {key} the code decodes as {mode}"),
+                                None => format!("From {key} the code decodes as the image says"),
+                            });
+                        }
                     }
                     PromptKind::Rebase => {
                         let text = prompt.value.trim();
@@ -3338,6 +3392,27 @@ impl App {
                 };
                 self.save_project_to(&path);
                 return Task::none();
+            }
+
+            Message::EditMode => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select where the instruction set changes".into());
+                    return Task::none();
+                };
+                let Some(current) = self.provider.mode_at(address) else {
+                    self.notice = Some("Choosing the instruction set needs an ARM image".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let marked = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.mode.clone());
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Mode,
+                    title: "Decode from here as (arm, thumb, or none to let the image say)",
+                    value: marked.unwrap_or(current),
+                });
             }
 
             Message::EditRebase => {
@@ -6851,6 +6926,92 @@ mod tests {
             .is_some_and(|n| n.starts_with("Wrote ")));
         assert_eq!(std::fs::read(&out).expect("the copy").len(), original.len());
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn an_arm_image_lists_its_functions_and_a_mode_mark_reads_them_again() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/arm_thumb.elf");
+        let config = Config {
+            binary: Some(fixture),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let names: Vec<(u64, String)> = app
+            .provider
+            .functions()
+            .into_iter()
+            .map(|row| (row.address, row.name))
+            .collect();
+        assert!(names.contains(&(0x2_0000, "add".to_string())), "{names:?}");
+
+        // `other_mode` is ARM by its symbol: four bytes an instruction.
+        let _ = app.update(Message::FunctionSelected(0x2_0038));
+        assert!(!app.work.listing.is_empty());
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .all(|line| line.bytes.split_whitespace().count() == 4));
+        let _ = app.update(Message::AddressSelected(0x2_0038));
+        let _ = app.update(Message::EditMode);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some("arm"));
+
+        // Marked Thumb, the same bytes read as Thumb words, and the project
+        // remembers; undo reads them as ARM again.
+        let _ = app.update(Message::PromptChanged("thumb".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("decodes as thumb")),
+            "{:?}",
+            app.notice
+        );
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .any(|line| line.bytes.split_whitespace().count() == 2));
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x20038")
+                .and_then(|a| a.mode.clone()),
+            Some("thumb".to_string())
+        );
+        let _ = app.update(Message::EditUndo);
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .all(|line| line.bytes.split_whitespace().count() == 4));
+        let _ = app.update(Message::EditRedo);
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .any(|line| line.bytes.split_whitespace().count() == 2));
+
+        // A word that is not an instruction set is refused; an x86 image has
+        // no instruction set to choose.
+        let _ = app.update(Message::EditMode);
+        let _ = app.update(Message::PromptChanged("x86".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not an instruction set")));
+        let mut x86 = App::boot(Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        })
+        .0;
+        let _ = x86.update(Message::AddressSelected(0x1149));
+        let _ = x86.update(Message::EditMode);
+        assert_eq!(
+            x86.notice.as_deref(),
+            Some("Choosing the instruction set needs an ARM image")
+        );
     }
 
     #[test]

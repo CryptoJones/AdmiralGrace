@@ -568,8 +568,16 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         .with_context(|| format!("reading {}", binary.display()))?
         .with_options(options);
     if let Some(project) = project {
-        // The analyst's patches are the bytes the image is read with.
+        // The analyst's patches are the bytes the image is read with, and
+        // the modes the instruction sets they are read in.
         image.set_patches(project.patches());
+        image.set_modes(
+            project
+                .modes()
+                .into_iter()
+                .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
+                .collect(),
+        );
         let notes = project.jump_tables();
         let hints = notes
             .into_iter()

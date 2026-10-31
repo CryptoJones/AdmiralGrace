@@ -145,6 +145,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditOperandFormat,
             )),
             Item::new(item_button(
+                "Decode from here as ARM or Thumb…",
+                "",
+                Message::EditMode,
+            )),
+            Item::new(item_button(
                 "Jump table…",
                 "Ctrl+Shift+J",
                 Message::EditSwitch,
