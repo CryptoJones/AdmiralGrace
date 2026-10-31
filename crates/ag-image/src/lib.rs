@@ -71,6 +71,8 @@ pub use ag_engine::swift::{
 pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
+pub mod graph_export;
+
 /// One section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionInfo {

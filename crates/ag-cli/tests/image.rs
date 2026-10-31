@@ -289,6 +289,50 @@ fn the_cfg_of_a_function_that_tail_calls_another_stops_at_the_jump() {
 }
 
 #[test]
+fn the_cfg_is_drawn_as_svg_and_pdf_when_asked() {
+    let stem = std::env::temp_dir().join(format!(
+        "ag-cli-cfg-picture-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let svg = stem.with_extension("svg");
+    let pdf = stem.with_extension("pdf");
+    let report = image(
+        "sample.elf",
+        &[
+            "cfg",
+            "main",
+            "--svg",
+            svg.to_str().unwrap(),
+            "--pdf",
+            pdf.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        report.contains(&format!("wrote {}", svg.display())),
+        "{report}"
+    );
+    assert!(
+        report.contains(&format!("wrote {}", pdf.display())),
+        "{report}"
+    );
+    // The pictures stand in for the report of the blocks.
+    assert!(!report.contains("block 0x"), "{report}");
+
+    let json = image_json("sample.elf", &["cfg", "main"]);
+    let blocks = json["blocks"].as_array().expect("blocks").len();
+    let text = std::fs::read_to_string(&svg).expect("the SVG");
+    assert!(text.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+    assert_eq!(text.matches("<rect x=").count(), blocks, "{text}");
+    assert!(text.contains("<title>main at "), "{text}");
+    let bytes = std::fs::read(&pdf).expect("the PDF");
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    assert!(bytes.ends_with(b"%%EOF\n"));
+    let _ = std::fs::remove_file(&svg);
+    let _ = std::fs::remove_file(&pdf);
+}
+
+#[test]
 fn the_cfg_of_a_32_bit_elf_has_its_loop() {
     let report = image("sample32.elf", &["cfg", "main"]);
 
