@@ -425,6 +425,14 @@ impl Provider for BinaryProvider {
             .map(|section| section.vma.saturating_add(section.size))
     }
 
+    fn image_base(&self) -> Option<u64> {
+        self.binary.base()
+    }
+
+    fn contains_address(&self, address: u64) -> bool {
+        self.binary.section_of(address).is_some()
+    }
+
     fn write_patched(&self, out: &Path) -> Option<Result<usize, String>> {
         let source = self.project.root.as_ref()?;
         let write = || -> Result<usize, String> {

@@ -144,7 +144,7 @@ Filed 2026-10-26.
 
 ### Dynamic analysis
 
-- [ ] Debugger frontend for LLDB and GDB — [#337](https://github.com/CryptoJones/AdmiralGrace/issues/337)
+- [x] Debugger frontend for LLDB and GDB — [#337](https://github.com/CryptoJones/AdmiralGrace/issues/337)
 
 ## Roadmap: advanced analysis
 

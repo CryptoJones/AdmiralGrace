@@ -193,6 +193,32 @@ The decoder is x86, and reads the width of the code — 32-bit or 64-bit — fro
 language. An image of another architecture opens with its symbols and its sections, but
 with the listing off, and the Problems panel says why.
 
+## Debugging
+
+Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or
+LLDB through `lldb-mi`, whichever is on the machine — and the static listing follows the
+program. **Debug ▸ Start under debugger** (F6) runs the open program under it,
+stopped at its first instruction; **Attach to process…** asks for a process id instead. A
+click in the listing's margin puts a **breakpoint** on that instruction (a red dot) or takes
+it off, as does F9 on the selection; breakpoints are kept across sessions and set in the
+debugger when one starts. **Continue** (F8), **Step into** (F11), **Step over** (F10) and
+**Finish function** (Shift+F11) run the stopped program; **Interrupt** stops a running one;
+**Stop** ends the session.
+
+When the program stops, the listing moves to the instruction it stopped at — the function
+is selected and the instruction marked with an amber wedge in the margin — in the image's
+addresses: a position-independent program runs under a slide the session learns from the
+process's mappings, and every address the debugger reports is read back through it. The
+**Debug** panel at the bottom holds the controls, where the program is, the registers, the
+stack (a frame is a button that moves the listing there), the bytes at the program counter
+and the debugger's log. The lifter and the listing are the image's; what runs is the
+program's, so a patch the project holds is not in the running program unless a patched copy
+is run.
+
+The same session runs headless as `ag debug IMAGE --break TARGET…`: the program runs to each
+breakpoint, the registers and the stack are printed there, and the command ends with the
+program's exit code.
+
 ## Reading the panes
 
 The selection is shared: a function picked in the navigator, an address picked in the

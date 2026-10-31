@@ -201,6 +201,8 @@ cargo run --bin ag-ui -- --corpus ./corpus
 cargo run --bin ag-ui -- --corpus ./corpus --methods ./corpus/methods.json
 ```
 
+The workbench also drives a debugger — GDB, or LLDB through `lldb-mi` — with breakpoints set in the listing's margin and the listing following the program counter; `ag debug` runs the same session headless. See [docs/workbench.md](docs/workbench.md#debugging).
+
 The corpus directory must contain a `decompile-index.json`. Without one the workbench opens a bundled sample project so the interface can be explored. `ui/README.md` covers the workbench in more detail.
 
 The workbench opens a kuna project export as well:

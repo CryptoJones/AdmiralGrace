@@ -244,6 +244,36 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(240.0),
     );
 
+    let debug = Item::with_menu(
+        root_button("Debug"),
+        Menu::new(vec![
+            Item::new(item_button(
+                "Start under debugger",
+                "F6",
+                Message::DebugStart,
+            )),
+            Item::new(item_button("Attach to process…", "", Message::DebugAttach)),
+            Item::new(separator()),
+            Item::new(item_button("Continue", "F8", Message::DebugContinue)),
+            Item::new(item_button("Step into", "F11", Message::DebugStep)),
+            Item::new(item_button("Step over", "F10", Message::DebugNext)),
+            Item::new(item_button(
+                "Finish function",
+                "Shift+F11",
+                Message::DebugFinish,
+            )),
+            Item::new(item_button("Interrupt", "", Message::DebugInterrupt)),
+            Item::new(item_button("Stop", "", Message::DebugStop)),
+            Item::new(separator()),
+            Item::new(item_button(
+                "Toggle breakpoint",
+                "F9",
+                Message::DebugToggleBreakpoint(None),
+            )),
+        ])
+        .width(260.0),
+    );
+
     let help = Item::with_menu(
         root_button("Help"),
         Menu::new(vec![
@@ -260,7 +290,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     Container::new(
         Row::new()
             .align_y(Alignment::Center)
-            .push(MenuBar::new(vec![file, edit, view_menu, analysis, help]))
+            .push(MenuBar::new(vec![
+                file, edit, view_menu, analysis, debug, help,
+            ]))
             .push(Space::new().width(Length::Fill)),
     )
     .width(Length::Fill)

@@ -1,6 +1,7 @@
 //! The AdmiralGrace desktop workbench.
 
 mod app;
+mod debug;
 mod data;
 mod model;
 mod theme;
