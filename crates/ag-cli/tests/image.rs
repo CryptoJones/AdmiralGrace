@@ -1991,3 +1991,40 @@ fn the_formatting_options_reach_the_command_line() {
     );
     assert_eq!(expanded, plain);
 }
+
+#[test]
+fn inlined_memory_operations_read_as_builtins() {
+    // `rep movsb` and `rep stosb`, with rcx the count.
+    let copy = image("builtins.elf", &["pseudocode", "rep_copy"]);
+    assert!(copy.contains("  __builtin_memcpy(a, b, c);"), "{copy}");
+    let fill = image("builtins.elf", &["pseudocode", "rep_fill"]);
+    assert!(
+        fill.contains("  __builtin_memset(a, (char)b, c);"),
+        "{fill}"
+    );
+    // A string put on the stack in two overlapping words, whose address
+    // goes to a call.
+    let text = image("builtins.elf", &["pseudocode", "stack_string"]);
+    assert!(
+        text.contains("  __builtin_strcpy(&local_d, \"hello, world\");\n  consume(&local_d);"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("local_8"),
+        "the word written into the string is not a variable: {text}"
+    );
+    // The stores themselves, when asked: the second word written into the
+    // first's variable.
+    let kept = image(
+        "builtins.elf",
+        &["pseudocode", "stack_string", "--option", "builtins", "keep"],
+    );
+    assert!(kept.contains("  local_d = 0x77202c6f6c6c6568;"), "{kept}");
+    assert!(
+        kept.contains("  *(long *)((char *)&local_d + 5) = 0x646c726f77202c;"),
+        "{kept}"
+    );
+    // The low level has the builtin as the call it is.
+    let low = image("builtins.elf", &["il", "rep_copy", "--level", "low"]);
+    assert!(low.contains("__builtin_memcpy("), "{low}");
+}

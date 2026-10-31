@@ -291,6 +291,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "builtins",
+        phase: Phase::Lift,
+        tier: Tier::Transform,
+        kind: Kind::Choice(&["recognize", "keep"]),
+        default: "recognize",
+        description: "The constant stores that put a string on the stack word by word, read back as one `__builtin_strcpy(&local, \"text\")` — or `__builtin_memcpy` where no NUL ends it — or kept as the stores they are. `rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset` either way, having no other reading.",
+        symptoms: &[
+            symptom(
+                "`local_d = 0x77202c6f6c6c6568;` and the word after it, where a string was meant",
+                "recognize",
+            ),
+            symptom(
+                "a `__builtin_strcpy` where the stores themselves are wanted",
+                "keep",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "dead-compares",
         phase: Phase::Lift,
         tier: Tier::Transform,
@@ -635,6 +653,16 @@ pub enum ConstantConditions {
     Expression,
 }
 
+/// What becomes of the constant stores that put a string on the stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Builtins {
+    /// One `__builtin_strcpy` or `__builtin_memcpy` of the string.
+    #[default]
+    Recognize,
+    /// The stores, word by word.
+    Keep,
+}
+
 /// What becomes of a `cmp` or `test` no branch reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeadCompares {
@@ -743,6 +771,7 @@ pub struct Options {
     pub pointer_loads: PointerLoads,
     pub operand_order: OperandOrder,
     pub unsigned_compare: UnsignedCompare,
+    pub builtins: Builtins,
     pub dead_compares: DeadCompares,
     pub dead_code: DeadCode,
     pub tail_calls: TailCalls,
@@ -926,6 +955,7 @@ impl Default for Options {
             pointer_loads: PointerLoads::default(),
             operand_order: OperandOrder::default(),
             unsigned_compare: UnsignedCompare::default(),
+            builtins: Builtins::default(),
             dead_compares: DeadCompares::default(),
             dead_code: DeadCode::default(),
             tail_calls: TailCalls::default(),
@@ -1063,6 +1093,13 @@ impl Options {
                         ("cast", UnsignedCompare::Cast),
                         ("bare", UnsignedCompare::Bare),
                     ],
+                )?
+            }
+            "builtins" => {
+                self.builtins = choose(
+                    spec,
+                    value,
+                    &[("recognize", Builtins::Recognize), ("keep", Builtins::Keep)],
                 )?
             }
             "dead-compares" => {
@@ -1247,6 +1284,10 @@ impl Options {
                 "unsigned-compare" => match self.unsigned_compare {
                     UnsignedCompare::Cast => "cast",
                     UnsignedCompare::Bare => "bare",
+                },
+                "builtins" => match self.builtins {
+                    Builtins::Recognize => "recognize",
+                    Builtins::Keep => "keep",
                 },
                 "dead-compares" => match self.dead_compares {
                     DeadCompares::Drop => "drop",

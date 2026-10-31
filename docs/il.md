@@ -92,6 +92,25 @@ of declarations. It is pseudocode in each language, not a program: `long(x)` and
 addresses the language has no spelling for, and `/` and `>>` keep C's meaning. The levels
 and the transpiler keep C, which a compiler reads. `docs/options.md` has the option.
 
+## Builtins
+
+The memory operations a compiler writes inline are read back as the calls they stand for.
+`rep movs` and `rep stos` — a copy or a fill of `rcx` elements through `rdi` and `rsi`, which
+`memcpy` and `memset` of a size the compiler does not know become — are `__builtin_memcpy(a,
+b, c)` and `__builtin_memset(a, (char)b, c)`, the count in bytes (`c * 8` for `rep stosq`),
+and `rdi`, `rsi` and `rcx` after them are what the instruction leaves: the pointers past what
+was moved, the count at zero, the direction flag taken as clear. A string put on the stack
+word by word — `mov rax, 0x77202c6f6c6c6568; mov [rsp+3], rax` and the word after it — or
+byte by byte is one `__builtin_strcpy(&local_d, "hello, world")` when the bytes read as text
+ending in NUL, or a `__builtin_memcpy(&local_d, "text", n)` of bytes that read as text with no
+NUL; the stores must be two or more, to or into one variable whose address is taken, and
+cover their span, so one wide constant stays the number it may be and another variable's
+store stays its own. The variable keeps the type of its first word; the string runs past it.
+`--option builtins keep` leaves the stores as they are — the second word written into the
+first's variable as `*(long *)((char *)&local_d + 5) = 0x646c726f77202c;` — while the `rep`
+instructions are builtins either way, having no other reading. The byte loops a compiler
+writes in place of `rep` are left the loops they are.
+
 ## The pseudocode's layout
 
 How the text is laid out is the analyst's too, apart from what it says: `--option brace-style broken`

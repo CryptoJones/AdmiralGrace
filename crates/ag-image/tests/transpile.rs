@@ -145,3 +145,59 @@ fn the_harness_builds_and_runs_to_the_emulators_answer() {
     let printed = String::from_utf8_lossy(&ran.stdout);
     assert!(printed.lines().any(|line| line.trim() == "10"), "{printed}");
 }
+
+#[test]
+fn the_builtins_transpile_to_c_plus_plus_a_compiler_reads() {
+    let compiler = ["c++", "g++", "clang++"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    });
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let image = Binary::open(&root.join("../ag-engine/tests/fixtures/builtins.elf"))
+        .expect("the fixture opens");
+    let targets: Vec<u64> = ["rep_copy", "rep_fill", "stack_string"]
+        .iter()
+        .map(|name| address_of(&image, name))
+        .collect();
+    let text = image
+        .transpile(&targets, false, None)
+        .expect("the three lift");
+    // The builtins' pointer arguments are cast for the compiler.
+    assert!(
+        text.contains("__builtin_memcpy((void *)a, (const void *)b, (unsigned long)c);"),
+        "{text}"
+    );
+    assert!(
+        text.contains("__builtin_memset((void *)a, (int)(char)b, (unsigned long)c);"),
+        "{text}"
+    );
+    assert!(
+        text.contains("__builtin_strcpy((char *)&local_d, \"hello, world\");"),
+        "{text}"
+    );
+    let Some(compiler) = compiler else {
+        eprintln!("no C++ compiler on this machine: the text is not compiled");
+        return;
+    };
+    let dir = Scratch(std::env::temp_dir().join(format!(
+        "ag-transpile-builtins-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let source = dir.0.join("builtins.cpp");
+    std::fs::write(&source, &text).unwrap();
+    let checked = Command::new(compiler)
+        .args(["-fsyntax-only", "-x", "c++"])
+        .arg(&source)
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        checked.status.success(),
+        "{}\n{text}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
