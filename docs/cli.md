@@ -94,6 +94,14 @@ rest of the file. The bytes are one section of code, and the entry, when named, 
 function. `ag project TARGET --raw … save` records the same in the project file, and every
 command that reads the project reads the target that way after, flags or not.
 
+A universal (fat) Mach-O holds several images, one per architecture. `ag image FILE slices`
+lists them, and `--slice ARCH` (or the slice's position, from 0) before the subcommand says
+which one to read: `ag image app --slice arm64 disasm main`. Opened without one, the file is
+refused with its slices named. `ag project TARGET --slice … save` records the choice, and
+every command that reads the project reads that slice after; a `--slice` that names another
+is refused. The file offsets `info` prints for a slice are the slice's own, measured from
+where it starts in the file.
+
 ```sh
 # The language, the entry point and the sections
 cargo run --bin ag -- image ./sample.elf info
@@ -127,12 +135,17 @@ cargo run --bin ag -- image ./sample.elf export ./sample.ag
 
 # Raw bytes: a Thumb firmware image loaded at 0x8000000, its entry named
 cargo run --bin ag -- image ./firmware.bin --raw thumb --base 0x8000000 --entry 0x8000101 disasm 0x8000100
+
+# A universal Mach-O: its slices, and one of them read
+cargo run --bin ag -- image ./app slices
+cargo run --bin ag -- image ./app --slice arm64 symbols
 ```
 
 ## `ag image` subcommands
 
 | Subcommand | What it prints |
 |---|---|
+| `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |

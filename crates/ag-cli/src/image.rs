@@ -17,6 +17,13 @@ use serde::Serialize;
 /// What to report about a program image.
 #[derive(Subcommand)]
 pub enum ImageCmd {
+    /// The slices of a universal (fat) Mach-O: each architecture in the
+    /// file, with where its image lies. One image has none.
+    Slices {
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The language, the entry point and the sections of the image.
     Info {
         /// Report as JSON.
@@ -532,7 +539,41 @@ pub(crate) struct PseudocodeJson {
 }
 
 /// Report on a program image.
-pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Result<i32> {
+pub fn run(
+    binary: &Path,
+    raw: Option<ag_image::RawSpec>,
+    slice: Option<String>,
+    cmd: ImageCmd,
+) -> Result<i32> {
+    // The slices are read off the file itself, before any image is opened.
+    if let ImageCmd::Slices { json } = &cmd {
+        let slices = Binary::slices_of(binary)?.unwrap_or_default();
+        if *json {
+            let rows: Vec<serde_json::Value> = slices
+                .iter()
+                .enumerate()
+                .map(|(index, slice)| {
+                    serde_json::json!({
+                        "index": index,
+                        "arch": slice.arch,
+                        "offset": format!("{:#x}", slice.offset),
+                        "size": slice.size,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        } else if slices.is_empty() {
+            println!("{} is one image: no slices", binary.display());
+        } else {
+            for (index, slice) in slices.iter().enumerate() {
+                println!(
+                    "{index}: {} offset={:#x} size={}",
+                    slice.arch, slice.offset, slice.size
+                );
+            }
+        }
+        return Ok(0);
+    }
     // The options are checked before the image is read, so a typo in one
     // is answered at once and names the row.
     let options = match &cmd {
@@ -585,7 +626,24 @@ pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Resu
         (None, Some(project)) => crate::project::raw_of_project(project)?,
         (None, None) => None,
     };
-    let image = crate::project::open_target(binary, raw.as_ref(), &layout)?.with_options(options);
+    // So is the slice of a universal Mach-O chosen: by the flag, or as the
+    // project remembers — and a flag that names another slice than the
+    // project's is refused.
+    if let (Some(flag), Some(project)) = (slice.as_deref(), &project) {
+        crate::project::check_slice_flag(
+            binary,
+            Some(flag),
+            project.target.slice.as_deref(),
+            Path::new("the project"),
+        )?;
+    }
+    let slice = slice.or_else(|| {
+        project
+            .as_ref()
+            .and_then(|project| project.target.slice.clone())
+    });
+    let image = crate::project::open_target(binary, raw.as_ref(), slice.as_deref(), &layout)?
+        .with_options(options);
     if let Some(project) = project {
         // The analyst's patches are the bytes the image is read with, and
         // the modes the instruction sets they are read in.
@@ -621,6 +679,8 @@ pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Resu
 
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
+        // Answered above, before any image was read.
+        ImageCmd::Slices { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
         ImageCmd::Disasm { target, json, .. } => disasm(&image, &target, json),
         ImageCmd::Strings {
@@ -2024,6 +2084,7 @@ mod tests {
         let error = run(
             &sample_path(),
             None,
+            None,
             ImageCmd::Pseudocode {
                 target: "sum_to".into(),
                 json: false,
@@ -2038,6 +2099,7 @@ mod tests {
         );
         let error = run(
             &sample_path(),
+            None,
             None,
             ImageCmd::Pseudocode {
                 target: "sum_to".into(),

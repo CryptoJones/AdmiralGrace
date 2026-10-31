@@ -34,6 +34,87 @@ pub struct Image {
     inner: Loaded,
     bytes: Vec<u8>,
     name: String,
+    /// The slice of a universal Mach-O the bytes are, when they are one:
+    /// the file's offsets are the slice's, this far into the file.
+    slice: Option<Slice>,
+}
+
+/// One slice of a universal (fat) Mach-O: an image of one architecture
+/// among several in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slice {
+    /// The architecture, as `lipo` names it: `x86_64`, `arm64`, `arm64e`,
+    /// `i386`, `arm`.
+    pub arch: String,
+    /// Where the slice starts in the file.
+    pub offset: u64,
+    /// How many bytes it is.
+    pub size: u64,
+}
+
+/// The slice `selector` names among `slices`: an architecture, by name and
+/// whatever its case — the first of that name when there are two — or a
+/// position counted from 0.
+pub fn resolve_slice<'a>(slices: &'a [Slice], selector: &str) -> Option<&'a Slice> {
+    let wanted = selector.trim();
+    slices
+        .iter()
+        .find(|found| found.arch.eq_ignore_ascii_case(wanted))
+        .or_else(|| {
+            wanted
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| slices.get(index))
+        })
+}
+
+/// The slices of a universal Mach-O, when `bytes` are one; `None` for any
+/// other file, a thin Mach-O included.
+pub fn fat_slices(bytes: &[u8]) -> Option<Vec<Slice>> {
+    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+    fn name(cputype: u32, cpusubtype: u32) -> String {
+        match cputype {
+            // Haswell builds carry the subtype 8, and sit beside the plain
+            // slice in the same file: they get their own name.
+            object::macho::CPU_TYPE_X86_64 if cpusubtype & 0xff == 8 => "x86_64h".to_string(),
+            object::macho::CPU_TYPE_X86_64 => "x86_64".to_string(),
+            object::macho::CPU_TYPE_X86 => "i386".to_string(),
+            object::macho::CPU_TYPE_ARM64 => {
+                if cpusubtype & 0xff == object::macho::CPU_SUBTYPE_ARM64E {
+                    "arm64e".to_string()
+                } else {
+                    "arm64".to_string()
+                }
+            }
+            object::macho::CPU_TYPE_ARM => "arm".to_string(),
+            other => format!("cputype-{other:#x}"),
+        }
+    }
+    if let Ok(fat) = MachOFatFile32::parse(bytes) {
+        return Some(
+            fat.arches()
+                .iter()
+                .map(|arch| Slice {
+                    arch: name(arch.cputype(), arch.cpusubtype()),
+                    offset: u64::from(arch.offset()),
+                    size: u64::from(arch.size()),
+                })
+                .collect(),
+        );
+    }
+    if let Ok(fat) = MachOFatFile64::parse(bytes) {
+        return Some(
+            fat.arches()
+                .iter()
+                .map(|arch| Slice {
+                    arch: name(arch.cputype(), arch.cpusubtype()),
+                    offset: arch.offset(),
+                    size: arch.size(),
+                })
+                .collect(),
+        );
+    }
+    None
 }
 
 /// What the image was read as: a container the loader parsed, or raw bytes
@@ -120,7 +201,66 @@ impl Image {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        // A universal Mach-O is several images in one file: which one is
+        // the analyst's to say.
+        if let Some(slices) = fat_slices(&bytes) {
+            anyhow::bail!(
+                "{name} is a universal Mach-O with the slices {}: say which one to read",
+                slices
+                    .iter()
+                    .map(|slice| slice.arch.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         Image::from_bytes(&name, bytes)
+    }
+
+    /// Read one slice of the universal Mach-O at `path`: the one whose
+    /// architecture `slice` names — `arm64`, `x86_64` — or whose position
+    /// it is, counted from 0. A file that is not universal has no slices to
+    /// choose from, and is refused with that said.
+    pub fn open_slice(path: &Path, slice: &str) -> Result<Image> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let slices = fat_slices(&bytes)
+            .with_context(|| format!("{name} is not a universal Mach-O: it has no slices"))?;
+        let chosen = resolve_slice(&slices, slice).with_context(|| {
+            format!(
+                "{name} has no slice {:?}; its slices are {}",
+                slice.trim(),
+                slices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, slice)| format!("{index}: {}", slice.arch))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        let start = usize::try_from(chosen.offset).ok();
+        let end =
+            start.and_then(|start| usize::try_from(chosen.size).ok().map(|size| start + size));
+        let slice_bytes = start
+            .zip(end)
+            .and_then(|(start, end)| bytes.get(start..end))
+            .with_context(|| {
+                format!(
+                    "the {} slice of {name} runs past the end of the file",
+                    chosen.arch
+                )
+            })?
+            .to_vec();
+        let mut image = Image::from_bytes(&format!("{name} ({})", chosen.arch), slice_bytes)?;
+        image.slice = Some(chosen.clone());
+        Ok(image)
+    }
+
+    /// The slice of a universal Mach-O this image is, when it is one.
+    pub fn slice(&self) -> Option<&Slice> {
+        self.slice.as_ref()
     }
 
     /// Parse an image already in memory; `name` labels it in errors.
@@ -131,6 +271,7 @@ impl Image {
             inner: Loaded::Object(Box::new(inner)),
             bytes,
             name: name.to_string(),
+            slice: None,
         })
     }
 
@@ -198,6 +339,7 @@ impl Image {
             }),
             bytes,
             name: name.to_string(),
+            slice: None,
         })
     }
 

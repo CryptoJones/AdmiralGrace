@@ -296,10 +296,17 @@ pub enum ProjectCmd {
 }
 
 /// Run `ag project <target> …`: the target is the binary the project describes.
-pub fn run(target: PathBuf, raw: Option<ag_image::RawSpec>, cmd: ProjectCmd) -> Result<i32> {
-    // The flags that say how raw bytes load are recorded when the project
-    // is made, so every command after reads the target the same way.
+pub fn run(
+    target: PathBuf,
+    raw: Option<ag_image::RawSpec>,
+    slice: Option<String>,
+    cmd: ProjectCmd,
+) -> Result<i32> {
+    // The flags that say how raw bytes load, or which slice the target is,
+    // are recorded when the project is made, so every command after reads
+    // the target the same way.
     RAW.with(|held| *held.borrow_mut() = raw);
+    SLICE.with(|held| *held.borrow_mut() = slice);
     match cmd {
         ProjectCmd::Save {
             out,
@@ -544,7 +551,7 @@ pub fn run(target: PathBuf, raw: Option<ag_image::RawSpec>, cmd: ProjectCmd) -> 
             };
             edit_patch(&target, &file, &address, Some((&bytes, Some(&text))))
         }
-        ProjectCmd::Tags { file, tag } => tags(&file, tag.as_deref()),
+        ProjectCmd::Tags { file, tag } => tags(&target, &file, tag.as_deref()),
         ProjectCmd::Color {
             file,
             address,
@@ -642,15 +649,20 @@ thread_local! {
     /// How the command line said the target loads as raw bytes, for the
     /// project made or opened by this run.
     static RAW: std::cell::RefCell<Option<ag_image::RawSpec>> = const { std::cell::RefCell::new(None) };
+    /// Which slice of a universal Mach-O the command line said the target
+    /// is, likewise.
+    static SLICE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The target as this run was told to read it, with the raw flags folded
 /// in when they were given.
 fn target_of(target: &Path, sha256: Option<String>) -> Target {
     let raw = RAW.with(|held| held.borrow().clone());
+    let slice = SLICE.with(|held| held.borrow().clone());
     Target {
         path: Some(target.display().to_string()),
         sha256,
+        slice,
         raw: raw.map(|spec| {
             let arch = ag_image::raw_arch(&spec.language)
                 .expect("a raw language the command line handed out has its word");
@@ -672,6 +684,26 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         );
     }
     let sha256 = sha256_of(target)?;
+    // A slice the file does not have would make a project nothing reads.
+    if let Some(slice) = SLICE.with(|held| held.borrow().clone()) {
+        let slices = ag_image::Binary::slices_of(target)?.with_context(|| {
+            format!(
+                "{} is not a universal Mach-O: it has no slices",
+                target.display()
+            )
+        })?;
+        anyhow::ensure!(
+            ag_image::resolve_slice(&slices, &slice).is_some(),
+            "{} has no slice {slice:?}; its slices are {}",
+            target.display(),
+            slices
+                .iter()
+                .enumerate()
+                .map(|(index, slice)| format!("{index}: {}", slice.arch))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let mut project = ProjectFile::new(target_of(target, Some(sha256)));
     for pair in options {
         let (name, value) = pair
@@ -711,6 +743,10 @@ pub struct RawArgs {
     /// How many bytes (with --raw); the rest of the file otherwise.
     #[arg(long, requires = "raw")]
     pub length: Option<String>,
+    /// Which slice of a universal Mach-O to read: an architecture, such as
+    /// `arm64` or `x86_64`, or its position from 0.
+    #[arg(long, conflicts_with = "raw")]
+    pub slice: Option<String>,
 }
 
 impl RawArgs {
@@ -795,11 +831,16 @@ pub fn raw_of_project(project: &ProjectFile) -> Result<Option<ag_image::RawSpec>
 pub fn open_target(
     target: &Path,
     raw: Option<&ag_image::RawSpec>,
+    slice: Option<&str>,
     layout: &ag_image::Layout,
 ) -> Result<ag_image::Binary> {
-    match raw {
-        Some(spec) => ag_image::Binary::open_raw_with_layout(target, spec, layout),
-        None => ag_image::Binary::open_with_layout(target, layout),
+    match (raw, slice) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("a target is raw bytes or a slice of a universal Mach-O, not both")
+        }
+        (Some(spec), None) => ag_image::Binary::open_raw_with_layout(target, spec, layout),
+        (None, Some(slice)) => ag_image::Binary::open_slice_with_layout(target, slice, layout),
+        (None, None) => ag_image::Binary::open_with_layout(target, layout),
     }
     .with_context(|| format!("reading {}", target.display()))
 }
@@ -886,7 +927,12 @@ fn number(text: &str) -> Result<u64> {
 /// — under the layout it records.
 fn image_under(target: &Path, project: &ProjectFile) -> Result<ag_image::Binary> {
     let layout = layout_of(project)?;
-    open_target(target, raw_of_project(project)?.as_ref(), &layout)
+    open_target(
+        target,
+        raw_of_project(project)?.as_ref(),
+        project.target.slice.as_deref(),
+        &layout,
+    )
 }
 
 /// Read `target` under the layout `project` now records, so a layout the
@@ -971,7 +1017,7 @@ fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
 
 /// Write a copy of `target` with the patches `file` holds in it.
 fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<i32> {
-    let project = load_project(file)?;
+    let project = load_project(target, file)?;
     let patches = project.patches();
     anyhow::ensure!(!patches.is_empty(), "{} holds no patches", file.display());
     // The target is never written, nor the project file: the copy goes
@@ -1023,7 +1069,7 @@ fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<
 
 /// Print what the project file of `target` holds.
 fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
-    let project = load_project(file)?;
+    let project = load_project(target, file)?;
     if json {
         print!("{}", project.to_json()?);
         return Ok(0);
@@ -1077,8 +1123,8 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
 /// Without a tag, one line per tag with how many places carry it. With
 /// one, one line per place, in address order, in the shape `show` prints a
 /// record — the kind, the address, and what the record carries.
-fn tags(file: &Path, tag: Option<&str>) -> Result<i32> {
-    let project = load_project(file)?;
+fn tags(target: &Path, file: &Path, tag: Option<&str>) -> Result<i32> {
+    let project = load_project(target, file)?;
     match tag {
         None => {
             let index = project.tags();
@@ -1219,10 +1265,50 @@ fn check_raw_flags(project: &ProjectFile, file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The project says which slice of a universal Mach-O its target is; a
+/// `--slice` that names another — by whatever spelling — would read another
+/// image under the same records, and is refused. The flag and the record
+/// are the same slice when they resolve to the same place in the file.
+pub fn check_slice_flag(
+    target: &Path,
+    flag: Option<&str>,
+    recorded: Option<&str>,
+    file: &Path,
+) -> Result<()> {
+    let Some(flag) = flag else {
+        return Ok(());
+    };
+    let slices = ag_image::Binary::slices_of(target)?.unwrap_or_default();
+    let place = |selector: &str| {
+        ag_image::resolve_slice(&slices, selector)
+            .map(|slice| slice.offset)
+            .with_context(|| format!("{} has no slice {selector:?}", target.display()))
+    };
+    let wanted = place(flag)?;
+    match recorded {
+        Some(recorded) if place(recorded)? == wanted => Ok(()),
+        Some(recorded) => anyhow::bail!(
+            "the --slice flag says the target is the {flag} slice, but {} says {recorded}: drop the flag, or make a new project",
+            file.display()
+        ),
+        None => anyhow::bail!(
+            "the --slice flag says the target is the {flag} slice, but {} says it is the whole file: drop the flag, or make a new project",
+            file.display()
+        ),
+    }
+}
+
 /// Read the project at `file`, which has to exist, with the flags checked.
-fn load_project(file: &Path) -> Result<ProjectFile> {
+fn load_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     let project = ProjectFile::load(file)?;
     check_raw_flags(&project, file)?;
+    let flag = SLICE.with(|held| held.borrow().clone());
+    check_slice_flag(
+        target,
+        flag.as_deref(),
+        project.target.slice.as_deref(),
+        file,
+    )?;
     Ok(project)
 }
 
@@ -1232,6 +1318,13 @@ fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     match ProjectFile::load(file) {
         Ok(project) => {
             check_raw_flags(&project, file)?;
+            let flag = SLICE.with(|held| held.borrow().clone());
+            check_slice_flag(
+                target,
+                flag.as_deref(),
+                project.target.slice.as_deref(),
+                file,
+            )?;
             Ok(project)
         }
         Err(_) if !file.exists() => {
