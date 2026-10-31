@@ -707,7 +707,7 @@ fn pseudocode_row(
 
     match address {
         Some(address) => mouse_area(row)
-            .on_press(Message::AddressSelected(address))
+            .on_press(Message::PseudocodeLineSelected(index, address))
             .into(),
         None => row.into(),
     }

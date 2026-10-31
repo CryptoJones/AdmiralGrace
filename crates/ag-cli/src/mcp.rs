@@ -325,13 +325,13 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "set_override",
-            description: "Allow or prevent one of the lift's judgment calls at an address in the project file: `guard` (a branch whose one arm never falls through read as a guard the rest follows), `fold` (a condition comparing an expression with itself folded to the constant it is), `invert` (the condition turned round with its arms), `switch` (the indirect jump read as a switch through a jump table). The pseudocode is read again with the word. The project is saved.",
+            description: "Allow or prevent one of the lift's judgment calls at a site in the project file — the address of the branch or the indirect jump, the last of the pseudocode line's addresses: `guard` (a branch whose one arm never falls through read as a guard the rest follows), `fold` (a condition comparing an expression with itself folded to the constant it is), `invert` (the condition turned round with its arms), `switch` (the indirect jump read as a switch through a jump table; off, the function is not lifted and says why). The pseudocode is read again with the word. The project is saved.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "address": address,
                     "kind": { "type": "string", "enum": ["guard", "fold", "invert", "switch"], "description": "The judgment call." },
-                    "on": { "type": ["boolean", "null"], "description": "true to allow, false to prevent, null to leave it to the lift." },
+                    "on": { "type": ["boolean", "null"], "description": "true (the default) to allow, false to prevent, null to leave it to the lift." },
                 },
                 "required": ["address", "kind"]
             }),
@@ -981,7 +981,8 @@ impl Server {
                     ));
                 }
                 let on = match arguments.get("on") {
-                    None | Some(Value::Null) => None,
+                    None => Some(true),
+                    Some(Value::Null) => None,
                     Some(Value::Bool(on)) => Some(*on),
                     Some(_) => return Err("\"on\" is true, false or null".to_string()),
                 };

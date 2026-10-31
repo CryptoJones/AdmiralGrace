@@ -707,9 +707,9 @@ pub struct Options {
     pub language: Language,
 }
 
-/// The analyst's word at one site — one instruction's address — on the
-/// judgment calls the lift makes there, each allowed, prevented or left to
-/// the lift: whether a branch whose one arm never falls through is a guard
+/// The analyst's word at one site — the address of a branch or an indirect
+/// jump — on the judgment calls the lift makes there, each allowed,
+/// prevented or left to the lift: whether a branch whose one arm never falls through is a guard
 /// the rest follows unnested (`guard`), whether a condition that compares
 /// an expression with itself is folded to the constant it is (`fold`),
 /// whether the branch's condition is turned round with its arms (`invert`),
@@ -772,13 +772,17 @@ pub trait Sites {
     /// The word at `address`; nothing said unless the analyst did.
     fn at(&self, address: u64) -> SiteOverride;
 
-    /// The words at any of `addresses`, laid over one another in order.
+    /// The word at the site of a statement whose condition came from
+    /// `addresses`: the branch instruction itself, which is the last of
+    /// them in its block and so the highest. The compare and the
+    /// instructions that fed it are not sites — one of them may feed two
+    /// branches.
     fn over(&self, addresses: &[u64]) -> SiteOverride {
         addresses
             .iter()
-            .fold(SiteOverride::default(), |word, address| {
-                word.merged(self.at(*address))
-            })
+            .max()
+            .map(|address| self.at(*address))
+            .unwrap_or_default()
     }
 }
 

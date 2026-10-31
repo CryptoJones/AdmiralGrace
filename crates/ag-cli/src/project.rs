@@ -618,17 +618,27 @@ pub fn run(
             address,
             variable,
             name,
-        } => edit_named(&target, &file, Named::Variable, &address, &variable, |a| {
-            a.name = Some(name)
-        }),
+        } => edit_named(
+            &target,
+            &file,
+            Named::Variable,
+            &address,
+            &variable,
+            |a| a.name = Some(name),
+        ),
         ProjectCmd::Reg {
             file,
             address,
             register,
             name,
-        } => edit_named(&target, &file, Named::Register, &address, &register, |a| {
-            a.name = Some(name)
-        }),
+        } => edit_named(
+            &target,
+            &file,
+            Named::Register,
+            &address,
+            &register,
+            |a| a.name = Some(name),
+        ),
     }
 }
 
@@ -1274,7 +1284,8 @@ fn edit_named(
     change: impl FnOnce(&mut Annotation),
 ) -> Result<i32> {
     let mut project = open_project(target, file)?;
-    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
+    let key = ag_corpus::project::canonical_address(address)
+        .unwrap_or_else(|| address.to_string());
     match named {
         Named::Variable => change(project.variable_mut(&key, thing)),
         Named::Register => change(project.register_mut(&key, thing)),

@@ -1433,25 +1433,27 @@ impl Binary {
         functions
     }
 
-    /// Tell the image where the jump tables are that its code does not
-    /// say: one hint per indirect jump, by the jump's address. The walks
-    /// and the pseudocode built so far are forgotten, since the graph of
-    /// a function may have grown cases.
     /// Tell the lift the analyst's words on the sites — which judgment calls
     /// to make or not make at each address — and say whether that changed
-    /// anything. The graphs and the pseudocode are read again after.
+    /// anything. The pseudocode and the levels are read again after; the
+    /// walks too, and the indexes built from them, when a word on a
+    /// `switch` changed, since that changes a function's graph.
     pub fn set_site_overrides(&self, overrides: BTreeMap<u64, SiteOverride>) -> bool {
+        let switches = |words: &BTreeMap<u64, SiteOverride>| -> BTreeMap<u64, bool> {
+            words
+                .iter()
+                .filter_map(|(address, word)| Some((*address, word.switch?)))
+                .collect()
+        };
+        let rewalk;
         if let Ok(mut held) = self.site_overrides.lock() {
             if *held == overrides {
                 return false;
             }
+            rewalk = switches(&held) != switches(&overrides);
             *held = overrides;
-        }
-        if let Ok(mut cache) = self.disassembly.lock() {
-            cache.clear();
-        }
-        if let Ok(mut cache) = self.cfgs.lock() {
-            cache.clear();
+        } else {
+            return false;
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
@@ -1462,8 +1464,22 @@ impl Binary {
         if let Ok(mut cache) = self.plugin_stages.lock() {
             cache.clear();
         }
-        if let Ok(mut cache) = self.graph.lock() {
-            *cache = None;
+        if rewalk {
+            if let Ok(mut cache) = self.disassembly.lock() {
+                cache.clear();
+            }
+            if let Ok(mut cache) = self.cfgs.lock() {
+                cache.clear();
+            }
+            // The program-wide indexes were built from the old walks.
+            for index in [&self.string_users, &self.data_users] {
+                if let Ok(mut held) = index.lock() {
+                    *held = None;
+                }
+            }
+            if let Ok(mut held) = self.graph.lock() {
+                *held = None;
+            }
         }
         true
     }
@@ -1477,6 +1493,10 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// Tell the image where the jump tables are that its code does not
+    /// say: one hint per indirect jump, by the jump's address. The walks
+    /// and the pseudocode built so far are forgotten, since the graph of
+    /// a function may have grown cases.
     pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) -> bool {
         if let Ok(mut held) = self.table_hints.lock() {
             if *held == hints {

@@ -397,9 +397,7 @@ pub fn hex_of_bytes(bytes: &[u8]) -> String {
 /// together, `B8 01 00 00 00` or `b801000000`. Anything else is no patch.
 pub fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
     let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if digits.is_empty()
-        || !digits.len().is_multiple_of(2)
-        || !digits.chars().all(|c| c.is_ascii_hexdigit())
+    if digits.is_empty() || !digits.len().is_multiple_of(2) || !digits.chars().all(|c| c.is_ascii_hexdigit())
     {
         return None;
     }
@@ -1268,11 +1266,10 @@ impl ProjectFile {
         sources
     }
 
-    /// Every jump table the analyst placed, by the value of the address of
-    /// the `jmp` that reads it: what an analysis is told where its own
-    /// recovery fails. A note on a spaced address keys on its value.
-    /// The analyst's overrides, by the address each is at: the kind and
-    /// whether it is allowed.
+    /// The analyst's overrides, by the value of the address each is at —
+    /// the branch or the indirect jump — the kind and whether it is
+    /// allowed. A word on a spaced address keys on its value, as a jump
+    /// table note does.
     pub fn overrides(&self) -> BTreeMap<u64, BTreeMap<String, bool>> {
         self.places()
             .filter_map(|a| {
@@ -1285,6 +1282,9 @@ impl ProjectFile {
             .collect()
     }
 
+    /// Every jump table the analyst placed, by the value of the address of
+    /// the `jmp` that reads it: what an analysis is told where its own
+    /// recovery fails. A note on a spaced address keys on its value.
     pub fn jump_tables(&self) -> BTreeMap<u64, JumpTableNote> {
         self.places()
             .filter_map(|a| {
@@ -1470,8 +1470,12 @@ mod tests {
             raw: None,
             slice: None,
         });
-        project.options.insert("loop-form".into(), "while".into());
-        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("main".into());
+        project
+            .options
+            .insert("loop-form".into(), "while".into());
+        project
+            .annotation_mut(TargetKind::Function, "0x1000")
+            .name = Some("main".into());
         project
             .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
             .comment = Some("imported qsort".into());
@@ -1528,10 +1532,14 @@ mod tests {
     #[test]
     fn one_address_carries_one_record_whatever_the_spelling() {
         let mut project = ProjectFile::new(Target::default());
-        project.annotation_mut(TargetKind::Function, "0X10").name = Some("main".into());
+        project
+            .annotation_mut(TargetKind::Function, "0X10")
+            .name = Some("main".into());
         // A comment at the same address, spelled differently, lands on the
         // same record rather than masking the rename.
-        project.annotation_mut(TargetKind::Address, "0x10").comment = Some("the entry".into());
+        project
+            .annotation_mut(TargetKind::Address, "0x10")
+            .comment = Some("the entry".into());
         assert_eq!(project.annotations.len(), 1, "one record for one address");
         assert_eq!(project.annotations[0].address, "0x10", "stored canonical");
         let found = project.annotation_for("10").expect("any spelling finds it");
@@ -1542,7 +1550,9 @@ mod tests {
     #[test]
     fn a_spaced_address_keys_apart_from_the_bare_value() {
         let mut project = ProjectFile::new(Target::default());
-        project.annotation_mut(TargetKind::Function, "0x1").name = Some("local".into());
+        project
+            .annotation_mut(TargetKind::Function, "0x1")
+            .name = Some("local".into());
         project
             .annotation_mut(TargetKind::Function, "external:0x1")
             .name = Some("qsort".into());
@@ -1553,15 +1563,11 @@ mod tests {
             .bookmark = true;
         assert_eq!(project.annotations.len(), 2);
         assert_eq!(
-            project
-                .annotation_for("EXTERNAL:0x1")
-                .and_then(|a| a.name.as_deref()),
+            project.annotation_for("EXTERNAL:0x1").and_then(|a| a.name.as_deref()),
             Some("qsort")
         );
         assert_eq!(
-            project
-                .annotation_for("0x1")
-                .and_then(|a| a.name.as_deref()),
+            project.annotation_for("0x1").and_then(|a| a.name.as_deref()),
             Some("local")
         );
     }
@@ -1569,15 +1575,17 @@ mod tests {
     #[test]
     fn a_variable_record_does_not_share_the_address_record() {
         let mut project = ProjectFile::new(Target::default());
-        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("decode_frame".into());
+        project
+            .annotation_mut(TargetKind::Function, "0x1000")
+            .name = Some("decode_frame".into());
         // The entry label and a local of the function at that entry are
         // different things: each keeps its own name.
-        project.variable_mut("0x1000", "local_10").name = Some("envelope".into());
+        project
+            .variable_mut("0x1000", "local_10")
+            .name = Some("envelope".into());
         assert_eq!(project.annotations.len(), 2, "one address, two records");
         assert_eq!(
-            project
-                .annotation_for("0x1000")
-                .and_then(|a| a.name.as_deref()),
+            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
             Some("decode_frame"),
             "the address record is the function's"
         );
@@ -1588,9 +1596,7 @@ mod tests {
         // A second spelling of the address finds the same variable record.
         project.variable_mut("0X1000", "local_10").bookmark = true;
         assert_eq!(project.annotations.len(), 2);
-        assert!(project
-            .variable_for("0x1000", "local_10")
-            .is_some_and(|a| a.bookmark));
+        assert!(project.variable_for("0x1000", "local_10").is_some_and(|a| a.bookmark));
     }
 
     #[test]
@@ -1625,39 +1631,28 @@ mod tests {
     #[test]
     fn a_register_record_keys_on_the_register_not_the_address() {
         let mut project = ProjectFile::new(Target::default());
-        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("decode_frame".into());
+        project
+            .annotation_mut(TargetKind::Function, "0x1000")
+            .name = Some("decode_frame".into());
         // The register is a third thing at the entry address: its own
         // record, keyed on the register's name.
         project.register_mut("0x1000", "rax").name = Some("result".into());
         assert_eq!(project.annotations.len(), 2, "one address, two records");
         assert_eq!(
-            project
-                .annotation_for("0x1000")
-                .and_then(|a| a.name.as_deref()),
+            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
             Some("decode_frame"),
             "the address record is still the function's"
         );
-        assert_eq!(
-            project.register_name("0x1000", "rax").as_deref(),
-            Some("result")
-        );
+        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
         // A second spelling of the address finds the same register record.
         project.register_mut("0X1000", "rax").bookmark = true;
         assert_eq!(project.annotations.len(), 2);
-        assert!(project
-            .register_for("0x1000", "rax")
-            .is_some_and(|a| a.bookmark));
+        assert!(project.register_for("0x1000", "rax").is_some_and(|a| a.bookmark));
         // A register of another function keys apart, and so does a register
         // of the same function from another name.
         project.register_mut("0x2000", "rax").name = Some("total".into());
-        assert_eq!(
-            project.register_name("0x1000", "rax").as_deref(),
-            Some("result")
-        );
-        assert_eq!(
-            project.register_name("0x2000", "rax").as_deref(),
-            Some("total")
-        );
+        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
+        assert_eq!(project.register_name("0x2000", "rax").as_deref(), Some("total"));
     }
 
     #[test]
@@ -1690,9 +1685,7 @@ mod tests {
         // An unmarked address is not a bookmark either.
         project.annotation_mut(TargetKind::Address, "0x999").name = Some("x".into());
         // An address that parses to no value keeps its spelling and sorts last.
-        project
-            .annotation_mut(TargetKind::Address, "nowhere")
-            .bookmark = true;
+        project.annotation_mut(TargetKind::Address, "nowhere").bookmark = true;
 
         let marked: Vec<&str> = project
             .bookmarks()

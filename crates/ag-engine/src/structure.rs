@@ -1544,10 +1544,8 @@ mod tests {
             c_at(&nodes, &options, &word("guard", false)).unwrap(),
             "int f(int a)\n{\n  if (a == 0) {\n    return a;\n  } else {\n    x = 2;\n    return x;\n  }\n}"
         );
-        // `invert on` turns the condition round with its arms; the arm
-        // that now comes first falls through, so the guard rule turns it
-        // back into the same text — except that the analyst chose which
-        // arm is the guard.
+        // `invert on` turns the condition round with its arms: the other
+        // arm is the guard now, and the lift does not turn it back.
         assert_eq!(
             c_at(&nodes, &options, &word("invert", true)).unwrap(),
             "int f(int a)\n{\n  if (a != 0) {\n    x = 2;\n    return x;\n  }\n  return a;\n}"
@@ -1557,21 +1555,67 @@ mod tests {
         assert!(c_at(&nodes, &options, &elsewhere)
             .unwrap()
             .contains("  }\n  x = 2;"));
+        // The site is the branch instruction, the last of the condition's
+        // addresses; a word at the compare before it is not the site's.
+        let mut compared = early_return(cond("a", BinaryOp::Equal, 0));
+        if let Terminator::Branch { addresses, .. } = &mut compared[0].terminator {
+            *addresses = vec![0x1003, 0x1000];
+        }
+        assert!(c_at(&compared, &options, &word("guard", false))
+            .unwrap()
+            .contains("  }\n  x = 2;"));
+        let at_branch = BTreeMap::from([(0x1003u64, word("guard", false)[&0x1000])]);
+        assert!(c_at(&compared, &options, &at_branch)
+            .unwrap()
+            .contains("  } else {\n"));
 
-        // A condition that compares an expression with itself is folded to
-        // the constant it is — unless the analyst says `fold off`.
-        let same = AstNode::binary(AstNode::var("a"), BinaryOp::Equal, AstNode::var("a")).folded();
-        assert!(matches!(
-            same,
-            AstNode::ConstantCondition { holds: true, .. }
-        ));
-        let nodes = early_return(same);
-        let folded = c_at(&nodes, &options, &()).unwrap();
-        assert!(folded.contains("if (1) {"), "{folded}");
-        assert!(!folded.contains("if (a == a)"), "{folded}");
-        let kept = c_at(&nodes, &options, &word("fold", false)).unwrap();
-        assert!(kept.contains("if (a == a) {"), "{kept}");
-        assert!(!kept.contains("if (1)"), "{kept}");
+        // Where the taken arm falls through and the other does not, the
+        // lift turns the condition round to make the guard — unless the
+        // analyst said `invert off`. Inside a loop the taken arm's end is
+        // the header, so it falls through.
+        // 0: while (a < 10): if (a == 0) goto 2 else 3; 2: x = 2 → 0;
+        // 3: return a; 4: return x
+        let turned = vec![
+            node(
+                0x1000,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("a", BinaryOp::Less, 10),
+                    taken: 1,
+                    next: 4,
+                    addresses: vec![0x1000],
+                },
+            ),
+            node(
+                0x1010,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("a", BinaryOp::Equal, 0),
+                    taken: 2,
+                    next: 3,
+                    addresses: vec![0x1010],
+                },
+            ),
+            node(
+                0x1020,
+                vec![assign("x", 2, 0x1020)],
+                Terminator::Goto {
+                    target: 0,
+                    addresses: vec![0x1024],
+                },
+            ),
+            node(0x1030, vec![ret("a", 0x1030)], Terminator::Return),
+            node(0x1040, vec![ret("x", 0x1040)], Terminator::Return),
+        ];
+        assert_eq!(
+            c_at(&turned, &options, &()).unwrap(),
+            "int f(int a)\n{\n  while (a < 0xa) {\n    if (a != 0) {\n      return a;\n    }\n    x = 2;\n  }\n  return x;\n}"
+        );
+        let at_inner = BTreeMap::from([(0x1010u64, word("invert", false)[&0x1000])]);
+        assert_eq!(
+            c_at(&turned, &options, &at_inner).unwrap(),
+            "int f(int a)\n{\n  while (a < 0xa) {\n    if (a == 0) {\n      x = 2;\n    } else {\n      return a;\n    }\n  }\n  return x;\n}"
+        );
     }
 
     #[test]
