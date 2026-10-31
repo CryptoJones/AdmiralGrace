@@ -24,6 +24,8 @@ a function you know takes more arguments than its signature shows, because the t
 `a + b` where the listing says `add esi, edi` and you want the C to follow it | `--option operand-order instruction`
 `(unsigned int)a < (unsigned int)b` cluttering every bounds check | `--option unsigned-compare bare`
 `a < b` where you need to know whether a negative `a` passes | `--option unsigned-compare cast`
+`not lifted yet: an indirect call` where the function pointer is a parameter | `--option indirect-calls lift`
+`a(b, 1)` where the arguments of a call through a pointer cannot be trusted | `--option indirect-calls refuse`
 `local_d = 0x77202c6f6c6c6568;` and the word after it, where a string was meant | `--option builtins recognize`
 a `__builtin_strcpy` where the stores themselves are wanted | `--option builtins keep`
 a row of `*(int *)(a + 4) = …;` stores that fill a struct field by field | `--option struct-initializers recognize`
@@ -73,6 +75,7 @@ Option | Tier | Takes | Default | What it decides
 `pointer-loads` | rendering | `named` \| `cast` | `named` | A load or store at an address the image names as data: the data's name (`counter`), or the typed cast every other address gets (`*(int *)0x4010`).
 `operand-order` | rendering | `instruction` \| `canonical` | `instruction` | The operands of `+`, `*`, `&`, `|` and `^`: in the order the instruction names them (`b + a`), or canonical, variables alphabetical and constants last (`a + b`).
 `unsigned-compare` | rendering | `cast` \| `bare` | `cast` | A comparison whose condition code is unsigned (`jb`, `ja`, `jbe`, `jae`): both sides cast, `(unsigned int)a < (unsigned int)b`, or written bare, `a < b`.
+`indirect-calls` | transform | `lift` \| `refuse` | `lift` | A call or a jump through a value the lift knows — a parameter, a field loaded from a struct — made as the call through that value, `a(b, 1)`, or refused as `an indirect call`. A Windows control-flow guard's dispatch — `call [__guard_dispatch_icall_fptr]` with the target in `rax`, or a `jmp` through it — is the call it guards, to that target, and its check is dropped; the target it names outright is called outright either way.
 `builtins` | transform | `recognize` \| `keep` | `recognize` | The constant stores that put a string on the stack word by word, read back as one `__builtin_strcpy(&local, "text")` — or `__builtin_memcpy` where no NUL ends it — or kept as the stores they are. `rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset` either way, having no other reading.
 `struct-initializers` | transform | `recognize` \| `keep` | `recognize` | A run of stores through one pointer at distinct offsets — `*(int *)a = b; *(int *)(a + 4) = 2; *(long *)(a + 8) = 7;` — read as one struct initializer, `*(struct { int at_0; int at_4; long at_8; } *)a = { b, 2, 7 };`, or kept as the stores they are. Two stores at least, their values reading no memory.
 `dead-compares` | transform | `drop` \| `keep` | `drop` | A `cmp` or `test` whose flags no branch reads: dropped, or kept as the statement `__cmp(a, b);` or `__test(a, b);`.

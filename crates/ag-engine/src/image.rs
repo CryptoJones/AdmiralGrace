@@ -703,6 +703,51 @@ impl Image {
         symbols
     }
 
+    /// The pointers a PE's control-flow guard calls through, from its load
+    /// configuration, as `(address, name)`: the slot that holds the check
+    /// function, `__guard_check_icall_fptr`, and the one that holds the
+    /// dispatcher, `__guard_dispatch_icall_fptr`, named as the C runtime
+    /// names them. A call through the dispatcher is the call it guards, to
+    /// the function in `rax`; a call through the check validates `rcx` and
+    /// returns. Empty for any other image, or a PE without them.
+    pub fn guard_pointers(&self) -> Vec<(u64, String)> {
+        use object::read::pe::PeFile64;
+        use object::LittleEndian as LE;
+        if self.object().is_none() {
+            return Vec::new();
+        }
+        let Ok(pe) = PeFile64::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let Some(directory) = pe.data_directory(object::pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+        else {
+            return Vec::new();
+        };
+        let Ok(data) = directory.data(self.bytes.as_slice(), &pe.section_table()) else {
+            return Vec::new();
+        };
+        let Ok((config, _)) =
+            object::pod::from_bytes::<object::pe::ImageLoadConfigDirectory64>(data)
+        else {
+            return Vec::new();
+        };
+        // The guard's fields came with Windows 8.1; a shorter configuration
+        // has none.
+        if config.size.get(LE) < 0x80 {
+            return Vec::new();
+        }
+        let mut pointers = Vec::new();
+        let check = config.guard_cf_check_function_pointer.get(LE);
+        if check != 0 {
+            pointers.push((check, "__guard_check_icall_fptr".to_string()));
+        }
+        let dispatch = config.guard_cf_dispatch_function_pointer.get(LE);
+        if dispatch != 0 {
+            pointers.push((dispatch, "__guard_dispatch_icall_fptr".to_string()));
+        }
+        pointers
+    }
+
     /// The named data objects as `(address, name, size)`.
     pub fn data_symbols(&self) -> Vec<(u64, String, u64)> {
         let mut symbols = match &self.inner {
@@ -712,11 +757,17 @@ impl Image {
                 .map(|inner| inner.data_symbols())
                 .unwrap_or_default(),
         };
-        // A PE names its data through its export table, with no extent.
+        // A PE names its data through its export table, with no extent; its
+        // load configuration names the control-flow guard's pointers.
         if let Some(inner) = self.object() {
             for (address, name) in inner.data_exports() {
                 if !symbols.iter().any(|(found, _, _)| found == address) {
                     symbols.push((*address, name.clone(), 0));
+                }
+            }
+            for (address, name) in self.guard_pointers() {
+                if !symbols.iter().any(|(found, _, _)| *found == address) {
+                    symbols.push((address, name, 8));
                 }
             }
             symbols.sort_by_key(|(address, _, _)| *address);

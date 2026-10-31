@@ -169,8 +169,8 @@ use crate::cfgwalk::{resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
-    Builtins, DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads,
-    ReturnLiveness, SlotNames, StructInitializers, TailCalls, UnsignedCompare,
+    Builtins, DeadCompares, IndirectCalls, MergedNames, OperandOrder, Options, Parameters,
+    PointerLoads, ReturnLiveness, SlotNames, StructInitializers, TailCalls, UnsignedCompare,
 };
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
@@ -1460,6 +1460,51 @@ enum Sym {
 }
 
 /// Why a [`Sym::Dead`] value cannot be read.
+/// What a call or a jump calls.
+#[derive(Debug, Clone, PartialEq)]
+enum Callee {
+    /// A function by name, at an address.
+    Named(String, u64),
+    /// An expression the call goes through: a parameter, a loaded field.
+    Through(AstNode),
+}
+
+impl Callee {
+    /// The callee as a reason names it.
+    fn label(&self) -> String {
+        match self {
+            Callee::Named(name, _) => name.clone(),
+            Callee::Through(expression) => one_line_of(expression),
+        }
+    }
+}
+
+/// How a callee is reached: by a `call`, by a `jmp` that leaves the
+/// function, or through the control-flow guard's dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum How {
+    Call,
+    Jump,
+    Dispatch,
+}
+
+/// The control-flow guard's pointers a Windows image calls through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    /// `__guard_dispatch_icall_fptr`: the call goes to the function in `rax`.
+    Dispatch,
+    /// `__guard_check_icall_fptr`: `rcx` is validated, and the call returns.
+    Check,
+}
+
+/// An expression on one line, as the pseudocode spells it.
+fn one_line_of(node: &AstNode) -> String {
+    crate::emit::emit_node(node)
+        .trim_end()
+        .trim_end_matches(';')
+        .to_string()
+}
+
 fn dead_reason(callee: &str) -> String {
     format!("{callee}'s result on one path and nothing on another")
 }
@@ -3997,29 +4042,104 @@ impl<'a> Lifter<'a> {
     /// a function's address — when the lifter knows what it holds; a call
     /// through a value it does not know is refused.
     fn call(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
-        let named = |this: &Self, target: u64| -> String {
-            this.symbols
-                .function_name(target)
-                .unwrap_or_else(|| format!("sub_{target:x}"))
-        };
         if let Flow::Call(target) = ins.flow {
-            let name = named(self, target);
+            let name = self.function_named(target);
             return self.emit_call(name, target, ins.address);
         }
         let [operand] = ins.operands.as_slice() else {
             return Err(NotLifted::new("an indirect call"));
         };
         let value = self.value_of(operand, 64, ins)?;
-        match &value.sym {
-            Sym::Node(AstNode::FunctionName { name, address }) => {
-                let (name, address) = (name.clone(), *address);
-                self.emit_call(name, address, ins.address)
+        match self.callee_of(&value, ins.address, How::Call)? {
+            // The guard's check validates the pointer in `rcx` and returns:
+            // nothing the lift reads changes.
+            None => Ok(()),
+            Some(callee) => self.emit_callee(callee, ins.address),
+        }
+    }
+
+    /// The name of the function at `target`: the image's, or one made of
+    /// the address.
+    fn function_named(&self, target: u64) -> String {
+        self.symbols
+            .function_name(target)
+            .unwrap_or_else(|| format!("sub_{target:x}"))
+    }
+
+    /// What a call or a jump through `value` calls: a function the image
+    /// names, the function at a constant address, the function in `rax`
+    /// when the value is the control-flow guard's dispatcher, or — under
+    /// `indirect-calls lift` — the value itself, an expression the call
+    /// goes through. `None` for the guard's check, which calls nothing of
+    /// the function's own. A value the lift does not know is refused, and
+    /// so is a jump through an expression that is not a variable, which is
+    /// a jump table the walk did not read, not a tail call.
+    fn callee_of(&mut self, value: &Value, at: u64, how: How) -> Result<Option<Callee>, NotLifted> {
+        let refused = || match how {
+            How::Jump => NotLifted::new(format!("an indirect jump at {at:#x}")),
+            How::Call | How::Dispatch => NotLifted::new("an indirect call"),
+        };
+        let node = match &value.sym {
+            Sym::Node(node) => node.clone(),
+            _ => return Err(refused()),
+        };
+        match self.guard_slot(&node) {
+            Some(Guard::Check) => return Ok(None),
+            Some(Guard::Dispatch) => {
+                let target = self.read(RegisterId::new(RC_GPR, RAX, 64), at)?;
+                return self.callee_of(&target, at, How::Dispatch);
             }
-            Sym::Node(AstNode::Constant { value: target, .. }) => {
-                let (name, target) = (named(self, *target), *target);
-                self.emit_call(name, target, ins.address)
+            None => {}
+        }
+        Ok(Some(match node {
+            AstNode::FunctionName { name, address } => Callee::Named(name, address),
+            AstNode::Constant { value: target, .. } => {
+                Callee::Named(self.function_named(target), target)
             }
-            _ => Err(NotLifted::new("an indirect call")),
+            expression => {
+                if self.options.indirect_calls == IndirectCalls::Refuse
+                    || (how == How::Jump && !matches!(expression, AstNode::Var { .. }))
+                {
+                    return Err(refused());
+                }
+                Callee::Through(expression)
+            }
+        }))
+    }
+
+    /// Which of the control-flow guard's pointers `node` is the contents
+    /// of, when it is one: the variable the image names so, or a load from
+    /// the slot's address.
+    fn guard_slot(&self, node: &AstNode) -> Option<Guard> {
+        let name = match node {
+            AstNode::Var { name } => name.clone(),
+            AstNode::Deref { target } => {
+                let address = match target.as_ref() {
+                    AstNode::Cast { target, .. } => target.as_ref(),
+                    other => other,
+                };
+                let AstNode::Constant { value, .. } = address else {
+                    return None;
+                };
+                match self.symbols.pointee(*value) {
+                    Some(Pointee::Data(name)) => name,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        match name.as_str() {
+            "__guard_dispatch_icall_fptr" => Some(Guard::Dispatch),
+            "__guard_check_icall_fptr" => Some(Guard::Check),
+            _ => None,
+        }
+    }
+
+    /// Call `callee` at `at`.
+    fn emit_callee(&mut self, callee: Callee, at: u64) -> Result<(), NotLifted> {
+        match callee {
+            Callee::Named(name, address) => self.emit_call(name, address, at),
+            Callee::Through(expression) => self.emit_call_through(expression, at),
         }
     }
 
@@ -4029,20 +4149,12 @@ impl<'a> Lifter<'a> {
     /// or a pointer loaded from one. Anything else is refused: a direct jump
     /// to an address the image does not name as `jumps to 0x…`, and a jump
     /// through a value that is not a function as `an indirect jump at 0x…`.
-    fn jump_target(&mut self, ins: &DecodedInsn) -> Result<(String, u64), NotLifted> {
+    fn jump_target(&mut self, ins: &DecodedInsn) -> Result<Callee, NotLifted> {
         let at = ins.address;
         // A target the image names nothing at is a routine of its own all
         // the same, called by its address.
-        let named = |this: &Self, target: u64| -> Result<(String, u64), NotLifted> {
-            Ok((
-                this.symbols
-                    .function_name(target)
-                    .unwrap_or_else(|| format!("sub_{target:x}")),
-                target,
-            ))
-        };
         if let Flow::UnconditionalBranch(target) = ins.flow {
-            return named(self, target);
+            return Ok(Callee::Named(self.function_named(target), target));
         }
         let [operand] = ins.operands.as_slice() else {
             return Err(NotLifted::new(format!(
@@ -4051,10 +4163,10 @@ impl<'a> Lifter<'a> {
             )));
         };
         let value = self.value_of(operand, 64, ins)?;
-        match &value.sym {
-            Sym::Node(AstNode::FunctionName { name, address }) => Ok((name.clone(), *address)),
-            Sym::Node(AstNode::Constant { value: target, .. }) => named(self, *target),
-            _ => Err(NotLifted::new(format!("an indirect jump at {at:#x}"))),
+        match self.callee_of(&value, at, How::Jump)? {
+            Some(callee) => Ok(callee),
+            // A jump through the guard's check goes nowhere the lift knows.
+            None => Err(NotLifted::new(format!("an indirect jump at {at:#x}"))),
         }
     }
 
@@ -4063,16 +4175,19 @@ impl<'a> Lifter<'a> {
     /// entry value and the `tail-calls` option allows it.
     fn tail_jump(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         let at = ins.address;
-        let (name, address) = self.jump_target(ins)?;
+        let callee = self.jump_target(ins)?;
         if self.stack_pointer()? != 0 {
             return Err(NotLifted::new(format!(
                 "the stack is not balanced at the jmp at {at:#x}"
             )));
         }
         if self.options.tail_calls == TailCalls::Refuse {
-            return Err(NotLifted::new(format!("a tail call to {name} at {at:#x}")));
+            return Err(NotLifted::new(format!(
+                "a tail call to {} at {at:#x}",
+                callee.label()
+            )));
         }
-        self.emit_call(name, address, at)?;
+        self.emit_callee(callee, at)?;
         self.ret(ins)
     }
 
@@ -4101,7 +4216,11 @@ impl<'a> Lifter<'a> {
         if !body.iter().all(is_padding) {
             return Ok(None);
         }
-        let (name, _) = self.jump_target(last)?;
+        // A thunk is a jump to a function by name; a jump through a value
+        // is a function of its own, with the call in its body.
+        let Callee::Named(name, _) = self.jump_target(last)? else {
+            return Ok(None);
+        };
         if self.options.tail_calls == TailCalls::Refuse {
             return Err(NotLifted::new(format!(
                 "a tail call to {name} at {:#x}",
@@ -4114,6 +4233,23 @@ impl<'a> Lifter<'a> {
     /// The call of `name` at `target` from `at`: the arguments from the
     /// register state, the clobbers, and the result in `rax` as a temporary.
     fn emit_call(&mut self, name: String, target: u64, at: u64) -> Result<(), NotLifted> {
+        let callee = AstNode::FunctionName {
+            name: name.clone(),
+            address: target,
+        };
+        self.emit_call_node(callee, name, at)
+    }
+
+    /// A call through `expression` — a parameter, a field loaded from a
+    /// struct — at `at`: `a(b, 1)`.
+    fn emit_call_through(&mut self, expression: AstNode, at: u64) -> Result<(), NotLifted> {
+        let label = one_line_of(&expression);
+        self.emit_call_node(expression, label, at)
+    }
+
+    /// A call of `callee` — a function by name, or an expression — at `at`,
+    /// `name` being what the callee is called in the reasons given later.
+    fn emit_call_node(&mut self, callee: AstNode, name: String, at: u64) -> Result<(), NotLifted> {
         let mut args = Vec::new();
         let mut addresses = vec![at];
         for &register in self.abi.argument_registers() {
@@ -4123,6 +4259,11 @@ impl<'a> Lifter<'a> {
                 break;
             };
             if matches!(value.sym, Sym::Unknown(_)) {
+                break;
+            }
+            // The guard's dispatcher loaded into a register is the call's
+            // way, not an argument.
+            if matches!(&value.sym, Sym::Node(node) if self.guard_slot(node).is_some()) {
                 break;
             }
             let value = self.at_width(value.clone(), value.bits, register, at)?;
@@ -4160,12 +4301,9 @@ impl<'a> Lifter<'a> {
                 }
             }
         }
-        let callee_name = name.clone();
+        let callee_name = name;
         let node = AstNode::Call {
-            callee: Box::new(AstNode::FunctionName {
-                name,
-                address: target,
-            }),
+            callee: Box::new(callee),
             args,
         };
         // The call clobbers the caller-saved registers, the flags, and
@@ -6322,12 +6460,86 @@ mod tests {
     }
 
     #[test]
-    fn an_indirect_call_is_refused() {
-        // call rdi; ret
+    fn an_indirect_call_goes_through_its_value_or_is_refused() {
+        // call rdi; ret: the call goes through the parameter, which the
+        // first argument register still holds, and its result is nobody's.
         assert_eq!(
-            refused(&[0xff, 0xd7, 0xc3]),
+            c(&[0xff, 0xd7, 0xc3]),
+            "void f(long a)\n{\n  a(a);\n  return;\n}"
+        );
+        assert_eq!(
+            c_with(&[0xff, 0xd7, 0xc3], &names, &[("indirect-calls", "refuse")]),
             "not lifted yet: an indirect call"
         );
+    }
+
+    /// Symbols that name the control-flow guard's pointers at 0x4000 (the
+    /// dispatcher) and 0x4008 (the check), and the function `add` at 0x2000.
+    struct Guarded;
+
+    impl Symbols for Guarded {
+        fn function_name(&self, address: u64) -> Option<String> {
+            (address == 0x2000).then(|| "add".to_string())
+        }
+
+        fn pointee(&self, address: u64) -> Option<Pointee> {
+            match address {
+                0x4000 => Some(Pointee::Data("__guard_dispatch_icall_fptr".to_string())),
+                0x4008 => Some(Pointee::Data("__guard_check_icall_fptr".to_string())),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn a_control_flow_guard_dispatch_is_the_call_it_guards() {
+        // mov rax, rdi; call [rip+disp → 0x4000]; ret: the call goes to the
+        // function in rax, the parameter.
+        let through = c_with(
+            &[0x48, 0x89, 0xf8, 0xff, 0x15, 0xf7, 0x2f, 0x00, 0x00, 0xc3],
+            &Guarded,
+            &[],
+        );
+        assert_eq!(through, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        // lea rax, [rip+disp → 0x2000]; mov edi, 3; call [0x4000]; ret: the
+        // function in rax is named, and called outright.
+        let named = c_with(
+            &[
+                0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, 0xbf, 0x03, 0x00, 0x00, 0x00, 0xff, 0x15,
+                0xee, 0x2f, 0x00, 0x00, 0xc3,
+            ],
+            &Guarded,
+            &[],
+        );
+        assert!(named.contains("  add(3);"), "{named}");
+        // mov r8, [0x4000]; mov rax, rdi; jmp r8: the dispatcher loaded into
+        // a register and jumped through is a tail call through rax.
+        let tail = c_with(
+            &[
+                0x4c, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0x48, 0x89, 0xf8, 0x41, 0xff, 0xe0,
+            ],
+            &Guarded,
+            &[],
+        );
+        assert_eq!(tail, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        // mov rcx, rdi; call [0x4008]; call rcx; ret: the check validates
+        // rcx and is dropped; the call through rcx stands.
+        let checked = c_with(
+            &[
+                0x48, 0x89, 0xf9, 0xff, 0x15, 0xff, 0x2f, 0x00, 0x00, 0xff, 0xd1, 0xc3,
+            ],
+            &Guarded,
+            &[],
+        );
+        assert_eq!(checked, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        // Under `indirect-calls refuse` the dispatch to a parameter is refused
+        // as the indirect call it is, and the named target still goes.
+        let refused = c_with(
+            &[0x48, 0x89, 0xf8, 0xff, 0x15, 0xf7, 0x2f, 0x00, 0x00, 0xc3],
+            &Guarded,
+            &[("indirect-calls", "refuse")],
+        );
+        assert_eq!(refused, "not lifted yet: an indirect call");
     }
 
     #[test]
