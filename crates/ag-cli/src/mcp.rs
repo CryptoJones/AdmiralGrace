@@ -218,6 +218,20 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "emulate",
+            description: "Run one function on its medium level — its statements over variables — against the image's memory, without a debugger: each statement as it ran, what it wrote, what the function returned, and why the run stopped. A call to a function of the image is followed; any other call's result is unknown, and a branch that depends on an unknown value stops the run.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "args": { "type": "array", "items": { "type": ["integer", "string"] }, "description": "The arguments, in parameter order: numbers, or hex text such as \"0x10\"." },
+                    "steps": { "type": "integer", "description": "The statements run before the run is stopped (default 10000)." },
+                    "depth": { "type": "integer", "description": "How many calls deep a call to a function of the image is followed (default 8)." },
+                },
+                "required": ["target"]
+            }),
+        },
+        Tool {
             name: "control_flow",
             description: "The control-flow graph of one function: its blocks with their instructions, the edges between them (fall-through or taken), and the jump tables its indirect jumps read.",
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
@@ -758,6 +772,48 @@ impl Server {
                     .map_err(|error| format!("{address:#x} was not lifted: {}", error.reason))?;
                 let mut answer = Answer::json(crate::image::il_json(&function));
                 answer.text = function.render(&render);
+                Ok(answer)
+            }
+            "emulate" => {
+                let address = self.function(&text("target")?)?;
+                let args = match arguments.get("args") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            ag_image::plugin::plugin_number(item)
+                                .or_else(|| item.as_i64().map(|value| value as u64))
+                                .or_else(|| {
+                                    item.as_str()
+                                        .and_then(|text| text.strip_prefix('-'))
+                                        .and_then(|text| text.parse::<u64>().ok())
+                                        .map(|value| value.wrapping_neg())
+                                })
+                                .ok_or_else(|| format!("an argument is a number, not {item}"))
+                        })
+                        .collect::<Result<Vec<u64>, String>>()?,
+                    Some(_) => return Err("\"args\" is a list of numbers".to_string()),
+                };
+                let whole = |key: &str, default: usize| -> Result<usize, String> {
+                    match arguments.get(key) {
+                        None | Some(Value::Null) => Ok(default),
+                        Some(value) => value
+                            .as_u64()
+                            .filter(|value| *value >= 1)
+                            .map(|value| value as usize)
+                            .ok_or_else(|| format!("{key:?} is a whole number from 1")),
+                    }
+                };
+                let limits = ag_image::EmulationLimits {
+                    steps: whole("steps", 10_000)?,
+                    depth: whole("depth", 8)?,
+                };
+                let run = self
+                    .image
+                    .emulate(address, &args, &limits)
+                    .map_err(|error| format!("{address:#x} was not lifted: {}", error.reason))?;
+                let mut answer = Answer::json(crate::image::emulation_json(&run));
+                answer.text = run.text();
                 Ok(answer)
             }
             "control_flow" => {
@@ -1687,6 +1743,7 @@ mod tests {
                 "disassemble",
                 "decompile",
                 "il",
+                "emulate",
                 "control_flow",
                 "callers",
                 "callees",

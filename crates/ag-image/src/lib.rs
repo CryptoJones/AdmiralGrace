@@ -46,7 +46,7 @@ use ag_engine::arm::ArmVariant;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::emit_function;
-use ag_engine::lift::{lift_function, Pointee, Symbols};
+use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
 use ag_engine::ProcedureCfg;
@@ -57,6 +57,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
+pub use ag_engine::emulate::{self as emulate, Limits as EmulationLimits, Run as Emulation};
 pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
@@ -1910,19 +1911,7 @@ impl Binary {
             .code_name(address)
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
-        let stages = match self.architecture_stages(&decoded, &cfg, address, &name) {
-            Some(stages) => stages?,
-            None => Arc::new(ag_engine::lift::lift_stages(
-                &decoded.disasm,
-                &cfg,
-                address,
-                &name,
-                code.bitness,
-                self.abi(),
-                &ImageSymbols(self),
-                &self.options,
-            )?),
-        };
+        let stages = self.stages_of(code, &decoded, &cfg, address, &name)?;
         let text = |at: u64| decoded.text.get(&at).cloned();
         let function = il::build(level, &stages, &decoded.disasm, &text, casts);
         if !ssa {
@@ -2174,6 +2163,76 @@ impl Binary {
             cache.insert(address, Arc::clone(&cfg));
         }
         cfg
+    }
+
+    /// Every stage of the lift of the function at `address`: the chains, the
+    /// levels, the function, by the engine's lifter or by a plugin
+    /// architecture that lifts its own language.
+    pub fn stages(&self, address: u64) -> Result<Arc<Stages>, NotLifted> {
+        let code = self.code_at(address).ok_or_else(|| NotLifted {
+            reason: format!("no code at {address:#x}"),
+        })?;
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        let name = self
+            .code_name(address)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("sub_{address:x}"));
+        self.stages_of(code, &decoded, &cfg, address, &name)
+    }
+
+    fn stages_of(
+        &self,
+        code: &FileSection,
+        decoded: &Decoded,
+        cfg: &ProcedureCfg,
+        address: u64,
+        name: &str,
+    ) -> Result<Arc<Stages>, NotLifted> {
+        match self.architecture_stages(decoded, cfg, address, name) {
+            Some(stages) => stages,
+            None => Ok(Arc::new(ag_engine::lift::lift_stages(
+                &decoded.disasm,
+                cfg,
+                address,
+                name,
+                code.bitness,
+                self.abi(),
+                &ImageSymbols(self),
+                &self.options,
+            )?)),
+        }
+    }
+
+    /// Run the function at `address` with `args` as its parameters, in
+    /// order, on its medium level — its statements over variables — against
+    /// the image's memory, within `limits`; a call to a function of the
+    /// image is followed, `limits.depth` deep, and any other call's result
+    /// is unknown. See `ag_engine::emulate`.
+    pub fn emulate(
+        &self,
+        address: u64,
+        args: &[u64],
+        limits: &ag_engine::emulate::Limits,
+    ) -> Result<ag_engine::emulate::Run, NotLifted> {
+        let stages = self.stages(address)?;
+        let args: Vec<ag_engine::emulate::Val> = args
+            .iter()
+            .map(|arg| ag_engine::emulate::Val::known(*arg, 64, true))
+            .collect();
+        Ok(ag_engine::emulate::run_with(
+            &stages,
+            &args,
+            &Emulated {
+                image: self,
+                limits: *limits,
+                stages: std::cell::RefCell::new(HashMap::new()),
+            },
+            limits,
+            0,
+            ag_engine::emulate::Memory::new(),
+            &std::cell::Cell::new(limits.steps),
+        ))
     }
 
     /// The stages of a function the image's architecture lifts itself, when
@@ -2920,9 +2979,87 @@ fn decode_arm_section(
     }
 }
 
-/// Decode the bytes of a section through a plugin's architecture; a
-/// section it cannot decode is reported and left empty, as the engine's
-/// own decoders leave one.
+/// The image as the emulator's world: its bytes — zero where a section has
+/// none in the file — its data symbols, and its functions followed as
+/// calls, each lifted once.
+struct Emulated<'a> {
+    image: &'a Binary,
+    limits: ag_engine::emulate::Limits,
+    stages: std::cell::RefCell<HashMap<u64, Arc<Stages>>>,
+}
+
+impl ag_engine::emulate::World for Emulated<'_> {
+    fn read(&self, address: u64, len: usize) -> Option<Vec<u8>> {
+        let section = self.image.section_of(address)?;
+        let end = address.checked_add(len as u64)?;
+        if end > section.vma.saturating_add(section.size) {
+            return None;
+        }
+        // The tail of a section the file does not hold is zero when loaded.
+        let mut bytes = self.image.bytes_at(address, len).unwrap_or_default();
+        bytes.resize(len, 0);
+        Some(bytes)
+    }
+
+    fn address_of(&self, name: &str) -> Option<u64> {
+        self.image
+            .data_symbols()
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.address)
+    }
+
+    fn size_of(&self, name: &str) -> Option<u64> {
+        self.image
+            .data_symbols()
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.size)
+            .filter(|size| *size > 0)
+    }
+
+    fn call(
+        &self,
+        _name: &str,
+        address: u64,
+        args: &[ag_engine::emulate::Val],
+        depth: usize,
+        memory: &mut ag_engine::emulate::Memory,
+        budget: &std::cell::Cell<usize>,
+    ) -> Option<ag_engine::emulate::Val> {
+        // A function of the image is run in turn, on the memory the caller
+        // has written and the steps it has left; an import, or a function
+        // the lifter refuses, is not.
+        if depth > self.limits.depth || !self.image.functions().iter().any(|f| f.address == address)
+        {
+            return None;
+        }
+        let cached = self.stages.borrow().get(&address).cloned();
+        let stages = match cached {
+            Some(stages) => stages,
+            None => {
+                let stages = self.image.stages(address).ok()?;
+                self.stages
+                    .borrow_mut()
+                    .insert(address, Arc::clone(&stages));
+                stages
+            }
+        };
+        let run = ag_engine::emulate::run_with(
+            &stages,
+            args,
+            self,
+            &self.limits,
+            depth,
+            std::mem::take(memory),
+            budget,
+        );
+        let returned = run.returned();
+        *memory = run.memory;
+        returned
+    }
+}
+
 /// A control-flow graph from the blocks an architecture recovered, checked:
 /// every block runs forward, no two overlap, the entry starts one, and
 /// every successor starts one. Each block's instructions are the decoded
@@ -3000,6 +3137,9 @@ fn cfg_from_blocks(
     Ok(cfg)
 }
 
+/// Decode the bytes of a section through a plugin's architecture; a
+/// section it cannot decode is reported and left empty, as the engine's
+/// own decoders leave one.
 fn decode_plugin_section(
     arch: &dyn ag_engine::plugin::Architecture,
     language: &str,

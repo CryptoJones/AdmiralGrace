@@ -191,6 +191,27 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// Run a function on its medium level — its statements over variables
+    /// — against the image's memory, without a debugger: each statement
+    /// as it runs, what it wrote, and what the function returned.
+    Emulate {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// An argument, in parameter order; a number, decimal or hex,
+        /// negative with a `-`. May be repeated.
+        #[arg(long = "arg", value_name = "N", action = clap::ArgAction::Append, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// The statements and blocks run, over the whole run and the calls
+        /// it follows, before the run is stopped.
+        #[arg(long, default_value_t = 10_000)]
+        steps: usize,
+        /// How many calls deep a call to a function of the image is followed.
+        #[arg(long, default_value_t = 8)]
+        depth: usize,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The data the image holds, and the functions that use it.
     Data {
         /// The function or the data: an address such as `0x1198`, or a name.
@@ -815,6 +836,13 @@ pub fn run(
             casts,
             json,
         ),
+        ImageCmd::Emulate {
+            target,
+            args,
+            steps,
+            depth,
+            json,
+        } => emulate(&image, &target, &args, steps, depth, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
             dir,
@@ -1696,6 +1724,101 @@ fn il(
             Ok(1)
         }
     }
+}
+
+/// Run one function with the arguments given and report the run.
+fn emulate(
+    image: &Binary,
+    target: &str,
+    args: &[String],
+    steps: usize,
+    depth: usize,
+    json: bool,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_pseudocode(),
+        "the lifter reads 64-bit x86, and this image is {}",
+        image.language()
+    );
+    anyhow::ensure!(steps >= 1, "--steps is a whole number from 1");
+    let address = resolve(image, target)?;
+    let args = args
+        .iter()
+        .map(|arg| {
+            parse_number(arg).ok_or_else(|| anyhow::anyhow!("the argument {arg:?} is a number"))
+        })
+        .collect::<Result<Vec<u64>>>()?;
+    let limits = ag_image::EmulationLimits { steps, depth };
+    match image.emulate(address, &args, &limits) {
+        Ok(run) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&emulation_json(&run))?);
+            } else {
+                print!("{}", run.text());
+            }
+            Ok(0)
+        }
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "function": address,
+                        "function_hex": format!("{address:#x}"),
+                        "lifted": false,
+                        "reason": error.reason,
+                    }))?
+                );
+            } else {
+                println!("// {target} at {address:#x}: {error}");
+            }
+            Ok(1)
+        }
+    }
+}
+
+/// A number as the command line spells it: decimal, or hex with `0x`.
+fn parse_number(text: &str) -> Option<u64> {
+    let text = text.trim();
+    if let Some(negative) = text.strip_prefix('-') {
+        return parse_number(negative).map(|value| value.wrapping_neg());
+    }
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        text.parse().ok()
+    }
+}
+
+/// A run as JSON: the steps, the stop, the variables and the memory written.
+pub(crate) fn emulation_json(run: &ag_image::Emulation) -> serde_json::Value {
+    let value = |value: &ag_image::emulate::Val| match value.value {
+        Some(bits) => serde_json::json!({
+            "value": bits,
+            "as_signed": value.as_i64(),
+            "hex": format!("{bits:#x}"),
+            "bits": value.bits,
+            "signed": value.signed,
+        }),
+        None => serde_json::json!({ "value": null, "bits": value.bits, "signed": value.signed }),
+    };
+    serde_json::json!({
+        "function": run.address,
+        "function_hex": format!("{:#x}", run.address),
+        "name": run.name,
+        "steps": run.steps.iter().map(|step| serde_json::json!({
+            "address": step.address,
+            "address_hex": step.address.map(|a| format!("{a:#x}")),
+            "block": step.block,
+            "text": step.text,
+            "wrote": step.wrote.as_ref().map(|(name, v)| serde_json::json!({ "name": name, "value": value(v) })),
+            "note": step.note,
+        })).collect::<Vec<_>>(),
+        "stop": run.stop.text(),
+        "returned": run.returned().map(|v| value(&v)),
+        "variables": run.variables.iter().map(|(name, v)| (name.clone(), value(v))).collect::<serde_json::Map<_, _>>(),
+        "memory": run.memory.iter().map(|(address, byte)| serde_json::json!({ "address": address, "address_hex": format!("{address:#x}"), "byte": byte })).collect::<Vec<_>>(),
+    })
 }
 
 /// A function at one level, as JSON.

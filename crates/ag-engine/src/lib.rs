@@ -8,6 +8,7 @@ pub mod cpu_context;
 pub mod dead;
 pub mod demangle;
 pub mod emit;
+pub mod emulate;
 pub mod il;
 pub mod image;
 pub mod lift;
