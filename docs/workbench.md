@@ -280,8 +280,16 @@ nothing need assign it — the first line of an `if`'s arm, or past a join: the 
 `NAME_2 = NAME;  // new version of NAME` goes before it, and the uses it reaches read `NAME_2`,
 which is renamed on its own; a version whose use is reached from before it too is refused,
 and the leading comments say which use. `NAME@ADDRESS off` takes a split or a version back.
-The words are kept on the function's record in the project file, by the names the lift
-declares, and undo takes them back.
+**Set variable value…** pins a variable to a value or an inclusive range: `NAME=5` or
+`NAME=0..7` for the whole function, from its entry, or `NAME@ADDRESS=…` from the selected
+line on, the prompt opening on the selected line's variable and address. The uses only the
+word reaches read the value, an `if` it settles reads as a constant condition — its dead arm
+dimmed, or gone under `dead-code drop` — and a `switch` on it keeps the cases in range; at a
+jump through a table nothing bounds, a range on the register the `jmp` reads bounds the
+table. The leading comments say what was used, `// a is 3 here, as the analyst said`, or why
+not. `NAME off` or `NAME@ADDRESS off` takes the word back. The words are kept on the
+function's record in the project file, by the names the lift declares, and undo takes them
+back.
 
 ## Debugging
 

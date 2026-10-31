@@ -564,6 +564,96 @@ pub struct Annotation {
     /// the field prints the variable whole and misreads nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<VariableVersion>,
+    /// On a function's record: the values the analyst pinned on its
+    /// variables, each the variable, a single value or an inclusive range,
+    /// and the address it holds from — or the whole function, from its
+    /// entry — one word per variable and address. The lift follows them
+    /// through the body. A reader that does not know the field reads the
+    /// function as the bytes say and misreads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<VariableValue>,
+}
+
+/// A value or an inclusive range pinned on a variable, on a function's
+/// record: `{"variable": "a", "value": 5}`, or `{"variable": "eax", "at":
+/// "0x401020", "min": 0, "max": 7}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableValue {
+    /// The variable, as the lift declares it; at a jump through a table,
+    /// the register that indexes it.
+    pub variable: String,
+    /// The address of the statement the word holds from, in its canonical
+    /// spelling; absent for the whole function, from its entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// The one value, when the word is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<i64>,
+    /// The least value of a range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    /// The greatest value of a range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+impl VariableValue {
+    /// The least and greatest value, when the word says them: `value`, or
+    /// `min` and `max` with the least not above the greatest.
+    pub fn range(&self) -> Option<(i64, i64)> {
+        match (self.value, self.min, self.max) {
+            (Some(value), None, None) => Some((value, value)),
+            (None, Some(min), Some(max)) if min <= max => Some((min, max)),
+            _ => None,
+        }
+    }
+
+    /// `5`, or `0..=7`; empty for a word that says neither.
+    pub fn spelled(&self) -> String {
+        match self.range() {
+            Some((min, max)) if min == max => min.to_string(),
+            Some((min, max)) => format!("{min}..={max}"),
+            None => String::new(),
+        }
+    }
+}
+
+/// The value or range the analyst typed: `5`, `-1`, `0x10`, or an
+/// inclusive range `MIN..MAX` — `MIN..=MAX` reads the same — as the least
+/// and greatest value.
+pub fn parse_value_or_range(text: &str) -> Result<(i64, i64), String> {
+    let number = |raw: &str| -> Result<i64, String> {
+        let raw = raw.trim();
+        let (negative, digits) = match raw.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, raw),
+        };
+        let magnitude = match digits
+            .strip_prefix("0x")
+            .or_else(|| digits.strip_prefix("0X"))
+        {
+            Some(hex) => i128::from_str_radix(hex, 16),
+            None => digits.parse::<i128>(),
+        }
+        .map_err(|_| format!("{raw:?} is not a number such as 5, -1 or 0x10"))?;
+        let value = if negative { -magnitude } else { magnitude };
+        i64::try_from(value).map_err(|_| format!("{raw} does not fit in 64 bits"))
+    };
+    let text = text.trim();
+    match text.split_once("..") {
+        Some((min, max)) => {
+            let max = max.strip_prefix('=').unwrap_or(max);
+            let (min, max) = (number(min)?, number(max)?);
+            if min > max {
+                return Err(format!("the range {text} runs from {min} down to {max}"));
+            }
+            Ok((min, max))
+        }
+        None => {
+            let value = number(text)?;
+            Ok((value, value))
+        }
+    }
 }
 
 /// A split of a variable at one of its definitions, on a function's record.
@@ -582,11 +672,14 @@ pub struct VariableSplit {
 pub type VariableVersion = VariableSplit;
 
 /// The analyst's merges of one function's variables, `(keep, gone)`, its
-/// splits, `(variable, at)`, and its new versions, `(variable, at)`.
+/// splits, `(variable, at)`, its new versions, `(variable, at)`, and its
+/// pinned values, `(variable, at, min, max)`, `at` `None` for the whole
+/// function.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
+    Vec<(String, Option<u64>, i64, i64)>,
 );
 
 impl Annotation {
@@ -620,6 +713,7 @@ impl Annotation {
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -653,6 +747,7 @@ impl Annotation {
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -685,6 +780,7 @@ impl Annotation {
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -904,6 +1000,7 @@ impl Annotation {
             && self.merges.is_empty()
             && self.splits.is_empty()
             && self.versions.is_empty()
+            && self.values.is_empty()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -966,6 +1063,42 @@ impl Annotation {
         self.versions
             .retain(|v| !(v.variable == variable && v.at == at));
         self.versions.len() != before
+    }
+
+    /// Pin `variable` to the values `min..=max` — one value where they are
+    /// one — from `at`, in its canonical spelling, or for the whole
+    /// function: a word already on the variable there is replaced in its
+    /// place.
+    pub fn set_variable_value(&mut self, variable: &str, at: Option<&str>, min: i64, max: i64) {
+        let (value, min, max) = if min == max {
+            (Some(min), None, None)
+        } else {
+            (None, Some(min), Some(max))
+        };
+        let word = VariableValue {
+            variable: variable.to_string(),
+            at: at.map(str::to_string),
+            value,
+            min,
+            max,
+        };
+        match self
+            .values
+            .iter_mut()
+            .find(|v| v.variable == variable && v.at.as_deref() == at)
+        {
+            Some(held) => *held = word,
+            None => self.values.push(word),
+        }
+    }
+
+    /// Take back the value pinned on `variable` at `at`, and say whether
+    /// there was one.
+    pub fn clear_variable_value(&mut self, variable: &str, at: Option<&str>) -> bool {
+        let before = self.values.len();
+        self.values
+            .retain(|v| !(v.variable == variable && v.at.as_deref() == at));
+        self.values.len() != before
     }
 }
 
@@ -1427,9 +1560,10 @@ impl ProjectFile {
         removable
     }
 
-    /// The analyst's merges, splits and new versions of each function's
-    /// variables, by the value of the function's entry. A split or a
-    /// version at an address that does not read is left out.
+    /// The analyst's merges, splits, new versions and pinned values of each
+    /// function's variables, by the value of the function's entry. A split,
+    /// a version or a value at an address that does not read is left out,
+    /// and so is a value that says no value or range.
     pub fn variable_edits(&self) -> BTreeMap<u64, VariableWords> {
         let read = |words: &[VariableSplit]| -> Vec<(String, u64)> {
             words
@@ -1440,15 +1574,37 @@ impl ProjectFile {
                 })
                 .collect()
         };
+        let values = |words: &[VariableValue]| -> Vec<(String, Option<u64>, i64, i64)> {
+            words
+                .iter()
+                .filter_map(|v| {
+                    let at = match &v.at {
+                        Some(at) => Some(crate::parse_addr_space(at).ok()?.0),
+                        None => None,
+                    };
+                    let (min, max) = v.range()?;
+                    Some((v.variable.clone(), at, min, max))
+                })
+                .collect()
+        };
         self.places()
             .filter(|a| {
-                !a.block && (!a.merges.is_empty() || !a.splits.is_empty() || !a.versions.is_empty())
+                !a.block
+                    && (!a.merges.is_empty()
+                        || !a.splits.is_empty()
+                        || !a.versions.is_empty()
+                        || !a.values.is_empty())
             })
             .filter_map(|a| {
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((
                     value,
-                    (a.merges.clone(), read(&a.splits), read(&a.versions)),
+                    (
+                        a.merges.clone(),
+                        read(&a.splits),
+                        read(&a.versions),
+                        values(&a.values),
+                    ),
                 ))
             })
             .collect()
@@ -2677,6 +2833,7 @@ mod tests {
                     ],
                     vec![("local_14".to_string(), 0x401020)],
                     Vec::new(),
+                    Vec::new(),
                 )
             )])
         );
@@ -2715,6 +2872,7 @@ mod tests {
                         ("a".to_string(), 0x40101b),
                         ("local_c".to_string(), 0x40102e)
                     ],
+                    Vec::new(),
                 )
             )])
         );
@@ -2730,5 +2888,61 @@ mod tests {
         assert!(!record.unversion_variable("a", "0x40101b"));
         assert!(record.unversion_variable("local_c", "0x40102e"));
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn pinned_values_are_kept_on_the_functions_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        record.set_variable_value("a", None, 5, 5);
+        record.set_variable_value("eax", Some("0x401007"), 0, 3);
+        // A word on the variable at the same place is replaced.
+        record.set_variable_value("a", None, 6, 6);
+        assert_eq!(record.values.len(), 2, "one word per variable and place");
+        let edits = project.variable_edits();
+        assert_eq!(
+            edits,
+            BTreeMap::from([(
+                0x401000,
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    vec![
+                        ("a".to_string(), None, 6, 6),
+                        ("eax".to_string(), Some(0x401007), 0, 3)
+                    ],
+                )
+            )])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"values\": ["), "{json}");
+        assert!(json.contains("\"value\": 6"), "{json}");
+        assert!(json.contains("\"min\": 0"), "{json}");
+        assert!(json.contains("\"max\": 3"), "{json}");
+        assert!(!json.contains("\"versions\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.variable_edits(), edits);
+        assert_eq!(read.format, FORMAT_VERSION);
+        // Taken back, the record goes.
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        assert!(record.clear_variable_value("a", None));
+        assert!(!record.clear_variable_value("a", None));
+        assert!(!record.clear_variable_value("eax", None), "by its place");
+        assert!(record.clear_variable_value("eax", Some("0x401007")));
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_value_or_a_range_is_read_as_the_analyst_types_it() {
+        assert_eq!(parse_value_or_range("5"), Ok((5, 5)));
+        assert_eq!(parse_value_or_range(" -1 "), Ok((-1, -1)));
+        assert_eq!(parse_value_or_range("0x10"), Ok((16, 16)));
+        assert_eq!(parse_value_or_range("0..7"), Ok((0, 7)));
+        assert_eq!(parse_value_or_range("0..=7"), Ok((0, 7)));
+        assert_eq!(parse_value_or_range("-4..0x4"), Ok((-4, 4)));
+        assert!(parse_value_or_range("7..0").is_err());
+        assert!(parse_value_or_range("five").is_err());
+        assert!(parse_value_or_range("").is_err());
     }
 }

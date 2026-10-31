@@ -501,3 +501,91 @@ fn a_new_variable_version_is_forced_through_the_server() {
     );
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn a_variables_value_is_pinned_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-value-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("switch.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"a","value":4}"#,
+            r#""name":"decompile","arguments":{"target":"classify"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"0x401000","variable":"edi","value":"0..1","address":"0x401007"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"a","value":"clear"}"#,
+            r#""name":"decompile","arguments":{"target":"classify"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"edi","value":"clear","address":"0x401007"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"a","value":"clear"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"a","value":"seven"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 8);
+    let text = |i: usize| {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    for reply in &replies[..6] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    // The answer is the function's record, its values with it.
+    let record: serde_json::Value = serde_json::from_str(&text(0)).expect("JSON");
+    assert!(text(0).contains("\"values\": ["), "{}", text(0));
+    assert!(record.to_string().contains("\"spelled\":\"4\""), "{record}");
+    assert!(
+        text(1).contains("// the switch at 0x401007 reads case 4 only\n"),
+        "{}",
+        text(1)
+    );
+    // The register the table's jump reads narrows the switch's cases.
+    assert!(
+        text(4).contains("// edi is in 0..=1 at 0x401007, as the analyst said\n"),
+        "{}",
+        text(4)
+    );
+    assert!(
+        text(4).contains("  case 1:\n") && !text(4).contains("  case 2:\n"),
+        "{}",
+        text(4)
+    );
+    // A word not there to take back is said, and so is what is no value.
+    assert_eq!(replies[6]["result"]["isError"], true, "{:?}", replies[6]);
+    assert_eq!(replies[7]["result"]["isError"], true, "{:?}", replies[7]);
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    assert!(
+        saved.variable_edits().is_empty(),
+        "the words taken back leave none"
+    );
+    let _ = std::fs::remove_file(&project);
+}

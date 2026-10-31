@@ -2416,3 +2416,128 @@ fn a_new_variable_version_is_forced_at_an_arms_start_on_the_analysts_word() {
     assert!(!ok);
     assert!(stderr.contains("is not an address"), "{stderr}");
 }
+
+#[test]
+fn a_variables_value_or_range_is_pinned_and_followed_through_the_pseudocode() {
+    let file = TempFile::new("value");
+    // What `ag image switch.elf pseudocode classify --project FILE` prints.
+    let pseudocode = |drop: bool| -> String {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ag"));
+        command.arg("image").arg(fixture("switch.elf")).args([
+            "pseudocode",
+            "classify",
+            "--project",
+            &file.text(),
+        ]);
+        if drop {
+            command.args(["--option", "dead-code", "drop"]);
+        }
+        let output = command.output().expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let word = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec![args[0], "--file"];
+        let text = file.text();
+        all.push(&text);
+        all.extend(&args[1..]);
+        project_with("switch.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("switch.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = pseudocode(false);
+    assert!(
+        before.contains("  if ((unsigned int)a > 5) {\n"),
+        "{before}"
+    );
+    assert!(before.contains("  case 5:\n"), "{before}");
+
+    // The parameter is 3 for the whole function: it is read in place, the
+    // guard can only fail, and the switch reads its one case.
+    let (ok, stdout, stderr) = word(&["value", "classify", "a", "3"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now value a = 3"),
+        "{stdout}"
+    );
+    let three = pseudocode(false);
+    assert!(
+        three.contains("// a is 3 here, as the analyst said\n"),
+        "{three}"
+    );
+    assert!(
+        three.contains("// the switch at 0x401007 reads case 3 only\n"),
+        "{three}"
+    );
+    assert!(
+        three.contains("  if (0) { // constant: (unsigned int)3 > 5\n"),
+        "{three}"
+    );
+    assert!(
+        three
+            .contains("  switch ((unsigned long)(unsigned int)3) {\n  case 3:\n    return;\n  }\n"),
+        "{three}"
+    );
+    let dropped = pseudocode(true);
+    assert!(!dropped.contains("if ("), "{dropped}");
+
+    // A range replaces the value: the guard is decided, the cases outside
+    // go, and nothing is read in place.
+    let (ok, stdout, stderr) = word(&["value", "classify", "a", "0..1"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now value a = 0..=1"),
+        "{stdout}"
+    );
+    let range = pseudocode(false);
+    assert!(
+        range.contains("// a is in 0..=1 here, as the analyst said\n"),
+        "{range}"
+    );
+    assert!(
+        range.contains("  if (0) { // constant: (unsigned int)a > 5\n"),
+        "{range}"
+    );
+    assert!(
+        range.contains("  case 1:\n") && !range.contains("  case 2:\n"),
+        "{range}"
+    );
+    // A range the guard does not settle leaves it.
+    let (ok, _, stderr) = word(&["value", "classify", "a", "0..9"]);
+    assert!(ok, "{stderr}");
+    let wide = pseudocode(false);
+    assert!(wide.contains("  if ((unsigned int)a > 5) {\n"), "{wide}");
+    assert!(wide.contains("  case 5:\n"), "{wide}");
+
+    // A word at an address no statement carries is refused, and said.
+    let (ok, _, stderr) = word(&["value", "classify", "a", "-1", "--at", "0x401234"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        pseudocode(false).contains("// a is not pinned to -1 at 0x401234: no statement there\n"),
+        "{}",
+        pseudocode(false)
+    );
+
+    // `clear` takes each back; one not there is said on stderr.
+    let (ok, _, stderr) = word(&["value", "classify", "a", "clear", "--at", "0x401234"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = word(&["value", "classify", "a", "clear"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("cleared"), "{stdout}");
+    let (ok, _, stderr) = word(&["value", "classify", "a", "clear"]);
+    assert!(ok);
+    assert!(
+        stderr.contains("a had no value pinned in 0x401000"),
+        "{stderr}"
+    );
+    assert_eq!(pseudocode(false), before);
+
+    // What is not a value is refused.
+    let (ok, _, stderr) = word(&["value", "classify", "a", "7..0"]);
+    assert!(!ok);
+    assert!(stderr.contains("runs from 7 down to 0"), "{stderr}");
+}

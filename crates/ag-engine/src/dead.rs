@@ -480,7 +480,7 @@ fn may_touch_memory(node: &AstNode) -> bool {
 }
 
 /// Whether a statement, or any statement inside it, is or holds a label.
-fn has_label(statement: &Statement) -> bool {
+pub(crate) fn has_label(statement: &Statement) -> bool {
     if statement.node.any(&|n| matches!(n, AstNode::Label { .. })) {
         return true;
     }

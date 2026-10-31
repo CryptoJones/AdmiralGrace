@@ -43,7 +43,9 @@
 //! after a merge, and the fresh variable a split makes is renamed by its
 //! own name, `v1_2`. The splits are made first, then the new versions,
 //! then the merges, each in the order the analyst gave them, so a variable
-//! a split or a version makes can be merged into another.
+//! a split or a version makes can be merged into another. The values the
+//! analyst pins ([`crate::values`]) are followed between the versions and
+//! the merges, by the same names.
 //!
 //! A new version is a split where no statement assigns the variable: at the
 //! start of an `if`'s arm, or past a join. The analyst names a variable and
@@ -84,22 +86,28 @@ pub struct VariableEdits {
     /// `(variable, at)`: a definition `fresh = variable;` is put at `at`, and
     /// the uses it reaches take the fresh name.
     pub versions: Vec<(String, u64)>,
+    /// The values and ranges the analyst pinned, followed through the body
+    /// after the versions and before the merges ([`crate::values`]).
+    pub values: Vec<crate::values::PinnedValue>,
 }
 
-/// One function's merges, `(keep, gone)`, splits, `(variable, at)`, and new
-/// versions, `(variable, at)`, as the project file gives them.
+/// One function's merges, `(keep, gone)`, splits, `(variable, at)`, new
+/// versions, `(variable, at)`, and pinned values, `(variable, at, min,
+/// max)`, as the project file gives them.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
+    Vec<crate::values::PinnedWord>,
 );
 
 impl From<VariableWords> for VariableEdits {
-    fn from((merges, splits, versions): VariableWords) -> Self {
+    fn from((merges, splits, versions, values): VariableWords) -> Self {
         Self {
             merges,
             splits,
             versions,
+            values: values.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -107,7 +115,10 @@ impl From<VariableWords> for VariableEdits {
 impl VariableEdits {
     /// Whether there is no word at all.
     pub fn is_empty(&self) -> bool {
-        self.merges.is_empty() && self.splits.is_empty() && self.versions.is_empty()
+        self.merges.is_empty()
+            && self.splits.is_empty()
+            && self.versions.is_empty()
+            && self.values.is_empty()
     }
 }
 
@@ -248,13 +259,29 @@ pub fn merge_candidates(function: &LiftedFunction) -> Vec<MergeCandidate> {
 }
 
 /// Make the analyst's splits, then the new versions, then the merges, in
-/// `function`, noting the ones refused and the unsound ones made.
+/// `function`, noting the ones refused and the unsound ones made; the
+/// pinned values are followed with no word at any branch and no table.
 pub fn apply_edits(function: &mut LiftedFunction, edits: &VariableEdits) {
+    apply_edits_with(function, edits, &(), &BTreeMap::new());
+}
+
+/// [`apply_edits`], the pinned values followed between the versions and
+/// the merges — by the names the lift declares, a split's and a version's
+/// own among them, before a merge renames one away — with the analyst's
+/// words at the branches, `sites`, and the first case value of each jump
+/// table by its `jmp`, `tables`.
+pub fn apply_edits_with(
+    function: &mut LiftedFunction,
+    edits: &VariableEdits,
+    sites: &dyn crate::options::Sites,
+    tables: &BTreeMap<u64, i64>,
+) {
     if edits.is_empty() || function.thunk.is_some() {
         return;
     }
     apply_splits(function, &edits.splits);
     apply_versions(function, &edits.versions);
+    crate::values::apply_values(function, &edits.values, sites, tables);
     apply_merges(function, &edits.merges);
 }
 
@@ -666,7 +693,7 @@ fn walk_mut(
 }
 
 /// Every node of `statements`, as [`walk_mut`] reaches them.
-fn nodes_of(statements: &[Statement]) -> BTreeMap<(usize, Part), AstNode> {
+pub(crate) fn nodes_of(statements: &[Statement]) -> BTreeMap<(usize, Part), AstNode> {
     let mut copy = statements.to_vec();
     let mut nodes = BTreeMap::new();
     walk_mut(&mut copy, &mut 0, &mut |index, part, node| {
@@ -817,7 +844,7 @@ fn origin(name: &str, declared: &BTreeSet<&str>) -> String {
 }
 
 /// The 64-bit name of the general register `name` names at any width.
-fn register_family(name: &str) -> Option<String> {
+pub(crate) fn register_family(name: &str) -> Option<String> {
     (0..16).find_map(|index| {
         [64, 32, 16, 8]
             .iter()

@@ -197,6 +197,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::EditVersionVariable,
             )),
+            Item::new(item_button(
+                "Set variable value…",
+                "",
+                Message::EditVariableValue,
+            )),
             Item::new(separator()),
             Item::new(item_button(
                 "Assemble over bytes…",

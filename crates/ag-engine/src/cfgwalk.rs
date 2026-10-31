@@ -42,6 +42,14 @@ pub trait Entries {
         None
     }
 
+    /// The ranges the analyst pinned at `site`, each the variable or
+    /// register named and its least and greatest value, inclusive: a range
+    /// on the register that indexes a jump table, at the `jmp`, bounds a
+    /// table no compare before the jump bounds. None unless said.
+    fn pinned_ranges(&self, _site: u64) -> Vec<(String, i64, i64)> {
+        Vec::new()
+    }
+
     /// Whether a branch from the procedure entered at `entry` to `target`
     /// leaves the procedure: under the `branches-end-procedures` option,
     /// a target before the entry or at or past the next function the
@@ -351,7 +359,10 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
 /// from the `cmp index, N` that guards the jump — `N + 1` entries under a
 /// `ja`/`jbe`, `N` under a `jae`/`jb` — and a `sub index, M` just before
 /// the compare makes `M` the first case's value. An analyst's hint stands
-/// in for the table and the count where the code does not say. Every
+/// in for the table and the count where the code does not say; where the
+/// code names the table and its index register but no compare bounds it,
+/// the analyst's range on that register at the jump, `0..=N`, makes
+/// `N + 1` entries from the first. Every
 /// entry must land on an instruction of the disassembly; the table stops
 /// at the first that does not, and a table with no entry at all is no
 /// table.
@@ -372,7 +383,10 @@ fn recover_table(
     let index = shape.as_ref().map(|shape| shape.index);
     let (count, base) = match hint {
         Some(hint) => (hint.count, 0),
-        None => bound_of(disasm, at, index?)?,
+        None => match bound_of(disasm, at, index?) {
+            Some(bound) => bound,
+            None => (pinned_count(entries, jmp.address, index?)?, 0),
+        },
     };
     if count == 0 || !matches!(width, 4 | 8) {
         return None;
@@ -558,6 +572,27 @@ fn bound_of(disasm: &Disasm, at: usize, index: RegisterId) -> Option<(u32, i64)>
         return Some((count, base));
     }
     None
+}
+
+/// The most entries an analyst's range reads from a table.
+const MOST_PINNED_ENTRIES: i64 = 1 << 16;
+
+/// The entry count the analyst's range on the index register at the `jmp`
+/// at `site` gives — its greatest value and one — when they pinned one,
+/// by any width of the register's name, `eax` or `rax`, and it does not
+/// go below 0.
+fn pinned_count(entries: &dyn Entries, site: u64, index: RegisterId) -> Option<u32> {
+    let names: Vec<String> = [64, 32, 16, 8]
+        .iter()
+        .map(|&bits| crate::lift::gpr_name(index.index, bits))
+        .collect();
+    entries
+        .pinned_ranges(site)
+        .into_iter()
+        .find(|(name, min, max)| {
+            names.contains(name) && *min >= 0 && *min <= *max && *max < MOST_PINNED_ENTRIES
+        })
+        .and_then(|(_, _, max)| u32::try_from(max + 1).ok())
 }
 
 /// What one instruction does to the walk.

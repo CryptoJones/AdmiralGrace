@@ -74,6 +74,7 @@ use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::swift::{
     SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
 };
+pub use ag_engine::values::PinnedValue;
 pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
@@ -457,8 +458,8 @@ pub struct Binary {
     /// The analyst's words on which functions are inlined into their
     /// callers' pseudocode, by entry: `true` to inline, `false` never to.
     inlines: Mutex<BTreeMap<u64, bool>>,
-    /// The analyst's merges and splits of each function's variables, by
-    /// the function's entry.
+    /// The analyst's merges, splits, new versions and pinned values of
+    /// each function's variables, by the function's entry.
     variable_edits: Mutex<BTreeMap<u64, VariableEdits>>,
     /// The functions being lifted, by the thread lifting them, so that a
     /// cycle of calls through the bodies inlined is not followed round —
@@ -1589,20 +1590,53 @@ impl Binary {
         true
     }
 
-    /// Tell the lift which variables of each function the analyst merges
-    /// and where one is split — by the function's entry, the names the
-    /// lift declares — and say whether that changed anything. The
-    /// pseudocode and the levels are read again after; the walks are kept.
+    /// Tell the lift which variables of each function the analyst merges,
+    /// where one is split or has a new version, and what values one holds
+    /// — by the function's entry, the names the lift declares — and say
+    /// whether that changed anything. The pseudocode and the levels are
+    /// read again after; the walks are kept, unless a value pinned at an
+    /// indirect `jmp` changed, which may bound a jump table the walk reads.
     pub fn set_variable_edits(&self, edits: BTreeMap<u64, VariableEdits>) -> bool {
         let edits: BTreeMap<u64, VariableEdits> = edits
             .into_iter()
             .filter(|(_, edits)| !edits.is_empty())
             .collect();
+        let rewalk;
         if let Ok(mut held) = self.variable_edits.lock() {
             if *held == edits {
                 return false;
             }
+            rewalk = self.values_at_jumps(&held) != self.values_at_jumps(&edits);
             *held = edits;
+        } else {
+            return false;
+        }
+        if rewalk {
+            // As a jump table's hint does: the walks, and what was built
+            // from them, are forgotten.
+            if let Ok(mut cache) = self.disassembly.lock() {
+                cache.clear();
+            }
+            if let Ok(mut held) = self.noreturn.lock() {
+                held.clear();
+            }
+            if let Ok(mut held) = self.noreturn_facts.lock() {
+                held.clear();
+            }
+            if let Ok(mut cache) = self.cfgs.lock() {
+                cache.clear();
+            }
+            if let Ok(mut cache) = self.plugin_stages.lock() {
+                cache.clear();
+            }
+            for index in [&self.string_users, &self.data_users] {
+                if let Ok(mut held) = index.lock() {
+                    *held = None;
+                }
+            }
+            if let Ok(mut held) = self.graph.lock() {
+                *held = None;
+            }
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
@@ -1611,6 +1645,43 @@ impl Binary {
             cache.clear();
         }
         true
+    }
+
+    /// The values pinned at an indirect `jmp`, as `(at, variable, min,
+    /// max)`: the ones the walk may read a table's bound from.
+    fn values_at_jumps(
+        &self,
+        edits: &BTreeMap<u64, VariableEdits>,
+    ) -> BTreeSet<(u64, String, i64, i64)> {
+        edits
+            .values()
+            .flat_map(|edits| &edits.values)
+            .filter_map(|value| Some((value.at?, value)))
+            .filter(|(at, _)| self.is_indirect_jump(*at))
+            .map(|(at, value)| (at, value.variable.clone(), value.min, value.max))
+            .collect()
+    }
+
+    /// Whether the instruction at `address` is an indirect `jmp`.
+    fn is_indirect_jump(&self, address: u64) -> bool {
+        let Some(bitness) = self.bitness else {
+            return false;
+        };
+        let Some(bytes) = self.bytes_at(address, 15).or_else(|| {
+            // Near the end of a section, as many bytes as there are.
+            (2..15).rev().find_map(|len| self.bytes_at(address, len))
+        }) else {
+            return false;
+        };
+        let mut decoder = iced_x86::Decoder::with_ip(
+            bitness.bits(),
+            &bytes,
+            address,
+            iced_x86::DecoderOptions::NONE,
+        );
+        let instruction = decoder.decode();
+        !instruction.is_invalid()
+            && instruction.flow_control() == iced_x86::FlowControl::IndirectBranch
     }
 
     /// The analyst's merges and splits of the variables of the function at
@@ -3112,6 +3183,18 @@ impl Entries for Binary {
         self.table_hints.lock().ok()?.get(&site).copied()
     }
 
+    /// The values the analyst pinned at `site`, in any function.
+    fn pinned_ranges(&self, site: u64) -> Vec<(String, i64, i64)> {
+        let Ok(held) = self.variable_edits.lock() else {
+            return Vec::new();
+        };
+        held.values()
+            .flat_map(|edits| &edits.values)
+            .filter(|value| value.at == Some(site))
+            .map(|value| (value.variable.clone(), value.min, value.max))
+            .collect()
+    }
+
     fn table_allowed(&self, site: u64) -> bool {
         self.site_override(site).switch != Some(false)
     }
@@ -3284,7 +3367,8 @@ impl Symbols for ImageSymbols<'_> {
         facts
     }
 
-    /// The analyst's merges and splits of the function's variables.
+    /// The analyst's merges, splits, versions and values of the function's
+    /// variables.
     fn variable_edits(&self, address: u64) -> VariableEdits {
         self.0.variable_edits(address)
     }
@@ -4561,6 +4645,38 @@ mod tests {
         assert_eq!(
             binary.pseudocode(0x1149).unwrap_err().to_string(),
             "not lifted yet: rsi is read before it is written"
+        );
+    }
+
+    #[test]
+    fn a_value_pinned_at_an_indirect_jump_is_one_the_walk_reads() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/switch.elf");
+        let binary = Binary::open(&path).expect("the switch ELF loads");
+        // classify: 0x401007 jmp [rdi*8+0x402000]; 0x401005 mov edi, edi.
+        assert!(binary.is_indirect_jump(0x401007));
+        assert!(!binary.is_indirect_jump(0x401005));
+        let pin = |variable: &str, at: u64| VariableEdits {
+            values: vec![PinnedValue {
+                variable: variable.to_string(),
+                at: Some(at),
+                min: 0,
+                max: 1,
+            }],
+            ..VariableEdits::default()
+        };
+        let edits = BTreeMap::from([(0x401000, pin("edi", 0x401007))]);
+        assert_eq!(binary.values_at_jumps(&edits).len(), 1);
+        let edits = BTreeMap::from([(0x401000, pin("a", 0x401005))]);
+        assert!(binary.values_at_jumps(&edits).is_empty());
+        // The walk sees the words at the jump; the switch keeps its cases
+        // in range.
+        assert!(binary.set_variable_edits(BTreeMap::from([(0x401000, pin("edi", 0x401007))])));
+        assert_eq!(binary.pinned_ranges(0x401007), [("edi".to_string(), 0, 1)]);
+        let text = binary.pseudocode(0x401000).expect("lifted").text();
+        assert!(
+            text.contains("  case 1:\n") && !text.contains("  case 2:\n"),
+            "{text}"
         );
     }
 }
