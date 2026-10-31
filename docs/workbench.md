@@ -407,6 +407,10 @@ prompt offers the mode the marks and symbols give an address, not one a `blx` se
 are not reached by the graph; and a call or jump through a register under a condition is read
 as falling through.
 
+An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
+`+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped
+binary is named too; `ag image FILE objc` prints the classes, categories and protocols.
+
 A universal (fat) Mach-O holds several images, one per architecture. **Open binary…** takes
 `slice=ARCH` after the path — `app slice=arm64`, or the slice's position from 0 — to say which;
 opened without one, the notice names the slices. The project file remembers the choice.

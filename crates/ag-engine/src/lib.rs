@@ -9,6 +9,7 @@ pub mod emit;
 pub mod image;
 pub mod lift;
 pub mod liveness;
+pub mod objc;
 pub mod options;
 pub mod pipeline;
 pub mod procedure;

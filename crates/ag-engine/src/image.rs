@@ -37,6 +37,8 @@ pub struct Image {
     /// The slice of a universal Mach-O the bytes are, when they are one:
     /// the file's offsets are the slice's, this far into the file.
     slice: Option<Slice>,
+    /// The Objective-C metadata the image carries, read once when asked.
+    objc: std::cell::OnceCell<Option<crate::objc::ObjcMetadata>>,
 }
 
 /// One slice of a universal (fat) Mach-O: an image of one architecture
@@ -275,6 +277,7 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            objc: std::cell::OnceCell::new(),
         })
     }
 
@@ -343,7 +346,16 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            objc: std::cell::OnceCell::new(),
         })
+    }
+
+    /// The Objective-C metadata the image carries — its classes, categories
+    /// and protocols — when it is a Mach-O with any.
+    pub fn objc(&self) -> Option<&crate::objc::ObjcMetadata> {
+        self.objc
+            .get_or_init(|| self.object().and_then(|_| crate::objc::read(&self.bytes)))
+            .as_ref()
     }
 
     /// The loader's reading of the container, when there is one.
@@ -506,16 +518,54 @@ impl Image {
 
     /// The function symbols as `(address, name)`, rebased to the load address.
     pub fn function_symbols(&self) -> Vec<(u64, String)> {
-        self.object()
+        let mut symbols = self
+            .object()
             .map(|inner| inner.func_symbols())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // An Objective-C method's implementation is named by the metadata —
+        // `-[Class sel]` — where no symbol names it, as in a stripped image.
+        // Only an implementation in code is a function: a crafted record
+        // pointing into data or off the map names nothing.
+        if let Some(objc) = self.objc() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _)| *address).collect();
+            let code: Vec<(u64, u64)> = self
+                .sections()
+                .into_iter()
+                .filter(|section| section.executable)
+                .map(|section| (section.vma, section.vma.saturating_add(section.size)))
+                .collect();
+            for (imp, name) in objc.method_names() {
+                let in_code = code
+                    .iter()
+                    .any(|(start, end)| (*start..*end).contains(&imp));
+                if in_code && !named.contains(&imp) {
+                    symbols.push((imp, name));
+                }
+            }
+            symbols.sort_by_key(|(address, _)| *address);
+        }
+        symbols
     }
 
     /// The named data objects as `(address, name, size)`.
     pub fn data_symbols(&self) -> Vec<(u64, String, u64)> {
-        self.object()
+        let mut symbols = self
+            .object()
             .map(|inner| inner.data_symbols())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A class object is data the loader registers, named by its class.
+        if let Some(objc) = self.objc() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _, _)| *address).collect();
+            for (address, name) in objc.class_symbols() {
+                if !named.contains(&address) {
+                    symbols.push((address, name, crate::objc::ObjcMetadata::CLASS_OBJECT_SIZE));
+                }
+            }
+            symbols.sort_by_key(|(address, _, _)| *address);
+        }
+        symbols
     }
 
     /// The name of the function symbol at `address`, when there is one.

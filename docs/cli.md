@@ -94,6 +94,17 @@ rest of the file. The bytes are one section of code, and the entry, when named, 
 function. `ag project TARGET --raw … save` records the same in the project file, and every
 command that reads the project reads the target that way after, flags or not.
 
+An Objective-C Mach-O describes its classes, categories and protocols in its `__objc_*`
+sections, for the runtime to register at load; `ag image FILE objc` prints them, and every
+method's implementation is a function under its runtime name — `-[Class sel]`, `+[Class
+sel]`, `-[Class(Category) sel]` — in every report, symbols or none. An instance method's name
+starts with `-`, so `--` goes before it on the command line: `ag image app disasm -- '-[Foo
+bar:]'`. The pointers of an image linked for macOS 12 or iOS 15 and later are chained
+fixups, and are resolved before they are followed; a class of another image — a superclass,
+or the class a category extends — is bound at load, so a category on one names the class
+`?`. (The external method map `ag corpus … --methods` takes is for a corpus; an image needs
+none.)
+
 A universal (fat) Mach-O holds several images, one per architecture. `ag image FILE slices`
 lists them, and `--slice ARCH` (or the slice's position, from 0) before the subcommand says
 which one to read: `ag image app --slice arm64 disasm main`. Opened without one, the file is
@@ -145,6 +156,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 
 | Subcommand | What it prints |
 |---|---|
+| `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |

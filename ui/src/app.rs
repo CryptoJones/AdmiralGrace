@@ -7577,6 +7577,35 @@ mod tests {
     }
 
     #[test]
+    fn an_objective_c_images_methods_are_listed_under_their_runtime_names() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/sample_objc_stripped");
+        let app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        let names: Vec<String> = app
+            .provider
+            .functions()
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "-[Derived greet:]"),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "+[Base answer]"),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "-[Base(Extra) thrice:]"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
     fn editing_bytes_needs_a_program_image() {
         let mut app = App::boot(Config::default()).0;
         app.selection = Selection::Address(0x1149);

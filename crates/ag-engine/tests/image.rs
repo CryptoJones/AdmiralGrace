@@ -351,3 +351,214 @@ fn a_64_bit_fat_header_a_slice_past_the_end_and_a_haswell_slice_are_read() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    let stripped = Image::open(&fixtures.join("sample_objc_stripped")).expect("loads");
+    let objc = stripped.objc().expect("Objective-C metadata");
+
+    // Two classes, one on the other; a category on the root; a protocol.
+    let names: Vec<&str> = objc
+        .classes
+        .iter()
+        .map(|class| class.name.as_str())
+        .collect();
+    assert_eq!(names, ["Base", "Derived"]);
+    let base = &objc.classes[0];
+    assert_eq!(base.superclass, None, "a root class");
+    assert_eq!(base.class_methods.len(), 1);
+    assert_eq!(base.class_methods[0].selector, "answer");
+    assert_eq!(base.instance_methods[0].selector, "twice:");
+    assert!(base.instance_methods[0]
+        .types
+        .as_deref()
+        .is_some_and(|t| t.starts_with("i")));
+    assert_eq!(base.ivars.len(), 1);
+    assert_eq!(base.ivars[0].name, "isa");
+    let derived = &objc.classes[1];
+    assert_eq!(derived.superclass.as_deref(), Some("Base"));
+    assert_eq!(derived.protocols, ["Greeting"]);
+    assert_eq!(derived.instance_methods[0].selector, "greet:");
+    assert_eq!(objc.categories.len(), 1);
+    assert_eq!(objc.categories[0].name, "Extra");
+    assert_eq!(objc.categories[0].class.as_deref(), Some("Base"));
+    assert_eq!(objc.categories[0].instance_methods[0].selector, "thrice:");
+    assert_eq!(objc.protocols.len(), 1);
+    assert_eq!(objc.protocols[0].name, "Greeting");
+    assert_eq!(objc.protocols[0].instance_methods[0].selector, "greet:");
+    assert_eq!(objc.protocols[0].instance_methods[0].imp, None);
+
+    // The methods' code is named from the metadata, symbols or none, and the
+    // names agree with what the linker kept in the unstripped twin.
+    let stripped_names: Vec<String> = stripped
+        .function_symbols()
+        .into_iter()
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" -[Derived greet:]")),
+        "{stripped_names:?}"
+    );
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" +[Base answer]")),
+        "{stripped_names:?}"
+    );
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" -[Base(Extra) thrice:]")),
+        "{stripped_names:?}"
+    );
+    let full = Image::open(&fixtures.join("sample_objc")).expect("loads");
+    let full_names: Vec<String> = full
+        .function_symbols()
+        .into_iter()
+        .filter(|(_, name)| name.starts_with('-') || name.starts_with('+'))
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    let from_metadata: Vec<String> = objc
+        .method_names()
+        .into_iter()
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    assert_eq!(full_names, from_metadata);
+    assert!(stripped
+        .data_symbols()
+        .iter()
+        .any(|(_, name, _)| name == "OBJC_CLASS_$_Derived"));
+
+    // The stripped twin's symbol table names nothing: `_main` is gone, and
+    // the method names can only have come from the metadata.
+    assert!(
+        !stripped_names.iter().any(|line| line.ends_with(" _main")),
+        "{stripped_names:?}"
+    );
+
+    // Nothing of the kind in an ELF, or a Mach-O without Objective-C.
+    let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    assert!(Image::open(&elf).expect("loads").objc().is_none());
+    assert!(Image::open(&fixtures.join("sample.macho"))
+        .expect("loads")
+        .objc()
+        .is_none());
+}
+
+#[test]
+fn an_image_with_chained_fixups_reads_the_same_objective_c() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    // Linked for macOS 12, every pointer slot of the metadata is a packed
+    // fixup: read raw, the lists would come out empty or wrong.
+    let chained = Image::open(&fixtures.join("sample_objc_chained")).expect("loads");
+    let objc = chained.objc().expect("Objective-C metadata");
+    let classic = Image::open(&fixtures.join("sample_objc")).expect("loads");
+    let expected = classic.objc().expect("Objective-C metadata");
+
+    let shape = |objc: &ag_engine::objc::ObjcMetadata| {
+        let methods =
+            |methods: &[ag_engine::objc::ObjcMethod]| -> Vec<(String, Option<String>, bool)> {
+                methods
+                    .iter()
+                    .map(|method| {
+                        (
+                            method.selector.clone(),
+                            method.types.clone(),
+                            method.imp.is_some(),
+                        )
+                    })
+                    .collect()
+            };
+        let classes: Vec<_> = objc
+            .classes
+            .iter()
+            .map(|class| {
+                (
+                    class.name.clone(),
+                    class.superclass.clone(),
+                    class.protocols.clone(),
+                    methods(&class.instance_methods),
+                    methods(&class.class_methods),
+                    class
+                        .ivars
+                        .iter()
+                        .map(|ivar| ivar.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let categories: Vec<_> = objc
+            .categories
+            .iter()
+            .map(|category| {
+                (
+                    category.name.clone(),
+                    category.class.clone(),
+                    methods(&category.instance_methods),
+                )
+            })
+            .collect();
+        let protocols: Vec<_> = objc
+            .protocols
+            .iter()
+            .map(|protocol| (protocol.name.clone(), methods(&protocol.instance_methods)))
+            .collect();
+        (classes, categories, protocols)
+    };
+    assert_eq!(shape(objc), shape(expected));
+    assert_eq!(objc.classes.len(), 2);
+    assert!(chained
+        .function_symbols()
+        .iter()
+        .any(|(_, name)| name == "-[Derived greet:]"));
+}
+
+#[test]
+fn a_category_on_a_class_of_another_image_names_the_class_unknown() {
+    use ag_engine::image::Image;
+    use object::{Object, ObjectSection};
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    let mut bytes = std::fs::read(fixtures.join("sample_objc_stripped")).expect("reads");
+    let category = Image::open(&fixtures.join("sample_objc_stripped"))
+        .expect("loads")
+        .objc()
+        .expect("Objective-C")
+        .categories[0]
+        .address;
+    // Zero the category's class slot in a copy, as a class bound at load
+    // reads: the slot is `category_t.cls`, 8 bytes in.
+    let slot = category + 8;
+    let file = object::File::parse(bytes.as_slice()).expect("parses");
+    let section = file
+        .sections()
+        .find(|section| (section.address()..section.address() + section.size()).contains(&slot))
+        .expect("the category is in a section");
+    let (offset, _) = section.file_range().expect("in the file");
+    let at = (offset + (slot - section.address())) as usize;
+    drop(file);
+    bytes[at..at + 8].fill(0);
+    let dir = std::env::temp_dir().join(format!("ag-objc-external-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sample_objc_external");
+    std::fs::write(&path, &bytes).expect("writes");
+
+    let image = Image::open(&path).expect("loads");
+    let objc = image.objc().expect("Objective-C");
+    assert_eq!(objc.categories[0].class, None);
+    assert!(image
+        .function_symbols()
+        .iter()
+        .any(|(_, name)| name == "-[?(Extra) thrice:]"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

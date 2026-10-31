@@ -1865,3 +1865,51 @@ fn a_slice_of_a_universal_macho_is_a_program_whose_patches_land_in_its_part_of_t
         .entry()
         .is_some_and(|entry| arm64.disassembly(entry).is_some()));
 }
+
+#[test]
+fn an_objective_c_images_methods_are_functions_under_their_runtime_names() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_objc_stripped");
+    let binary = Binary::open(&path).expect("loads");
+    let objc = binary.objc().expect("Objective-C");
+    assert_eq!(objc.classes.len(), 2);
+    let names: Vec<&str> = binary
+        .functions()
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    assert!(names.contains(&"-[Derived greet:]"), "{names:?}");
+    assert!(names.contains(&"-[Base(Extra) thrice:]"), "{names:?}");
+    let greet = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "-[Derived greet:]")
+        .expect("greet")
+        .address;
+    assert!(binary.disassembly(greet).is_some());
+    assert!(binary.function_name(greet).is_some());
+    assert!(macho().objc().is_none());
+
+    // Read at another base, the metadata's addresses move with the functions.
+    let layout = ag_image::Layout {
+        base: Some(0x5000_0000),
+        segments: Vec::new(),
+    };
+    let moved = Binary::open_with_layout(&path, &layout).expect("loads");
+    let moved_greet = moved
+        .functions()
+        .iter()
+        .find(|function| function.name == "-[Derived greet:]")
+        .expect("greet")
+        .address;
+    assert_ne!(moved_greet, greet);
+    let moved_objc = moved.objc().expect("Objective-C");
+    let imp = moved_objc.classes[1].instance_methods[0].imp;
+    assert_eq!(imp, Some(moved_greet));
+    // The image moved down, from 0x100000000: the same distance, wrapping.
+    assert_eq!(
+        moved_objc.classes[0].address,
+        objc.classes[0]
+            .address
+            .wrapping_add(moved_greet.wrapping_sub(greet))
+    );
+}
