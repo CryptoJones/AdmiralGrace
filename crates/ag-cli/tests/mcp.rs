@@ -318,3 +318,99 @@ fn opaque_predicates_are_listed_and_patched_through_the_server() {
     assert_eq!(patches.len(), 2);
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn variables_are_merged_and_split_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-merge-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("sample.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"merge_candidates","arguments":{"target":"main"}"#,
+            r#""name":"merge_variables","arguments":{"function":"main","keep":"b","gone":"v2"}"#,
+            r#""name":"decompile","arguments":{"target":"main"}"#,
+            r#""name":"split_variable","arguments":{"function":"sum_to","variable":"local_10","address":"0x116c"}"#,
+            r#""name":"decompile","arguments":{"target":"sum_to"}"#,
+            r#""name":"unmerge_variable","arguments":{"function":"0x1198","gone":"v2"}"#,
+            r#""name":"unsplit_variable","arguments":{"function":"sum_to","variable":"local_10","address":"0x116c"}"#,
+            r#""name":"decompile","arguments":{"target":"main"}"#,
+            r#""name":"unmerge_variable","arguments":{"function":"main","gone":"v2"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 9);
+    let text = |i: usize| {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    for reply in &replies[..8] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    let candidates: serde_json::Value = serde_json::from_str(&text(0)).expect("JSON");
+    assert_eq!(candidates["function"], "main");
+    assert_eq!(candidates["valid"][0]["keep"], "b");
+    assert_eq!(candidates["valid"][0]["gone"], "v2");
+    assert!(text(1).contains("\"merges\": [\n"), "{}", text(1));
+    assert!(
+        text(2).contains("  b = sum_to(add(a, 3));\n"),
+        "{}",
+        text(2)
+    );
+    assert!(text(2).contains("  return b;\n"), "{}", text(2));
+    assert!(
+        text(3).contains("\"variable\": \"local_10\""),
+        "{}",
+        text(3)
+    );
+    assert!(
+        text(4).contains(
+            "// local_10 is not split at 0x116c: a use at 0x117d is reached by another definition too\n"
+        ),
+        "{}",
+        text(4)
+    );
+    assert!(
+        text(7).contains("  v2 = sum_to(add(a, 3));\n"),
+        "{}",
+        text(7)
+    );
+    // A word not there to take back is said.
+    assert_eq!(replies[8]["result"]["isError"], true, "{:?}", replies[8]);
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    assert!(
+        saved.variable_edits().is_empty(),
+        "the words taken back leave none"
+    );
+    let _ = std::fs::remove_file(&project);
+}

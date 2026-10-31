@@ -264,6 +264,20 @@ shape of the function still reads. The slice follows the pseudocode as it is rea
 **Clear slice**, or opening another function, shows every line again. What a slice keeps is
 `ag image pseudocode --slice`'s (`docs/cli.md`).
 
+## Merging and splitting variables
+
+**Edit ▸ Merge variables…** merges two of the variables of the function on screen: type
+`KEEP GONE`, and every occurrence of `GONE` reads `KEEP`. The prompt opens on the first merge
+`ag image merges` suggests — a copy, or a register declared again past a join — and takes a
+name the analyst gave a variable for the variable. A merge that changes the meaning is made
+on the analyst's word, and the notice and the function's leading comments say where both are
+live. **Unmerge variable…** takes one back by the variable merged away. **Split variable
+here…** splits the variable the selected line assigns at that line's address, `NAME@ADDRESS`:
+the assignment and the uses it reaches take a fresh name, `NAME_2`; a split that would need
+both names at one use is refused, and the leading comments say which use. The words are kept
+on the function's record in the project file, by the names the lift declares, and undo takes
+them back.
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or

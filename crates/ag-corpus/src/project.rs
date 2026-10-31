@@ -541,7 +541,37 @@ pub struct Annotation {
     /// format version does not change for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<bool>,
+    /// On a function's record: the analyst's merges of its variables, each
+    /// `[keep, gone]` — every occurrence of `gone` reads `keep`, and `gone`
+    /// is no longer declared — in the order they are made. The names are
+    /// the ones the lift declares, before renames, as a variable's record
+    /// keys on. A reader that does not know the field prints the variables
+    /// apart and misreads nothing, so the format version does not change
+    /// for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merges: Vec<(String, String)>,
+    /// On a function's record: the analyst's splits of its variables, each
+    /// the variable and the address of the definition split from it, in
+    /// the order they are made. The definition and the uses it reaches take
+    /// a fresh name, `v1_2`. A reader that does not know the field prints
+    /// the variable whole and misreads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub splits: Vec<VariableSplit>,
 }
+
+/// A split of a variable at one of its definitions, on a function's record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableSplit {
+    /// The variable, as the lift declares it.
+    pub variable: String,
+    /// The address of the statement assigning it, in its canonical
+    /// spelling.
+    pub at: String,
+}
+
+/// The analyst's merges of one function's variables, `(keep, gone)`, and
+/// its splits, `(variable, at)`.
+pub type VariableWords = (Vec<(String, String)>, Vec<(String, u64)>);
 
 impl Annotation {
     /// An empty annotation for the local variable `variable` of the function
@@ -571,6 +601,8 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            merges: Vec::new(),
+            splits: Vec::new(),
         }
     }
 
@@ -601,6 +633,8 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            merges: Vec::new(),
+            splits: Vec::new(),
         }
     }
 
@@ -630,6 +664,8 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            merges: Vec::new(),
+            splits: Vec::new(),
         }
     }
 
@@ -846,6 +882,46 @@ impl Annotation {
             && self.overrides.is_empty()
             && !self.drop_stores
             && self.inline.is_none()
+            && self.merges.is_empty()
+            && self.splits.is_empty()
+    }
+
+    /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
+    /// the order of the others kept.
+    pub fn merge_variables(&mut self, keep: &str, gone: &str) {
+        self.unmerge_variable(gone);
+        self.merges.push((keep.to_string(), gone.to_string()));
+    }
+
+    /// Take back the merge of `gone`, and say whether there was one.
+    pub fn unmerge_variable(&mut self, gone: &str) -> bool {
+        let before = self.merges.len();
+        self.merges.retain(|(_, g)| g != gone);
+        self.merges.len() != before
+    }
+
+    /// Split `variable` at the definition at `at`, in its canonical
+    /// spelling; a word already there stays where it is.
+    pub fn split_variable(&mut self, variable: &str, at: &str) {
+        if !self
+            .splits
+            .iter()
+            .any(|s| s.variable == variable && s.at == at)
+        {
+            self.splits.push(VariableSplit {
+                variable: variable.to_string(),
+                at: at.to_string(),
+            });
+        }
+    }
+
+    /// Take back the split of `variable` at `at`, and say whether there was
+    /// one.
+    pub fn unsplit_variable(&mut self, variable: &str, at: &str) -> bool {
+        let before = self.splits.len();
+        self.splits
+            .retain(|s| !(s.variable == variable && s.at == at));
+        self.splits.len() != before
     }
 }
 
@@ -1305,6 +1381,27 @@ impl ProjectFile {
                 .push(variable.to_string());
         }
         removable
+    }
+
+    /// The analyst's merges and splits of each function's variables, by
+    /// the value of the function's entry. A split at an address that does
+    /// not read is left out.
+    pub fn variable_edits(&self) -> BTreeMap<u64, VariableWords> {
+        self.places()
+            .filter(|a| !a.block && (!a.merges.is_empty() || !a.splits.is_empty()))
+            .filter_map(|a| {
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                let splits = a
+                    .splits
+                    .iter()
+                    .filter_map(|s| {
+                        let (at, _) = crate::parse_addr_space(&s.at).ok()?;
+                        Some((s.variable.clone(), at))
+                    })
+                    .collect();
+                Some((value, (a.merges.clone(), splits)))
+            })
+            .collect()
     }
 
     /// The analyst's words on which functions are inlined into their
@@ -2497,6 +2594,53 @@ mod tests {
         record.inline = Some(false);
         assert!(!record.is_empty());
         record.inline = None;
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn merges_and_splits_are_kept_on_the_functions_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        record.merge_variables("v1", "v2");
+        record.merge_variables("v1", "v3");
+        // A second word on v2 replaces the first, at the end.
+        record.merge_variables("v3", "v2");
+        record.split_variable("local_14", "0x401020");
+        record.split_variable("local_14", "0x401020");
+        assert_eq!(
+            record.merges,
+            [
+                ("v1".to_string(), "v3".to_string()),
+                ("v3".to_string(), "v2".to_string())
+            ]
+        );
+        assert_eq!(record.splits.len(), 1, "one word per split");
+        let edits = project.variable_edits();
+        assert_eq!(
+            edits,
+            BTreeMap::from([(
+                0x401000,
+                (
+                    vec![
+                        ("v1".to_string(), "v3".to_string()),
+                        ("v3".to_string(), "v2".to_string())
+                    ],
+                    vec![("local_14".to_string(), 0x401020)],
+                )
+            )])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"merges\": ["), "{json}");
+        assert!(json.contains("\"variable\": \"local_14\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.variable_edits(), edits);
+        assert_eq!(read.format, FORMAT_VERSION);
+        // Taken back, the record goes.
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        assert!(record.unmerge_variable("v2"));
+        assert!(record.unmerge_variable("v3"));
+        assert!(!record.unmerge_variable("v3"));
+        assert!(record.unsplit_variable("local_14", "0x401020"));
         assert!(record.is_empty());
     }
 }

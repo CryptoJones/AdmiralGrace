@@ -217,6 +217,13 @@ pub trait Symbols {
         None
     }
 
+    /// The analyst's words on the variables of the function at `address`:
+    /// which are merged and where one is split, by the names the lift
+    /// declares. None unless the image says.
+    fn variable_edits(&self, _address: u64) -> crate::merge::VariableEdits {
+        crate::merge::VariableEdits::default()
+    }
+
     /// What the pointer to `address` lands on, when the image knows.
     fn pointee(&self, _address: u64) -> Option<Pointee> {
         None
@@ -944,6 +951,8 @@ fn lift_inner(
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
+    // The analyst's splits and merges, on the body as it then reads.
+    crate::merge::apply_edits(&mut function, &symbols.variable_edits(entry));
     let high = if keep {
         function.body.clone()
     } else {

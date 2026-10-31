@@ -178,7 +178,7 @@ Filed 2026-10-26.
 
 ### Variables and data flow
 
-- [ ] Merge and split variables — [#358](https://github.com/CryptoJones/AdmiralGrace/issues/358)
+- [x] Merge and split variables — [#358](https://github.com/CryptoJones/AdmiralGrace/issues/358)
 - [ ] Force a new variable version for per-path naming and typing — [#359](https://github.com/CryptoJones/AdmiralGrace/issues/359)
 - [ ] User-informed data flow: set a variable's value or range — [#360](https://github.com/CryptoJones/AdmiralGrace/issues/360)
 - [ ] Expose possible-value-set analysis in the workbench and the CLI — [#361](https://github.com/CryptoJones/AdmiralGrace/issues/361)

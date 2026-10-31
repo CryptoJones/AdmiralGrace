@@ -2206,3 +2206,115 @@ fn opaque_predicates_are_found_and_patched_out_of_the_pseudocode() {
     let again = ag(&["opaque", "--all", "--project", &project]);
     assert!(again.starts_with("0x401029  even_product"), "{again}");
 }
+
+#[test]
+fn variables_are_merged_and_split_on_the_analysts_word_and_the_candidates_listed() {
+    let file = TempFile::new("merge");
+    // What `ag image inline.elf SUBCOMMAND ping --project FILE` prints.
+    let image = |args: &[&str]| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(args)
+            .args(["--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let word = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec![args[0], "--file"];
+        let text = file.text();
+        all.push(&text);
+        all.extend(&args[1..]);
+        project_with("inline.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+
+    // The candidates, grouped: local_c and eax both copy a.
+    let listing = image(&["merges", "ping"]);
+    assert!(
+        listing.starts_with("// merge candidates of ping at 0x401000\nsuggested:\n  local_c into a  local_c = a copies it\n  eax into a      eax = a copies it\nvalid:\n"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("unsound:\n  eax into local_c  both are live at 0x401023\n"),
+        "{listing}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&image(&["merges", "ping", "--json"])).expect("JSON");
+    assert_eq!(json["function"], "ping");
+    assert_eq!(json["suggested"][0]["keep"], "a");
+    assert_eq!(json["suggested"][0]["gone"], "local_c");
+    assert_eq!(json["unsound"][0]["at"], "0x401023");
+
+    // A merge reads local_c as a, and drops its declaration and the copy.
+    let before = image(&["pseudocode", "ping"]);
+    assert!(before.contains("  local_c = a;\n"), "{before}");
+    let (ok, stdout, stderr) = word(&["merge", "ping", "a", "local_c"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now merge local_c into a"),
+        "{stdout}"
+    );
+    let merged = image(&["pseudocode", "ping"]);
+    assert!(!merged.contains("local_c"), "{merged}");
+    assert!(merged.contains("    a = v1 + 1;\n"), "{merged}");
+    assert!(merged.contains("  return a;\n"), "{merged}");
+
+    // An unsound merge is made, and said.
+    let (ok, _, stderr) = word(&["merge", "ping", "a", "v1"]);
+    assert!(ok, "{stderr}");
+    let unsound = image(&["pseudocode", "ping"]);
+    assert!(
+        unsound.contains("// a and v1 are merged though both are live at 0x401023\n"),
+        "{unsound}"
+    );
+    let (ok, _, stderr) = word(&["unmerge", "ping", "v1"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = word(&["unmerge", "ping", "local_c"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(image(&["pseudocode", "ping"]), before);
+
+    // A split of eax at its second assignment gives it a name of its own.
+    let (ok, stdout, stderr) = word(&["split", "ping", "eax", "0x401023"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now split eax at 0x401023"),
+        "{stdout}"
+    );
+    let split = image(&["pseudocode", "ping"]);
+    assert!(split.contains("  int eax_2;\n"), "{split}");
+    assert!(split.contains("    eax_2 = v1 + 1;\n"), "{split}");
+    assert!(split.contains("  eax = a;\n"), "{split}");
+    // The halves are a suggested merge.
+    assert!(
+        image(&["merges", "ping"]).contains("  eax_2 into eax  both hold rax\n"),
+        "the halves"
+    );
+    // A split whose use another definition reaches is refused, and said.
+    let (ok, _, stderr) = word(&["split", "ping", "local_c", "0x40102b"]);
+    assert!(ok, "{stderr}");
+    let refused = image(&["pseudocode", "ping"]);
+    assert!(
+        refused.contains(
+            "// local_c is not split at 0x40102b: a use at 0x40102e is reached by another definition too\n"
+        ),
+        "{refused}"
+    );
+    let (ok, _, stderr) = word(&["unsplit", "ping", "local_c", "0x40102b"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = word(&["unsplit", "ping", "eax", "0x401023"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("function 0x401000 cleared"), "{stdout}");
+    assert_eq!(image(&["pseudocode", "ping"]), before);
+    // A variable is not merged into itself.
+    let (ok, _, stderr) = word(&["merge", "ping", "a", "a"]);
+    assert!(!ok);
+    assert!(stderr.contains("cannot be merged into itself"), "{stderr}");
+}

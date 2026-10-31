@@ -762,7 +762,7 @@ fn visit(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
 
 /// `node` with `f` applied to every node inside it, innermost first, and
 /// then to the node itself. What `f` returns is not looked into again.
-fn map(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNode {
+pub(crate) fn map(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNode {
     let sub = |node: Box<AstNode>, f: &mut dyn FnMut(AstNode) -> AstNode| Box::new(map(*node, f));
     let node = match node {
         AstNode::Binary { lhs, op, rhs } => AstNode::Binary {
