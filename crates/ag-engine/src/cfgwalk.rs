@@ -50,6 +50,72 @@ pub trait Entries {
     fn branch_leaves(&self, _entry: u64, _target: u64) -> bool {
         false
     }
+
+    /// Whether a call to the function at `callee` comes back: `exit`,
+    /// `abort` and their kind never do, nor does a function whose every
+    /// path ends in one of them, so the instruction after such a call is
+    /// not reached from it. The default says every call returns.
+    fn returns(&self, _callee: u64) -> bool {
+        true
+    }
+
+    /// Whether a call through the import `slot` comes back: the same, for
+    /// `call [rip+slot]` to an import the image names.
+    fn slot_returns(&self, _slot: u64) -> bool {
+        true
+    }
+}
+
+/// Whether a function of this name never returns, by the name alone: the
+/// C library's `exit`, `abort` and `__stack_chk_fail`, C++'s throw and
+/// terminate, Windows' `ExitProcess` and `__fastfail`, and the rest of
+/// that kind. A leading underscore or two, as a Mach-O or an import table
+/// spells a name, is not counted.
+pub fn never_returns_by_name(name: &str) -> bool {
+    let name = name
+        .strip_prefix("__imp_")
+        .unwrap_or(name)
+        .trim_start_matches('_');
+    matches!(
+        name,
+        "exit"
+            | "Exit"
+            | "quick_exit"
+            | "abort"
+            | "stack_chk_fail"
+            | "assert_fail"
+            | "assert_rtn"
+            | "assert"
+            | "err"
+            | "errx"
+            | "verr"
+            | "verrx"
+            | "longjmp"
+            | "siglongjmp"
+            | "longjmp_chk"
+            | "pthread_exit"
+            | "cxa_throw"
+            | "cxa_rethrow"
+            | "cxa_bad_cast"
+            | "cxa_bad_typeid"
+            | "Unwind_Resume"
+            | "ZSt9terminatev"
+            | "std_terminate"
+            | "CxxThrowException"
+            | "ExitProcess"
+            | "ExitThread"
+            | "TerminateProcess"
+            | "FreeLibraryAndExitThread"
+            | "RaiseException"
+            | "RtlRaiseException"
+            | "fastfail"
+            | "invoke_watson"
+            | "report_rangecheckfailure"
+            | "objc_exception_throw"
+            | "rust_panic"
+            | "ZN4core9panicking5panic17h"
+    ) || name.starts_with("ZN4core9panicking")
+        || name.starts_with("ZN3std9panicking")
 }
 
 /// The analyst's word on a jump table: where it is and how long.
@@ -488,6 +554,25 @@ fn step_of(
     entries: &dyn Entries,
     table: Option<&JumpTable>,
 ) -> Step {
+    let mut step = step_before_boundaries(ins, entry, entries, table);
+    // No function runs into the next one: code that would fall into
+    // another function's entry ended before it — after a call that never
+    // returns, or an instruction that never falls through.
+    let next = ins.address + ins.length as u64;
+    if step.falls_through && next != entry && entries.is_function(next) {
+        step.falls_through = false;
+        step.ends_block = true;
+    }
+    step
+}
+
+/// [`step_of`] before the function boundaries are applied.
+fn step_before_boundaries(
+    ins: &DecodedInsn,
+    entry: u64,
+    entries: &dyn Entries,
+    table: Option<&JumpTable>,
+) -> Step {
     let plain = Step {
         targets: Vec::new(),
         falls_through: true,
@@ -535,15 +620,19 @@ fn step_of(
             ends_block: true,
             ..plain
         },
+        // A call comes back to the next instruction, unless the callee is
+        // one that never returns.
         Flow::Call(t) => Step {
-            falls_through: true,
+            falls_through: entries.returns(t),
             ends_block: true,
             is_call: true,
             call_target: Some(t),
             ..plain
         },
         Flow::IndirectCall => Step {
-            falls_through: true,
+            falls_through: ins
+                .memory_address()
+                .is_none_or(|slot| entries.slot_returns(slot)),
             ends_block: true,
             is_call: true,
             ..plain

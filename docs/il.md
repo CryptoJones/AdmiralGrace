@@ -92,6 +92,23 @@ of declarations. It is pseudocode in each language, not a program: `long(x)` and
 addresses the language has no spelling for, and `/` and `>>` keep C's meaning. The levels
 and the transpiler keep C, which a compiler reads. `docs/options.md` has the option.
 
+## Functions that do not return
+
+A call to `exit`, `abort`, `__stack_chk_fail`, `ExitProcess`, a C++ throw or another of that
+kind never comes back, and the walk gives its block no successor: the code after it is not
+the call's to reach, and a function that would otherwise run into the next function's entry
+ends before it. A function of the image whose every path ends so — in such a call, a tail call
+to one, a trap, or by running up to the next function, never in a `ret` — never returns
+either, and its callers' graphs end at their calls to it; the pseudocode says `// does not
+return` after the line that decided its type. An exit-on-error helper, which does not return
+only under a condition — `if (p == 0) { die(2); }` at the top of its body, the arm ending in a
+call that never returns while the rest goes on — is noted with the condition, `// does not
+return when a == 0`, and a caller says it of its own arguments at the end of the call's line:
+`checked(p, 5);  // checked does not return when p == 0` — where every parameter the condition
+names has an argument to stand for it. Conditions deeper in a body are not said, since they
+hold only under the ones above them. The path after such a call ends in a marker the
+pseudocode does not print and the transpiler writes for the compiler, `__builtin_unreachable()`.
+
 ## Calls through pointers, and Windows control-flow guard
 
 A call or a jump through a value the lift knows — a parameter, a field loaded from a struct —

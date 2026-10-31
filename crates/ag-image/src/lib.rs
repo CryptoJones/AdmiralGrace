@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use iced_x86::Formatter as _;
 
 use ag_engine::arm::ArmVariant;
+use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
 use ag_engine::emit::{emit_function_in, Callees};
@@ -441,6 +442,15 @@ pub struct Binary {
     /// address of the function that declares them: taken out of the
     /// pseudocode even when the dead code is kept.
     removable_stores: Mutex<BTreeMap<u64, Vec<String>>>,
+    /// Whether each function never returns, as the walks found; forgotten
+    /// with the walks.
+    noreturn: Mutex<BTreeMap<u64, bool>>,
+    /// The functions whose return is being decided, so that a cycle of
+    /// calls is not followed round.
+    noreturn_visiting: Mutex<BTreeSet<u64>>,
+    /// The functions whose conditions of not returning are being read,
+    /// so that a cycle of calls is not followed round.
+    facts_visiting: Mutex<BTreeSet<u64>>,
     /// The levels of the lift, by function, level and form; forgotten with
     /// the pseudocode.
     levels: Mutex<LevelCache>,
@@ -745,6 +755,9 @@ impl Binary {
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
             levels: Mutex::new(HashMap::new()),
+            noreturn: Mutex::new(BTreeMap::new()),
+            noreturn_visiting: Mutex::new(BTreeSet::new()),
+            facts_visiting: Mutex::new(BTreeSet::new()),
             removable_stores: Mutex::new(BTreeMap::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
@@ -1476,6 +1489,9 @@ impl Binary {
             if let Ok(mut cache) = self.cfgs.lock() {
                 cache.clear();
             }
+            if let Ok(mut held) = self.noreturn.lock() {
+                held.clear();
+            }
             // The program-wide indexes were built from the old walks.
             for index in [&self.string_users, &self.data_users] {
                 if let Ok(mut held) = index.lock() {
@@ -1527,6 +1543,101 @@ impl Binary {
     /// say: one hint per indirect jump, by the jump's address. The walks
     /// and the pseudocode built so far are forgotten, since the graph of
     /// a function may have grown cases.
+    /// Whether the function at `address` never returns: it is `exit`,
+    /// `abort` or another of that kind by name, or every path of its graph
+    /// ends in a call to one, a tail call to one, a trap, or by running up
+    /// to the next function — none in a `ret`, a tail call to a function
+    /// that returns, or a jump the walk could not follow, which is taken to
+    /// return. A cycle of calls is taken to return.
+    pub fn never_returns(&self, address: u64) -> bool {
+        if let Some(name) = self.function_name(address) {
+            if ag_engine::cfgwalk::never_returns_by_name(name) {
+                return true;
+            }
+        }
+        if let Some(known) = self
+            .noreturn
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).copied())
+        {
+            return known;
+        }
+        {
+            let Ok(mut visiting) = self.noreturn_visiting.lock() else {
+                return false;
+            };
+            if !visiting.insert(address) {
+                return false;
+            }
+        }
+        let verdict = self.never_returns_by_graph(address);
+        if let Ok(mut visiting) = self.noreturn_visiting.lock() {
+            visiting.remove(&address);
+        }
+        if let Ok(mut held) = self.noreturn.lock() {
+            held.insert(address, verdict);
+        }
+        verdict
+    }
+
+    /// [`Self::never_returns`] by the graph alone.
+    fn never_returns_by_graph(&self, address: u64) -> bool {
+        let Some(code) = self.code_at(address) else {
+            return false;
+        };
+        if !self.supports_disassembly() {
+            return false;
+        }
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        if cfg.blocks.is_empty() {
+            return false;
+        }
+        for block in &cfg.blocks {
+            let Some(last) = decoded
+                .disasm
+                .instructions
+                .iter()
+                .find(|ins| ins.address + ins.length as u64 == block.to)
+            else {
+                return false;
+            };
+            match last.flow {
+                Flow::Return => return false,
+                // A tail call returns if its callee does.
+                Flow::UnconditionalBranch(_) | Flow::IndirectBranch
+                    if cfg.tail_calls.iter().any(|tail| tail.site == last.address) =>
+                {
+                    let target = cfg
+                        .tail_calls
+                        .iter()
+                        .find(|tail| tail.site == last.address)
+                        .map(|tail| tail.target)
+                        .unwrap_or_default();
+                    let returns = match self.imports.get(&target) {
+                        Some(import) => !ag_engine::cfgwalk::never_returns_by_name(import),
+                        None => !self.never_returns(target),
+                    };
+                    if returns {
+                        return false;
+                    }
+                }
+                // A jump the walk could not follow may go anywhere.
+                Flow::IndirectBranch
+                    if !cfg
+                        .jump_tables
+                        .iter()
+                        .any(|table| table.site == last.address) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) -> bool {
         if let Ok(mut held) = self.table_hints.lock() {
             if *held == hints {
@@ -1536,6 +1647,9 @@ impl Binary {
         }
         if let Ok(mut cache) = self.disassembly.lock() {
             cache.clear();
+        }
+        if let Ok(mut held) = self.noreturn.lock() {
+            held.clear();
         }
         if let Ok(mut cache) = self.cfgs.lock() {
             cache.clear();
@@ -2789,6 +2903,16 @@ impl Entries for Binary {
         self.site_override(site).switch != Some(false)
     }
 
+    fn returns(&self, callee: u64) -> bool {
+        !self.never_returns(callee)
+    }
+
+    fn slot_returns(&self, slot: u64) -> bool {
+        self.imports
+            .get(&slot)
+            .is_none_or(|import| !ag_engine::cfgwalk::never_returns_by_name(import))
+    }
+
     /// Under `branches-end-procedures yes`, a branch to an address before
     /// the entry or at or past the next function the image knows leaves
     /// the procedure.
@@ -2843,6 +2967,47 @@ impl Symbols for ImageSymbols<'_> {
 
     fn site(&self, address: u64) -> SiteOverride {
         self.0.site_override(address)
+    }
+
+    fn returns(&self, address: u64) -> bool {
+        !self.0.never_returns(address)
+    }
+
+    /// The conditions under which the function at `address` does not
+    /// return, over its parameters' names, from its own lift; a cycle of
+    /// calls is not followed round.
+    fn noreturn_when(&self, address: u64) -> Vec<(Vec<String>, AstNode)> {
+        {
+            let Ok(mut visiting) = self.0.facts_visiting.lock() else {
+                return Vec::new();
+            };
+            if !visiting.insert(address) {
+                return Vec::new();
+            }
+        }
+        let facts = self
+            .0
+            .stages(address)
+            .ok()
+            .map(|stages| {
+                let params: Vec<String> = stages
+                    .function
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect();
+                stages
+                    .function
+                    .noreturn_when
+                    .iter()
+                    .map(|condition| (params.clone(), condition.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(mut visiting) = self.0.facts_visiting.lock() {
+            visiting.remove(&address);
+        }
+        facts
     }
 
     /// The call graph's callers of the function, each call site decided by
