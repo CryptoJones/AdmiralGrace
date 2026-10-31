@@ -17,7 +17,7 @@ The images the image tests read, and how they were made.
 | `arm64.elf` | An AArch64 ELF executable built from `arm_sample.c`, statically linked with no C library. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
-| `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass, a category and a protocol, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
+| `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
 | `sample_objc_chained` | The same source linked for macOS 12 with chained fixups (`LC_DYLD_CHAINED_FIXUPS`): every pointer slot of the metadata holds a packed fixup, not an address, as every Mach-O linked for macOS 12 or iOS 15 and later does. |
 | `sample.m` | The Objective-C source of the two. |

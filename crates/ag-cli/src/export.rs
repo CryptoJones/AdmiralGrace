@@ -18,6 +18,8 @@
 //!   strings.json               ag image strings --json
 //!   data.json                  ag image data --json
 //!   calls.json                 ag image calls --json
+//!   objc.json                  ag image objc --json, when the image has Objective-C
+//!   objc.h                     ag image objc --header, the same as a header
 //!   functions/<address>.json   cfg, calls, data references, pseudocode or the reason
 //!   functions/<address>.asm    ag image disasm <address>
 //! ```
@@ -26,16 +28,16 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ag_image::Binary;
 use ag_corpus::project::sha256_of;
+use ag_image::Binary;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
 
 use crate::image::{
     calls_json, cfg_json, data_json, function_calls_json, function_data_json, info_json,
-    listing_text, pseudocode_json, strings_json, symbols_json, CfgJson, FunctionCallsJson,
-    FunctionDataJson, PseudocodeJson,
+    listing_text, objc_json, pseudocode_json, strings_json, symbols_json, CfgJson,
+    FunctionCallsJson, FunctionDataJson, PseudocodeJson,
 };
 
 /// The version of the layout, for a reader that has to tell one from the next.
@@ -50,6 +52,8 @@ const FILES: &[(&str, &str)] = &[
     ("strings.json", "The strings, with the functions that use them: `ag image strings --json`."),
     ("data.json", "The data, with the functions that use it: `ag image data --json`."),
     ("calls.json", "The whole call graph: `ag image calls --json`."),
+    ("objc.json", "The Objective-C the image describes — classes, categories, protocols — when it describes any: `ag image objc --json`."),
+    ("objc.h", "The same as an Objective-C header, when the image describes any: `ag image objc --header`."),
     ("functions/<address>.json", "One function: its control-flow graph (`cfg`), its calls and callers (`calls`), the data it refers to (`data`), and its pseudocode or the reason it has none (`pseudocode`)."),
     ("functions/<address>.asm", "The listing of the function, as `ag image disasm` prints it."),
 ];
@@ -217,6 +221,11 @@ pub fn run(
     writer.write_json("strings.json", &strings_json(image)?)?;
     writer.write_json("data.json", &data_json(image))?;
     writer.write_json("calls.json", &calls_json(image))?;
+    // An Objective-C image describes its classes; the rest have no such files.
+    if let Some(header) = image.objc_header() {
+        writer.write_json("objc.json", &objc_json(image))?;
+        writer.write("objc.h", header.as_bytes())?;
+    }
 
     // Then one pair of files per function.
     let mut index = Vec::new();

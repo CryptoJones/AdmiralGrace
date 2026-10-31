@@ -24,7 +24,7 @@ the workbench in more detail.
 | Pane | What it holds |
 |---|---|
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
-| Work surface | The selected function: listing, pseudocode, graph, bytes, and references. |
+| Work surface | The selected function: listing, pseudocode, graph, bytes, and references; for an Objective-C image, a Header tab with the recovered declarations. |
 | Inspector | The selection's detail, its cross references, the project's provenance and its shape. |
 | Bottom workspace | Search results, problems, and the log. |
 
@@ -409,7 +409,11 @@ as falling through.
 
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
 `+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped
-binary is named too; `ag image FILE objc` prints the classes, categories and protocols.
+binary is named too; `ag image FILE objc` prints the classes, categories and protocols. The
+work surface gains a **Header** tab for such an image: the same metadata as an Objective-C
+header — every protocol, class and category declared with its properties, instance variables
+and methods, the types decoded from the runtime's encodings — the quickest overview of the
+binary. `ag image FILE objc --header` prints the same, and `export` writes it as `objc.h`.
 
 A universal (fat) Mach-O holds several images, one per architecture. **Open binary…** takes
 `slice=ARCH` after the path — `app slice=arm64`, or the slice's position from 0 — to say which;

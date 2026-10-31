@@ -832,6 +832,33 @@ fn an_export_of_the_elf_writes_the_whole_analysis() {
 }
 
 #[test]
+fn an_export_of_an_objective_c_image_writes_its_header_and_the_rest_do_not() {
+    let dir = ExportDir::new("objc");
+    let (ok, _, stderr) = export("sample_objc_stripped", &dir, &[]);
+    assert!(ok, "{stderr}");
+    let files = dir.files();
+    assert!(files.contains(&"objc.h".to_string()), "{files:?}");
+    assert!(files.contains(&"objc.json".to_string()), "{files:?}");
+    let header = std::fs::read_to_string(dir.path().join("objc.h")).expect("objc.h");
+    assert_eq!(header, image("sample_objc_stripped", &["objc", "--header"]));
+    assert_eq!(
+        dir.json("objc.json")["classes"][1]["name"],
+        serde_json::json!("Derived")
+    );
+    let readme = std::fs::read_to_string(dir.path().join("README.md")).expect("README");
+    assert!(readme.contains("objc.h"), "{readme}");
+
+    let dir = ExportDir::new("elf-no-objc");
+    let (ok, _, stderr) = export("sample.elf", &dir, &[]);
+    assert!(ok, "{stderr}");
+    let files = dir.files();
+    assert!(
+        !files.iter().any(|file| file.starts_with("objc.")),
+        "{files:?}"
+    );
+}
+
+#[test]
 fn the_info_of_an_export_is_what_the_subcommand_prints() {
     let dir = ExportDir::new("info");
     let (ok, _, stderr) = export("sample.elf", &dir, &[]);
@@ -1423,6 +1450,55 @@ fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
         serde_json::json!("greet:")
     );
     assert!(json["protocols"][0]["instance_methods"][0]["imp"].is_null());
+    assert_eq!(
+        json["classes"][1]["properties"][0]["attributes"],
+        serde_json::json!("Ti,N,V_count")
+    );
+    let text = image("sample_objc_stripped", &["objc"]);
+    assert!(
+        text.contains("    property count  Ti,N,V_count"),
+        "{text}"
+    );
+
+    // The same as a header: declarations in dependency order, the types
+    // decoded, the accessors folded into their properties.
+    let header = image("sample_objc_stripped", &["objc", "--header"]);
+    assert!(
+        header.starts_with(
+            "// Objective-C declarations recovered from the image: 2 classes, 1 category, 1 protocol.\n"
+        ),
+        "{header}"
+    );
+    let protocol = header.find("@protocol Greeting").expect("protocol");
+    let base = header.find("@interface Base {").expect("base");
+    let extra = header.find("@interface Base (Extra)").expect("category");
+    let derived = header
+        .find("@interface Derived : Base <Greeting>")
+        .expect("derived");
+    assert!(
+        protocol < base && base < extra && extra < derived,
+        "{header}"
+    );
+    assert!(
+        header.contains("@property (nonatomic, readonly) struct Point origin;\n"),
+        "{header}"
+    );
+    assert!(
+        header.contains(
+            "- (unsigned long long)hash:(const char *)arg1 at:(unsigned long long)arg2;\n"
+        ),
+        "{header}"
+    );
+    assert!(!header.contains("setCount:"), "{header}");
+    let plain = image("sample.macho", &["objc", "--header"]);
+    assert!(plain.contains("no Objective-C metadata"), "{plain}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["image"])
+        .arg(fixture("sample_objc_stripped"))
+        .args(["objc", "--header", "--json"])
+        .output()
+        .expect("runs");
+    assert!(!output.status.success(), "--header and --json conflict");
 
     // An image without Objective-C says so.
     let report = image("sample.macho", &["objc"]);

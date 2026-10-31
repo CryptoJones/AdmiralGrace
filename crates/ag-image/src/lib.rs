@@ -61,7 +61,7 @@ pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
 pub use ag_engine::objc::{
-    ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProtocol,
+    ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
 };
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
@@ -687,6 +687,14 @@ impl Binary {
     /// the function list under the names the metadata gives.
     pub fn objc(&self) -> Option<&ObjcMetadata> {
         self.objc.as_ref()
+    }
+
+    /// The Objective-C the image carries, as a header: every protocol, class
+    /// and category declared with its properties, instance variables and
+    /// methods under the types their encodings say. `None` for an image
+    /// without Objective-C.
+    pub fn objc_header(&self) -> Option<String> {
+        self.objc.as_ref().map(ObjcMetadata::header)
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose

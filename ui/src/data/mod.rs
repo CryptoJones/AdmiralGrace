@@ -479,6 +479,13 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// The Objective-C the image describes, as a header: every protocol,
+    /// class and category declared. `None` where there is none, and the
+    /// Header tab is not offered.
+    fn objc_header(&self) -> Option<String> {
+        None
+    }
+
     /// Counts for the navigator sections.
     fn counts(&self) -> SectionCounts;
 
