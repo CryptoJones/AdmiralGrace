@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod plugin;
 pub mod procedure;
 pub mod register;
+pub mod slice;
 pub mod structure;
 pub mod swift;
 pub mod swift_demangle;

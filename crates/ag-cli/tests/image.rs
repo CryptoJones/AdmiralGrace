@@ -596,6 +596,94 @@ fn the_pseudocode_is_reported_as_json_with_the_addresses_of_each_line() {
 }
 
 #[test]
+fn the_pseudocode_is_printed_sliced_with_the_rest_as_comments_or_left_out() {
+    // sum_to's `local_14` at the end: the loop's init, condition and step
+    // are its; the sum is not.
+    let report = image(
+        "sample.elf",
+        &["pseudocode", "sum_to", "--slice", "local_14"],
+    );
+    assert_eq!(
+        report,
+        "// sum_to at 0x1161\n\
+         // backward slice of local_14 at the end\n\
+         // returns long: main reads rax after the call\n\
+         long sum_to(int a)\n\
+         {\n\
+         \x20 long local_10;\n\
+         \x20 int local_14;\n\
+         \n\
+         \x20 // local_10 = 0;\n\
+         \x20 for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) {\n\
+         \x20   // local_10 = local_10 + (long)local_14;\n\
+         \x20 }\n\
+         \x20 // return local_10;\n\
+         }\n"
+    );
+
+    // ping of the inline fixture, forward from the call's result at one of
+    // its line's addresses: the `if` stays for what it holds, the stores
+    // before it go.
+    let report = image(
+        "inline.elf",
+        &[
+            "pseudocode",
+            "ping",
+            "--slice",
+            "v1@0x401021",
+            "--forward",
+            "--slice-hide",
+        ],
+    );
+    assert!(
+        report.contains("// forward slice of v1 at 0x401021\n"),
+        "{report}"
+    );
+    assert!(!report.contains("local_c = a;"), "{report}");
+    assert!(!report.contains("eax = a;"), "{report}");
+    assert!(
+        report.contains(
+            "  if (eax > 0) {\n    v1 = pong(a - 1);\n    local_c = v1 + 1;\n    eax = v1 + 1;\n  }\n  return local_c;\n"
+        ),
+        "{report}"
+    );
+
+    // The return value, backward, as JSON: every line marked.
+    let report = image_json("inline.elf", &["pseudocode", "ping", "--slice", "return"]);
+    assert_eq!(
+        report["slice"],
+        serde_json::json!({
+            "variable": "return",
+            "address": null,
+            "address_hex": null,
+            "direction": "backward",
+        })
+    );
+    let out: Vec<&str> = report["lines"]
+        .as_array()
+        .expect("the lines")
+        .iter()
+        .filter(|line| line["in_slice"] == serde_json::json!(false))
+        .map(|line| line["text"].as_str().expect("text").trim())
+        .collect();
+    assert_eq!(out, ["eax = v1 + 1;"]);
+    // Unsliced, the lines say nothing of a slice.
+    let report = image_json("inline.elf", &["pseudocode", "ping"]);
+    assert!(report.get("slice").is_none());
+    assert!(report["lines"][0].get("in_slice").is_none());
+
+    // A variable or a statement the function lacks is said.
+    let (ok, _, error) = image_result("sample.elf", &["pseudocode", "main", "--slice", "nothing"]);
+    assert!(!ok);
+    assert!(error.contains("main names no variable nothing"), "{error}");
+    let (ok, _, error) = image_result("sample.elf", &["pseudocode", "main", "--slice", "v2@0x1"]);
+    assert!(!ok);
+    assert!(error.contains("main has no statement at 0x1"), "{error}");
+    let (ok, _, _) = image_result("sample.elf", &["pseudocode", "main", "--forward"]);
+    assert!(!ok, "--forward needs --slice");
+}
+
+#[test]
 fn the_start_up_glue_is_void_by_use_and_the_option_restores_the_refusal() {
     let report = image("sample.elf", &["pseudocode", "__do_global_dtors_aux"]);
     assert_eq!(

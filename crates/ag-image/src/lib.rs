@@ -46,7 +46,7 @@ use ag_engine::arm::ArmVariant;
 use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
-use ag_engine::emit::{emit_function_in, Callees};
+use ag_engine::emit::{emit_function_in, emit_function_sliced, Callees};
 use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
@@ -67,6 +67,7 @@ pub use ag_engine::objc::{
     ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
 };
 pub use ag_engine::opaque::Opaque;
+pub use ag_engine::slice::{Criterion as SliceCriterion, Direction as SliceDirection};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::swift::{
@@ -2161,9 +2162,27 @@ impl Binary {
             return found.clone();
         }
 
-        let built = self.build_pseudocode(address).map(Arc::new);
+        let built = self.build_pseudocode(address, None).map(Arc::new);
         cache.insert(address, built.clone());
         built
+    }
+
+    /// The pseudocode of the function at `address`, sliced: the same lines
+    /// as [`Binary::pseudocode`]'s, with
+    /// [`Pseudocode::slice_lines`] saying which the slice of `criterion`,
+    /// taken `direction`, keeps. Not kept, since each slice is asked once.
+    /// A function the lifter refuses is refused with its reason; a
+    /// criterion the function has no such variable or statement for is
+    /// refused with that.
+    pub fn sliced_pseudocode(
+        &self,
+        address: u64,
+        criterion: &SliceCriterion,
+        direction: SliceDirection,
+    ) -> Result<Pseudocode, NotLifted> {
+        // Refused the way the pseudocode is, and from the same cache.
+        self.pseudocode(address)?;
+        self.build_pseudocode(address, Some((criterion, direction)))
     }
 
     /// The function at `address` at one level of the lift — the machine's
@@ -2237,8 +2256,13 @@ impl Binary {
         Ok(il::to_ssa(&function, analysis, medium.as_ref()))
     }
 
-    /// Lift the function at `address` and print it.
-    fn build_pseudocode(&self, address: u64) -> Result<Pseudocode, NotLifted> {
+    /// Lift the function at `address` and print it, sliced when `slice`
+    /// says how.
+    fn build_pseudocode(
+        &self,
+        address: u64,
+        slice: Option<(&SliceCriterion, SliceDirection)>,
+    ) -> Result<Pseudocode, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),
         })?;
@@ -2266,15 +2290,25 @@ impl Binary {
             .map_err(|reason| NotLifted { reason })?;
             Ok(pseudocode)
         };
+        let emit = |function: &ag_engine::LiftedFunction| match slice {
+            None => Ok(emit_function_in(
+                function,
+                &self.options,
+                &removable,
+                &callees,
+            )),
+            Some((criterion, direction)) => emit_function_sliced(
+                function,
+                &self.options,
+                &removable,
+                &callees,
+                criterion,
+                direction,
+            )
+            .map_err(|reason| NotLifted { reason }),
+        };
         if let Some(stages) = self.architecture_stages(&decoded, &cfg, address, &name) {
-            return stages.and_then(|stages| {
-                formatted(emit_function_in(
-                    &stages.function,
-                    &self.options,
-                    &removable,
-                    &callees,
-                ))
-            });
+            return stages.and_then(|stages| formatted(emit(&stages.function)?));
         }
         let function = {
             let _lifting = Lifting::new(self, address);
@@ -2289,12 +2323,7 @@ impl Binary {
                 &self.options,
             )?
         };
-        formatted(emit_function_in(
-            &function,
-            &self.options,
-            &removable,
-            &callees,
-        ))
+        formatted(emit(&function)?)
     }
 
     /// The control-flow graph of the function at `address`.

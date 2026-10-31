@@ -52,6 +52,12 @@ pub struct Pseudocode {
     /// that goes one way — kept here because the option says `keep`. Empty
     /// under `drop`, when they are gone.
     pub dead_lines: BTreeSet<usize>,
+    /// The lines, counted from zero, a slice keeps, when the pseudocode was
+    /// printed sliced: the lines of the statements in the slice, of the
+    /// control statements that hold them, and the lines that are no
+    /// statement's — the signature, the declarations, the function's
+    /// braces. `None` when it was not.
+    pub slice_lines: Option<BTreeSet<usize>>,
 }
 
 impl Pseudocode {
@@ -251,6 +257,38 @@ pub fn emit_function_in(
     removable: &[String],
     callees: &dyn Callees,
 ) -> Pseudocode {
+    emit_marked(function, options, removable, callees, None)
+        .expect("a pseudocode without a slice is always printed")
+}
+
+/// [`emit_function_in`], sliced: the pseudocode says which lines the slice
+/// of `criterion` keeps, the slice taken `direction` over the body as it
+/// is printed — after the dead code the options drop. Or why there is no
+/// such criterion in the function.
+pub fn emit_function_sliced(
+    function: &LiftedFunction,
+    options: &Options,
+    removable: &[String],
+    callees: &dyn Callees,
+    criterion: &crate::slice::Criterion,
+    direction: crate::slice::Direction,
+) -> Result<Pseudocode, String> {
+    emit_marked(
+        function,
+        options,
+        removable,
+        callees,
+        Some((criterion, direction)),
+    )
+}
+
+fn emit_marked(
+    function: &LiftedFunction,
+    options: &Options,
+    removable: &[String],
+    callees: &dyn Callees,
+    slice: Option<(&crate::slice::Criterion, crate::slice::Direction)>,
+) -> Result<Pseudocode, String> {
     // Under `dead-code drop` the body is pruned first: the statements whose
     // results nothing uses go, and the locals nothing names after them.
     // Under `keep`, the dead stores of the removable variables alone go,
@@ -271,10 +309,17 @@ pub fn emit_function_in(
     } else {
         crate::dead::dead_indices(function)
     };
+    let sliced = match slice {
+        Some((criterion, direction)) => Some(crate::slice::slice(function, criterion, direction)?),
+        None => None,
+    };
     let mut marks = Marks {
         next: 0,
         dead: &dead,
         spans: Vec::new(),
+        slice: sliced.as_ref(),
+        sliced: Vec::new(),
+        open: Vec::new(),
     };
     let mut style = Style::of(options);
     if options.call_hints == CallHints::Names {
@@ -295,12 +340,14 @@ pub fn emit_function_in(
             text: style.comment(&format!("thunk for {callee}")),
             addresses: signature_addresses,
         });
-        return Pseudocode {
+        let slice_lines = sliced.as_ref().map(|_| (0..lines.len()).collect());
+        return Ok(Pseudocode {
             lines,
             dead_lines: BTreeSet::new(),
             return_type: None,
             return_reason: None,
-        };
+            slice_lines,
+        });
     }
 
     // The return type is a decision, and the comment says what decided it:
@@ -440,17 +487,19 @@ pub fn emit_function_in(
         }),
     }
 
+    let slice_lines = marks.slice.map(|_| marks.slice_lines(lines.len()));
     let mut pseudocode = Pseudocode {
         lines,
         return_type: Some(function.return_type.clone()),
         return_reason: function.return_reason.clone(),
         dead_lines: marks.dead_lines(),
+        slice_lines,
     };
     if style.braces == BraceStyle::Broken && matches!(style.language, Language::C | Language::ObjC)
     {
         break_braces(&mut pseudocode);
     }
-    pseudocode
+    Ok(pseudocode)
 }
 
 /// The parameter names of every function the body calls by address, from
@@ -513,11 +562,12 @@ fn for_each_node(statements: &[Statement], f: &dyn Fn(&AstNode)) {
 /// Put every control statement's opening brace on a line of its own under
 /// its head, and `else` on its own line between the braces — the broken
 /// brace style — keeping each line's addresses on the head and the dead
-/// lines on the lines they came from. The function's own brace already
-/// stands alone.
+/// lines and the slice's on the lines they came from. The function's own
+/// brace already stands alone.
 fn break_braces(pseudocode: &mut Pseudocode) {
     let mut lines = Vec::with_capacity(pseudocode.lines.len() + 8);
     let mut dead = BTreeSet::new();
+    let mut kept = pseudocode.slice_lines.as_ref().map(|_| BTreeSet::new());
     let brace_line = |text: &str, brace: &str| Line {
         text: format!("{}{brace}", &text[..text.len() - text.trim_start().len()]),
         addresses: Vec::new(),
@@ -543,9 +593,15 @@ fn break_braces(pseudocode: &mut Pseudocode) {
         if was_dead {
             dead.extend(first..lines.len());
         }
+        if let (Some(kept), Some(slice)) = (kept.as_mut(), pseudocode.slice_lines.as_ref()) {
+            if slice.contains(&index) {
+                kept.extend(first..lines.len());
+            }
+        }
     }
     pseudocode.lines = lines;
     pseudocode.dead_lines = dead;
+    pseudocode.slice_lines = kept;
 }
 
 /// The head of a control statement's line without its ` {`, when the line
@@ -575,6 +631,14 @@ struct Marks<'a> {
     /// spans, and whether it is dead. A statement's lines hold the lines of
     /// the statements it holds, which speak for themselves after it.
     spans: Vec<(usize, usize, bool)>,
+    /// The indices of the statements in the slice, when the pseudocode is
+    /// sliced.
+    slice: Option<&'a BTreeSet<usize>>,
+    /// Each span's standing in the slice: whether its statement is in it,
+    /// or holds one that is.
+    sliced: Vec<bool>,
+    /// The spans of the statements being printed, outermost first.
+    open: Vec<usize>,
 }
 
 impl Marks<'_> {
@@ -593,6 +657,46 @@ impl Marks<'_> {
             }
         }
         lines
+    }
+
+    /// The lines the slice keeps, of `count`: a statement's lines when it
+    /// is in the slice or holds a statement that is, less those of a
+    /// statement it holds that is not; and every line that is no
+    /// statement's.
+    fn slice_lines(&self, count: usize) -> BTreeSet<usize> {
+        let mut lines: BTreeSet<usize> = (0..count).collect();
+        for ((first, end, _), kept) in self.spans.iter().zip(&self.sliced) {
+            if *kept {
+                lines.extend(*first..*end);
+            } else {
+                for line in *first..*end {
+                    lines.remove(&line);
+                }
+            }
+        }
+        lines
+    }
+
+    /// Begin the statement `mark`, its first line `first`; its span.
+    fn begin(&mut self, mark: usize, first: usize) -> usize {
+        let span = self.spans.len();
+        self.spans.push((first, first, self.dead.contains(&mark)));
+        let kept = self.slice.is_some_and(|slice| slice.contains(&mark));
+        self.sliced.push(kept);
+        if kept {
+            for open in &self.open {
+                self.sliced[*open] = true;
+            }
+        }
+        self.open.push(span);
+        span
+    }
+
+    /// End the statement whose span is `span`, its lines ending before
+    /// `end`.
+    fn end(&mut self, span: usize, end: usize) {
+        self.spans[span].1 = end;
+        self.open.pop();
     }
 }
 
@@ -772,11 +876,7 @@ fn emit_statements(
         let after = label_of(statements.get(index + 1));
         let mark = marks.next;
         marks.next += 1;
-        let first_line = lines.len();
-        let span = marks.spans.len();
-        marks
-            .spans
-            .push((first_line, first_line, marks.dead.contains(&mark)));
+        let span = marks.begin(mark, lines.len());
         match &statement.kind {
             StatementKind::Plain => match &statement.node {
                 // A label sits one level out from the statements it names;
@@ -1138,7 +1238,7 @@ fn emit_statements(
                 }
             },
         }
-        marks.spans[span].1 = lines.len();
+        marks.end(span, lines.len());
     }
 }
 
@@ -2973,5 +3073,139 @@ mod tests {
             text("python"),
             "deref_struct(a) = {\"at_0\": b, \"at_4\": 2, \"at_8\": 7}"
         );
+    }
+
+    /// `ping` of the inline fixture, by hand: `local_c = a; eax = a; if
+    /// (eax > 0) { v1 = pong(a - 1); local_c = v1 + 1; eax = v1 + 1; }
+    /// return local_c;`.
+    fn ping() -> LiftedFunction {
+        use crate::lift::{Statement, StatementKind};
+        let var = |name: &str| AstNode::var(name);
+        let int = |name: &str| Variable {
+            ty: "int".to_string(),
+            name: name.to_string(),
+        };
+        let assign = |name: &str, rhs: AstNode, at: u64| {
+            Statement::plain(
+                AstNode::Assign {
+                    lhs: Box::new(var(name)),
+                    rhs: Box::new(rhs),
+                },
+                vec![at],
+            )
+        };
+        let plus = |a: AstNode, b: u64| AstNode::binary(a, BinaryOp::Add, AstNode::constant(b, 4));
+        LiftedFunction {
+            name: "ping".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![int("a")],
+            locals: vec![int("local_c"), int("eax"), int("v1")],
+            body: vec![
+                assign("local_c", var("a"), 0x14),
+                assign("eax", var("a"), 0x18),
+                Statement {
+                    node: AstNode::binary(var("eax"), BinaryOp::Greater, AstNode::constant(0, 4)),
+                    addresses: vec![0x1c],
+                    kind: StatementKind::If {
+                        then_part: vec![
+                            assign(
+                                "v1",
+                                AstNode::Call {
+                                    callee: Box::new(AstNode::FunctionName {
+                                        name: "pong".to_string(),
+                                        address: 0x40,
+                                    }),
+                                    args: vec![AstNode::binary(
+                                        var("a"),
+                                        BinaryOp::Sub,
+                                        AstNode::constant(1, 4),
+                                    )],
+                                },
+                                0x20,
+                            ),
+                            assign("local_c", plus(var("v1"), 1), 0x24),
+                            assign("eax", plus(var("v1"), 1), 0x28),
+                        ],
+                        else_part: Vec::new(),
+                    },
+                },
+                Statement::plain(
+                    AstNode::Return {
+                        value: Some(Box::new(var("local_c"))),
+                    },
+                    vec![0x2c],
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            return_reason: None,
+        }
+    }
+
+    #[test]
+    fn a_sliced_pseudocode_keeps_the_slice_and_what_holds_it() {
+        use crate::slice::{Criterion, Direction};
+        let function = ping();
+        let sliced = |criterion: &str, direction, options: &Options| {
+            let pseudocode = emit_function_sliced(
+                &function,
+                options,
+                &[],
+                &(),
+                &Criterion::parse(criterion).expect("a criterion"),
+                direction,
+            )
+            .expect("a slice");
+            let kept = pseudocode.slice_lines.clone().expect("sliced");
+            let out: Vec<String> = pseudocode
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !kept.contains(index))
+                .map(|(_, line)| line.text.trim().to_string())
+                .collect();
+            (pseudocode, out)
+        };
+        // The value returned: everything but the last store to `eax`.
+        let (pseudocode, out) = sliced("return", Direction::Backward, &Options::default());
+        assert_eq!(out, ["eax = v1 + 1;"], "{}", pseudocode.text());
+        // `local_c` at the end is the same value, less the return itself.
+        let (pseudocode, out) = sliced("local_c", Direction::Backward, &Options::default());
+        assert_eq!(
+            out,
+            ["eax = v1 + 1;", "return local_c;"],
+            "{}",
+            pseudocode.text()
+        );
+        // The text is the pseudocode's own: a slice only marks it.
+        assert_eq!(
+            pseudocode.text(),
+            emit_function(&function, &Options::default()).text()
+        );
+        // Forward from the call's result: the `if` stays for what it holds,
+        // the stores before it go.
+        let (pseudocode, out) = sliced("v1@0x20", Direction::Forward, &Options::default());
+        assert_eq!(out, ["local_c = a;", "eax = a;"], "{}", pseudocode.text());
+        // The broken braces keep the marks on the lines they came from.
+        let broken = Options::from_pairs([("brace-style", "broken")]).expect("an option");
+        let (pseudocode, out) = sliced("v1@0x20", Direction::Forward, &broken);
+        assert_eq!(out, ["local_c = a;", "eax = a;"], "{}", pseudocode.text());
+        // Unsliced, nothing says so; a criterion the function lacks is said.
+        assert!(emit_function(&function, &Options::default())
+            .slice_lines
+            .is_none());
+        assert!(emit_function_sliced(
+            &function,
+            &Options::default(),
+            &[],
+            &(),
+            &Criterion::parse("nothing").expect("a criterion"),
+            Direction::Backward,
+        )
+        .is_err());
     }
 }

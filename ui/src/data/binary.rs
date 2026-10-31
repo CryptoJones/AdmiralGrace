@@ -386,6 +386,19 @@ impl Provider for BinaryProvider {
             .unwrap_or_default()
     }
 
+    fn slice_lines(
+        &self,
+        address: u64,
+        criterion: &ag_image::SliceCriterion,
+        direction: ag_image::SliceDirection,
+    ) -> Result<BTreeSet<usize>, String> {
+        let pseudocode = self
+            .binary
+            .sliced_pseudocode(address, criterion, direction)
+            .map_err(|error| error.reason)?;
+        Ok(pseudocode.slice_lines.unwrap_or_default())
+    }
+
     fn set_removable_stores(&self, removable: BTreeMap<u64, Vec<String>>) -> bool {
         self.binary.set_removable_stores(removable)
     }

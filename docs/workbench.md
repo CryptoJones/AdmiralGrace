@@ -251,6 +251,19 @@ while the rest stay: type the variable's declared name (`rax`), or `NAME keep` t
 back. The word is kept on the variable's record in the project file, so a project opened
 again reads the same; **Dead code: hidden** still drops everything at once.
 
+## Slices
+
+**View ▸ Slice backward from variable…** dims every line of the pseudocode the value of one
+variable does not depend on, the way dead code is greyed out; **Slice forward from
+variable…** dims every line the value does not affect. The prompt opens on the variable the
+selected line assigns, or the first it names, at an address of that line —
+`local_10@0x1180` — and takes `NAME` or `NAME@end` for the variable's value at the
+function's end, `return` for the value the function returns, and a name the analyst gave a
+variable for the variable. The control statements holding a kept line stay undimmed, so the
+shape of the function still reads. The slice follows the pseudocode as it is read again, and
+**Clear slice**, or opening another function, shows every line again. What a slice keeps is
+`ag image pseudocode --slice`'s (`docs/cli.md`).
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or
