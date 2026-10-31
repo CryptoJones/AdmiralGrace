@@ -547,6 +547,301 @@ pub fn lift_function(
 /// Lift a run of instructions as a function entered at `entry`: the graph
 /// is built from the instructions alone, stopping at a `jmp` to a function
 /// `symbols` names, as an image's walk does.
+/// The stages of a lift, kept for the intermediate languages: the chains
+/// the function was cut into, the statements over temporaries and slots
+/// before they were resolved (the low level), the nodes over variables
+/// (the medium level), the structured body (the high level), and the
+/// function the lift ended in.
+pub struct Stages {
+    /// The chains, the entry's first; the graph the low and medium levels
+    /// are laid on.
+    pub chains: Vec<StageChain>,
+    /// The low-level statements of each chain, in the chains' order.
+    pub low: Vec<Vec<LowStatement>>,
+    /// The medium-level nodes, one per chain.
+    pub medium: Vec<Node>,
+    /// The structured body.
+    pub high: Vec<Statement>,
+    /// The function the lift ended in.
+    pub function: LiftedFunction,
+    /// The analysis of the chain graph: its order, dominators and loops.
+    pub analysis: Analysis,
+}
+
+/// One chain of a lift: a run of blocks the lift reads as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageChain {
+    /// The address of the first instruction.
+    pub address: u64,
+    /// The addresses of the instructions, in order.
+    pub instructions: Vec<u64>,
+    /// The chains this one goes on to, by index.
+    pub successors: Vec<usize>,
+}
+
+/// One statement of the low level: the lifter's own, over temporaries,
+/// stack slots and registers, before the temporaries are resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowStatement {
+    pub text: String,
+    pub addresses: Vec<u64>,
+    /// What the statement writes: a temporary, a slot, a variable, a
+    /// register.
+    pub defines: Vec<String>,
+    /// What it reads.
+    pub uses: Vec<String>,
+}
+
+/// Lift the function at `entry` and keep every stage. A thunk has one
+/// chain and no statements at any level.
+#[allow(clippy::too_many_arguments)]
+pub fn lift_stages(
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    entry: u64,
+    name: &str,
+    bitness: Bitness,
+    abi: Abi,
+    symbols: &dyn Symbols,
+    options: &Options,
+) -> Result<Stages, NotLifted> {
+    if bitness != Bitness::Bits64 {
+        return Err(NotLifted::new(format!("{bitness} code")));
+    }
+    let chains = chains(disasm, cfg, entry, symbols)?;
+    let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
+    let stage_chains: Vec<StageChain> = chains
+        .iter()
+        .zip(&successors)
+        .map(|(chain, successors)| StageChain {
+            address: chain.address,
+            instructions: chain.instructions.iter().map(|ins| ins.address).collect(),
+            successors: successors.clone(),
+        })
+        .collect();
+    let mut lifter = Lifter::new(abi, symbols, *options);
+    if let Some(callee) = lifter.thunk(&chains)? {
+        let function = LiftedFunction {
+            name: name.to_string(),
+            address: entry,
+            return_type: "void".to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: Vec::new(),
+            frame: chains[0]
+                .instructions
+                .iter()
+                .map(|ins| ins.address)
+                .collect(),
+            thunk: Some(callee),
+            return_reason: None,
+        };
+        let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
+        return Ok(Stages {
+            chains: stage_chains,
+            low: vec![Vec::new()],
+            medium: Vec::new(),
+            high: Vec::new(),
+            function,
+            analysis,
+        });
+    }
+    let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
+    let lifted = lifter.lift_chains(&chains, &analysis)?;
+    let low: Vec<Vec<LowStatement>> = lifted
+        .iter()
+        .map(|(statements, terminator)| {
+            let mut rows: Vec<LowStatement> = statements.iter().map(Stmt::low).collect();
+            if let Some(end) = low_terminator(terminator) {
+                rows.push(end);
+            }
+            rows
+        })
+        .collect();
+    lifter.decide_return(entry, &lifted)?;
+    let nodes = lifter.resolve_all(&chains, lifted)?;
+    let medium = nodes.clone();
+    let body = structure::structure(&nodes, &analysis, 0, options);
+    let high = body.clone();
+    let function = lifter.finish(name, entry, &chains, body)?;
+    Ok(Stages {
+        chains: stage_chains,
+        low,
+        medium,
+        high,
+        function,
+        analysis,
+    })
+}
+
+/// A chain's end as a low-level statement, when it says more than the
+/// graph does: the condition branched on, the index switched on.
+fn low_terminator(terminator: &Terminator) -> Option<LowStatement> {
+    match terminator {
+        Terminator::Branch {
+            cond, addresses, ..
+        } => Some(LowStatement {
+            text: format!("branch if {}", one_line(&crate::emit::emit_node(cond))),
+            addresses: addresses.clone(),
+            defines: Vec::new(),
+            uses: crate::il::names_in(cond),
+        }),
+        Terminator::Switch {
+            index, addresses, ..
+        } => Some(LowStatement {
+            text: format!("switch on {}", one_line(&crate::emit::emit_node(index))),
+            addresses: addresses.clone(),
+            defines: Vec::new(),
+            uses: crate::il::names_in(index),
+        }),
+        Terminator::Return | Terminator::Goto { .. } => None,
+    }
+}
+
+/// Emitted text as one line, the newline the emitter ends with dropped.
+fn one_line(text: &str) -> String {
+    text.trim_end().trim_end_matches(';').to_string()
+}
+
+impl Sym {
+    /// The symbolic value's text, and the name it reads when it is one
+    /// thing read.
+    fn low_text(&self) -> (String, Vec<String>) {
+        match self {
+            Sym::Node(node) => (
+                one_line(&crate::emit::emit_node(node)),
+                crate::il::names_in(node),
+            ),
+            Sym::Stack(offset) => {
+                let slot = slot_name(*offset);
+                (slot.clone(), vec![slot])
+            }
+            Sym::Entry(index) => {
+                // The value a register held when the function was entered.
+                let name = format!("entry{index}");
+                (name.clone(), vec![name])
+            }
+            Sym::Temp(index) => {
+                let name = format!("t{index}");
+                (name.clone(), vec![name])
+            }
+            Sym::Dead(reason) => (format!("dead /* {reason} */"), Vec::new()),
+            Sym::Unknown(reason) => (format!("unknown /* {reason} */"), Vec::new()),
+        }
+    }
+}
+
+/// A stack slot's name at the low level: `slot[-0x14]`.
+fn slot_name(offset: i64) -> String {
+    if offset < 0 {
+        format!("slot[-{:#x}]", -offset)
+    } else {
+        format!("slot[{offset:#x}]")
+    }
+}
+
+impl Value {
+    fn low_text(&self) -> (String, Vec<String>) {
+        self.sym.low_text()
+    }
+}
+
+impl Stmt {
+    /// The statement at the low level.
+    fn low(&self) -> LowStatement {
+        match self {
+            Stmt::Call {
+                temp,
+                node,
+                addresses,
+            } => LowStatement {
+                text: format!("t{temp} = {}", one_line(&crate::emit::emit_node(node))),
+                addresses: addresses.clone(),
+                defines: vec![format!("t{temp}")],
+                uses: crate::il::names_in(node),
+            },
+            Stmt::Store {
+                offset,
+                bits,
+                value,
+                addresses,
+            } => {
+                let (text, uses) = value.low_text();
+                let slot = slot_name(*offset);
+                LowStatement {
+                    text: format!("{slot}:{bits} = {text}"),
+                    addresses: addresses.clone(),
+                    defines: vec![slot],
+                    uses,
+                }
+            }
+            Stmt::Assign {
+                lhs,
+                value,
+                addresses,
+            } => {
+                let (text, uses) = value.low_text();
+                let defines = match lhs {
+                    AstNode::Var { .. } | AstNode::Register { .. } => crate::il::names_in(lhs),
+                    _ => Vec::new(),
+                };
+                // A store through a pointer reads what the pointer is made of.
+                let mut uses = uses;
+                if defines.is_empty() {
+                    uses.extend(crate::il::names_in(lhs));
+                }
+                LowStatement {
+                    text: format!("{} = {text}", one_line(&crate::emit::emit_node(lhs))),
+                    addresses: addresses.clone(),
+                    defines,
+                    uses,
+                }
+            }
+            Stmt::Return {
+                value,
+                leftover,
+                addresses,
+            } => {
+                let (text, uses) = match value {
+                    Some(value) => {
+                        let (text, uses) = value.low_text();
+                        (format!("return {text}"), uses)
+                    }
+                    None => match leftover {
+                        Some(temp) => (
+                            format!("return /* t{temp} left in rax */"),
+                            vec![format!("t{temp}")],
+                        ),
+                        None => ("return".to_string(), Vec::new()),
+                    },
+                };
+                LowStatement {
+                    text,
+                    addresses: addresses.clone(),
+                    defines: Vec::new(),
+                    uses,
+                }
+            }
+            Stmt::Compare {
+                name,
+                lhs,
+                rhs,
+                addresses,
+            } => {
+                let (left, mut uses) = lhs.low_text();
+                let (right, more) = rhs.low_text();
+                uses.extend(more);
+                LowStatement {
+                    text: format!("flags = {name}({left}, {right})"),
+                    addresses: addresses.clone(),
+                    defines: vec!["flags".to_string()],
+                    uses,
+                }
+            }
+        }
+    }
+}
+
 pub fn lift_block(
     instructions: &[DecodedInsn],
     entry: u64,

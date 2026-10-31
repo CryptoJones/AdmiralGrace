@@ -62,6 +62,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/options.md"),
     },
     Doc {
+        topic: "il",
+        summary: "The intermediate languages: four levels of the lift, each with an SSA form, mapped onto each other.",
+        readme_sections: &["Intermediate languages"],
+        body: include_str!("../../../docs/il.md"),
+    },
+    Doc {
         topic: "plugins",
         summary: "The plugin SDK: loaders, architectures and tools, in Rust or as commands declared in a manifest.",
         readme_sections: &["Plugins"],

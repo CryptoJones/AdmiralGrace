@@ -146,6 +146,20 @@ cargo run --bin ag -- run ./sample.elf --project ./sample.agproj -- python3 my_s
 
 See [docs/scripting.md](docs/scripting.md).
 
+## Intermediate languages
+
+The lift is readable at every level it passes through — `lifted` (the machine's
+instructions with the registers each touches), `low` (the lifter's statements over
+temporaries and slots), `medium` (statements over variables on the block graph) and `high`
+(the structured body) — each with an SSA form, each item carrying the addresses it came
+from, so the levels map onto each other and onto the listing.
+
+```bash
+cargo run --bin ag -- image ./sample.elf il sum_to --level medium --ssa
+```
+
+See [docs/il.md](docs/il.md).
+
 ## Plugins
 
 A loader, an architecture or a tool is added without forking: in Rust, against the traits
@@ -184,7 +198,7 @@ ag docs cli
 ag install-skill --agent claude
 ```
 
-`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, plugins, scripting and the workbench.
+`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, the intermediate languages, plugins, scripting and the workbench.
 
 ## Desktop workbench
 

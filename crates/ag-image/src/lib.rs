@@ -57,6 +57,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
+pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
@@ -1809,6 +1810,47 @@ impl Binary {
     }
 
     /// Lift the function at `address` and print it.
+    /// The function at `address` at one level of the lift — the machine's
+    /// instructions, the lifter's statements over temporaries, the
+    /// statements over variables, or the structured body — in SSA form
+    /// when asked. Every item carries the addresses it came from, so the
+    /// levels map onto each other and onto the listing.
+    pub fn il(&self, address: u64, level: Level, ssa: bool) -> Result<IlFunction, NotLifted> {
+        let code = self.code_at(address).ok_or_else(|| NotLifted {
+            reason: format!("no code at {address:#x}"),
+        })?;
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        let name = self
+            .code_name(address)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("sub_{address:x}"));
+        let stages = ag_engine::lift::lift_stages(
+            &decoded.disasm,
+            &cfg,
+            address,
+            &name,
+            code.bitness,
+            self.abi(),
+            &ImageSymbols(self),
+            &self.options,
+        )?;
+        let text = |at: u64| decoded.text.get(&at).cloned();
+        let function = il::build(level, &stages, &decoded.disasm, &text);
+        if !ssa {
+            return Ok(function);
+        }
+        // The high level takes its versions from the medium level's.
+        let medium = (level == Level::High).then(|| {
+            il::to_ssa(
+                &il::build(Level::Medium, &stages, &decoded.disasm, &text),
+                &stages.analysis,
+                None,
+            )
+        });
+        Ok(il::to_ssa(&function, &stages.analysis, medium.as_ref()))
+    }
+
     fn build_pseudocode(&self, address: u64) -> Result<Pseudocode, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),
