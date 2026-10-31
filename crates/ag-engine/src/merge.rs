@@ -41,9 +41,28 @@
 //! The names are the ones the lift declares, before the analyst's renames,
 //! as a rename keys its variable: a rename of `v1` names the kept variable
 //! after a merge, and the fresh variable a split makes is renamed by its
-//! own name, `v1_2`. The splits are made first, then the merges, each in
-//! the order the analyst gave them, so a variable a split makes can be
-//! merged into another.
+//! own name, `v1_2`. The splits are made first, then the new versions,
+//! then the merges, each in the order the analyst gave them, so a variable
+//! a split or a version makes can be merged into another.
+//!
+//! A new version is a split where no statement assigns the variable: at the
+//! start of an `if`'s arm, or past a join. The analyst names a variable and
+//! an address, and the lift puts a definition of its own there, `v1_2 =
+//! v1;`, printed with the comment `// new version of v1`, just before the
+//! first statement, in the order the pseudocode reads, whose line carries
+//! the address — after it, where that statement is a label, so a `goto` to
+//! the label reaches the new definition. A control statement's line is its
+//! condition's: an address of an `if`'s condition puts the definition
+//! before the `if`, and an address of the first line of one of its arms at
+//! that arm's start. The uses the new definition reaches, until another
+//! definition of the variable, read the new name, which is renamed and
+//! merged by its own name as a split's is, and declared with the variable's
+//! type. A use the new definition reaches with another reaching it too
+//! would need both names, and the version is refused with a note: `v1 has
+//! no new version at 0x401020: a use at 0x401030 is reached from before it
+//! too`. In a loop that means a version in the body of a variable the
+//! condition reads is refused, since the condition is reached both from
+//! before the loop and from the body.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,18 +81,59 @@ pub struct VariableEdits {
     /// `(variable, at)`: the definition at `at` and the uses it reaches take
     /// a fresh name.
     pub splits: Vec<(String, u64)>,
+    /// `(variable, at)`: a definition `fresh = variable;` is put at `at`, and
+    /// the uses it reaches take the fresh name.
+    pub versions: Vec<(String, u64)>,
 }
 
-impl From<(Vec<(String, String)>, Vec<(String, u64)>)> for VariableEdits {
-    fn from((merges, splits): (Vec<(String, String)>, Vec<(String, u64)>)) -> Self {
-        Self { merges, splits }
+/// One function's merges, `(keep, gone)`, splits, `(variable, at)`, and new
+/// versions, `(variable, at)`, as the project file gives them.
+pub type VariableWords = (
+    Vec<(String, String)>,
+    Vec<(String, u64)>,
+    Vec<(String, u64)>,
+);
+
+impl From<VariableWords> for VariableEdits {
+    fn from((merges, splits, versions): VariableWords) -> Self {
+        Self {
+            merges,
+            splits,
+            versions,
+        }
     }
 }
 
 impl VariableEdits {
     /// Whether there is no word at all.
     pub fn is_empty(&self) -> bool {
-        self.merges.is_empty() && self.splits.is_empty()
+        self.merges.is_empty() && self.splits.is_empty() && self.versions.is_empty()
+    }
+}
+
+/// The intrinsic the definition a new version makes reads its variable
+/// through, so the pseudocode can say what it is: `v1_2 =
+/// __new_version(v1)` prints as `v1_2 = v1;  // new version of v1`. It is
+/// no call, and a copy as a merge sees it.
+pub const NEW_VERSION: &str = "__new_version";
+
+/// The variable a statement that is a new version's definition copies,
+/// when it is one: `v1` of `v1_2 = __new_version(v1)`.
+pub fn new_version_of(node: &AstNode) -> Option<&str> {
+    match node {
+        AstNode::Assign { rhs, .. } => versioned(rhs),
+        _ => None,
+    }
+}
+
+/// The variable an expression `__new_version(v1)` reads, when it is one.
+pub(crate) fn versioned(node: &AstNode) -> Option<&str> {
+    match node {
+        AstNode::Intrinsic { name, args } if name == NEW_VERSION => match args.as_slice() {
+            [AstNode::Var { name }] => Some(name),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -187,13 +247,14 @@ pub fn merge_candidates(function: &LiftedFunction) -> Vec<MergeCandidate> {
     candidates
 }
 
-/// Make the analyst's splits, then the merges, in `function`, noting the
-/// ones refused and the unsound ones made.
+/// Make the analyst's splits, then the new versions, then the merges, in
+/// `function`, noting the ones refused and the unsound ones made.
 pub fn apply_edits(function: &mut LiftedFunction, edits: &VariableEdits) {
     if edits.is_empty() || function.thunk.is_some() {
         return;
     }
     apply_splits(function, &edits.splits);
+    apply_versions(function, &edits.versions);
     apply_merges(function, &edits.merges);
 }
 
@@ -287,11 +348,12 @@ fn drop_self_copies(statements: &mut Vec<Statement>) {
 }
 
 /// `(to, from)` when the node is the copy `to = from;` of one variable into
-/// another, with no cast between.
+/// another, with no cast between — a new version's definition among them.
 fn copy_of(node: &AstNode) -> Option<(&str, &str)> {
     match node {
         AstNode::Assign { lhs, rhs } => match (lhs.as_ref(), rhs.as_ref()) {
             (AstNode::Var { name: to }, AstNode::Var { name: from }) => Some((to, from)),
+            (AstNode::Var { name: to }, rhs) => Some((to, versioned(rhs)?)),
             _ => None,
         },
         _ => None,
@@ -383,6 +445,20 @@ fn split(function: &mut LiftedFunction, variable: &str, at: u64) -> Result<(), S
     let sites: BTreeSet<(usize, Part)> = sites.into_iter().map(key).collect();
     let uses: BTreeSet<(usize, Part)> = uses.into_iter().map(key).collect();
 
+    let fresh = fresh_name(function, &graph, variable);
+    walk_mut(&mut function.body, &mut 0, &mut |index, part, node| {
+        let reads = uses.contains(&(index, part));
+        let defines = sites.contains(&(index, part));
+        if reads || defines {
+            rename_in(node, variable, &fresh, reads, defines);
+        }
+    });
+    declare(function, variable, &declared, fresh, emptied);
+    Ok(())
+}
+
+/// `variable_2`, or `variable_3`… where the function has the name already.
+fn fresh_name(function: &LiftedFunction, graph: &Graph, variable: &str) -> String {
     let mut taken: BTreeSet<String> = graph.vars.keys().cloned().collect();
     taken.extend(
         function
@@ -392,22 +468,27 @@ fn split(function: &mut LiftedFunction, variable: &str, at: u64) -> Result<(), S
             .map(|v| v.name.clone()),
     );
     let mut n = 2;
-    let fresh = loop {
+    loop {
         let name = format!("{variable}_{n}");
         if !taken.contains(&name) {
             break name;
         }
         n += 1;
-    };
-    walk_mut(&mut function.body, &mut 0, &mut |index, part, node| {
-        let reads = uses.contains(&(index, part));
-        let defines = sites.contains(&(index, part));
-        if reads || defines {
-            rename_in(node, variable, &fresh, reads, defines);
-        }
-    });
+    }
+}
+
+/// Declare `fresh` with the type of `declared`, the variable it is made
+/// from: in its place when `emptied`, else after it, or first among the
+/// locals when it is a parameter.
+fn declare(
+    function: &mut LiftedFunction,
+    variable: &str,
+    declared: &Variable,
+    fresh: String,
+    emptied: bool,
+) {
     let fresh = Variable {
-        ty: declared.ty,
+        ty: declared.ty.clone(),
         name: fresh,
     };
     match function.locals.iter().position(|v| v.name == variable) {
@@ -415,7 +496,125 @@ fn split(function: &mut LiftedFunction, variable: &str, at: u64) -> Result<(), S
         Some(i) => function.locals.insert(i + 1, fresh),
         None => function.locals.insert(0, fresh),
     }
+}
+
+/// Put a new version of each `(variable, at)`: a definition `fresh =
+/// variable;` just before the first statement whose line carries `at` —
+/// after it, when that is a label — and the uses it reaches read `fresh`,
+/// declared with the variable's type. A version is refused, and noted,
+/// where a use the new definition reaches is reached by another definition
+/// too, where it reaches no use, where no statement carries the address,
+/// where the function does not declare the variable, and where its address
+/// is taken.
+pub fn apply_versions(function: &mut LiftedFunction, versions: &[(String, u64)]) {
+    for (variable, at) in versions {
+        if let Err(why) = version(function, variable, *at) {
+            function
+                .notes
+                .push(format!("{variable} has no new version at {at:#x}: {why}"));
+        }
+    }
+}
+
+fn version(function: &mut LiftedFunction, variable: &str, at: u64) -> Result<(), String> {
+    let declared = function
+        .params
+        .iter()
+        .chain(&function.locals)
+        .find(|v| v.name == variable)
+        .cloned()
+        .ok_or_else(|| format!("{} declares no {variable}", function.name))?;
+    let definition = Statement::plain(
+        AstNode::Assign {
+            lhs: Box::new(AstNode::var(variable)),
+            rhs: Box::new(AstNode::Intrinsic {
+                name: NEW_VERSION.to_string(),
+                args: vec![AstNode::var(variable)],
+            }),
+        },
+        vec![at],
+    );
+    // Tried on a copy, so a version refused leaves the body as it was.
+    let mut tried = function.clone();
+    if !insert_before(&mut tried.body, at, &definition) {
+        return Err("no statement there".to_string());
+    }
+    let graph = Graph::of(&tried);
+    let var = graph.vars[variable];
+    if graph.memory.contains(&var) {
+        return Err("its address is taken".to_string());
+    }
+    let index = nodes_of(&tried.body)
+        .into_iter()
+        .find(|((_, part), node)| *part == Part::Node && *node == definition.node)
+        .map(|((index, _), _)| index);
+    let site = (0..graph.nodes.len())
+        .find(|&n| graph.nodes[n].owner == index && graph.nodes[n].part == Part::Node)
+        .expect("the new definition's node");
+    let flow = Flow::of(&graph);
+    let mut uses = BTreeSet::new();
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_by_key(|&n| (graph.nodes[n].owner, graph.nodes[n].part));
+    for n in order {
+        let node = &graph.nodes[n];
+        // The new definition reads the variable as it was.
+        if n == site || !node.uses.contains(&var) {
+            continue;
+        }
+        let reaching: BTreeSet<usize> = flow.reaching_of(n, var).collect();
+        if !reaching.contains(&site) {
+            continue;
+        }
+        if reaching.len() > 1 {
+            let address = node.addresses.first().copied().unwrap_or(function.address);
+            return Err(format!(
+                "a use at {address:#x} is reached from before it too"
+            ));
+        }
+        uses.insert(n);
+    }
+    if uses.is_empty() {
+        return Err("no use reads it from there".to_string());
+    }
+    let key = |n: usize| {
+        (
+            graph.nodes[n].owner.expect("a statement's node"),
+            graph.nodes[n].part,
+        )
+    };
+    let site = key(site);
+    let uses: BTreeSet<(usize, Part)> = uses.into_iter().map(key).collect();
+    let fresh = fresh_name(&tried, &graph, variable);
+    walk_mut(&mut tried.body, &mut 0, &mut |index, part, node| {
+        let reads = uses.contains(&(index, part));
+        let defines = (index, part) == site;
+        if reads || defines {
+            rename_in(node, variable, &fresh, reads, defines);
+        }
+    });
+    function.body = tried.body;
+    declare(function, variable, &declared, fresh, false);
     Ok(())
+}
+
+/// Put `statement` just before the first statement of `statements`, at any
+/// depth in the order the pseudocode reads them, whose addresses hold `at`
+/// — just after it, when it is a label — and say whether there was one.
+fn insert_before(statements: &mut Vec<Statement>, at: u64, statement: &Statement) -> bool {
+    for i in 0..statements.len() {
+        if statements[i].addresses.contains(&at) {
+            let label = matches!(statements[i].kind, StatementKind::Plain)
+                && matches!(statements[i].node, AstNode::Label { .. });
+            statements.insert(if label { i + 1 } else { i }, statement.clone());
+            return true;
+        }
+        for child in statements[i].children_mut() {
+            if insert_before(child, at, statement) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Rename `from` to `to` in `node`: where it is read when `reads`, and
@@ -979,5 +1178,218 @@ mod tests {
         apply_splits(&mut inner, &[("i".into(), 0x1008)]);
         assert_eq!(inner.body, f.body);
         assert_eq!(inner.notes.len(), 1, "{:?}", inner.notes);
+    }
+
+    fn if_(
+        cond: AstNode,
+        at: u64,
+        then_part: Vec<Statement>,
+        else_part: Vec<Statement>,
+    ) -> Statement {
+        Statement {
+            node: cond,
+            addresses: vec![at],
+            kind: StatementKind::If {
+                then_part,
+                else_part,
+            },
+        }
+    }
+
+    fn call(name: &str, arg: AstNode) -> AstNode {
+        AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: name.to_string(),
+                address: 0x2000,
+            }),
+            args: vec![arg],
+        }
+    }
+
+    fn eval(node: AstNode, at: u64) -> Statement {
+        Statement::plain(node, vec![at])
+    }
+
+    #[test]
+    fn a_version_at_an_arms_start_renames_only_that_arms_uses() {
+        // x = a + 1; if (a) { f(x); x = 2; } else { g(x); } return x;
+        let f = function(
+            &["a"],
+            &["x"],
+            vec![
+                assign("x", add(var("a"), c(1)), 0x1000),
+                if_(
+                    var("a"),
+                    0x1004,
+                    vec![eval(call("f", var("x")), 0x1008), assign("x", c(2), 0x100c)],
+                    vec![eval(call("g", var("x")), 0x1010)],
+                ),
+                ret(var("x"), 0x1014),
+            ],
+        );
+        let mut versioned = f.clone();
+        apply_versions(&mut versioned, &[("x".into(), 0x1008)]);
+        assert!(versioned.notes.is_empty(), "{:?}", versioned.notes);
+        let names: Vec<&str> = versioned.locals.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["x", "x_2"]);
+        let out = text(&versioned);
+        // The new definition prints with its comment, at the arm's start.
+        assert!(
+            out.contains(
+                "  if (a) {\n    x_2 = x;  // new version of x\n    f(x_2);\n    x = 2;\n"
+            ),
+            "{out}"
+        );
+        // The other arm, and the use past the join, read x still.
+        assert!(out.contains("    g(x);\n"), "{out}");
+        assert!(out.contains("  return x;\n"), "{out}");
+        // The new definition carries the address it was put at.
+        assert!(versioned.body[1].children()[0][0].addresses == [0x1008]);
+        // The two are a suggested merge, by the copy, and merging undoes
+        // the version.
+        let pair = kind_of(&merge_candidates(&versioned), "x", "x_2").expect("a candidate");
+        assert_eq!(pair.kind, MergeKind::Suggested);
+        assert_eq!(pair.reason, "x_2 = x copies it");
+        let mut back = versioned.clone();
+        apply_merges(&mut back, &[("x".into(), "x_2".into())]);
+        assert_eq!(back.body, f.body);
+    }
+
+    #[test]
+    fn a_version_whose_use_is_reached_from_before_it_too_is_refused() {
+        // x = a + 1; if (a) { f(x); } return x;
+        let f = function(
+            &["a"],
+            &["x"],
+            vec![
+                assign("x", add(var("a"), c(1)), 0x1000),
+                if_(
+                    var("a"),
+                    0x1004,
+                    vec![eval(call("f", var("x")), 0x1008)],
+                    Vec::new(),
+                ),
+                ret(var("x"), 0x100c),
+            ],
+        );
+        let mut refused = f.clone();
+        apply_versions(
+            &mut refused,
+            &[
+                ("x".into(), 0x1008),
+                ("x".into(), 0x2000),
+                ("y".into(), 0x1000),
+            ],
+        );
+        assert_eq!(
+            refused.notes,
+            [
+                "x has no new version at 0x1008: a use at 0x100c is reached from before it too",
+                "x has no new version at 0x2000: no statement there",
+                "y has no new version at 0x1000: f declares no y",
+            ]
+        );
+        assert_eq!(refused.body, f.body);
+        assert_eq!(refused.locals.len(), 1);
+        // Where nothing reads it before it is assigned again, there is no
+        // version to make.
+        let mut none = f.clone();
+        apply_versions(&mut none, &[("x".into(), 0x1000)]);
+        assert_eq!(
+            none.notes,
+            ["x has no new version at 0x1000: no use reads it from there"]
+        );
+        // Past the join the one path is the function's: the version takes
+        // the return.
+        let mut joined = f.clone();
+        apply_versions(&mut joined, &[("x".into(), 0x100c)]);
+        assert!(joined.notes.is_empty(), "{:?}", joined.notes);
+        let out = text(&joined);
+        assert!(
+            out.contains("  x_2 = x;  // new version of x\n  return x_2;\n"),
+            "{out}"
+        );
+        assert!(out.contains("    f(x);\n"), "{out}");
+    }
+
+    #[test]
+    fn a_version_of_a_parameter_is_declared_and_then_renamed_by_its_own_name() {
+        // if (a) { return a + 1; } return a;
+        let f = function(
+            &["a"],
+            &[],
+            vec![
+                if_(
+                    var("a"),
+                    0x1000,
+                    vec![ret(add(var("a"), c(1)), 0x1004)],
+                    Vec::new(),
+                ),
+                ret(var("a"), 0x1008),
+            ],
+        );
+        let mut versioned = f.clone();
+        apply_edits(
+            &mut versioned,
+            &VariableEdits {
+                versions: vec![("a".into(), 0x1004)],
+                ..VariableEdits::default()
+            },
+        );
+        assert!(versioned.notes.is_empty(), "{:?}", versioned.notes);
+        assert_eq!(versioned.locals[0].name, "a_2");
+        assert_eq!(versioned.locals[0].ty, "long", "the variable's type");
+        let out = text(&versioned);
+        assert!(out.contains("  long a_2;\n"), "{out}");
+        assert!(
+            out.contains("    a_2 = a;  // new version of a\n    return a_2 + 1;\n"),
+            "{out}"
+        );
+        assert!(out.contains("  return a;\n"), "{out}");
+        // A merge of the new version into another variable is by its name.
+        let mut merged = f.clone();
+        merged.locals.push(Variable {
+            ty: "long".to_string(),
+            name: "count".to_string(),
+        });
+        apply_edits(
+            &mut merged,
+            &VariableEdits {
+                versions: vec![("a".into(), 0x1004)],
+                merges: vec![("count".into(), "a_2".into())],
+                ..VariableEdits::default()
+            },
+        );
+        let out = text(&merged);
+        assert!(
+            out.contains("    count = a;  // new version of a\n    return count + 1;\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_version_at_a_label_goes_after_it() {
+        // x = a; L: f(x); return x; — the version goes after the label.
+        let label = Statement::plain(
+            AstNode::Label {
+                name: "L".to_string(),
+                address: 0x1004,
+            },
+            vec![0x1004],
+        );
+        let mut f = function(
+            &["a"],
+            &["x"],
+            vec![
+                assign("x", var("a"), 0x1000),
+                label,
+                eval(call("f", var("x")), 0x1004),
+                ret(var("x"), 0x1008),
+            ],
+        );
+        apply_versions(&mut f, &[("x".into(), 0x1004)]);
+        assert!(f.notes.is_empty(), "{:?}", f.notes);
+        assert!(matches!(f.body[1].node, AstNode::Label { .. }));
+        assert_eq!(new_version_of(&f.body[2].node), Some("x"));
     }
 }

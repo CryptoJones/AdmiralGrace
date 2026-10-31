@@ -414,3 +414,90 @@ fn variables_are_merged_and_split_through_the_server() {
     );
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn a_new_variable_version_is_forced_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-version-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("sample.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            // _init: rax = __gmon_start__; if (rax != 0) { rax = …(); } return rax;
+            r#""name":"version_variable","arguments":{"function":"_init","variable":"rax","address":"0x101a"}"#,
+            r#""name":"decompile","arguments":{"target":"_init"}"#,
+            r#""name":"version_variable","arguments":{"function":"0x1000","variable":"rax","address":"0x100f"}"#,
+            r#""name":"decompile","arguments":{"target":"_init"}"#,
+            r#""name":"unversion_variable","arguments":{"function":"_init","variable":"rax","address":"0x100f"}"#,
+            r#""name":"unversion_variable","arguments":{"function":"_init","variable":"rax","address":"0x101a"}"#,
+            r#""name":"decompile","arguments":{"target":"_init"}"#,
+            r#""name":"unversion_variable","arguments":{"function":"_init","variable":"rax","address":"0x101a"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 8);
+    let text = |i: usize| {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    for reply in &replies[..7] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    // The answer is the function's record, its versions with it.
+    let record: serde_json::Value = serde_json::from_str(&text(0)).expect("JSON");
+    assert!(text(0).contains("\"versions\": ["), "{}", text(0));
+    assert!(record.to_string().contains("\"at\":\"0x101a\""), "{record}");
+    // Past the join the return reads the new version.
+    assert!(
+        text(1).contains("  rax_2 = rax;  // new version of rax\n  return rax_2;\n"),
+        "{}",
+        text(1)
+    );
+    // Before the `if`, the return is reached from the arm too: refused.
+    assert!(
+        text(3).contains(
+            "// rax has no new version at 0x100f: a use at 0x101a is reached from before it too\n"
+        ),
+        "{}",
+        text(3)
+    );
+    assert!(!text(6).contains("rax_2"), "{}", text(6));
+    // A word not there to take back is said.
+    assert_eq!(replies[7]["result"]["isError"], true, "{:?}", replies[7]);
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    assert!(
+        saved.variable_edits().is_empty(),
+        "the words taken back leave none"
+    );
+    let _ = std::fs::remove_file(&project);
+}

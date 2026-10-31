@@ -274,9 +274,14 @@ on the analyst's word, and the notice and the function's leading comments say wh
 live. **Unmerge variable…** takes one back by the variable merged away. **Split variable
 here…** splits the variable the selected line assigns at that line's address, `NAME@ADDRESS`:
 the assignment and the uses it reaches take a fresh name, `NAME_2`; a split that would need
-both names at one use is refused, and the leading comments say which use. The words are kept
-on the function's record in the project file, by the names the lift declares, and undo takes
-them back.
+both names at one use is refused, and the leading comments say which use. **New variable
+version here…** puts a new version of a variable at the selected line, `NAME@ADDRESS`, where
+nothing need assign it — the first line of an `if`'s arm, or past a join: the line
+`NAME_2 = NAME;  // new version of NAME` goes before it, and the uses it reaches read `NAME_2`,
+which is renamed on its own; a version whose use is reached from before it too is refused,
+and the leading comments say which use. `NAME@ADDRESS off` takes a split or a version back.
+The words are kept on the function's record in the project file, by the names the lift
+declares, and undo takes them back.
 
 ## Debugging
 

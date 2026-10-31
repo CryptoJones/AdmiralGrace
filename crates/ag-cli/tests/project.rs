@@ -2318,3 +2318,101 @@ fn variables_are_merged_and_split_on_the_analysts_word_and_the_candidates_listed
     assert!(!ok);
     assert!(stderr.contains("cannot be merged into itself"), "{stderr}");
 }
+
+#[test]
+fn a_new_variable_version_is_forced_at_an_arms_start_on_the_analysts_word() {
+    let file = TempFile::new("version");
+    // What `ag image inline.elf pseudocode ping --project FILE` prints.
+    let pseudocode = || -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(["pseudocode", "ping", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let word = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec![args[0], "--file"];
+        let text = file.text();
+        all.push(&text);
+        all.extend(&args[1..]);
+        project_with("inline.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = pseudocode();
+    assert!(before.contains("    v1 = pong(a - 1);\n"), "{before}");
+
+    // A new version of a at the start of the `if`'s arm: the arm's use of
+    // a reads it, and the condition before it does not.
+    let (ok, stdout, stderr) = word(&["version", "ping", "a", "0x40101b"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now version a at 0x40101b"),
+        "{stdout}"
+    );
+    let versioned = pseudocode();
+    assert!(versioned.contains("  int a_2;\n"), "{versioned}");
+    assert!(
+        versioned.contains(
+            "  if (eax > 0) {\n    a_2 = a;  // new version of a\n    v1 = pong(a_2 - 1);\n"
+        ),
+        "{versioned}"
+    );
+    assert!(versioned.contains("  local_c = a;\n"), "{versioned}");
+    // The new variable is a suggested merge with the one it copies.
+    let merges = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("inline.elf"))
+        .args(["merges", "ping", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    let merges = String::from_utf8_lossy(&merges.stdout);
+    assert!(
+        merges.contains("suggested:\n  a_2 into a      a_2 = a copies it\n"),
+        "{merges}"
+    );
+    // It is renamed by its own name.
+    let (ok, stdout, stderr) = word(&["var", "0x401000", "a_2", "depth"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("variable 0x401000::a_2 now name depth"),
+        "{stdout}"
+    );
+
+    // Before the `if`, local_c is read past the join with the arm's
+    // assignment reaching it too: refused, and said.
+    let (ok, _, stderr) = word(&["version", "ping", "local_c", "0x401015"]);
+    assert!(ok, "{stderr}");
+    let refused = pseudocode();
+    assert!(
+        refused.contains(
+            "// local_c has no new version at 0x401015: a use at 0x40102e is reached from before it too\n"
+        ),
+        "{refused}"
+    );
+    assert!(!refused.contains("local_c_2"), "{refused}");
+
+    // Taken back, the pseudocode is as it was.
+    let (ok, _, stderr) = word(&["unversion", "ping", "local_c", "0x401015"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = word(&["unversion", "ping", "a", "0x40101b"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(pseudocode(), before);
+    let (ok, _, stderr) = word(&["unversion", "ping", "a", "0x40101b"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("a had no new version at 0x40101b"),
+        "{stderr}"
+    );
+    // An address that does not read is refused.
+    let (ok, _, stderr) = word(&["version", "ping", "a", "here"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not an address"), "{stderr}");
+}

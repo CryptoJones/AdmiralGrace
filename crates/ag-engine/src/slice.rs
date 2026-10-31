@@ -403,10 +403,12 @@ fn read(node: &AstNode, effects: &mut Effects) {
             }
         }
         AstNode::Intrinsic { name, args } => {
-            // A note — an inlined call's, a halt's — is no call.
+            // A note — an inlined call's, a halt's, a new version's — is no
+            // call.
             if name != crate::inline::INLINED
                 && name != crate::lift::HALTED
                 && name != crate::lift::UNREACHABLE
+                && name != crate::merge::NEW_VERSION
             {
                 effects.calls = true;
             }

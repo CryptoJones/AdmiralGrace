@@ -181,6 +181,9 @@ pub enum Message {
     /// Split a variable of the function on screen at the selected line's
     /// definition of it.
     EditSplitVariable,
+    /// Force a new version of a variable of the function on screen at the
+    /// selected line.
+    EditVersionVariable,
     /// Take one variable's dead stores out of the pseudocode, or put them
     /// back.
     EditDeadStores,
@@ -319,6 +322,10 @@ pub enum PromptKind {
     /// definition it is split at: `VAR@ADDRESS`, or `VAR@ADDRESS off` to
     /// take the split back.
     SplitVariable,
+    /// A variable of the function on screen and the address its new
+    /// version is put at: `VAR@ADDRESS`, or `VAR@ADDRESS off` to take it
+    /// back.
+    VersionVariable,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -2981,6 +2988,7 @@ impl App {
                         | PromptKind::MergeVariables
                         | PromptKind::UnmergeVariable
                         | PromptKind::SplitVariable
+                        | PromptKind::VersionVariable
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -3685,6 +3693,18 @@ impl App {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::SplitVariable,
                     title: "Split variable at its definition (VAR@ADDRESS, VAR@ADDRESS off)",
+                    value: self.slice_suggestion(),
+                });
+            }
+
+            Message::EditVersionVariable => {
+                if self.work.listing_of.is_none() || self.work.pseudocode.is_none() {
+                    self.notice = Some("Open the function whose variable to version".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::VersionVariable,
+                    title: "New variable version at this line (VAR@ADDRESS, VAR@ADDRESS off)",
                     value: self.slice_suggestion(),
                 });
             }
@@ -4914,7 +4934,9 @@ impl App {
                         self.notice = Some(format!("{gone} is no longer merged"));
                         self.tell_variable_edits();
                     }
-                    PromptKind::SplitVariable => {
+                    PromptKind::SplitVariable | PromptKind::VersionVariable => {
+                        // A split and a new version are both `VAR@ADDRESS`.
+                        let version = prompt.kind == PromptKind::VersionVariable;
                         let Some(function) = self.work.listing_of else {
                             return Task::none();
                         };
@@ -4924,10 +4946,13 @@ impl App {
                         let (Some(name), Some(at), state) =
                             (parts.next(), parts.next(), parts.next())
                         else {
-                            self.notice = Some(
+                            self.notice = Some(if version {
+                                "Name the variable and the address of its new version: VAR@ADDRESS"
+                                    .into()
+                            } else {
                                 "Name the variable and the address of its definition: VAR@ADDRESS"
-                                    .into(),
-                            );
+                                    .into()
+                            });
                             return Task::none();
                         };
                         let off = match state.map(str::to_ascii_lowercase).as_deref() {
@@ -4946,7 +4971,13 @@ impl App {
                         let split = self
                             .annotations
                             .annotation_for(&key)
-                            .map(|a| a.splits.clone())
+                            .map(|a| {
+                                if version {
+                                    a.versions.clone()
+                                } else {
+                                    a.splits.clone()
+                                }
+                            })
                             .unwrap_or_default();
                         let variable = self.declared_name(&key, name).or_else(|| {
                             split
@@ -4962,7 +4993,19 @@ impl App {
                         let record = self
                             .annotations
                             .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
-                        if off {
+                        if version && off {
+                            if !record.unversion_variable(&variable, &at) {
+                                self.annotations.prune();
+                                self.notice =
+                                    Some(format!("{variable} has no new version at {at}"));
+                                return Task::none();
+                            }
+                            self.notice =
+                                Some(format!("{variable} no longer has a new version at {at}"));
+                        } else if version {
+                            record.version_variable(&variable, &at);
+                            self.notice = Some(format!("{variable} has a new version at {at}"));
+                        } else if off {
                             if !record.unsplit_variable(&variable, &at) {
                                 self.annotations.prune();
                                 self.notice = Some(format!("{variable} is not split at {at}"));
@@ -11634,6 +11677,91 @@ mod tests {
             "{:?}",
             app.notice
         );
+    }
+
+    #[test]
+    fn a_new_variable_version_is_forced_renamed_and_taken_back_with_undo() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        // _init: rax = __gmon_start__; if (rax != 0) { rax = …(); } return rax;
+        let _ = app.update(Message::FunctionSelected(0x1000));
+        let text = body(&app);
+        let line = text
+            .lines()
+            .position(|line| line.contains("return rax;"))
+            .unwrap_or_else(|| panic!("{text}"));
+        let address = app.work.line_addresses[&line][0];
+        let _ = app.update(Message::PseudocodeLineSelected(line, address));
+
+        // The prompt opens on the selected line's variable and address.
+        let _ = app.update(Message::EditVersionVariable);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::VersionVariable);
+        assert_eq!(prompt.value, "rax@0x101a");
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("rax has a new version at 0x101a")
+        );
+        let versioned = body(&app);
+        assert!(
+            versioned.contains("  rax_2 = rax;  // new version of rax\n  return rax_2;\n"),
+            "{versioned}"
+        );
+        assert!(versioned.contains("  long rax_2;\n"), "{versioned}");
+
+        // The new version is renamed on its own.
+        let _ = app.update(Message::EditRenameVariable);
+        let _ = app.update(Message::PromptChanged("rax_2=found".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let pairs = app.rename_pairs();
+        assert!(
+            pairs.contains(&("rax_2".to_string(), "found".to_string())),
+            "{pairs:?}"
+        );
+        assert!(
+            !pairs.iter().any(|(original, _)| original == "rax"),
+            "{pairs:?}"
+        );
+
+        // Before the `if`, the return is reached from the arm too: refused,
+        // and the function says why.
+        let _ = app.update(Message::EditVersionVariable);
+        let _ = app.update(Message::PromptChanged("rax@0x100f".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            body(&app).contains(
+                "// rax has no new version at 0x100f: a use at 0x101a is reached from before it too\n"
+            ),
+            "{}",
+            body(&app)
+        );
+        // `off` takes it back.
+        let _ = app.update(Message::EditVersionVariable);
+        let _ = app.update(Message::PromptChanged("rax@0x100f off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(!body(&app).contains("no new version"), "{}", body(&app));
+
+        // Undo takes each word back in turn: the one taken off comes back,
+        // then goes with the refused one, then the rename and the version.
+        let _ = app.update(Message::EditUndo);
+        assert!(
+            body(&app).contains("no new version at 0x100f"),
+            "{}",
+            body(&app)
+        );
+        for _ in 0..3 {
+            let _ = app.update(Message::EditUndo);
+        }
+        assert!(app.annotations.annotation_for("0x1000").is_none());
+        assert!(app.rename_pairs().is_empty(), "{:?}", app.rename_pairs());
+        assert!(!body(&app).contains("rax_2"), "{}", body(&app));
+        assert!(body(&app).contains("  return rax;\n"), "{}", body(&app));
     }
 
     #[test]
