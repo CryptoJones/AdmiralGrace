@@ -827,12 +827,14 @@ fn falls_through(statements: &[Statement]) -> bool {
         return true;
     };
     match &last.kind {
-        // A call that never returns leaves the marker after it.
+        // A call that never returns leaves the marker after it, and so does
+        // a side the walk did not follow.
         StatementKind::Plain => {
             !matches!(
                 &last.node,
                 AstNode::Return { .. } | AstNode::Goto { .. } | AstNode::Break | AstNode::Continue
-            ) && !matches!(&last.node, AstNode::Intrinsic { name, .. } if name == crate::lift::UNREACHABLE)
+            ) && !matches!(&last.node, AstNode::Intrinsic { name, .. }
+                if name == crate::lift::UNREACHABLE || name == crate::lift::HALTED)
         }
         StatementKind::If {
             then_part,

@@ -1750,7 +1750,10 @@ fn a_site_override_is_recorded_and_told_to_the_image() {
         &["override", "--file", &file.text(), "0x401003", "tail", "on"],
     );
     assert!(!ok);
-    assert!(stderr.contains("guard, fold, invert or switch"), "{stderr}");
+    assert!(
+        stderr.contains("guard, fold, invert, switch, taken or next"),
+        "{stderr}"
+    );
     let (ok, _, stderr) = project_with(
         "switch.elf",
         &[
@@ -1764,6 +1767,86 @@ fn a_site_override_is_recorded_and_told_to_the_image() {
     );
     assert!(!ok);
     assert!(stderr.contains("on, off or clear"), "{stderr}");
+}
+
+#[test]
+fn a_taken_off_word_leaves_the_branch_target_unanalyzed() {
+    let file = TempFile::new("taken");
+    let classify = |command: &str| -> (bool, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("switch.elf"))
+            .args([command, "classify", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    // The guard's `ja` at 0x401003 goes to the `ret` at 0x40102d; `taken
+    // off` leaves it out of the walk.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "taken",
+            "off",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401003 now override taken off"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["annotations"][0]["overrides"]["taken"],
+        serde_json::json!(false)
+    );
+    let (ok, text) = classify("pseudocode");
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("// analysis halted at 0x40102d: told to\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  if ((unsigned int)a > 5) {\n    // not analyzed: 0x40102d\n  }\n  switch ("
+        ),
+        "{text}"
+    );
+    let (ok, cfg) = classify("cfg");
+    assert!(ok, "{cfg}");
+    assert!(
+        cfg.contains("block 0x401000 - 0x401005\n  successors: 0x401005\n"),
+        "{cfg}"
+    );
+    assert!(
+        cfg.contains("halts:\n  0x401003 -> 0x40102d: told to"),
+        "{cfg}"
+    );
+
+    // Cleared, the walk follows the branch again.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "taken",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, text) = classify("pseudocode");
+    assert!(ok, "{text}");
+    assert!(!text.contains("not analyzed"), "{text}");
+    assert!(text.contains("    return;\n  }\n  switch ("), "{text}");
 }
 
 #[test]

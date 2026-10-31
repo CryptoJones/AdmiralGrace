@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use iced_x86::Mnemonic;
 
-use crate::cfg::{BasicBlock, JumpTable, ProcedureCfg, TailCall};
+use crate::cfg::{BasicBlock, Halt, HaltReason, JumpTable, ProcedureCfg, TailCall};
 use crate::cpu_context::{DecodedInsn, Flow, Operand};
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
@@ -63,6 +63,26 @@ pub trait Entries {
     /// `call [rip+slot]` to an import the image names.
     fn slot_returns(&self, _slot: u64) -> bool {
         true
+    }
+
+    /// What the analyst said about following the branch at `site` to its
+    /// target — a conditional branch's taken side, a jump's target, a jump
+    /// table's cases: `Some(false)` for `taken off`, which leaves the
+    /// target out, and `Some(true)` for `taken on`, which follows it even
+    /// where the bytes there do not decode. The default says nothing, and
+    /// the walk follows every target that decodes.
+    fn follows_taken(&self, _site: u64) -> Option<bool> {
+        None
+    }
+
+    /// What the analyst said about going on from the instruction at `site`
+    /// to the one after it — a conditional branch's fall-through, a call's
+    /// return: `Some(false)` for `next off`, which leaves it out, and
+    /// `Some(true)` for `next on`, which goes on after a call the walk
+    /// takes for one that never returns, and into a fall-through that does
+    /// not decode. The default says nothing.
+    fn follows_next(&self, _site: u64) -> Option<bool> {
+        None
     }
 }
 
@@ -174,6 +194,13 @@ pub fn resolve_branches(disasm: &Disasm, entry: u64) -> ProcedureCfg {
 /// overlap and a branch into the middle of straight-line code splits it.
 /// Every successor an instruction names is a block start, and no successor is
 /// listed twice.
+///
+/// A side of a branch the walk does not follow is a *halt*, recorded in
+/// `halts`: one the analyst said not to follow, and a branch target that
+/// does not decode — bytes that are no instruction, or an address inside
+/// one — which obfuscated code jumps over, unless the analyst said to
+/// follow it. A conditional branch whose fall-through does not decode is
+/// halted there the same way.
 pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries) -> ProcedureCfg {
     let by_addr: BTreeMap<u64, usize> = disasm
         .instructions
@@ -190,6 +217,11 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
     let mut call_targets: Vec<u64> = Vec::new();
     let mut tail_calls: Vec<TailCall> = Vec::new();
     let mut tables: BTreeMap<u64, JumpTable> = BTreeMap::new();
+    let mut halts: Vec<Halt> = Vec::new();
+    let code = Code {
+        disasm,
+        by_addr: &by_addr,
+    };
     let mut frontier: Vec<u64> = Vec::new();
 
     if by_addr.contains_key(&entry) {
@@ -214,7 +246,8 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
                     tables.insert(ins.address, table);
                 }
             }
-            let step = step_of(ins, entry, entries, tables.get(&ins.address));
+            let step = step_of(ins, entry, entries, tables.get(&ins.address), &code);
+            halts.extend(step.halts.iter().copied());
             if let Some(target) = step.call_target {
                 call_targets.push(target);
             }
@@ -271,7 +304,7 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
         };
         bb.to = next;
 
-        let step = step_of(ins, entry, entries, tables.get(&ins.address));
+        let step = step_of(ins, entry, entries, tables.get(&ins.address), &code);
         let next_is_leader = leaders.contains(&next);
         if step.ends_block || !step.falls_through || next_is_leader {
             let mut successors: Vec<u64> = Vec::new();
@@ -303,6 +336,7 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
         call_targets,
         tail_calls,
         jump_tables: tables.into_values().collect(),
+        halts,
         ..ProcedureCfg::default()
     }
 }
@@ -543,6 +577,34 @@ struct Step {
     /// another function — recorded but not walked: the callee's entry, or
     /// the GOT slot the jump reads.
     tail_call: Option<u64>,
+    /// The sides the walk does not follow, left out of `targets` and
+    /// `falls_through`.
+    halts: Vec<Halt>,
+}
+
+/// The disassembly the walk reads, and where each instruction of it is.
+struct Code<'a> {
+    disasm: &'a Disasm,
+    by_addr: &'a BTreeMap<u64, usize>,
+}
+
+impl Code<'_> {
+    /// Whether `target` does not decode: the instruction there is bytes
+    /// that are no instruction, or the address lies inside the decoded
+    /// range on no instruction's first byte.
+    fn does_not_decode(&self, target: u64) -> bool {
+        if let Some(&i) = self.by_addr.get(&target) {
+            return self.disasm.instructions[i].flow == Flow::Invalid;
+        }
+        let (Some((&first, _)), Some((_, &last))) = (
+            self.by_addr.first_key_value(),
+            self.by_addr.last_key_value(),
+        ) else {
+            return false;
+        };
+        let last = &self.disasm.instructions[last];
+        first <= target && target < last.address + last.length as u64
+    }
 }
 
 /// What the instruction does to the walk of the procedure entered at
@@ -553,8 +615,14 @@ fn step_of(
     entry: u64,
     entries: &dyn Entries,
     table: Option<&JumpTable>,
+    code: &Code,
 ) -> Step {
-    let mut step = step_before_boundaries(ins, entry, entries, table);
+    let mut step = guided(
+        step_before_boundaries(ins, entry, entries, table),
+        ins,
+        entries,
+        code,
+    );
     // No function runs into the next one. Code that would fall into
     // another function's entry goes on in that function: a tail call to
     // it, which returns if it does — except after a call, a system call
@@ -574,6 +642,53 @@ fn step_of(
     step
 }
 
+/// The step with the sides the walk does not follow taken out of it: the
+/// ones the analyst said not to follow, a target that does not decode, and
+/// a conditional branch's fall-through that does not decode, each recorded
+/// as a halt — but a call's return the analyst said not to follow is a
+/// call that never returns, and no halt. The analyst's `on` follows a side
+/// the walk would not: a target or a fall-through that does not decode, or
+/// the return of a call to a function that never returns.
+fn guided(mut step: Step, ins: &DecodedInsn, entries: &dyn Entries, code: &Code) -> Step {
+    let site = ins.address;
+    let next = site + ins.length as u64;
+    let is_call = matches!(ins.flow, Flow::Call(_) | Flow::IndirectCall);
+    let forks = matches!(ins.flow, Flow::ConditionalBranch(_) | Flow::Xbegin(_));
+    let halt = |target: u64, why: HaltReason| Halt { site, target, why };
+    match entries.follows_next(site) {
+        Some(false) if step.falls_through => {
+            step.falls_through = false;
+            step.ends_block = true;
+            if !is_call {
+                step.halts.push(halt(next, HaltReason::Said));
+            }
+        }
+        Some(true) if is_call => step.falls_through = true,
+        None if forks && step.falls_through && code.does_not_decode(next) => {
+            step.falls_through = false;
+            step.halts.push(halt(next, HaltReason::Invalid));
+        }
+        _ => {}
+    }
+    let said = entries.follows_taken(site);
+    let mut halts = Vec::new();
+    step.targets.retain(|&target| {
+        let why = match said {
+            Some(false) => HaltReason::Said,
+            None if code.does_not_decode(target) => HaltReason::Invalid,
+            _ => return true,
+        };
+        // A target that is the fall-through as well is still reached.
+        if !(step.falls_through && target == next) {
+            halts.push(halt(target, why));
+        }
+        false
+    });
+    halts.append(&mut step.halts);
+    step.halts = halts;
+    step
+}
+
 /// [`step_of`] before the function boundaries are applied.
 fn step_before_boundaries(
     ins: &DecodedInsn,
@@ -588,6 +703,7 @@ fn step_before_boundaries(
         is_call: false,
         call_target: None,
         tail_call: None,
+        halts: Vec::new(),
     };
     match ins.flow {
         // A system call or software interrupt returns to the next instruction.

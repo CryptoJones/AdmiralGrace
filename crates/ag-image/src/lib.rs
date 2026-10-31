@@ -56,7 +56,7 @@ use anyhow::{Context, Result};
 
 pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
-pub use ag_engine::cfg::JumpTable;
+pub use ag_engine::cfg::{Halt, HaltReason, JumpTable};
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::emulate::{self as emulate, Limits as EmulationLimits, Run as Emulation};
 pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
@@ -312,6 +312,8 @@ pub struct ControlFlowGraph {
     pub edges: Vec<Edge>,
     /// The jump tables the function's indirect jumps read.
     pub jump_tables: Vec<JumpTable>,
+    /// The sides of branches the walk did not follow.
+    pub halts: Vec<Halt>,
 }
 
 /// The disassembly of one function.
@@ -332,6 +334,9 @@ pub struct Disassembly {
     /// The jump tables the function's indirect jumps read: the cases of
     /// each `switch`, recovered from the code or told by the analyst.
     pub jump_tables: Vec<JumpTable>,
+    /// The sides of branches the walk did not follow: the ones the analyst
+    /// said not to, and the targets that do not decode.
+    pub halts: Vec<Halt>,
 }
 
 /// The calls between the functions of an image.
@@ -1466,12 +1471,15 @@ impl Binary {
     /// to make or not make at each address — and say whether that changed
     /// anything. The pseudocode and the levels are read again after; the
     /// walks too, and the indexes built from them, when a word on a
-    /// `switch` changed, since that changes a function's graph.
+    /// `switch`, a `taken` or a `next` changed, since that changes a
+    /// function's graph.
     pub fn set_site_overrides(&self, overrides: BTreeMap<u64, SiteOverride>) -> bool {
-        let switches = |words: &BTreeMap<u64, SiteOverride>| -> BTreeMap<u64, bool> {
+        type Walked = (Option<bool>, Option<bool>, Option<bool>);
+        let walked = |words: &BTreeMap<u64, SiteOverride>| -> BTreeMap<u64, Walked> {
             words
                 .iter()
-                .filter_map(|(address, word)| Some((*address, word.switch?)))
+                .map(|(address, word)| (*address, (word.switch, word.taken, word.next)))
+                .filter(|(_, walked)| *walked != (None, None, None))
                 .collect()
         };
         let rewalk;
@@ -1479,7 +1487,7 @@ impl Binary {
             if *held == overrides {
                 return false;
             }
-            rewalk = switches(&held) != switches(&overrides);
+            rewalk = walked(&held) != walked(&overrides);
             *held = overrides;
         } else {
             return false;
@@ -1603,6 +1611,10 @@ impl Binary {
         let decoded = self.decoded_of(code);
         let cfg = self.walk(&decoded.disasm, address);
         if cfg.blocks.is_empty() {
+            return false;
+        }
+        // A side the walk did not follow may go anywhere.
+        if !cfg.halts.is_empty() {
             return false;
         }
         for block in &cfg.blocks {
@@ -2263,6 +2275,7 @@ impl Binary {
             blocks: disassembly.blocks.clone(),
             edges,
             jump_tables: disassembly.jump_tables.clone(),
+            halts: disassembly.halts.clone(),
         }))
     }
 
@@ -2906,6 +2919,7 @@ impl Binary {
             calls,
             pointers,
             jump_tables: cfg.jump_tables.clone(),
+            halts: cfg.halts.clone(),
         })
     }
 }
@@ -2943,6 +2957,14 @@ impl Entries for Binary {
 
     fn table_allowed(&self, site: u64) -> bool {
         self.site_override(site).switch != Some(false)
+    }
+
+    fn follows_taken(&self, site: u64) -> Option<bool> {
+        self.site_override(site).taken
+    }
+
+    fn follows_next(&self, site: u64) -> Option<bool> {
+        self.site_override(site).next
     }
 
     fn returns(&self, callee: u64) -> bool {

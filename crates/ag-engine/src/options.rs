@@ -849,18 +849,26 @@ pub struct Options {
 /// an expression with itself is folded to the constant it is (`fold`),
 /// whether the branch's condition is turned round with its arms (`invert`),
 /// and whether the indirect jump there reads a jump table the walk
-/// recovers (`switch`).
+/// recovers (`switch`) — and on the ones the walk makes: whether it
+/// follows the branch to its target — a conditional branch's taken side,
+/// a jump's target, a jump table's cases (`taken`) — and whether it goes
+/// on to the instruction after — a conditional branch's fall-through, a
+/// call's return (`next`). A side not followed is not analyzed, and the
+/// lift says so where the path would go; a call whose return is not
+/// followed is one that does not return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SiteOverride {
     pub guard: Option<bool>,
     pub fold: Option<bool>,
     pub invert: Option<bool>,
     pub switch: Option<bool>,
+    pub taken: Option<bool>,
+    pub next: Option<bool>,
 }
 
 impl SiteOverride {
     /// The kinds, as the project file and the command line spell them.
-    pub const KINDS: [&'static str; 4] = ["guard", "fold", "invert", "switch"];
+    pub const KINDS: [&'static str; 6] = ["guard", "fold", "invert", "switch", "taken", "next"];
 
     /// Whether anything is said.
     pub fn is_empty(&self) -> bool {
@@ -874,6 +882,8 @@ impl SiteOverride {
             "fold" => Some(self.fold),
             "invert" => Some(self.invert),
             "switch" => Some(self.switch),
+            "taken" => Some(self.taken),
+            "next" => Some(self.next),
             _ => None,
         }
     }
@@ -886,6 +896,8 @@ impl SiteOverride {
             "fold" => self.fold = on,
             "invert" => self.invert = on,
             "switch" => self.switch = on,
+            "taken" => self.taken = on,
+            "next" => self.next = on,
             _ => return false,
         }
         true
@@ -898,6 +910,8 @@ impl SiteOverride {
             fold: other.fold.or(self.fold),
             invert: other.invert.or(self.invert),
             switch: other.switch.or(self.switch),
+            taken: other.taken.or(self.taken),
+            next: other.next.or(self.next),
         }
     }
 }
@@ -1801,5 +1815,33 @@ mod tests {
             "{ \"shows\": \"`0x64` where the source said `100`\", \"value\": \"decimal\" }"
         ));
         assert_eq!(json_string("a \"b\"\n"), "\"a \\\"b\\\"\\n\"");
+    }
+
+    #[test]
+    fn a_site_override_says_whether_the_walk_follows_each_side() {
+        let mut word = SiteOverride::default();
+        assert_eq!(word.get("taken"), Some(None));
+        assert_eq!(word.get("next"), Some(None));
+        assert!(word.set("taken", Some(false)));
+        assert!(word.set("next", Some(true)));
+        assert_eq!(word.get("taken"), Some(Some(false)));
+        assert_eq!(word.get("next"), Some(Some(true)));
+        assert_eq!(word.taken, Some(false));
+        assert_eq!(word.next, Some(true));
+        assert!(!word.is_empty());
+        // A later word speaks over an earlier one where it says anything.
+        let over = SiteOverride {
+            taken: Some(true),
+            ..SiteOverride::default()
+        };
+        let merged = word.merged(over);
+        assert_eq!((merged.taken, merged.next), (Some(true), Some(true)));
+        assert!(word.set("taken", None));
+        assert!(word.set("next", None));
+        assert!(word.is_empty());
+        for kind in SiteOverride::KINDS {
+            assert!(word.get(kind).is_some(), "{kind}");
+        }
+        assert_eq!(SiteOverride::KINDS.len(), 6);
     }
 }

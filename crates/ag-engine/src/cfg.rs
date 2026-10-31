@@ -47,6 +47,43 @@ pub struct ProcedureCfg {
     /// The jump tables the procedure's indirect jumps read, in walk order:
     /// the cases of each `switch` the walk recovered, or was told.
     pub jump_tables: Vec<JumpTable>,
+    /// The sides of branches the walk did not follow, in walk order: the
+    /// ones the analyst said not to, and the ones whose target does not
+    /// decode. The block a halt is in leaves the side out of its
+    /// successors.
+    pub halts: Vec<Halt>,
+}
+
+/// A side of a branch the walk did not follow: the branch's target, or
+/// the instruction after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Halt {
+    /// The address of the instruction the side leaves from.
+    pub site: u64,
+    /// Where the side goes.
+    pub target: u64,
+    /// Why it was not followed.
+    pub why: HaltReason,
+}
+
+/// Why the walk did not follow a side of a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltReason {
+    /// The analyst said not to: `taken off` or `next off` at the site.
+    Said,
+    /// The target does not decode: the bytes there are no instruction, or
+    /// it lands inside one. `taken on` at the site follows it anyway.
+    Invalid,
+}
+
+impl HaltReason {
+    /// The reason, as the notes and the listings say it.
+    pub fn text(self) -> &'static str {
+        match self {
+            HaltReason::Said => "told to",
+            HaltReason::Invalid => "the target does not decode",
+        }
+    }
 }
 
 /// A jump table an indirect `jmp` reads: the cases of a `switch`.
