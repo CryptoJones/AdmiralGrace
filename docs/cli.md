@@ -595,6 +595,16 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `set_comment address text [above]` | Puts a comment on the address, inline or above; empty text clears it. |
 | `set_bookmark address [on]` | Bookmarks the function, or takes the bookmark off. |
 | `bookmarks` | The project's bookmarks. |
+| `set_label address name` | Names the address — a label on a branch target, a piece of data; an empty name clears it. |
+| `set_tags address [add] [remove] [on]` | Adds tags to and takes tags off the record at the address; `on` is `function`, `address` (the default) or `block`, as the workbench's prompt asks. |
+| `set_color address color [on]` | Highlights the record: a color name or `#rrggbb`; `none` clears it. |
+| `add_reference from to`, `remove_reference from to` | Records that the instruction at `from` reaches `to` — a computed call or jump the analysis cannot see — or takes the record off. |
+| `tags` | Every tag of the project with how many records carry it. |
+| `tagged tag` | The records that carry a tag. |
+
+The same tools drive a script: `ag run IMAGE [--project FILE] -- COMMAND ARGS…` starts the
+command with the server on its standard input and output and ends with the command's exit
+status — see `docs/scripting.md`, and the Python client in `scripts/ag.py`.
 
 Every write reads the project file again, changes the one record and saves the file whole —
 written beside itself and moved into place — so a change the analyst saved from the command

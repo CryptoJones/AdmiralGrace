@@ -134,6 +134,11 @@ fn tools() -> Vec<Tool> {
         "description": "The most rows to return (default 200, at most 5000).",
         "minimum": 1
     });
+    let on = json!({
+        "type": "string",
+        "enum": ["function", "address", "block"],
+        "description": "What the record is on: the function entered at the address, the address itself (the default), or the block of bytes starting there."
+    });
     vec![
         Tool {
             name: "image_info",
@@ -268,6 +273,83 @@ fn tools() -> Vec<Tool> {
             name: "bookmarks",
             description: "The bookmarks of the project file, each with the function's address and name.",
             schema: json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "set_label",
+            description: "Name the address — a label on a branch target, a piece of data — in the project file; an empty name clears it. A function's entry is named with set_name. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "address": address,
+                    "name": { "type": "string", "description": "The label, or empty to clear." },
+                },
+                "required": ["address", "name"]
+            }),
+        },
+        Tool {
+            name: "set_tags",
+            description: "Add tags to, and take tags off, the function entered at an address, the address itself, or the block of bytes starting there, in the project file. The workbench's navigator filters by a tag (#tag). The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "address": address,
+                    "add": { "type": "array", "items": { "type": "string" }, "description": "The tags to add." },
+                    "remove": { "type": "array", "items": { "type": "string" }, "description": "The tags to take off." },
+                    "on": on,
+                },
+                "required": ["address"]
+            }),
+        },
+        Tool {
+            name: "set_color",
+            description: "Highlight the function entered at an address, the address itself, or the block starting there, in the project file: a color name (red, orange, amber, yellow, green, cyan, blue, purple, pink, gray) or #rrggbb; none clears it. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "address": address,
+                    "color": { "type": "string", "description": "The color, or none to clear." },
+                    "on": on,
+                },
+                "required": ["address", "color"]
+            }),
+        },
+        Tool {
+            name: "add_reference",
+            description: "Record in the project file that the instruction at one address reaches another — a computed call or jump the analysis cannot see. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "The address the reference leaves from." },
+                    "to": { "type": "string", "description": "The address it reaches." },
+                },
+                "required": ["from", "to"]
+            }),
+        },
+        Tool {
+            name: "remove_reference",
+            description: "Take a recorded reference off the project file. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "The address the reference leaves from." },
+                    "to": { "type": "string", "description": "The address it reaches." },
+                },
+                "required": ["from", "to"]
+            }),
+        },
+        Tool {
+            name: "tags",
+            description: "Every tag of the project file, with how many records carry it.",
+            schema: json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "tagged",
+            description: "The records of the project file that carry a tag: each address, what the record is on, and its name.",
+            schema: json!({
+                "type": "object",
+                "properties": { "tag": { "type": "string", "description": "The tag." } },
+                "required": ["tag"]
+            }),
         },
     ]
 }
@@ -704,6 +786,107 @@ impl Server {
                     })
                     .collect();
                 Ok(Answer::json(json!({ "bookmarks": bookmarks })))
+            }
+            "set_label" => {
+                let address = parse_address(&text("address")?)?;
+                let name = text("name")?;
+                self.change(TargetKind::Address, address, |record| {
+                    record.name = (!name.trim().is_empty()).then(|| name.trim().to_string());
+                })?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
+            "set_tags" => {
+                let address = parse_address(&text("address")?)?;
+                let kind = target_kind(arguments.get("on"))?;
+                let add = words(arguments.get("add"), "add")?;
+                let remove = words(arguments.get("remove"), "remove")?;
+                self.change(kind, address, |record| {
+                    for tag in add
+                        .iter()
+                        .flat_map(|tag| ag_corpus::project::parse_tags(tag))
+                    {
+                        record.add_tag(&tag);
+                    }
+                    for tag in remove
+                        .iter()
+                        .flat_map(|tag| ag_corpus::project::parse_tags(tag))
+                    {
+                        record.remove_tag(&tag);
+                    }
+                })?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
+            "set_color" => {
+                let address = parse_address(&text("address")?)?;
+                let color = text("color")?;
+                let kind = target_kind(arguments.get("on"))?;
+                let value = if color.trim().is_empty() || color.trim().eq_ignore_ascii_case("none")
+                {
+                    None
+                } else {
+                    Some(ag_corpus::project::parse_color(&color).ok_or_else(|| {
+                        format!(
+                            "{color:?} is not a color; use a name such as red or amber, or #rrggbb"
+                        )
+                    })?)
+                };
+                self.change(kind, address, |record| record.color = value)?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
+            "add_reference" | "remove_reference" => {
+                let from = parse_address(&text("from")?)?;
+                let to = parse_address(&text("to")?)?;
+                let reaches = format!("{to:#x}");
+                let adding = name == "add_reference";
+                self.change(TargetKind::Address, from, |record| {
+                    if adding {
+                        record.add_reference(&reaches);
+                    } else {
+                        record.remove_reference(&reaches);
+                    }
+                })?;
+                Ok(Answer::json(annotations_json(&self.project()?.file, from)))
+            }
+            "tags" => {
+                self.reload()?;
+                let project = self.project()?;
+                let tags: Vec<Value> = project
+                    .file
+                    .tags()
+                    .into_iter()
+                    .map(|(tag, count)| json!({ "tag": tag, "count": count }))
+                    .collect();
+                Ok(Answer::json(json!({ "tags": tags })))
+            }
+            "tagged" => {
+                let tag = text("tag")?;
+                self.reload()?;
+                let project = self.project()?;
+                let records: Vec<Value> = project
+                    .file
+                    .tagged(&tag)
+                    .iter()
+                    .map(|record| {
+                        let address = ag_corpus::parse_addr(&record.address).ok();
+                        json!({
+                            "address": record.address,
+                            "on": record.kind.label(),
+                            "name": record.name.clone().or_else(|| {
+                                address.and_then(|address| self.image.function_name(address).map(str::to_string))
+                            }),
+                        })
+                    })
+                    .collect();
+                Ok(Answer::json(json!({ "tag": tag, "records": records })))
             }
             _ => Err(format!("unknown tool {name:?}")),
         }
@@ -1145,6 +1328,40 @@ fn matcher(text: &str) -> Result<regex::Regex, String> {
         .map_err(|error| format!("{text:?} is not a pattern: {error}"))
 }
 
+/// What a record is on, as the `on` argument says: the address itself
+/// unless it says otherwise.
+fn target_kind(on: Option<&Value>) -> Result<TargetKind, String> {
+    match on {
+        None | Some(Value::Null) => Ok(TargetKind::Address),
+        Some(Value::String(on)) => match on.as_str() {
+            "function" => Ok(TargetKind::Function),
+            "address" => Ok(TargetKind::Address),
+            "block" => Ok(TargetKind::Region),
+            other => Err(format!(
+                "\"on\" is function, address or block, not {other:?}"
+            )),
+        },
+        Some(_) => Err("\"on\" is function, address or block".to_string()),
+    }
+}
+
+/// The strings of an array argument, or none when it was not given.
+fn words(value: Option<&Value>, key: &str) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("{key:?} is an array of strings"))
+            })
+            .collect(),
+        Some(Value::String(one)) => Ok(vec![one.clone()]),
+        Some(_) => Err(format!("{key:?} is an array of strings")),
+    }
+}
+
 /// The address `text` spells.
 fn parse_address(text: &str) -> Result<u64, String> {
     ag_corpus::parse_addr(text).map_err(|_| format!("{text:?} is not an address"))
@@ -1379,6 +1596,13 @@ mod tests {
                 "set_comment",
                 "set_bookmark",
                 "bookmarks",
+                "set_label",
+                "set_tags",
+                "set_color",
+                "add_reference",
+                "remove_reference",
+                "tags",
+                "tagged",
             ]
         );
         for tool in tools {
@@ -1713,6 +1937,107 @@ mod tests {
         };
         let raw = flags.spec().unwrap().unwrap();
         assert!(open(&fixture(), Some(raw), None, Some(&path), Vec::new()).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tags_colors_labels_and_references_are_recorded_where_they_are_told() {
+        let path = temp_project("tags");
+        let mut server = server(Some(path.clone()));
+        let tagged = call(
+            &mut server,
+            "set_tags",
+            json!({ "address": "0x1149", "add": ["crypto, parser"], "on": "function" }),
+        );
+        assert_eq!(tagged["isError"], false, "{tagged}");
+        assert_eq!(
+            tagged["structuredContent"]["record"]["tags"],
+            json!(["crypto", "parser"])
+        );
+        let fewer = call(
+            &mut server,
+            "set_tags",
+            json!({ "address": "0x1149", "remove": ["parser"], "on": "function" }),
+        );
+        assert_eq!(
+            fewer["structuredContent"]["record"]["tags"],
+            json!(["crypto"])
+        );
+        let tags = call(&mut server, "tags", json!({}));
+        assert_eq!(
+            tags["structuredContent"]["tags"],
+            json!([{ "tag": "crypto", "count": 1 }])
+        );
+        let with = call(&mut server, "tagged", json!({ "tag": "crypto" }));
+        assert_eq!(with["structuredContent"]["records"][0]["address"], "0x1149");
+        assert_eq!(with["structuredContent"]["records"][0]["on"], "function");
+        assert_eq!(with["structuredContent"]["records"][0]["name"], "add");
+        let bad = call(
+            &mut server,
+            "set_tags",
+            json!({ "address": "0x1149", "on": "galaxy" }),
+        );
+        assert_eq!(bad["isError"], true);
+
+        let colored = call(
+            &mut server,
+            "set_color",
+            json!({ "address": "0x1198", "color": "amber", "on": "block" }),
+        );
+        assert!(
+            colored["structuredContent"]["block"]["color"].is_string(),
+            "{colored}"
+        );
+        assert!(colored["structuredContent"]["record"].is_null());
+        let wrong = call(
+            &mut server,
+            "set_color",
+            json!({ "address": "0x1198", "color": "plaid" }),
+        );
+        assert_eq!(wrong["isError"], true);
+        let cleared = call(
+            &mut server,
+            "set_color",
+            json!({ "address": "0x1198", "color": "none", "on": "block" }),
+        );
+        assert!(cleared["structuredContent"]["block"].is_null());
+
+        let labelled = call(
+            &mut server,
+            "set_label",
+            json!({ "address": "0x11a4", "name": "again" }),
+        );
+        assert_eq!(labelled["structuredContent"]["record"]["name"], "again");
+
+        let referenced = call(
+            &mut server,
+            "add_reference",
+            json!({ "from": "0x11b5", "to": "0x1149" }),
+        );
+        assert_eq!(
+            referenced["structuredContent"]["record"]["references"],
+            json!(["0x1149"])
+        );
+        let xrefs = call(&mut server, "cross_references", json!({ "target": "add" }));
+        assert_eq!(
+            xrefs["structuredContent"]["recorded"]["from"],
+            json!(["0x11b5"])
+        );
+        let gone = call(
+            &mut server,
+            "remove_reference",
+            json!({ "from": "0x11b5", "to": "0x1149" }),
+        );
+        assert!(gone["structuredContent"]["record"].is_null(), "{gone}");
+
+        let saved = ProjectFile::load(&path).expect("the project saved");
+        assert!(saved
+            .annotation_for("0x1149")
+            .is_some_and(|a| a.has_tag("crypto")));
+        assert_eq!(
+            saved.annotation_for("0x11a4").and_then(|a| a.name.clone()),
+            Some("again".to_string())
+        );
         let _ = std::fs::remove_file(&path);
     }
 
