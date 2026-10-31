@@ -121,7 +121,8 @@ its superclass, its fields or cases with their types, the protocols it conforms 
 class, the methods its vtable dispatches with each implementation's address — and each
 protocol. Swift names are demangled everywhere like C++ ones (`sample.Derived.greet(times:
 Swift.Int) -> Swift.Int` for `$s6sample7DerivedC5greet5timesS2i_tF`), the mangled name kept
-beside; a vtable entry no symbol names is a function under `Type.method#N`. The types inside
+beside; a vtable entry no symbol names is a function under `Type.<kind>#N` — `sample.Base.getter#0`,
+`sample.Base.method#4`. The types inside
 the records are decoded the same way, symbolic references followed to the descriptor they
 name.
 

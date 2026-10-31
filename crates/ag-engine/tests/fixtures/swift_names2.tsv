@@ -1,0 +1,96 @@
+_$s4Unit6shapes6ShapedPTl	associated type descriptor for shapes.Shaped.Unit
+_$s6shapes1dSSvp	shapes.d : Swift.String
+_$s6shapes1sSiSgvp	shapes.s : Swift.Int?
+_$s6shapes3boxAA3BoxCySiGvp	shapes.box : shapes.Box<Swift.Int>
+_$s6shapes3BoxC3addyyxF	shapes.Box.add(A) -> ()
+_$s6shapes3BoxC3addyyxFTq	method descriptor for shapes.Box.add(A) -> ()
+_$s6shapes3BoxC5firstxSgvg	shapes.Box.first.getter : A?
+_$s6shapes3BoxC5firstxSgvgTq	method descriptor for shapes.Box.first.getter : A?
+_$s6shapes3BoxC5firstxSgvpMV	property descriptor for shapes.Box.first : A?
+_$s6shapes3BoxC5itemsSayxGvg	shapes.Box.items.getter : [A]
+_$s6shapes3BoxC5itemsSayxGvgTq	method descriptor for shapes.Box.items.getter : [A]
+_$s6shapes3BoxC5itemsSayxGvM	shapes.Box.items.modify : [A]
+_$s6shapes3BoxC5itemsSayxGvM.resume.0	shapes.Box.items.modify : [A] with unmangled suffix ".resume.0"
+_$s6shapes3BoxC5itemsSayxGvMTq	method descriptor for shapes.Box.items.modify : [A]
+_$s6shapes3BoxC5itemsSayxGvpfi	variable initialization expression of shapes.Box.items : [A]
+_$s6shapes3BoxC5itemsSayxGvpMV	property descriptor for shapes.Box.items : [A]
+_$s6shapes3BoxC5itemsSayxGvpWvd	direct field offset for shapes.Box.items : [A]
+_$s6shapes3BoxC5itemsSayxGvs	shapes.Box.items.setter : [A]
+_$s6shapes3BoxC5itemsSayxGvsTq	method descriptor for shapes.Box.items.setter : [A]
+_$s6shapes3BoxCACyxGycfc	shapes.Box.init() -> shapes.Box<A>
+_$s6shapes3BoxCACyxGycfC	shapes.Box.__allocating_init() -> shapes.Box<A>
+_$s6shapes3BoxCACyxGycfCTq	method descriptor for shapes.Box.__allocating_init() -> shapes.Box<A>
+_$s6shapes3BoxCfd	shapes.Box.deinit
+_$s6shapes3BoxCfD	shapes.Box.__deallocating_deinit
+_$s6shapes3BoxCMa	type metadata accessor for shapes.Box
+_$s6shapes3BoxCMF	reflection metadata field descriptor shapes.Box
+_$s6shapes3BoxCMi	type metadata instantiation function for shapes.Box
+_$s6shapes3BoxCMI	type metadata instantiation cache for shapes.Box
+_$s6shapes3BoxCMn	nominal type descriptor for shapes.Box
+_$s6shapes3BoxCMP	generic type metadata pattern for shapes.Box
+_$s6shapes3BoxCMr	type metadata completion function for shapes.Box
+_$s6shapes3BoxCySiGMd	demangling cache variable for type metadata for shapes.Box<Swift.Int>
+_$s6shapes3BoxCySiGMR	mangled name ref for type metadata for shapes.Box<Swift.Int>
+_$s6shapes3sumySiSgSaySiG_AA5PointVAdCtKF	shapes.sum([Swift.Int], shapes.Point, [Swift.Int], Swift.Int?) throws -> Swift.Int?
+_$s6shapes4pairyx_q_tx_q_tr0_lF	shapes.pair<A, B>(A, B) -> (A, B)
+_$s6shapes4pickyxx_xtSLRzlF	shapes.pick<A where A: Swift.Comparable>(A, A) -> A
+_$s6shapes5fetch1xSSSiSg_tYaF	shapes.fetch(x: Swift.Int?) async -> Swift.String
+_$s6shapes5fetch1xSSSiSg_tYaFTu	async function pointer to shapes.fetch(x: Swift.Int?) async -> Swift.String
+_$s6shapes5fetch1xSSSiSg_tYaFTY0_	(1) suspend resume partial function for shapes.fetch(x: Swift.Int?) async -> Swift.String
+_$s6shapes5PointV1x1yACSi_SitcfC	shapes.Point.init(x: Swift.Int, y: Swift.Int) -> shapes.Point
+_$s6shapes5PointV1xSivg	shapes.Point.x.getter : Swift.Int
+_$s6shapes5PointV1xSivM	shapes.Point.x.modify : Swift.Int
+_$s6shapes5PointV1xSivM.resume.0	shapes.Point.x.modify : Swift.Int with unmangled suffix ".resume.0"
+_$s6shapes5PointV1xSivpMV	property descriptor for shapes.Point.x : Swift.Int
+_$s6shapes5PointV1xSivs	shapes.Point.x.setter : Swift.Int
+_$s6shapes5PointV1ySivg	shapes.Point.y.getter : Swift.Int
+_$s6shapes5PointV1ySivM	shapes.Point.y.modify : Swift.Int
+_$s6shapes5PointV1ySivM.resume.0	shapes.Point.y.modify : Swift.Int with unmangled suffix ".resume.0"
+_$s6shapes5PointV1ySivpMV	property descriptor for shapes.Point.y : Swift.Int
+_$s6shapes5PointV1ySivs	shapes.Point.y.setter : Swift.Int
+_$s6shapes5PointVMa	type metadata accessor for shapes.Point
+_$s6shapes5PointVMf	full type metadata for shapes.Point
+_$s6shapes5PointVMF	reflection metadata field descriptor shapes.Point
+_$s6shapes5PointVMn	nominal type descriptor for shapes.Point
+_$s6shapes5PointVN	type metadata for shapes.Point
+_$s6shapes5PointVwet	getEnumTagSinglePayload value witness for shapes.Point
+_$s6shapes5PointVwst	storeEnumTagSinglePayload value witness for shapes.Point
+_$s6shapes5PointVWV	value witness table for shapes.Point
+_$s6shapes5twiceyxx_xxKXEtKlF	shapes.twice<A>(A, (A) throws -> A) throws -> A
+_$s6shapes6Shaped_pMF	reflection metadata field descriptor shapes.Shaped
+_$s6shapes6ShapedMp	protocol descriptor for shapes.Shaped
+_$s6shapes6ShapedP4UnitAC_SjTn	associated conformance descriptor for shapes.Shaped.shapes.Shaped.Unit: Swift.Numeric
+_$s6shapes6ShapedTL	protocol requirements base descriptor for shapes.Shaped
+_$s6shapes7FailureOACs5ErrorAAWl	lazy protocol witness table accessor for type shapes.Failure and conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOACs5ErrorAAWL	lazy protocol witness table cache variable for type shapes.Failure and conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOMa	type metadata accessor for shapes.Failure
+_$s6shapes7FailureOMf	full type metadata for shapes.Failure
+_$s6shapes7FailureOMF	reflection metadata field descriptor shapes.Failure
+_$s6shapes7FailureOMn	nominal type descriptor for shapes.Failure
+_$s6shapes7FailureON	type metadata for shapes.Failure
+_$s6shapes7FailureOs5ErrorAAMc	protocol conformance descriptor for shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOs5ErrorAAMcMK	metadata instantiation cache for protocol conformance descriptor for shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOs5ErrorAAsADP19_getEmbeddedNSErroryXlSgyFTW	protocol witness for Swift.Error._getEmbeddedNSError() -> Swift.AnyObject? in conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOs5ErrorAAsADP5_codeSivgTW	protocol witness for Swift.Error._code.getter : Swift.Int in conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOs5ErrorAAsADP7_domainSSvgTW	protocol witness for Swift.Error._domain.getter : Swift.String in conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOs5ErrorAAsADP9_userInfoyXlSgvgTW	protocol witness for Swift.Error._userInfo.getter : Swift.AnyObject? in conformance shapes.Failure : Swift.Error in shapes
+_$s6shapes7FailureOwet	getEnumTagSinglePayload value witness for shapes.Failure
+_$s6shapes7FailureOwst	storeEnumTagSinglePayload value witness for shapes.Failure
+_$s6shapes7FailureOwug	getEnumTag value witness for shapes.Failure
+_$s6shapes7FailureOwui	destructiveInjectEnumTag value witness for shapes.Failure
+_$s6shapes7FailureOwup	destructiveProjectEnumData value witness for shapes.Failure
+_$s6shapes7FailureOWV	value witness table for shapes.Failure
+_$s6shapes7measurey4UnitQzxAA6ShapedRzlF	shapes.measure<A where A: shapes.Shaped>(A) -> A.Unit
+_$s6shapes8describe1x5names4flagSSSiSg_SDySSSiGSbtF	shapes.describe(x: Swift.Int?, names: [Swift.String : Swift.Int], flag: Swift.Bool) -> Swift.String
+_$s6shapesMXM	module descriptor shapes
+_$ss12_ArrayBufferV20_consumeAndCreateNew14bufferIsUnique15minimumCapacity13growForAppendAByxGSb_SiSbtFSi_Tg5	generic specialization <Swift.Int> of Swift._ArrayBuffer._consumeAndCreateNew(bufferIsUnique: Swift.Bool, minimumCapacity: Swift.Int, growForAppend: Swift.Bool) -> Swift._ArrayBuffer<A>
+_$ss18_DictionaryStorageCySSSiGMd	demangling cache variable for type metadata for Swift._DictionaryStorage<Swift.String, Swift.Int>
+_$ss18_DictionaryStorageCySSSiGMR	mangled name ref for type metadata for Swift._DictionaryStorage<Swift.String, Swift.Int>
+_$ss22__RawDictionaryStorageC4find_9hashValues10_HashTableV6BucketV6bucket_Sb5foundtx_SitSHRzlFSS_Tg5	generic specialization <Swift.String> of Swift.__RawDictionaryStorage.find<A where A: Swift.Hashable>(_: A, hashValue: Swift.Int) -> (bucket: Swift._HashTable.Bucket, found: Swift.Bool)
+_$ss22__RawDictionaryStorageC4findys10_HashTableV6BucketV6bucket_Sb5foundtxSHRzlFSS_Tg5	generic specialization <Swift.String> of Swift.__RawDictionaryStorage.find<A where A: Swift.Hashable>(A) -> (bucket: Swift._HashTable.Bucket, found: Swift.Bool)
+_$ss23_ContiguousArrayStorageCySiGMd	demangling cache variable for type metadata for Swift._ContiguousArrayStorage<Swift.Int>
+_$ss23_ContiguousArrayStorageCySiGMR	mangled name ref for type metadata for Swift._ContiguousArrayStorage<Swift.Int>
+_$ss23_ContiguousArrayStorageCySS_SitGMd	demangling cache variable for type metadata for Swift._ContiguousArrayStorage<(Swift.String, Swift.Int)>
+_$ss23_ContiguousArrayStorageCySS_SitGMR	mangled name ref for type metadata for Swift._ContiguousArrayStorage<(Swift.String, Swift.Int)>
+_$sSa6appendyyxnFSi_Tg5	generic specialization <Swift.Int> of Swift.Array.append(__owned A) -> ()
+_$sSD17dictionaryLiteralSDyxq_Gx_q_td_tcfCSS_SiTt0g5Tf4g_n	function signature specialization <Arg[0] = Owned To Guaranteed> of generic specialization <Swift.String, Swift.Int> of Swift.Dictionary.init(dictionaryLiteral: (A, B)...) -> [A : B]

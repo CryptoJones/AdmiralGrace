@@ -1884,10 +1884,7 @@ fn a_swift_images_functions_are_named_demangled_and_its_types_are_read() {
         binary.mangled_name(area.address),
         Some("_$s6sample7DerivedC4area2ofSiAA5ShapeO_tF")
     );
-    assert_eq!(
-        binary.code_name(area.address),
-        Some("sample.Derived.area")
-    );
+    assert_eq!(binary.code_name(area.address), Some("sample.Derived.area"));
     assert_eq!(
         binary.address_of_mangled("$s6sample7DerivedC4area2ofSiAA5ShapeO_tF"),
         Some(area.address)

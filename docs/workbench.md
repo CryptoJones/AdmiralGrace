@@ -415,7 +415,8 @@ for a function and for a piece of data alike.
 
 A Swift Mach-O's functions are listed under their demangled names — `sample.Derived.greet(times:
 Swift.Int) -> Swift.Int` — the mangled `$s…` name in the inspector's **Mangled** row; a method
-a class's vtable points at and no symbol names is listed as `Type.method#N`. `ag image FILE
+a class's vtable points at and no symbol names is listed as `Type.<kind>#N`
+(`sample.Base.getter#0`). `ag image FILE
 swift` prints the types, their fields and their conformances.
 
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,

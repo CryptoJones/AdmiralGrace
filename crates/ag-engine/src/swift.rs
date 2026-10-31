@@ -14,10 +14,15 @@
 //!
 //! The image is read through kuna's view of a Mach-O with the chained
 //! fixups resolved, as the Objective-C metadata is. Every count and every
-//! string is bounded against a crafted file. Only a 64-bit Mach-O is read;
-//! the records are read as the Swift 5 runtime lays them out.
+//! string is bounded against a crafted file, and the field records read
+//! across the whole image with them; a field descriptor two types share
+//! is read once. Only a 64-bit Mach-O is read; the records are read as the
+//! Swift 5 runtime lays them out, and a class descriptor whose generic
+//! header carries flags this reader does not know keeps its methods to
+//! itself rather than name them wrong.
 
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 
 use kuna_analysis::analyzers::objc::sections::MachoImage;
 use kuna_analysis::loader::format::macho::resolve_chained_fixups;
@@ -157,6 +162,9 @@ impl SwiftMetadata {
     pub const LONGEST_NAME: usize = 4096;
     /// No chain of contexts is deeper: a bound on a crafted parent loop.
     pub const DEEPEST_CONTEXT: usize = 32;
+    /// No real image has more field records: a bound on the lists of a
+    /// crafted one, across every type.
+    pub const MOST_FIELDS: usize = 1 << 20;
 }
 
 /// The layouts of the runtime's records: byte offsets of the fields read.
@@ -167,6 +175,7 @@ mod layout {
     /// The kinds, in the low five bits of the flags.
     pub const KIND_MASK: u32 = 0x1f;
     pub const KIND_MODULE: u32 = 0;
+    pub const KIND_EXTENSION: u32 = 1;
     pub const KIND_PROTOCOL: u32 = 3;
     pub const KIND_CLASS: u32 = 16;
     pub const KIND_STRUCT: u32 = 17;
@@ -216,9 +225,13 @@ mod layout {
     pub const CONFORMANCE_TYPE_KIND_MASK: u32 = 0x7;
 }
 
-/// The image under the walk.
+/// The image under the walk: kuna's view of it, the field descriptors read
+/// so far by address, and the count of field records read against the
+/// bound.
 struct Walk<'a> {
     img: MachoImage<'a>,
+    fields: RefCell<HashMap<u64, Vec<SwiftField>>>,
+    field_records: Cell<usize>,
 }
 
 impl Walk<'_> {
@@ -290,7 +303,16 @@ impl Walk<'_> {
                         .and_then(|name| self.name_at(name))?;
                     parts.push(name);
                 }
-                // An extension or an anonymous context names nothing here.
+                // An extension names the type it extends, module and all,
+                // as a mangled type name; the chain ends there.
+                layout::KIND_EXTENSION => {
+                    let extended = self
+                        .relative(current.wrapping_add(layout::NAME))
+                        .and_then(|name| self.type_name_at(name))?;
+                    parts.push(extended);
+                    break;
+                }
+                // An anonymous context names nothing here.
                 _ => {}
             }
             if kind == layout::KIND_MODULE {
@@ -389,8 +411,18 @@ impl Walk<'_> {
         swift_demangle::demangle_type(&mangled)
     }
 
-    /// The fields of the field descriptor at `descriptor`.
+    /// The fields of the field descriptor at `descriptor`, read once per
+    /// descriptor.
     fn fields_at(&self, descriptor: u64) -> Vec<SwiftField> {
+        if let Some(fields) = self.fields.borrow().get(&descriptor) {
+            return fields.clone();
+        }
+        let fields = self.read_fields(descriptor);
+        self.fields.borrow_mut().insert(descriptor, fields.clone());
+        fields
+    }
+
+    fn read_fields(&self, descriptor: u64) -> Vec<SwiftField> {
         let mut fields = Vec::new();
         let Some(count) = self
             .img
@@ -410,6 +442,10 @@ impl Walk<'_> {
             return fields;
         }
         for index in 0..u64::from(count).min(SwiftMetadata::MOST_IN_A_LIST) {
+            if self.field_records.get() >= SwiftMetadata::MOST_FIELDS {
+                break;
+            }
+            self.field_records.set(self.field_records.get() + 1);
             let record =
                 descriptor.wrapping_add(layout::FIELD_DESCRIPTOR_FIRST + index * record_size);
             let Some(flags) = self.img.read_u32(record.wrapping_add(layout::FIELD_FLAGS)) else {
@@ -447,7 +483,15 @@ impl Walk<'_> {
             // A type's generic context header: the instantiation cache and
             // pattern, then the counts of parameters and requirements; the
             // parameters one byte each, padded to four; the requirements
-            // twelve bytes each.
+            // twelve bytes each. The header's flags announce trailing
+            // records this reader does not know — parameter packs, inverted
+            // protocols — after which the vtable cannot be placed.
+            let Some(header_flags) = self.img.read(at.wrapping_add(14), 2) else {
+                return methods;
+            };
+            if header_flags != [0, 0] {
+                return methods;
+            }
             let Some(params) = self.img.read(at.wrapping_add(8), 2) else {
                 return methods;
             };
@@ -490,7 +534,9 @@ impl Walk<'_> {
                 3 => "setter",
                 4 => "modify",
                 5 => "read",
-                _ => "method",
+                6 => "modify2",
+                7 => "read2",
+                _ => "unknown",
             };
             methods.push(SwiftMethod {
                 kind,
@@ -512,6 +558,8 @@ pub fn read(bytes: &[u8]) -> Option<SwiftMetadata> {
     }
     let walk = Walk {
         img: MachoImage::with_fixups(&file, resolve_chained_fixups(&file, bytes)),
+        fields: RefCell::new(HashMap::new()),
+        field_records: Cell::new(0),
     };
     let mut metadata = SwiftMetadata::default();
 
@@ -596,6 +644,12 @@ pub fn read(bytes: &[u8]) -> Option<SwiftMetadata> {
 
     // The conformances: each names a type and a protocol; the protocol may
     // be another image's, bound at load, and then names nothing here.
+    let type_index: HashMap<u64, usize> = metadata
+        .types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| (ty.address, index))
+        .collect();
     for conformance in records("__swift5_proto") {
         let Some(flags) = walk
             .img
@@ -622,10 +676,9 @@ pub fn read(bytes: &[u8]) -> Option<SwiftMetadata> {
         else {
             continue;
         };
-        if let Some(ty) = metadata
-            .types
-            .iter_mut()
-            .find(|ty| ty.address == type_descriptor)
+        if let Some(ty) = type_index
+            .get(&type_descriptor)
+            .and_then(|index| metadata.types.get_mut(*index))
         {
             if !ty.protocols.contains(&protocol) {
                 ty.protocols.push(protocol);
