@@ -152,7 +152,8 @@ The lift is readable at every level it passes through — `lifted` (the machine'
 instructions with the registers each touches), `low` (the lifter's statements over
 temporaries and slots), `medium` (statements over variables on the block graph) and `high`
 (the structured body) — each with an SSA form, each item carrying the addresses it came
-from, so the levels map onto each other and onto the listing.
+from, so the levels map onto each other and onto the listing. In the workbench, F7 cycles
+the Listing or Graph pane through the levels and Shift+F7 toggles the SSA form.
 
 ```bash
 cargo run --bin ag -- image ./sample.elf il sum_to --level medium --ssa

@@ -486,6 +486,17 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// The function at one level of the lift, in SSA form when asked, for
+    /// a provider whose engine lifts in stages.
+    fn il(
+        &self,
+        _address: u64,
+        _level: ag_image::Level,
+        _ssa: bool,
+    ) -> Option<ag_image::IlFunction> {
+        None
+    }
+
     /// Write a copy of the program with the patches told to the provider
     /// in it to `out`, when the provider reads a program image: how many
     /// bytes were written, or why none were.

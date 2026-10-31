@@ -193,6 +193,18 @@ The decoder is x86, and reads the width of the code — 32-bit or 64-bit — fro
 language. An image of another architecture opens with its symbols and its sections, but
 with the listing off, and the Problems panel says why.
 
+## The lift's levels in the panes
+
+The Listing and Graph tabs show the disassembly, or any level of the lift. **View ▸ Cycle the
+pane's level** (F7) moves the active pane on: the disassembly, then the `lifted`, `low`,
+`medium` and `high` levels, and back; **Toggle SSA form** (Shift+F7) shows the level with
+every definition versioned and a φ where paths meet. Each pane keeps its own level — the
+graph at the medium level beside the listing's disassembly, say — and the level follows the
+function selected. A row or a block line of a level carries the addresses the statement came
+from, so the selection, the highlights and the breakpoints still land, and the tab row shows
+the level. A function the lifter does not read keeps the disassembly, and the status line
+says so. The levels are described in `docs/il.md`.
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or

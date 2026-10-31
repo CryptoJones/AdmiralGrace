@@ -210,6 +210,20 @@ fn view_tabs(app: &App) -> Element<'_, Message> {
 
     row = row.push(Space::new().width(Length::Fill));
 
+    // The pane's level of the lift, when it is not the disassembly.
+    let level = match app.work.tab {
+        ViewTab::Listing => Some(app.work.listing_level),
+        ViewTab::Graph => Some(app.work.graph_level),
+        _ => None,
+    };
+    if let Some(level) = level.filter(|level| *level != crate::app::PaneLevel::Disassembly) {
+        row = row.push(
+            Container::new(Text::new(level.label()).size(11).color(color::AMBER))
+                .padding([4, 8])
+                .center_y(Length::Fill),
+        );
+    }
+
     Container::new(row)
         .padding([0, 12])
         .width(Length::Fill)

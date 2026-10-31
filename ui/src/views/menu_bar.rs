@@ -222,6 +222,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::ViewToggleBottom,
             )),
             Item::new(separator()),
+            Item::new(separator()),
+            Item::new(item_button(
+                "Cycle the pane's level",
+                "F7",
+                Message::ViewCycleLevel,
+            )),
+            Item::new(item_button(
+                "Toggle SSA form",
+                "Shift+F7",
+                Message::ViewToggleSsa,
+            )),
+            Item::new(separator()),
             Item::new(item_button("Reset layout", "", Message::ViewResetLayout)),
         ])
         .width(240.0),
