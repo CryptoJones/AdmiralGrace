@@ -895,6 +895,9 @@ impl Formatting {
     /// optional and none and false when left out — as the lines now. An
     /// answer without `lines` leaves them as they are.
     pub fn apply(&mut self, answer: &serde_json::Value) -> Result<(), String> {
+        if !answer.is_object() {
+            return Err("the answer is a JSON object, `{\"lines\": […]}` or `{}`".to_string());
+        }
         let Some(lines) = answer.get("lines") else {
             return Ok(());
         };

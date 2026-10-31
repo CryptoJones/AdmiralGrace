@@ -608,6 +608,37 @@ json.dump({"lines": lines}, sys.stdout)
         "{signature}"
     );
     assert_eq!(signature["addresses"][0], 0x1149);
+    // A dead line is said to be, and stays so after the formatter put a
+    // line before it.
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["pseudocode", "deregister_tm_clones", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let lines = report["lines"].as_array().expect("the lines");
+    assert_eq!(
+        lines[0]["text"],
+        "// formatted as c for deregister_tm_clones"
+    );
+    assert_eq!(lines[0]["dead"], false);
+    let store = lines
+        .iter()
+        .find(|line| {
+            line["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("rax = &completed.0;"))
+        })
+        .expect("the dead store");
+    assert_eq!(store["dead"], true, "{store}");
+    assert!(
+        store["text"].as_str().unwrap().ends_with("// @0x1097"),
+        "{store}"
+    );
+    let last = lines.last().expect("a last line");
+    assert_eq!(last["dead"], false);
     // Listed with the rest.
     let output = ag(&dir.0).arg("plugins").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -1977,8 +1977,9 @@ fn the_formatting_options_reach_the_command_line() {
         "sample.elf",
         &["pseudocode", "main", "--option", "call-hints", "names"],
     );
+    // add's first argument is `a`, which is its parameter's own name.
     assert!(
-        hinted.contains("sum_to(/* a */ add(/* a */ a, /* b */ 3))"),
+        hinted.contains("sum_to(/* a */ add(a, /* b */ 3))"),
         "{hinted}"
     );
     let plain = image("sample.elf", &["pseudocode", "main"]);

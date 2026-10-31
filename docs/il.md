@@ -100,8 +100,9 @@ puts each control statement's `{` on a line of its own under its head and `else`
 writes `x = c ? a : b;` as an `if`/`else` assigning in each arm, and a return of one as two returns;
 `--option wrap 80` breaks a statement longer than eighty columns between a call's arguments, the
 rest indented two levels; `--option call-hints names` labels each argument with the callee's
-parameter name — `sum_to(/* a */ add(/* a */ a, /* b */ 3))`, or `add(a=1, b=2)` in Python — where
-the callee is a function of the image. Every line keeps the addresses it came from, so a wrapped
+parameter name — `sum_to(/* a */ add(a, /* b */ 3))`, or `add(a=1, b=2)` in Python, where every
+argument has a name — where the callee is a function of the image; an argument that is the
+parameter's own name takes no label. Every line keeps the addresses it came from, so a wrapped
 statement's pieces all map to its instructions and a brace alone maps to none. The workbench adds
 rainbow braces and indent guides, which are drawing, not text; and a formatter plugin
 (`docs/plugins.md`) has the last word on the lines.

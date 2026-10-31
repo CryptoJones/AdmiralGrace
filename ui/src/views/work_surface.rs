@@ -806,10 +806,20 @@ pub fn spans(line: &str, dead: bool, decor: &Decor, depth: &mut usize) -> Vec<(S
     }
     let mut plain = String::new();
     let mut quoted = false;
+    let mut escaped = false;
     let mut first = true;
-    for c in rest.chars() {
+    for (i, c) in rest.char_indices() {
+        // A comment is text to its end, braces and all.
+        if !quoted && rest[i..].starts_with("//") {
+            plain.push_str(&rest[i..]);
+            break;
+        }
         let brace = !quoted && (c == '{' || c == '}');
-        if c == '"' {
+        if quoted && escaped {
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
             quoted = !quoted;
         }
         if brace {
@@ -1602,6 +1612,26 @@ mod tests {
             vec![("}".to_string(), BRACE_COLORS[0])]
         );
         assert_eq!(depth, 0);
+        // A brace in a comment, or after an escaped quote, is text.
+        let mut depth = 1;
+        assert_eq!(
+            spans("  if (0) { // constant: {", false, &decor, &mut depth),
+            vec![
+                ("│ ".to_string(), color::LINE),
+                ("if (0) ".to_string(), color::TEXT),
+                ("{".to_string(), BRACE_COLORS[1]),
+                (" // constant: {".to_string(), color::TEXT),
+            ]
+        );
+        assert_eq!(depth, 2);
+        assert_eq!(
+            spans("    s = \"\\\"{\";", false, &decor, &mut depth),
+            vec![
+                ("│ │ ".to_string(), color::LINE),
+                ("s = \"\\\"{\";".to_string(), color::TEXT),
+            ]
+        );
+        assert_eq!(depth, 2);
         // Nothing asked: the text in one piece, the depth still counted.
         let plain = Decor {
             rainbow: false,

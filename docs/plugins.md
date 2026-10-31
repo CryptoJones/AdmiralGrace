@@ -301,6 +301,14 @@ plugin::register_loader(Arc::new(Toy));
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.
+- `ag_engine::plugin::Formatter` — `name` and `format(&mut Formatting)`, over a function's
+  pseudocode after the engine has printed it: `Formatting` holds the `function`, its `name`,
+  the `language` and the `lines` (each an `emit::Line` with its `text` and `addresses`) with
+  the indices of the `dead` ones, and offers `to_json` and `apply(&answer)`, the shapes the
+  command conversation uses. Registered with `register_formatter`; `formatters()` lists them
+  in the order they run, `unregister_formatter(name)` takes one off, and
+  `format_pseudocode(&mut pseudocode, function, name, language)` runs them all, as the
+  image does after each `emit_function_in`.
 - `ag_engine::plugin::Rewriter` — `name`, `wants(address, name)` (every function unless
   said) and `rewrite(&mut Rewrite)`, over a function's medium-level graph before it is
   structured: `Rewrite` holds the `nodes` (each a `Node` of `Statement`s over `AstNode`s

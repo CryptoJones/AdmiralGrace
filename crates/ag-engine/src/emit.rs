@@ -220,7 +220,8 @@ pub fn emit_function_with(
 }
 
 /// Where the parameter names of the functions a body calls come from, for
-/// the `call-hints` option: the image, which has lifted them.
+/// the `call-hints` option: the image, which lifts each callee as it is
+/// asked.
 pub trait Callees {
     /// The names of the parameters of the function at `address`, in order,
     /// when it is a function the lift has named them for.
@@ -535,7 +536,7 @@ fn break_braces(pseudocode: &mut Pseudocode) {
 /// with its note kept on the head. A function's `{` alone, a label and a
 /// statement are not.
 fn control_head(trimmed: &str) -> Option<String> {
-    if trimmed == "{" || trimmed.starts_with("} ") {
+    if trimmed == "{" || trimmed.starts_with("} ") || trimmed.starts_with("//") {
         return None;
     }
     if let Some(head) = trimmed.strip_suffix(" {") {
@@ -1570,12 +1571,22 @@ fn arguments(args: &[AstNode], out: &mut String, style: &Style) {
 /// The arguments in parentheses, each labelled with the callee's parameter
 /// name where one is known: `/* a */ 1`, or `a=1` in Python.
 fn arguments_named(args: &[AstNode], names: Option<&[String]>, out: &mut String, style: &Style) {
+    // Python names an argument with `name=`, after which every argument
+    // must be named: the labels go on only where every argument has one.
+    let names =
+        names.filter(|names| style.language != Language::Python || names.len() >= args.len());
     out.push('(');
     for (i, a) in args.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        if let Some(name) = names.and_then(|names| names.get(i)) {
+        let mut text = String::new();
+        expr(a, &mut text, false, style);
+        // An argument that is the parameter's own name needs no label.
+        if let Some(name) = names
+            .and_then(|names| names.get(i))
+            .filter(|name| **name != text)
+        {
             match style.language {
                 Language::Python => {
                     let _ = write!(out, "{name}=");
@@ -1585,7 +1596,7 @@ fn arguments_named(args: &[AstNode], names: Option<&[String]>, out: &mut String,
                 }
             }
         }
-        expr(a, out, false, style);
+        out.push_str(&text);
     }
     out.push(')');
 }
@@ -2647,46 +2658,144 @@ mod tests {
                 (address == 0x2000).then(|| vec!["count".to_string(), "base".to_string()])
             }
         }
-        let call = |address: u64| AstNode::Call {
+        let call = |address: u64, args: Vec<AstNode>| AstNode::Call {
             callee: Box::new(AstNode::FunctionName {
                 name: if address == 0x2000 { "sum" } else { "other" }.to_string(),
                 address,
             }),
-            args: vec![
+            args,
+        };
+        let three = || {
+            vec![
                 AstNode::var("a"),
                 AstNode::constant(3, 4),
                 AstNode::constant(4, 4),
-            ],
+            ]
         };
         let mut function = every_statement();
         function.locals.clear();
         function.body = vec![
             Statement {
-                node: call(0x2000),
+                node: call(0x2000, three()),
                 addresses: vec![0x90],
                 kind: StatementKind::Plain,
             },
             Statement {
-                node: call(0x3000),
+                node: call(0x3000, three()),
                 addresses: vec![0x94],
+                kind: StatementKind::Plain,
+            },
+            Statement {
+                node: call(0x2000, vec![AstNode::var("count"), AstNode::constant(7, 4)]),
+                addresses: vec![0x98],
                 kind: StatementKind::Plain,
             },
         ];
         let off = emit_function_in(&function, &Options::default(), &[], &Known).text();
-        assert!(off.contains("  sum(a, 3, 4);\n  other(a, 3, 4);"), "{off}");
+        assert!(
+            off.contains("  sum(a, 3, 4);\n  other(a, 3, 4);\n  sum(count, 7);"),
+            "{off}"
+        );
         let names = Options::from_pairs([("call-hints", "names")]).expect("an option");
         let on = emit_function_in(&function, &names, &[], &Known).text();
         // A third argument past the names stands bare; an unknown callee's
-        // all do.
+        // all do; an argument that is the parameter's own name needs none.
         assert!(
-            on.contains("  sum(/* count */ a, /* base */ 3, 4);\n  other(a, 3, 4);"),
+            on.contains(
+                "  sum(/* count */ a, /* base */ 3, 4);\n  other(a, 3, 4);\n  sum(count, /* base */ 7);"
+            ),
             "{on}"
         );
+        // Python names every argument or none: a bare one after a named one
+        // would not be Python.
         let python = Options::from_pairs([("call-hints", "names"), ("language", "python")])
             .expect("options");
         let on = emit_function_in(&function, &python, &[], &Known).text();
-        assert!(on.contains("  sum(count=a, base=3, 4)\n"), "{on}");
+        assert!(
+            on.contains("  sum(a, 3, 4)\n  other(a, 3, 4)\n  sum(count, base=7)"),
+            "{on}"
+        );
         // Without a source of names the option changes nothing.
         assert_eq!(emit_function(&function, &names).text(), off);
+    }
+
+    #[test]
+    fn the_dead_lines_follow_the_broken_braces() {
+        use crate::lift::{Statement, StatementKind};
+        let var = AstNode::var;
+        let plain = |node: AstNode, at: u64| Statement {
+            node,
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        };
+        let assign = |name: &str, rhs: AstNode| AstNode::Assign {
+            lhs: Box::new(AstNode::var(name)),
+            rhs: Box::new(rhs),
+        };
+        // x = 1 (overwritten); if (0) { y = 2; } x = a; return x.
+        let function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![Variable {
+                ty: "int".to_string(),
+                name: "a".to_string(),
+            }],
+            locals: vec![
+                Variable {
+                    ty: "int".to_string(),
+                    name: "x".to_string(),
+                },
+                Variable {
+                    ty: "int".to_string(),
+                    name: "y".to_string(),
+                },
+            ],
+            body: vec![
+                plain(assign("x", AstNode::constant(1, 4)), 0x20),
+                Statement {
+                    node: AstNode::ConstantCondition {
+                        holds: false,
+                        compared: Box::new(AstNode::binary(var("a"), BinaryOp::Less, var("a"))),
+                    },
+                    addresses: vec![0x24],
+                    kind: StatementKind::If {
+                        then_part: vec![plain(assign("y", AstNode::constant(2, 4)), 0x28)],
+                        else_part: Vec::new(),
+                    },
+                },
+                plain(assign("x", var("a")), 0x30),
+                plain(
+                    AstNode::Return {
+                        value: Some(Box::new(var("x"))),
+                    },
+                    0x34,
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let broken = emit_function(
+            &function,
+            &Options::from_pairs([("brace-style", "broken")]).expect("an option"),
+        );
+        let dead: Vec<&str> = broken
+            .dead_lines
+            .iter()
+            .map(|line| broken.lines[*line].text.as_str())
+            .collect();
+        assert_eq!(
+            dead,
+            [
+                "  x = 1;",
+                "  if (0) // constant: a < a",
+                "  {",
+                "    y = 2;",
+                "  }",
+            ],
+            "{}",
+            broken.text()
+        );
     }
 }
