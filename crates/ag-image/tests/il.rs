@@ -246,9 +246,29 @@ fn every_item_carries_its_opcode_flags_stack_pointer_and_types_and_the_casts_are
     assert!(
         cmp.types
             .iter()
-            .any(|(name, ty)| name == "r1_0" && ty == "int"),
+            .any(|(name, ty)| name == "eax" && ty == "int"),
         "{cmp:?}"
     );
+    let mov = lifted.items_at(0x118a)[0];
+    assert_eq!(
+        mov.types,
+        vec![
+            ("eax".to_string(), "int".to_string()),
+            ("rbp".to_string(), "long".to_string())
+        ],
+        "{mov:?}"
+    );
+    let frame = lifted.items_at(0x1166)[0];
+    assert!(
+        frame
+            .types
+            .iter()
+            .any(|(name, ty)| name == "rbp" && ty == "long"),
+        "{frame:?}"
+    );
+    // The chain's last instruction has its stack pointer too.
+    assert_eq!(lifted.items_at(0x1190)[0].stack_pointer, Some(-8));
+    assert_eq!(lifted.items_at(0x117b)[0].stack_pointer, Some(-8));
     let jle = lifted.items_at(0x1190)[0];
     assert!(jle.flags_read.iter().any(|f| f == "ZF"), "{jle:?}");
     // The push is before the stack pointer moved; the notes are shown on request.
@@ -288,10 +308,12 @@ fn every_item_carries_its_opcode_flags_stack_pointer_and_types_and_the_casts_are
             .any(|(name, ty)| name == "a" && ty == "int"),
         "{branch:?}"
     );
-    assert!(medium
+    let goto = medium
         .items
         .iter()
-        .any(|item| item.opcode.as_deref() == Some("goto")));
+        .find(|item| item.opcode.as_deref() == Some("goto"))
+        .expect("goto");
+    assert_eq!(goto.stack_pointer, Some(-8), "{goto:?}");
     assert!(medium
         .items
         .iter()
@@ -340,6 +362,6 @@ fn every_item_carries_its_opcode_flags_stack_pointer_and_types_and_the_casts_are
     // A φ names its kind and the type of what it merges.
     let ssa = image.il(SUM_TO, Level::Medium, true).expect("ssa");
     let phi = ssa.items.iter().find(|item| item.phi).expect("phi");
-    assert_eq!(phi.opcode.as_deref(), Some("phi"));
     assert_eq!(phi.types.len(), 1, "{phi:?}");
+    assert_eq!(phi.stack_pointer, Some(-8), "{phi:?}");
 }

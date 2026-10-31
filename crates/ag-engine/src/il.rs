@@ -95,9 +95,10 @@ pub struct IlItem {
     pub phi: bool,
     /// What the item is: at the lifted level the instruction's form as the
     /// decoder numbers it (`Mov_r32_rm32`), at the others the statement's
-    /// kind — `assign`, `store`, `call`, `return`, `compare`, `branch`,
-    /// `switch`, `goto`, `if`, `else`, `while`, `do`, `for`, `case`,
-    /// `phi`. None for an instruction the decoder has no form for.
+    /// kind — `assign`, `store`, `call`, `intrinsic`, `return`, `compare`,
+    /// `branch`, `switch`, `goto`, `label`, `break`, `continue`,
+    /// `expression`, `if`, `else`, `while`, `do`, `for`, `case`, `phi`.
+    /// None for an instruction the decoder has no form for.
     pub opcode: Option<String>,
     /// The flags the instruction reads, at the lifted level: `CF`, `ZF`, …
     pub flags_read: Vec<String>,
@@ -107,8 +108,10 @@ pub struct IlItem {
     /// instruction, where the lifter knew it.
     pub stack_pointer: Option<i64>,
     /// The C type of each name the item reads or writes, by its plain
-    /// name: `local_14: int`; at the lifted level the registers by their
-    /// width.
+    /// name: `local_14: int`; at the lifted level the registers as the
+    /// text spells them, typed by their width: `eax: int`. A temporary
+    /// whose width was never read is `long`; a slot stored at two widths
+    /// has the first; the flags are `flags`.
     pub types: Vec<(String, String)>,
 }
 
@@ -277,9 +280,69 @@ fn offset_text(offset: i64) -> String {
     }
 }
 
+/// The width a general register's spelling names, in bits: `rax` 64,
+/// `eax` 32, `ax` 16, `al` 8, `r8d` 32; none for another register.
+pub fn register_width(name: &str) -> Option<u32> {
+    let name = name.to_ascii_lowercase();
+    const WIDE: [&str; 9] = [
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip",
+    ];
+    const WORD: [&str; 8] = ["ax", "bx", "cx", "dx", "si", "di", "bp", "sp"];
+    const BYTE: [&str; 12] = [
+        "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "bpl", "spl",
+    ];
+    if WIDE.contains(&name.as_str()) {
+        return Some(64);
+    }
+    if let Some(rest) = name.strip_prefix('e') {
+        if WORD.contains(&rest) || rest == "ip" {
+            return Some(32);
+        }
+    }
+    if WORD.contains(&name.as_str()) {
+        return Some(16);
+    }
+    if BYTE.contains(&name.as_str()) {
+        return Some(8);
+    }
+    // r8 to r15, and their d, w and b (or l) parts.
+    let numbered = name.strip_prefix('r')?;
+    let (digits, suffix) = numbered.split_at(numbered.trim_end_matches(['d', 'w', 'b', 'l']).len());
+    let number: u32 = digits.parse().ok()?;
+    if !(8..=15).contains(&number) {
+        return None;
+    }
+    match suffix {
+        "" => Some(64),
+        "d" => Some(32),
+        "w" => Some(16),
+        "b" | "l" => Some(8),
+        _ => None,
+    }
+}
+
+/// `node` cast to `ty`: a constant cast once, to that type; anything else
+/// wrapped whole, its own constants spelled with their widths.
+pub fn cast_to(ty: &str, node: &AstNode) -> AstNode {
+    match node {
+        AstNode::Constant { .. } => AstNode::Cast {
+            ty: ty.to_string(),
+            target: Box::new(node.clone()),
+        },
+        AstNode::Cast { ty: own, .. } if own == ty => node.clone(),
+        other => AstNode::Cast {
+            ty: ty.to_string(),
+            target: Box::new(with_casts(other)),
+        },
+    }
+}
+
 /// The expression with its casts explicit: every constant spelled with the
 /// type of its width — `(int)1`, `(long)0` — except under a cast already,
-/// or where it is an address dereferenced or taken.
+/// or where it is the constant directly dereferenced or taken the address
+/// of. The right side of an assignment, both sides of an operator, a call's
+/// arguments and a return's value are walked; a condition or a loop's
+/// header is not.
 pub fn with_casts(node: &AstNode) -> AstNode {
     fn walk(node: &AstNode, under: bool) -> AstNode {
         match node {
@@ -368,7 +431,8 @@ fn decorate(function: &mut IlFunction, stages: &Stages) {
         if item.stack_pointer.is_none() {
             item.stack_pointer = item
                 .addresses
-                .first()
+                .iter()
+                .min()
                 .and_then(|address| stages.stack_pointer.get(address).copied());
         }
         if item.types.is_empty() {
@@ -527,7 +591,7 @@ pub fn build(
                     let Some(instruction) = disasm.instruction_at(*address) else {
                         continue;
                     };
-                    let (mnemonic, operands, _) = text(*address).unwrap_or_else(|| {
+                    let (mnemonic, operands, registers) = text(*address).unwrap_or_else(|| {
                         (
                             format!("op{:x}", instruction.mnemonic),
                             String::new(),
@@ -558,14 +622,16 @@ pub fn build(
                     } else {
                         format!("{mnemonic} {operands}{flow}")
                     };
-                    let mut types: Vec<(String, String)> = Vec::new();
-                    for use_ in &instruction.register_uses {
-                        let name = register_name(use_.register);
-                        if !types.iter().any(|(known, _)| *known == name) {
-                            let ty = crate::lift::type_name(use_.register.bit_size).to_string();
-                            types.push((name, ty));
-                        }
-                    }
+                    // The registers as the text spells them, typed by the
+                    // width each spelling names: `eax: int`, `rax: long`.
+                    let types: Vec<(String, String)> = registers
+                        .iter()
+                        .filter_map(|register| {
+                            register_width(register).map(|bits| {
+                                (register.clone(), crate::lift::type_name(bits).to_string())
+                            })
+                        })
+                        .collect();
                     let names = |bits: u32| -> Vec<String> {
                         crate::cpu_context::flag_names(bits)
                             .into_iter()
@@ -1075,6 +1141,10 @@ pub fn to_ssa(
                 .cloned()
                 .into_iter()
                 .collect();
+            let stack_pointer = out.blocks[*block]
+                .items
+                .first()
+                .and_then(|first| out.items[*first].stack_pointer);
             out.items.push(IlItem {
                 id,
                 block: *block,
@@ -1086,6 +1156,7 @@ pub fn to_ssa(
                 phi: true,
                 opcode: Some("phi".to_string()),
                 types,
+                stack_pointer,
                 ..Default::default()
             });
             phi_items[*block].push((name.clone(), id));
@@ -1684,6 +1755,32 @@ mod tests {
         assert_eq!(type_of("x#3", &types).as_deref(), Some("int"));
         assert_eq!(type_of("entry5", &types).as_deref(), Some("long"));
         assert_eq!(type_of("r1_0", &types), None);
+        assert_eq!(register_width("eax"), Some(32));
+        assert_eq!(register_width("RBP"), Some(64));
+        assert_eq!(register_width("ax"), Some(16));
+        assert_eq!(register_width("al"), Some(8));
+        assert_eq!(register_width("r8d"), Some(32));
+        assert_eq!(register_width("r15"), Some(64));
+        assert_eq!(register_width("r9b"), Some(8));
+        assert_eq!(register_width("xmm0"), None);
+        assert_eq!(register_width("r16"), None);
+        let sum = AstNode::binary(
+            AstNode::var("x"),
+            crate::ast::BinaryOp::Add,
+            AstNode::constant(8, 4),
+        );
+        assert_eq!(line(&cast_to("int", &sum)), "(int)(x + (int)8)");
+        assert_eq!(line(&cast_to("long", &AstNode::constant(0, 4))), "(long)0");
+        assert_eq!(
+            line(&cast_to(
+                "long",
+                &AstNode::Cast {
+                    ty: "long".to_string(),
+                    target: Box::new(AstNode::var("y"))
+                }
+            )),
+            "(long)y"
+        );
     }
 
     /// A statement for a test: its text, what it defines, what it uses.

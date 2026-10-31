@@ -1727,7 +1727,7 @@ pub(crate) fn il_json(function: &ag_image::IlFunction) -> serde_json::Value {
             "flags_read": item.flags_read,
             "flags_written": item.flags_written,
             "stack_pointer": item.stack_pointer,
-            "types": item.types.iter().map(|(name, ty)| (name.clone(), serde_json::Value::String(ty.clone()))).collect::<serde_json::Map<_, _>>(),
+            "types": item.types.iter().map(|(name, ty)| serde_json::json!([name, ty])).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
 }

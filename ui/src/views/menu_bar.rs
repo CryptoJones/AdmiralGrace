@@ -353,7 +353,6 @@ fn root_button(label: &str) -> Element<'static, Message> {
         .into()
 }
 
-/// A menu entry with an optional shortcut hint.
 /// A View menu item for one of a level's options, marked when it is on.
 fn il_option_button(app: &App, option: crate::app::IlOption) -> Element<'static, Message> {
     let label = format!(
@@ -368,6 +367,7 @@ fn il_option_button(app: &App, option: crate::app::IlOption) -> Element<'static,
     item_button(&label, "", Message::ViewToggleIlOption(option))
 }
 
+/// A menu entry with an optional shortcut hint.
 fn item_button(label: &str, shortcut: &str, message: Message) -> Element<'static, Message> {
     button::Button::new(
         Row::new()

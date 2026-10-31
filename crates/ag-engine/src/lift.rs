@@ -868,17 +868,23 @@ impl Stmt {
                 addresses,
             } => {
                 let (text, uses) = value.low_text(names, false);
-                let (cast_text, _) = value.low_text(names, true);
                 let slot = names.slot(*offset);
-                // A value stored at another width than it has is cast to it.
-                let cast = if value.bits != *bits {
-                    format!("({})", type_name(*bits))
+                // A value stored at another width than it has is cast to it,
+                // whole.
+                let cast_text = if value.bits != *bits {
+                    match &value.sym {
+                        Sym::Node(node) => one_line(&crate::emit::emit_node(&crate::il::cast_to(
+                            type_name(*bits),
+                            node,
+                        ))),
+                        _ => format!("({}){}", type_name(*bits), value.low_text(names, true).0),
+                    }
                 } else {
-                    String::new()
+                    value.low_text(names, true).0
                 };
                 LowStatement {
                     text: format!("{slot}:{bits} = {text}"),
-                    casts: format!("{slot}:{bits} = {cast}{cast_text}"),
+                    casts: format!("{slot}:{bits} = {cast_text}"),
                     kind: "store",
                     addresses: addresses.clone(),
                     defines: vec![slot],
@@ -1569,6 +1575,7 @@ impl<'a> Lifter<'a> {
     /// the registers that became variables.
     fn reset(&mut self) {
         self.state = State::initial();
+        self.stack_pointers.clear();
         self.locals.clear();
         self.params.clear();
         self.temps.clear();
@@ -1732,6 +1739,9 @@ impl<'a> Lifter<'a> {
         for ins in body {
             self.step(ins)?;
         }
+        // The chain's last instruction is stepped by some ends and not
+        // others; the stack pointer before it is noted either way.
+        self.note_stack_pointer(last.address);
         match chain.end {
             End::Return => {
                 self.step(last)?;
@@ -2838,10 +2848,16 @@ impl<'a> Lifter<'a> {
 
     // ---- instructions -----------------------------------------------------
 
-    fn step(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+    /// Note the stack pointer's offset from the entry's, as it stands
+    /// before the instruction at `address`, when it is known.
+    fn note_stack_pointer(&mut self, address: u64) {
         if let Some(Sym::Stack(offset)) = self.state.regs.get(&RSP).map(|value| &value.sym) {
-            self.stack_pointers.insert(ins.address, *offset);
+            self.stack_pointers.insert(address, *offset);
         }
+    }
+
+    fn step(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        self.note_stack_pointer(ins.address);
         let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
         match mnemonic {
             Mnemonic::Nop | Mnemonic::Endbr64 => Ok(()),

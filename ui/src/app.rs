@@ -4373,9 +4373,14 @@ impl App {
                 let on = self.work.toggle_il_option(option);
                 self.refresh_listing();
                 self.notice = Some(format!(
-                    "{}: {} — shown beside a level's items",
+                    "{}: {} — {}",
                     option.label(),
-                    if on { "on" } else { "off" }
+                    if on { "on" } else { "off" },
+                    if option == IlOption::Casts {
+                        "a level's constants spelled with their widths"
+                    } else {
+                        "shown beside a level's items"
+                    }
                 ));
             }
             Message::DebugStart => return self.debug_start(),

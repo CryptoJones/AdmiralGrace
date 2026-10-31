@@ -124,8 +124,9 @@ pub struct DecodedInsn {
     pub flags_written: u32,
 }
 
-/// The name of an instruction's form, as the decoder numbers it: `None` for
-/// a form it does not know, an invalid instruction among them.
+/// The name of an instruction's form, as the x86 decoder numbers it: `None`
+/// for a form it does not know, an invalid instruction among them. The
+/// other decoders number nothing (0), so every form of theirs is `None`.
 pub fn opcode_name(opcode: u32) -> Option<String> {
     iced_x86::Code::try_from(opcode as usize)
         .ok()
@@ -133,8 +134,8 @@ pub fn opcode_name(opcode: u32) -> Option<String> {
         .map(|code| format!("{code:?}"))
 }
 
-/// The names of the flags in a set of the decoder's bits, in the order the
-/// register lays them out.
+/// The names of the flags in a set of the x86 decoder's bits, in the order
+/// the register lays them out; the other decoders report no flags.
 pub fn flag_names(bits: u32) -> Vec<&'static str> {
     use iced_x86::RflagsBits;
     [
