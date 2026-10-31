@@ -380,6 +380,16 @@ pub fn with_casts(node: &AstNode) -> AstNode {
                 name: name.clone(),
                 args: args.iter().map(|arg| walk(arg, false)).collect(),
             },
+            AstNode::StructInit { fields } => AstNode::StructInit {
+                fields: fields
+                    .iter()
+                    .map(|field| crate::ast::StructField {
+                        ty: field.ty.clone(),
+                        offset: field.offset,
+                        value: walk(&field.value, false),
+                    })
+                    .collect(),
+            },
             AstNode::Return { value } => AstNode::Return {
                 value: value.as_ref().map(|value| Box::new(walk(value, false))),
             },
@@ -535,6 +545,11 @@ fn collect_names(node: &AstNode, names: &mut Vec<String>) {
             collect_names(cond, names);
             collect_names(then, names);
             collect_names(otherwise, names);
+        }
+        AstNode::StructInit { fields } => {
+            for field in fields {
+                collect_names(&field.value, names);
+            }
         }
         AstNode::Label { .. }
         | AstNode::Goto { .. }

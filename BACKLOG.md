@@ -168,7 +168,7 @@ Filed 2026-10-26.
 - [x] Per-variable dead store elimination — [#348](https://github.com/CryptoJones/AdmiralGrace/issues/348)
 - [x] Pseudocode formatting options: brace style, rainbow braces, indent guides, ternaries, wrapping, call parameter hints — [#349](https://github.com/CryptoJones/AdmiralGrace/issues/349)
 - [x] Outline inlined memcpy, memset and strcpy into builtins — [#350](https://github.com/CryptoJones/AdmiralGrace/issues/350)
-- [ ] Struct initializer expressions in pseudocode — [#351](https://github.com/CryptoJones/AdmiralGrace/issues/351)
+- [x] Struct initializer expressions in pseudocode — [#351](https://github.com/CryptoJones/AdmiralGrace/issues/351)
 - [ ] Translate Windows CFG dispatch calls and jumps to functions into direct calls and tail calls — [#352](https://github.com/CryptoJones/AdmiralGrace/issues/352)
 - [ ] Detect conditionally non-returning functions — [#353](https://github.com/CryptoJones/AdmiralGrace/issues/353)
 - [ ] Guided analysis: choose per block which branch targets to analyze — [#354](https://github.com/CryptoJones/AdmiralGrace/issues/354)
