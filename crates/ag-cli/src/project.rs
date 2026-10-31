@@ -1200,7 +1200,6 @@ fn edit_named(
     Ok(0)
 }
 
-/// The project of `file`, created from `target` when the file is not there.
 /// The project says how its target loads; `--raw` flags that say otherwise
 /// would read other bytes under the same records, and are refused.
 fn check_raw_flags(project: &ProjectFile, file: &Path) -> Result<()> {
@@ -1227,6 +1226,7 @@ fn load_project(file: &Path) -> Result<ProjectFile> {
     Ok(project)
 }
 
+/// The project of `file`, created from `target` when the file is not there.
 fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     // The project may not exist yet: the first edit creates it from the target.
     match ProjectFile::load(file) {
