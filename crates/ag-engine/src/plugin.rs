@@ -2351,6 +2351,7 @@ impl Architecture for ExternalArchitecture {
                 opcode: 0,
                 flags_read: 0,
                 flags_written: 0,
+                rep: false,
             });
             decoded.text.insert(
                 address,

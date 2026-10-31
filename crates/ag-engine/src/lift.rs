@@ -169,8 +169,8 @@ use crate::cfgwalk::{resolve_branches_among, Entries};
 use crate::cpu_context::{DecodedInsn, Flow, Operand, RC_GPR, RC_IP, RC_NONE};
 use crate::liveness::{rax_name, CallSiteUse, ResultUse};
 use crate::options::{
-    DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads, ReturnLiveness,
-    SlotNames, TailCalls, UnsignedCompare,
+    Builtins, DeadCompares, MergedNames, OperandOrder, Options, Parameters, PointerLoads,
+    ReturnLiveness, SlotNames, TailCalls, UnsignedCompare,
 };
 use crate::pipeline::Disasm;
 use crate::register::RegisterId;
@@ -1126,6 +1126,30 @@ impl Stmt {
                     uses,
                 }
             }
+            Stmt::Builtin {
+                name,
+                args,
+                addresses,
+            } => {
+                let mut uses = Vec::new();
+                let mut texts = Vec::new();
+                let mut casts = Vec::new();
+                for arg in args {
+                    let (text, more) = arg.low_text(names, false);
+                    let (cast, _) = arg.low_text(names, true);
+                    uses.extend(more);
+                    texts.push(text);
+                    casts.push(cast);
+                }
+                LowStatement {
+                    text: format!("{name}({})", texts.join(", ")),
+                    casts: format!("{name}({})", casts.join(", ")),
+                    kind: "call",
+                    addresses: addresses.clone(),
+                    defines: Vec::new(),
+                    uses,
+                }
+            }
         }
     }
 }
@@ -1772,6 +1796,13 @@ enum Stmt {
         rhs: Value,
         addresses: Vec<u64>,
     },
+    /// A memory operation an instruction does whole — `rep movsb` is
+    /// `__builtin_memcpy(rdi, rsi, rcx)` — as the call it stands for.
+    Builtin {
+        name: &'static str,
+        args: Vec<Value>,
+        addresses: Vec<u64>,
+    },
 }
 
 /// The statements each path into a join appends, by the path's node.
@@ -1797,6 +1828,9 @@ struct Lifter<'a> {
     state: State,
     /// The slots whose address was taken.
     address_taken: BTreeSet<i64>,
+    /// Whether a run of stores was read back as a string: the variables the
+    /// run wrote into are then declared only if something still names them.
+    merged_strings: bool,
     /// The slots that are variables, with their width.
     locals: BTreeMap<i64, u32>,
     /// The stack pointer's offset from the entry's before each instruction,
@@ -1832,6 +1866,7 @@ impl<'a> Lifter<'a> {
             pending_compare: None,
             state: State::initial(),
             address_taken: BTreeSet::new(),
+            merged_strings: false,
             locals: BTreeMap::new(),
             stack_pointers: BTreeMap::new(),
             params: BTreeMap::new(),
@@ -3159,6 +3194,12 @@ impl<'a> Lifter<'a> {
             Mnemonic::Adc => self.carry_op(BinaryOp::Add, ins),
             Mnemonic::Sbb => self.carry_op(BinaryOp::Sub, ins),
             Mnemonic::Lea => self.lea(ins),
+            Mnemonic::Movsb | Mnemonic::Movsw | Mnemonic::Movsd | Mnemonic::Movsq => {
+                self.string_op(false, ins)
+            }
+            Mnemonic::Stosb | Mnemonic::Stosw | Mnemonic::Stosd | Mnemonic::Stosq => {
+                self.string_op(true, ins)
+            }
             Mnemonic::Push => self.push(ins),
             Mnemonic::Pop => self.pop(ins),
             Mnemonic::Leave => self.leave(ins),
@@ -3803,6 +3844,90 @@ impl<'a> Lifter<'a> {
         self.assign(dest, bits, address.also_from(at), ins)
     }
 
+    /// `rep movs` and `rep stos`: a copy or a fill of `rcx` elements through
+    /// `rdi` (and `rsi`), as the `__builtin_memcpy` or `__builtin_memset`
+    /// it stands for. The direction flag is taken as clear, as the ABI has
+    /// it: `rdi` and `rsi` end past what was moved, and `rcx` at zero. The
+    /// instruction without its prefix moves one element, and is not read.
+    fn string_op(&mut self, fill: bool, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        // `movsd` is also the SSE move: the string form has a memory
+        // operand, whose size is the element's.
+        let width = match ins.operands.first() {
+            Some(Operand::Mem { size, .. }) if *size > 0 => *size,
+            _ => return Err(NotLifted::new(mnemonic_name(ins))),
+        };
+        if !ins.rep {
+            return Err(NotLifted::new(format!(
+                "{} without rep",
+                mnemonic_name(ins)
+            )));
+        }
+        let at = ins.address;
+        let count = self.read(RegisterId::new(RC_GPR, RCX, 64), at)?;
+        let dest = self.read(RegisterId::new(RC_GPR, RDI, 64), at)?;
+        let count_node = self.node_of(&count)?;
+        let dest_node = self.node_of(&dest)?;
+        let bytes_node = if width == 1 {
+            count_node
+        } else {
+            AstNode::binary(
+                count_node,
+                BinaryOp::Mul,
+                AstNode::constant(u64::from(width), 8),
+            )
+        };
+        let mut from: Vec<u64> = count.from.iter().chain(&dest.from).copied().collect();
+        from.push(at);
+        let (name, args) = if fill {
+            let value = self.read(RegisterId::new(RC_GPR, RAX, width * 8), at)?;
+            from.extend(value.from.iter().copied());
+            let value_node = self.node_of(&value)?;
+            (
+                "__builtin_memset",
+                vec![dest_node.clone(), value_node, bytes_node.clone()],
+            )
+        } else {
+            let src = self.read(RegisterId::new(RC_GPR, RSI, 64), at)?;
+            from.extend(src.from.iter().copied());
+            let src_node = self.node_of(&src)?;
+            self.state.regs.insert(
+                RSI,
+                Value::node(
+                    AstNode::binary(src_node.clone(), BinaryOp::Add, bytes_node.clone()),
+                    64,
+                    vec![at],
+                ),
+            );
+            (
+                "__builtin_memcpy",
+                vec![dest_node.clone(), src_node, bytes_node.clone()],
+            )
+        };
+        // Memory was written through a pointer.
+        self.memory_written(if fill { "the fill" } else { "the copy" }, at);
+        let args = args
+            .into_iter()
+            .map(|node| Value::node(node, 64, vec![at]))
+            .collect();
+        self.statements.push(Stmt::Builtin {
+            name,
+            args,
+            addresses: sorted(from),
+        });
+        self.state.regs.insert(
+            RDI,
+            Value::node(
+                AstNode::binary(dest_node, BinaryOp::Add, bytes_node),
+                64,
+                vec![at],
+            ),
+        );
+        self.state
+            .regs
+            .insert(RCX, Value::node(AstNode::constant(0, 8), 64, vec![at]));
+        Ok(())
+    }
+
     fn push(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         let [src] = ins.operands.as_slice() else {
             return Err(NotLifted::new("push with no operand"));
@@ -4228,6 +4353,7 @@ impl<'a> Lifter<'a> {
                 }
                 Stmt::Assign { lhs, value, .. } => lhs.reads_var(name) || mentions(value),
                 Stmt::Compare { lhs, rhs, .. } => mentions(lhs) || mentions(rhs),
+                Stmt::Builtin { args, .. } => args.iter().any(&mentions),
             }) || matches!(terminator, Terminator::Branch { cond, .. } if cond.reads_var(name))
         })
     }
@@ -4586,16 +4712,54 @@ impl Lifter<'_> {
                     addresses,
                 } => {
                     if !self.locals.contains_key(offset) {
-                        if self.locals.iter().any(|(&local, &width)| {
-                            local < offset + i64::from(bits / 8)
-                                && *offset < local + i64::from(width / 8)
-                        }) {
-                            return Err(NotLifted::new(format!(
-                                "a partial write to {}",
-                                local_name(self.options.stack_slot_names, *offset)
-                            )));
+                        let into = self
+                            .locals
+                            .iter()
+                            .find(|(&local, &width)| {
+                                local < offset + i64::from(bits / 8)
+                                    && *offset < local + i64::from(width / 8)
+                            })
+                            .map(|(&local, _)| local);
+                        match into {
+                            None => continue,
+                            // A store into the middle of a variable — the
+                            // second word of a string put on the stack — is
+                            // a store through a pointer into it.
+                            Some(local) if local <= *offset => {
+                                let rhs = self.node_of(value)?;
+                                let base = AstNode::Cast {
+                                    ty: "char *".to_string(),
+                                    target: Box::new(AstNode::AddressOf {
+                                        target: Box::new(AstNode::var(local_name(
+                                            self.options.stack_slot_names,
+                                            local,
+                                        ))),
+                                    }),
+                                };
+                                let pointer = AstNode::binary(
+                                    base,
+                                    BinaryOp::Add,
+                                    AstNode::constant((*offset - local) as u64, 8),
+                                );
+                                let node = AstNode::Assign {
+                                    lhs: Box::new(AstNode::Deref {
+                                        target: Box::new(AstNode::Cast {
+                                            ty: format!("{} *", type_name(*bits)),
+                                            target: Box::new(pointer),
+                                        }),
+                                    }),
+                                    rhs: Box::new(rhs),
+                                };
+                                resolved.push((None, node, addresses.clone()));
+                                continue;
+                            }
+                            Some(local) => {
+                                return Err(NotLifted::new(format!(
+                                    "a partial write to {}",
+                                    local_name(self.options.stack_slot_names, local)
+                                )));
+                            }
                         }
-                        continue;
                     }
                     let rhs = self.node_of(value)?;
                     let node = AstNode::Assign {
@@ -4618,6 +4782,24 @@ impl Lifter<'_> {
                         rhs: Box::new(rhs),
                     };
                     resolved.push((None, node, addresses.clone()));
+                }
+                Stmt::Builtin {
+                    name,
+                    args,
+                    addresses,
+                } => {
+                    let mut nodes = Vec::with_capacity(args.len());
+                    for arg in args {
+                        nodes.push(self.node_of(arg)?);
+                    }
+                    resolved.push((
+                        None,
+                        AstNode::Intrinsic {
+                            name: name.to_string(),
+                            args: nodes,
+                        },
+                        addresses.clone(),
+                    ));
                 }
                 Stmt::Return {
                     value, addresses, ..
@@ -4658,11 +4840,165 @@ impl Lifter<'_> {
                 }
             }
         }
+        if self.options.builtins == Builtins::Recognize {
+            self.merge_stack_strings(&mut resolved);
+        }
         Ok(resolved)
+    }
+
+    /// A string put on the stack word by word — consecutive stores of
+    /// constants to one variable and into it, whose bytes read as text —
+    /// becomes one `__builtin_strcpy(&local, "text")`, or a
+    /// `__builtin_memcpy` of the bytes where no NUL ends them. Two stores
+    /// at least, so that one wide constant is left the number it may be.
+    fn merge_stack_strings(&mut self, resolved: &mut Vec<Resolved>) {
+        let names = self.options.stack_slot_names;
+        let offsets: BTreeMap<String, i64> = self
+            .locals
+            .keys()
+            .map(|&offset| (local_name(names, offset), offset))
+            .collect();
+        // The store a statement is, when it is one of a constant to a slot:
+        // the slot's offset, the width in bytes and the value.
+        let store = |node: &AstNode| -> Option<(i64, u32, u64)> {
+            let AstNode::Assign { lhs, rhs } = node else {
+                return None;
+            };
+            let AstNode::Constant { value, width_bytes } = rhs.as_ref() else {
+                return None;
+            };
+            match lhs.as_ref() {
+                AstNode::Var { name } => Some((*offsets.get(name)?, *width_bytes, *value)),
+                AstNode::Deref { target } => {
+                    let AstNode::Cast { target, .. } = target.as_ref() else {
+                        return None;
+                    };
+                    let AstNode::Binary {
+                        lhs,
+                        op: BinaryOp::Add,
+                        rhs,
+                    } = target.as_ref()
+                    else {
+                        return None;
+                    };
+                    let AstNode::Constant { value: past, .. } = rhs.as_ref() else {
+                        return None;
+                    };
+                    let AstNode::Cast { target, .. } = lhs.as_ref() else {
+                        return None;
+                    };
+                    let AstNode::AddressOf { target } = target.as_ref() else {
+                        return None;
+                    };
+                    let AstNode::Var { name } = target.as_ref() else {
+                        return None;
+                    };
+                    Some((offsets.get(name)? + *past as i64, *width_bytes, *value))
+                }
+                _ => None,
+            }
+        };
+        let mut merged = false;
+        let mut i = 0;
+        while i < resolved.len() {
+            let mut j = i;
+            let mut run: Vec<(i64, u32, u64)> = Vec::new();
+            while j < resolved.len() {
+                let (temp, node, _) = &resolved[j];
+                match (temp, store(node)) {
+                    (None, Some(found)) => run.push(found),
+                    _ => break,
+                }
+                j += 1;
+            }
+            if run.len() >= 2 {
+                if let Some((start, name, args)) = stack_string(&run) {
+                    if self.locals.contains_key(&start) {
+                        let mut addresses: Vec<u64> = resolved[i..j]
+                            .iter()
+                            .flat_map(|(_, _, addresses)| addresses.iter().copied())
+                            .collect();
+                        addresses = sorted(addresses);
+                        let mut full = vec![AstNode::AddressOf {
+                            target: Box::new(AstNode::var(local_name(names, start))),
+                        }];
+                        full.extend(args);
+                        resolved.splice(
+                            i..j,
+                            [(
+                                None,
+                                AstNode::Intrinsic {
+                                    name: name.to_string(),
+                                    args: full,
+                                },
+                                addresses,
+                            )],
+                        );
+                        merged = true;
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+            i = j.max(i + 1);
+        }
+        if merged {
+            self.merged_strings = true;
+        }
     }
 }
 
 // ---- helpers --------------------------------------------------------------
+
+/// The string a run of constant stores puts on the stack: the lowest
+/// offset written, the builtin that reads it back and the arguments after
+/// the destination — the text, and for a memcpy the byte count. The stores
+/// must cover their span without a gap, later ones over earlier, and the
+/// bytes must read as two or more printable characters ending in NULs
+/// (`__builtin_strcpy`) or nothing but printable characters
+/// (`__builtin_memcpy`).
+fn stack_string(run: &[(i64, u32, u64)]) -> Option<(i64, &'static str, Vec<AstNode>)> {
+    let mut bytes: BTreeMap<i64, u8> = BTreeMap::new();
+    for &(offset, width, value) in run {
+        for byte in 0..i64::from(width) {
+            bytes.insert(offset + byte, (value >> (8 * byte)) as u8);
+        }
+    }
+    let start = *bytes.keys().next()?;
+    let end = *bytes.keys().next_back()? + 1;
+    if (end - start) as usize != bytes.len() {
+        return None;
+    }
+    let flat: Vec<u8> = bytes.into_values().collect();
+    let printable =
+        |byte: u8| (0x20..=0x7e).contains(&byte) || matches!(byte, b'\t' | b'\n' | b'\r');
+    let text_end = flat
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(flat.len());
+    if text_end < 2 || !flat[..text_end].iter().all(|&byte| printable(byte)) {
+        return None;
+    }
+    let text = String::from_utf8(flat[..text_end].to_vec()).ok()?;
+    if text_end == flat.len() {
+        return Some((
+            start,
+            "__builtin_memcpy",
+            vec![
+                AstNode::StringLiteral { text },
+                AstNode::constant(flat.len() as u64, 8),
+            ],
+        ));
+    }
+    if !flat[text_end..].iter().all(|&byte| byte == 0) {
+        return None;
+    }
+    Some((
+        start,
+        "__builtin_strcpy",
+        vec![AstNode::StringLiteral { text }],
+    ))
+}
 
 /// The C type of a width.
 pub fn type_name(bits: u32) -> &'static str {
@@ -6739,6 +7075,38 @@ mod tests {
         assert_eq!(
             c_with(&code, &names, &[("return-liveness", "presence")]),
             "not lifted yet: f's result on one path and nothing on another"
+        );
+    }
+
+    #[test]
+    fn rep_movs_and_rep_stos_are_the_builtins_they_stand_for() {
+        // mov rcx, rdx; rep movsb; ret
+        let copy = c(&[0x48, 0x89, 0xd1, 0xf3, 0xa4, 0xc3]);
+        assert!(copy.contains("  __builtin_memcpy(a, b, c);"), "{copy}");
+        // mov rcx, rdx; mov eax, esi; rep stosb; ret: the byte of eax.
+        let fill = c(&[0x48, 0x89, 0xd1, 0x89, 0xf0, 0xf3, 0xaa, 0xc3]);
+        assert!(
+            fill.contains("  __builtin_memset(a, (char)b, c);"),
+            "{fill}"
+        );
+        // mov rcx, rdx; mov rax, rsi; rep stosq; ret: eight bytes an element.
+        let words = c(&[0x48, 0x89, 0xd1, 0x48, 0x89, 0xf0, 0xf3, 0x48, 0xab, 0xc3]);
+        assert!(
+            words.contains("  __builtin_memset(a, b, c * 8);"),
+            "{words}"
+        );
+        // After the copy rdi is past it: mov rcx, rdx; rep movsb; mov rax, rdi; ret
+        let after = c(&[0x48, 0x89, 0xd1, 0xf3, 0xa4, 0x48, 0x89, 0xf8, 0xc3]);
+        assert!(
+            after.contains("  __builtin_memcpy(a, b, c);\n  return a + c;"),
+            "{after}"
+        );
+        // Without the prefix the instruction moves one element, and is not
+        // read; the SSE movsd is a register move the lifter does not know.
+        assert_eq!(refused(&[0xa4, 0xc3]), "not lifted yet: movsb without rep");
+        assert_eq!(
+            refused(&[0xf2, 0x0f, 0x10, 0xc1, 0xc3]),
+            "not lifted yet: movsd"
         );
     }
 }

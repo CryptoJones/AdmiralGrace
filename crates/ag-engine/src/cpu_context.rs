@@ -122,6 +122,9 @@ pub struct DecodedInsn {
     /// The flags the instruction writes — set, cleared, computed or left
     /// undefined.
     pub flags_written: u32,
+    /// Whether the instruction carries a `rep` or `repne` prefix: a string
+    /// instruction repeated `rcx` times.
+    pub rep: bool,
 }
 
 /// The name of an instruction's form, as the x86 decoder numbers it: `None`
@@ -299,6 +302,7 @@ impl CpuContext for X86IcedContext {
                 opcode: 0,
                 flags_read: 0,
                 flags_written: 0,
+                rep: false,
             });
         }
         let mnemonic = ins.mnemonic() as u32;
@@ -385,6 +389,7 @@ impl CpuContext for X86IcedContext {
             opcode: ins.code() as u32,
             flags_read: ins.rflags_read(),
             flags_written: ins.rflags_modified(),
+            rep: ins.has_rep_prefix() || ins.has_repne_prefix(),
         })
     }
 

@@ -24,6 +24,8 @@ a function you know takes more arguments than its signature shows, because the t
 `a + b` where the listing says `add esi, edi` and you want the C to follow it | `--option operand-order instruction`
 `(unsigned int)a < (unsigned int)b` cluttering every bounds check | `--option unsigned-compare bare`
 `a < b` where you need to know whether a negative `a` passes | `--option unsigned-compare cast`
+`local_d = 0x77202c6f6c6c6568;` and the word after it, where a string was meant | `--option builtins recognize`
+a `__builtin_strcpy` where the stores themselves are wanted | `--option builtins keep`
 a `cmp` in the listing that the C says nothing about | `--option dead-compares keep`
 `__cmp(a, b);` statements that do nothing | `--option dead-compares drop`
 `return printf(a);` where the listing ends in `jmp`, and you want the functions that jump rather than call to stand out as refusals | `--option tail-calls refuse`
@@ -69,6 +71,7 @@ Option | Tier | Takes | Default | What it decides
 `pointer-loads` | rendering | `named` \| `cast` | `named` | A load or store at an address the image names as data: the data's name (`counter`), or the typed cast every other address gets (`*(int *)0x4010`).
 `operand-order` | rendering | `instruction` \| `canonical` | `instruction` | The operands of `+`, `*`, `&`, `|` and `^`: in the order the instruction names them (`b + a`), or canonical, variables alphabetical and constants last (`a + b`).
 `unsigned-compare` | rendering | `cast` \| `bare` | `cast` | A comparison whose condition code is unsigned (`jb`, `ja`, `jbe`, `jae`): both sides cast, `(unsigned int)a < (unsigned int)b`, or written bare, `a < b`.
+`builtins` | transform | `recognize` \| `keep` | `recognize` | The constant stores that put a string on the stack word by word, read back as one `__builtin_strcpy(&local, "text")` — or `__builtin_memcpy` where no NUL ends it — or kept as the stores they are. `rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset` either way, having no other reading.
 `dead-compares` | transform | `drop` \| `keep` | `drop` | A `cmp` or `test` whose flags no branch reads: dropped, or kept as the statement `__cmp(a, b);` or `__test(a, b);`.
 `tail-calls` | transform | `return` \| `refuse` | `return` | A `jmp` to another function with the stack as it was at entry: lifted as the call and the return it stands for, `return callee(args);` — a function that is only the jump is a thunk, printed as `// thunk for callee` — or refused, naming the callee.
 `return-liveness` | analysis | `callers` \| `presence` | `callers` | Whether a function returns a value, and at what width: from use — a caller that reads `eax`/`rax` after the call decides it, and with no caller in the image only a value the function wrote itself counts, not a callee's leftover — or from presence, `rax` written on the way to a `ret`, whatever reads it.
