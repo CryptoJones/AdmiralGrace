@@ -25,30 +25,200 @@
 //! past what the text itself shows to be unused. It runs to a fixed point,
 //! since removing one statement can leave another unused.
 
+use std::collections::BTreeSet;
+
 use crate::ast::AstNode;
 use crate::lift::{LiftedFunction, Statement, StatementKind};
 
 /// No real body needs more rounds.
 const MOST_ROUNDS: usize = 64;
 
+/// The tag a statement's index wears in place of its addresses while the
+/// pruning runs over a copy: far above any address an image has.
+const TAG: u64 = 1 << 62;
+
 /// The function with the statements nothing uses removed, and the locals
 /// nothing names after that.
 pub fn pruned(function: &LiftedFunction) -> LiftedFunction {
     let mut function = function.clone();
-    let own: Vec<String> = function
+    let own = own_of(&function);
+    prune(&mut function.body, &own);
+    drop_unnamed_locals(&mut function);
+    function
+}
+
+/// The function's own variables — its parameters and locals — the only
+/// ones a store to may be dead.
+fn own_of(function: &LiftedFunction) -> Vec<String> {
+    function
         .params
         .iter()
         .chain(&function.locals)
         .map(|variable| variable.name.clone())
-        .collect();
-    prune(&mut function.body, &own);
+        .collect()
+}
+
+/// Take out the locals the body no longer names.
+fn drop_unnamed_locals(function: &mut LiftedFunction) {
+    let body = &function.body;
     function.locals.retain(|local| {
-        function
-            .body
-            .iter()
+        body.iter()
             .any(|statement| mentions(statement, &local.name))
     });
+}
+
+/// The statements the pruning would take out of `function`, as their
+/// indices in a walk of the body that counts each statement before the
+/// ones it holds (a `for`'s init and step are part of the `for`, not
+/// counted): what `dead-code drop` removes, said of the body as it stands,
+/// so that a reader keeping the dead code can see which it is.
+pub fn dead_indices(function: &LiftedFunction) -> BTreeSet<usize> {
+    let mut tagged = function.clone();
+    let mut count = 0;
+    walk_mut(&mut tagged.body, &mut count, &mut |index, statement| {
+        statement.addresses = vec![TAG + index as u64];
+    });
+    let own = own_of(&tagged);
+    prune(&mut tagged.body, &own);
+    // A statement the pruning kept — or a call it kept out of a dropped
+    // assignment — still wears its tag.
+    let mut alive = BTreeSet::new();
+    walk(&tagged.body, &mut 0, &mut |_, statement| {
+        for address in &statement.addresses {
+            if *address >= TAG {
+                alive.insert((*address - TAG) as usize);
+            }
+        }
+    });
+    (0..count).filter(|index| !alive.contains(index)).collect()
+}
+
+/// The function with the dead stores to the variables in `removable` taken
+/// out — the stores to those variables that [`pruned`] would remove, where
+/// they stand in code that stays — and a local nothing names after that
+/// dropped. A store inside a branch that is itself dead is left with its
+/// branch: the branch goes whole or not at all, and a store taken out of
+/// it would leave its reader without one. A call in a removed store
+/// stays, as the call it is.
+pub fn without_stores(function: &LiftedFunction, removable: &[String]) -> LiftedFunction {
+    if removable.is_empty() {
+        return function.clone();
+    }
+    let dead = dead_indices(function);
+    let mut function = function.clone();
+    remove_stores(&mut function.body, &mut 0, &dead, removable, false);
+    drop_unnamed_locals(&mut function);
     function
+}
+
+/// Remove, in `statements` and their nested bodies, each assignment to one
+/// of `removable` whose index in the walk is in `dead` and that stands in
+/// no dead statement (`inside_dead`).
+fn remove_stores(
+    statements: &mut Vec<Statement>,
+    next: &mut usize,
+    dead: &BTreeSet<usize>,
+    removable: &[String],
+    inside_dead: bool,
+) {
+    let mut index = 0;
+    while index < statements.len() {
+        let own = *next;
+        *next += 1;
+        let is_dead = dead.contains(&own);
+        let doomed = is_dead
+            && !inside_dead
+            && assigned_var(&statements[index]).is_some_and(|name| removable.contains(&name));
+        if doomed {
+            let statement = statements.remove(index);
+            if let AstNode::Assign { rhs, .. } = statement.node {
+                if let Some(call) = call_in(*rhs) {
+                    statements.insert(index, Statement::plain(call, statement.addresses));
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        let inside = inside_dead || is_dead;
+        match &mut statements[index].kind {
+            StatementKind::Plain => {}
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => {
+                remove_stores(then_part, next, dead, removable, inside);
+                remove_stores(else_part, next, dead, removable, inside);
+            }
+            StatementKind::While { body }
+            | StatementKind::DoWhile { body }
+            | StatementKind::For { body, .. } => {
+                remove_stores(body, next, dead, removable, inside);
+            }
+            StatementKind::Switch { arms } => {
+                for arm in arms {
+                    remove_stores(&mut arm.body, next, dead, removable, inside);
+                }
+            }
+        }
+        index += 1;
+    }
+}
+
+/// Call `f` on each statement with its index in the walk: a statement
+/// before the statements it holds, in order.
+fn walk(statements: &[Statement], next: &mut usize, f: &mut dyn FnMut(usize, &Statement)) {
+    for statement in statements {
+        f(*next, statement);
+        *next += 1;
+        match &statement.kind {
+            StatementKind::Plain => {}
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => {
+                walk(then_part, next, f);
+                walk(else_part, next, f);
+            }
+            StatementKind::While { body }
+            | StatementKind::DoWhile { body }
+            | StatementKind::For { body, .. } => walk(body, next, f),
+            StatementKind::Switch { arms } => {
+                for arm in arms {
+                    walk(&arm.body, next, f);
+                }
+            }
+        }
+    }
+}
+
+/// [`walk`], changing each statement.
+fn walk_mut(
+    statements: &mut [Statement],
+    next: &mut usize,
+    f: &mut dyn FnMut(usize, &mut Statement),
+) {
+    for statement in statements {
+        f(*next, statement);
+        *next += 1;
+        match &mut statement.kind {
+            StatementKind::Plain => {}
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => {
+                walk_mut(then_part, next, f);
+                walk_mut(else_part, next, f);
+            }
+            StatementKind::While { body }
+            | StatementKind::DoWhile { body }
+            | StatementKind::For { body, .. } => walk_mut(body, next, f),
+            StatementKind::Switch { arms } => {
+                for arm in arms {
+                    walk_mut(&mut arm.body, next, f);
+                }
+            }
+        }
+    }
 }
 
 /// Prune `body` to a fixed point. `own` names the function's own
@@ -709,5 +879,91 @@ mod tests {
         ];
         prune(&mut body, &own(&["p"]));
         assert_eq!(body.len(), 2);
+    }
+
+    /// `x = 1; if (0) { y = 2; } x = f(); return x + z;` over the function's
+    /// own `x`, `y`, `z`: the first store to `x` is overwritten, the `if`
+    /// never runs, and the store that holds a call keeps the call.
+    fn a_body_with_dead_stores() -> LiftedFunction {
+        use crate::lift::Variable;
+        let local = |name: &str| Variable {
+            ty: "long".to_string(),
+            name: name.to_string(),
+        };
+        LiftedFunction {
+            name: "f".to_string(),
+            address: 0x1000,
+            return_type: "long".to_string(),
+            params: vec![local("z")],
+            locals: vec![local("x"), local("y")],
+            body: vec![
+                assign("x", AstNode::constant(1, 8)),
+                if_constant(
+                    false,
+                    vec![assign("y", AstNode::constant(2, 8))],
+                    Vec::new(),
+                ),
+                assign("x", call("f")),
+                ret(AstNode::binary(
+                    AstNode::var("x"),
+                    BinaryOp::Add,
+                    AstNode::var("z"),
+                )),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        }
+    }
+
+    #[test]
+    fn the_dead_statements_are_named_by_their_place_in_the_walk() {
+        let function = a_body_with_dead_stores();
+        // 0: x = 1 (overwritten); 1: if (0) (never taken); 2: y = 2 (in it);
+        // 3: x = f() (read by 4); 4: return.
+        assert_eq!(
+            dead_indices(&function),
+            BTreeSet::from([0, 1, 2]),
+            "{:?}",
+            dead_indices(&function)
+        );
+        // A store whose value is a call is dead only as a store: the call
+        // stays, so the statement is not named.
+        let mut unread = function.clone();
+        unread.body[3] = assign("x", call("f"));
+        unread.body.pop();
+        unread.body.push(ret(AstNode::var("z")));
+        assert_eq!(dead_indices(&unread), BTreeSet::from([0, 1, 2]));
+        assert!(
+            crate::emit::emit_function(&crate::dead::pruned(&unread), &Default::default())
+                .text()
+                .contains("  f();\n"),
+        );
+    }
+
+    #[test]
+    fn the_dead_stores_of_one_variable_go_and_the_rest_of_the_dead_code_stays() {
+        let function = a_body_with_dead_stores();
+        let text = |function: &LiftedFunction| {
+            crate::emit::emit_function(function, &Default::default()).text()
+        };
+        // Nothing marked: nothing changes.
+        assert_eq!(text(&without_stores(&function, &[])), text(&function));
+        // `x`: its overwritten store goes; the `if (0)` and `y` stay, and
+        // so does the store that is read.
+        let x = without_stores(&function, &own(&["x"]));
+        let printed = text(&x);
+        assert!(!printed.contains("x = 1;"), "{printed}");
+        assert!(printed.contains("if (0) {"), "{printed}");
+        assert!(printed.contains("y = 2;"), "{printed}");
+        assert!(printed.contains("x = f();"), "{printed}");
+        assert_eq!(x.locals.len(), 2);
+        // `y`: its one store stands in the dead `if`, which goes whole or
+        // not at all, so it stays with its branch.
+        let y = without_stores(&function, &own(&["y"]));
+        let printed = text(&y);
+        assert!(printed.contains("y = 2;"), "{printed}");
+        assert!(printed.contains("x = 1;"), "{printed}");
+        assert_eq!(y.locals.len(), 2);
     }
 }

@@ -13,7 +13,7 @@
 //! calls, named in [`crate::options`]: `constant-style`, `indent` and
 //! `constant-conditions`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::ast::{AstNode, BinaryOp, LoopKind};
@@ -45,6 +45,11 @@ pub struct Pseudocode {
     /// `main reads eax after the call` — when the lifter recorded it. The
     /// leading comment of the function says the same.
     pub return_reason: Option<String>,
+    /// The lines, counted from zero, of the statements the `dead-code`
+    /// option's `drop` would take out — a store nothing reads, a branch
+    /// that goes one way — kept here because the option says `keep`. Empty
+    /// under `drop`, when they are gone.
+    pub dead_lines: BTreeSet<usize>,
 }
 
 impl Pseudocode {
@@ -186,14 +191,42 @@ impl Default for Style {
 /// carry none. `options` says how a constant is spelled and how far a body
 /// is indented.
 pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode {
+    emit_function_with(function, options, &[])
+}
+
+/// [`emit_function`], with the dead stores to the variables named in
+/// `removable` taken out even under `dead-code keep`: the analyst's word
+/// that one variable's unused stores are noise. The other dead statements
+/// stay, and the pseudocode says which lines they are.
+pub fn emit_function_with(
+    function: &LiftedFunction,
+    options: &Options,
+    removable: &[String],
+) -> Pseudocode {
     // Under `dead-code drop` the body is pruned first: the statements whose
     // results nothing uses go, and the locals nothing names after them.
+    // Under `keep`, the dead stores of the removable variables alone go,
+    // and the rest of the dead code is marked.
+    let dropping = options.dead_code == crate::options::DeadCode::Drop;
     let pruned;
-    let function = if options.dead_code == crate::options::DeadCode::Drop {
+    let function = if dropping {
         pruned = crate::dead::pruned(function);
+        &pruned
+    } else if !removable.is_empty() {
+        pruned = crate::dead::without_stores(function, removable);
         &pruned
     } else {
         function
+    };
+    let dead = if dropping {
+        BTreeSet::new()
+    } else {
+        crate::dead::dead_indices(function)
+    };
+    let mut marks = Marks {
+        next: 0,
+        dead: &dead,
+        lines: BTreeSet::new(),
     };
     let style = Style::of(options);
     let mut lines = Vec::new();
@@ -212,6 +245,7 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
         });
         return Pseudocode {
             lines,
+            dead_lines: BTreeSet::new(),
             return_type: None,
             return_reason: None,
         };
@@ -329,7 +363,7 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
     }
 
     let start = lines.len();
-    emit_statements(&function.body, 1, &mut lines, &style, None);
+    emit_statements(&function.body, 1, &mut lines, &style, None, &mut marks);
 
     match style.language {
         Language::Python => {
@@ -350,7 +384,20 @@ pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode
         lines,
         return_type: Some(function.return_type.clone()),
         return_reason: function.return_reason.clone(),
+        dead_lines: marks.lines,
     }
+}
+
+/// The dead statements, found again as they are printed: each statement
+/// is counted as [`crate::dead::dead_indices`] counts it, and the lines of
+/// a dead one are noted.
+struct Marks<'a> {
+    /// The index of the next statement printed.
+    next: usize,
+    /// The indices of the statements the pruning would take out.
+    dead: &'a BTreeSet<usize>,
+    /// The lines of those statements, so far.
+    lines: BTreeSet<usize>,
 }
 
 /// Whether every line is a comment — or there is none — so that a Python
@@ -386,6 +433,7 @@ fn emit_statements(
     lines: &mut Vec<Line>,
     style: &Style,
     exit: Option<&str>,
+    marks: &mut Marks,
 ) {
     let pad = style.indent.repeat(depth);
     let language = style.language;
@@ -398,21 +446,25 @@ fn emit_statements(
             });
         }
     };
-    let body = |statements: &[Statement], lines: &mut Vec<Line>, exit: Option<&str>| {
-        let start = lines.len();
-        emit_statements(statements, depth + 1, lines, style, exit);
-        // A Python block of nothing, or of comments alone, is `pass`.
-        if !brace && only_comments(&lines[start..]) {
-            lines.push(Line {
-                text: format!("{pad}{}pass", style.indent),
-                addresses: Vec::new(),
-            });
-        }
-    };
+    let body =
+        |statements: &[Statement], lines: &mut Vec<Line>, exit: Option<&str>, marks: &mut Marks| {
+            let start = lines.len();
+            emit_statements(statements, depth + 1, lines, style, exit, marks);
+            // A Python block of nothing, or of comments alone, is `pass`.
+            if !brace && only_comments(&lines[start..]) {
+                lines.push(Line {
+                    text: format!("{pad}{}pass", style.indent),
+                    addresses: Vec::new(),
+                });
+            }
+        };
     let semicolon = style.terminator();
     for (index, statement) in statements.iter().enumerate() {
         // The label after a loop is where a `goto` out of the loop goes.
         let after = label_of(statements.get(index + 1));
+        let mark = marks.next;
+        marks.next += 1;
+        let first_line = lines.len();
         match &statement.kind {
             StatementKind::Plain => match &statement.node {
                 // A label sits one level out from the statements it names;
@@ -469,7 +521,7 @@ fn emit_statements(
                     ),
                     &statement.addresses,
                 );
-                body(then_part, lines, exit);
+                body(then_part, lines, exit, marks);
                 if !else_part.is_empty() {
                     lines.push(Line {
                         text: if brace {
@@ -479,7 +531,7 @@ fn emit_statements(
                         },
                         addresses: Vec::new(),
                     });
-                    body(else_part, lines, exit);
+                    body(else_part, lines, exit, marks);
                 }
                 close(lines);
             }
@@ -496,7 +548,7 @@ fn emit_statements(
                                 addresses: Vec::new(),
                             });
                         }
-                        emit_statements(&arm.body, depth + 1, lines, style, exit);
+                        emit_statements(&arm.body, depth + 1, lines, style, exit, marks);
                     }
                     close(lines);
                 }
@@ -524,7 +576,7 @@ fn emit_statements(
                             text: format!("{pad}{}{} => {{", style.indent, values.join(" | ")),
                             addresses: Vec::new(),
                         });
-                        emit_statements(inner, depth + 2, lines, style, exit);
+                        emit_statements(inner, depth + 2, lines, style, exit, marks);
                         lines.push(Line {
                             text: format!("{pad}{}}}", style.indent),
                             addresses: Vec::new(),
@@ -561,7 +613,7 @@ fn emit_statements(
                                 Vec::new()
                             },
                         });
-                        body(without_trailing_break(&arm.body), lines, exit);
+                        body(without_trailing_break(&arm.body), lines, exit, marks);
                     }
                 }
             },
@@ -576,7 +628,7 @@ fn emit_statements(
                     text: format!("{pad}{head}{}", constant_note(&statement.node, style)),
                     addresses: statement.addresses.clone(),
                 });
-                body(inner, lines, after);
+                body(inner, lines, after, marks);
                 close(lines);
             }
             StatementKind::DoWhile { body: inner } => match language {
@@ -585,7 +637,7 @@ fn emit_statements(
                         text: format!("{pad}do {{"),
                         addresses: Vec::new(),
                     });
-                    emit_statements(inner, depth + 1, lines, style, after);
+                    emit_statements(inner, depth + 1, lines, style, after, marks);
                     lines.push(Line {
                         text: format!(
                             "{pad}}} while ({});{}",
@@ -600,7 +652,7 @@ fn emit_statements(
                         text: format!("{pad}loop {{"),
                         addresses: Vec::new(),
                     });
-                    emit_statements(inner, depth + 1, lines, style, after);
+                    emit_statements(inner, depth + 1, lines, style, after, marks);
                     lines.push(Line {
                         text: format!(
                             "{pad}{}if !({}) {{ break; }}{}",
@@ -617,7 +669,7 @@ fn emit_statements(
                         text: format!("{pad}while True:"),
                         addresses: Vec::new(),
                     });
-                    body(inner, lines, after);
+                    body(inner, lines, after, marks);
                     lines.push(Line {
                         text: format!(
                             "{pad}{}if not ({}):{}",
@@ -649,7 +701,7 @@ fn emit_statements(
                         ),
                         addresses: statement.addresses.clone(),
                     });
-                    emit_statements(inner, depth + 1, lines, style, after);
+                    emit_statements(inner, depth + 1, lines, style, after, marks);
                     close(lines);
                 }
                 Language::Rust | Language::Python => {
@@ -667,7 +719,7 @@ fn emit_statements(
                         ),
                         addresses: statement.addresses.clone(),
                     });
-                    emit_statements(inner, depth + 1, lines, style, after);
+                    emit_statements(inner, depth + 1, lines, style, after, marks);
                     push(
                         lines,
                         format!(
@@ -680,6 +732,9 @@ fn emit_statements(
                     close(lines);
                 }
             },
+        }
+        if marks.dead.contains(&mark) {
+            marks.lines.extend(first_line..lines.len());
         }
     }
 }
@@ -1847,5 +1902,98 @@ mod tests {
 
         let bare = AstNode::Return { value: None };
         assert_eq!(emit_node(&bare).trim_end(), "return;");
+    }
+
+    #[test]
+    fn the_dead_lines_are_marked_under_keep_and_gone_under_drop() {
+        use crate::lift::{Statement, StatementKind};
+        let var = AstNode::var;
+        let plain = |node: AstNode, at: u64| Statement {
+            node,
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        };
+        let assign = |name: &str, rhs: AstNode| AstNode::Assign {
+            lhs: Box::new(AstNode::var(name)),
+            rhs: Box::new(rhs),
+        };
+        // x = 1 (overwritten); if (0) { y = 2; } (never taken); x = a; return x.
+        let function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![Variable {
+                ty: "int".to_string(),
+                name: "a".to_string(),
+            }],
+            locals: vec![
+                Variable {
+                    ty: "int".to_string(),
+                    name: "x".to_string(),
+                },
+                Variable {
+                    ty: "int".to_string(),
+                    name: "y".to_string(),
+                },
+            ],
+            body: vec![
+                plain(assign("x", AstNode::constant(1, 4)), 0x20),
+                Statement {
+                    node: AstNode::ConstantCondition {
+                        holds: false,
+                        compared: Box::new(AstNode::binary(var("a"), BinaryOp::Less, var("a"))),
+                    },
+                    addresses: vec![0x24],
+                    kind: StatementKind::If {
+                        then_part: vec![plain(assign("y", AstNode::constant(2, 4)), 0x28)],
+                        else_part: Vec::new(),
+                    },
+                },
+                plain(assign("x", var("a")), 0x30),
+                plain(
+                    AstNode::Return {
+                        value: Some(Box::new(var("x"))),
+                    },
+                    0x34,
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let kept = emit_function(&function, &Options::default());
+        let text = kept.text();
+        let line_of = |needle: &str| {
+            kept.lines
+                .iter()
+                .position(|line| line.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {text}"))
+        };
+        // The store, and the whole `if` — its condition line, its body and
+        // its closing brace.
+        assert_eq!(
+            kept.dead_lines,
+            BTreeSet::from([
+                line_of("x = 1;"),
+                line_of("if (0) {"),
+                line_of("y = 2;"),
+                line_of("if (0) {") + 2,
+            ]),
+            "{text}"
+        );
+        assert!(!kept.dead_lines.contains(&line_of("x = a;")), "{text}");
+        let dropped = emit_function(
+            &function,
+            &Options::from_pairs([("dead-code", "drop")]).expect("an option"),
+        );
+        assert!(dropped.dead_lines.is_empty());
+        assert!(!dropped.text().contains("x = 1;"), "{}", dropped.text());
+        // The analyst's word on `x` alone: its dead store goes, the `if`
+        // stays and is still marked.
+        let x = emit_function_with(&function, &Options::default(), &["x".to_string()]);
+        let text = x.text();
+        assert!(!text.contains("x = 1;"), "{text}");
+        assert!(text.contains("if (0) {"), "{text}");
+        assert_eq!(x.dead_lines.len(), 3, "{text} {:?}", x.dead_lines);
     }
 }

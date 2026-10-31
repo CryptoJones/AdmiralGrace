@@ -167,7 +167,8 @@ it compiles: `transpile` writes the functions as C++, a label per block and a `g
 way out, with a `main` to run one against the program it came from. The pseudocode itself
 reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
 each language's way; and the analyst has the last word at any one site — a guard, a folded
-condition, a turned-round branch, a switch — recorded in the project file.
+condition, a turned-round branch, a switch — recorded in the project file. Dead code the
+lift keeps is greyed out, and one variable's unused stores can be dropped on their own.
 
 See [docs/il.md](docs/il.md).
 

@@ -633,6 +633,9 @@ struct LineJson {
     addresses: Vec<u64>,
     /// The addresses, as hex strings.
     addresses_hex: Vec<String>,
+    /// Whether the line is dead code the `dead-code` option kept: a store
+    /// nothing reads, a branch that goes one way.
+    dead: bool,
 }
 
 /// The pseudocode of a function, as JSON.
@@ -742,6 +745,7 @@ pub(crate) fn open_image(
             .collect();
         image.set_jump_table_hints(hints);
         image.set_site_overrides(site_overrides(project));
+        image.set_removable_stores(project.removable_stores());
     }
     Ok(image)
 }
@@ -1699,6 +1703,7 @@ pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
                 .map(|(index, line)| LineJson {
                     line: index + 1,
                     text: line.text.clone(),
+                    dead: pseudocode.dead_lines.contains(&index),
                     addresses: line.addresses.clone(),
                     addresses_hex: line
                         .addresses

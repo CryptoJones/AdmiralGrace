@@ -231,6 +231,16 @@ with the words already at the site. The word is kept in the project file, the ps
 read again with it, and Undo takes it back. Click a line of the pseudocode to select it,
 then open the prompt from the Edit menu — the workbench has no context menus yet.
 
+## Dead stores, greyed out or gone
+
+Under **Dead code: shown** the pseudocode pane keeps every statement the lift made, and greys
+out the ones the `dead-code` option's `drop` would take out: a store to a variable nothing
+reads, or that is stored over before anything reads it, and a branch whose condition can only
+go one way. **Edit ▸ Drop dead stores of variable…** takes one variable's dead stores out
+while the rest stay: type the variable's declared name (`rax`), or `NAME keep` to put them
+back. The word is kept on the variable's record in the project file, so a project opened
+again reads the same; **Dead code: hidden** still drops everything at once.
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or

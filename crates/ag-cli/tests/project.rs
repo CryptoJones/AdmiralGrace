@@ -1788,3 +1788,103 @@ fn a_fold_off_word_keeps_the_comparison_a_constant_condition_folded_from() {
     assert!(text.contains("if (&completed.0 != &completed.0) {"), "{text}");
     assert!(!text.contains("if (0) {"), "{text}");
 }
+
+#[test]
+fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
+    let file = TempFile::new("stores");
+    let deregister = |file: &TempFile, json: bool| -> String {
+        let path = file.text();
+        let mut args = vec!["pseudocode", "deregister_tm_clones", "--project", path.as_str()];
+        if json {
+            args.push("--json");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("sample.elf"))
+            .args(&args)
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // deregister_tm_clones stores `rax = &completed.0;` and never reads it,
+    // then tests a condition that can only go one way: both are dead, and
+    // the JSON says so line by line while the text keeps them.
+    let (ok, _, stderr) = project(&["rename", "--file", &file.text(), "0x1090", "dereg"]);
+    assert!(ok, "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_str(&deregister(&file, true)).expect("JSON");
+    let lines = report["lines"].as_array().expect("the lines");
+    // By the line's exact text: the indentation tells the final `return`
+    // from the one inside the dead branch.
+    let dead = |text: &str| -> bool {
+        lines
+            .iter()
+            .find(|line| line["text"].as_str() == Some(text))
+            .unwrap_or_else(|| panic!("{text:?} in {report}"))["dead"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(dead("  rax = &completed.0;"), "{report}");
+    assert!(dead("  if (0) { // constant: &completed.0 != &completed.0"), "{report}");
+    assert!(dead("      return;"), "{report}");
+    assert!(!dead("  return;"), "{report}");
+    assert!(!dead("  long rax;"), "{report}");
+
+    // The analyst's word on `rax`: its dead store goes, the rest stays.
+    let (ok, stdout, stderr) = project(&[
+        "stores",
+        "--file",
+        &file.text(),
+        "0x1090",
+        "rax",
+        "drop",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("variable 0x1090::rax now dead stores dropped"),
+        "{stdout}"
+    );
+    let text = deregister(&file, false);
+    assert!(!text.contains("rax = &completed.0;"), "{text}");
+    assert!(text.contains("if (0) {"), "{text}");
+    assert!(text.contains("rax = _ITM_deregisterTMCloneTable;"), "a read store stays: {text}");
+    let report = show_json(&file);
+    let variable = report["annotations"]
+        .as_array()
+        .expect("the annotations")
+        .iter()
+        .find(|a| a["variable"] == serde_json::json!("rax"))
+        .expect("the variable's record");
+    assert_eq!(variable["drop_stores"], serde_json::json!(true));
+
+    // `keep` puts the store back and takes the record off.
+    let (ok, stdout, stderr) = project(&[
+        "stores",
+        "--file",
+        &file.text(),
+        "0x1090",
+        "rax",
+        "keep",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("variable 0x1090::rax cleared"), "{stdout}");
+    let text = deregister(&file, false);
+    assert!(text.contains("rax = &completed.0;"), "{text}");
+
+    let (ok, _, stderr) = project(&[
+        "stores",
+        "--file",
+        &file.text(),
+        "0x1090",
+        "rax",
+        "maybe",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("drop or keep"), "{stderr}");
+}

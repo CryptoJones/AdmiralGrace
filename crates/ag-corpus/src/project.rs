@@ -528,6 +528,11 @@ pub struct Annotation {
     /// field lifts as it always did and misreads nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, bool>,
+    /// On a variable's record: the analyst's word that the stores to the
+    /// variable nothing reads are noise, to be taken out of the pseudocode
+    /// even when the dead code is kept. Absent means kept and marked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop_stores: bool,
 }
 
 impl Annotation {
@@ -556,6 +561,7 @@ impl Annotation {
             byte_type: None,
             mode: None,
             overrides: BTreeMap::new(),
+            drop_stores: false,
         }
     }
 
@@ -584,6 +590,7 @@ impl Annotation {
             byte_type: None,
             mode: None,
             overrides: BTreeMap::new(),
+            drop_stores: false,
         }
     }
 
@@ -611,6 +618,7 @@ impl Annotation {
             byte_type: None,
             mode: None,
             overrides: BTreeMap::new(),
+            drop_stores: false,
         }
     }
 
@@ -824,6 +832,7 @@ impl Annotation {
             && self.byte_type.is_none()
             && self.mode.is_none()
             && self.overrides.is_empty()
+            && !self.drop_stores
     }
 }
 
@@ -1264,6 +1273,25 @@ impl ProjectFile {
             .collect();
         sort_by_address(&mut sources);
         sources
+    }
+
+    /// The variables whose dead stores the analyst called noise, by the
+    /// address of the function declaring each.
+    pub fn removable_stores(&self) -> BTreeMap<u64, Vec<String>> {
+        let mut removable: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for record in &self.annotations {
+            let Some(variable) = record.variable.as_deref().filter(|_| record.drop_stores) else {
+                continue;
+            };
+            let Ok((address, _)) = crate::parse_addr_space(&record.address) else {
+                continue;
+            };
+            removable
+                .entry(address)
+                .or_default()
+                .push(variable.to_string());
+        }
+        removable
     }
 
     /// The analyst's overrides, by the value of the address each is at —
@@ -2368,5 +2396,31 @@ mod tests {
         assert_eq!(read.overrides(), overrides);
         // A record without the field reads as no word.
         assert!(!json.contains("\"overrides\": {}"), "{json}");
+    }
+
+    #[test]
+    fn a_variables_dead_stores_are_marked_removable_and_the_project_lists_them() {
+        let mut project = ProjectFile::new(Target::default());
+        project.variable_mut("0x1090", "rax").drop_stores = true;
+        project.variable_mut("0x1090", "rbx").drop_stores = true;
+        project.variable_mut("0x1161", "local_10").name = Some("total".into());
+        // A word on the address's own record is not a variable's.
+        project
+            .annotation_mut(TargetKind::Address, "0x1161")
+            .drop_stores = true;
+        let removable = project.removable_stores();
+        assert_eq!(removable.len(), 1);
+        assert_eq!(removable[&0x1090], vec!["rax".to_string(), "rbx".to_string()]);
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"drop_stores\": true"), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.removable_stores(), removable);
+        // The word alone keeps a record; taken back, the record goes.
+        let mut record = Annotation::new(TargetKind::Address, "0x1090");
+        record.variable = Some("rax".into());
+        record.drop_stores = true;
+        assert!(!record.is_empty());
+        record.drop_stores = false;
+        assert!(record.is_empty());
     }
 }

@@ -96,6 +96,21 @@ fn a_project_file_is_made_and_written_through_the_server() {
             r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"decompile","arguments":{{"target":"deregister_tm_clones"}}}}}}"#
         )
         .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"set_override","arguments":{{"address":"0x10a1","kind":"fold","on":null}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"set_dead_stores","arguments":{{"address":"0x1090","variable":"rax","drop":true}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"decompile","arguments":{{"target":"deregister_tm_clones"}}}}}}"#
+        )
+        .unwrap();
     }
     let stdout = BufReader::new(child.stdout.take().expect("stdout"));
     let replies: Vec<serde_json::Value> = stdout
@@ -103,7 +118,7 @@ fn a_project_file_is_made_and_written_through_the_server() {
         .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
         .collect();
     assert!(child.wait().expect("the server ends").success());
-    assert_eq!(replies.len(), 3);
+    assert_eq!(replies.len(), 6);
     assert_eq!(replies[0]["result"]["isError"], false);
     assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
     assert!(
@@ -122,16 +137,29 @@ fn a_project_file_is_made_and_written_through_the_server() {
         "{decompiled}"
     );
     assert!(!decompiled.contains("if (0) {"), "{decompiled}");
+    assert!(decompiled.contains("rax = &completed.0;"), "{decompiled}");
+    // With the condition folded again, the store to `rax` before it is
+    // dead; the word on `rax` takes it out of the pseudocode.
+    assert_eq!(replies[3]["result"]["isError"], false, "{:?}", replies[3]);
+    assert_eq!(replies[4]["result"]["isError"], false, "{:?}", replies[4]);
+    let decompiled = replies[5]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(decompiled.contains("if (0) {"), "{decompiled}");
+    assert!(!decompiled.contains("rax = &completed.0;"), "{decompiled}");
+    assert!(
+        decompiled.contains("rax = _ITM_deregisterTMCloneTable;"),
+        "{decompiled}"
+    );
     let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
     assert_eq!(
         saved.annotation_for("0x1149").and_then(|a| a.name.clone()),
         Some("add_one".to_string())
     );
-    assert_eq!(
-        saved
-            .annotation_for("0x10a1")
-            .and_then(|a| a.overrides.get("fold").copied()),
-        Some(false)
+    assert!(
+        saved.annotation_for("0x10a1").is_none(),
+        "the word taken back leaves no record"
     );
+    assert!(saved
+        .variable_for("0x1090", "rax")
+        .is_some_and(|record| record.drop_stores));
     let _ = std::fs::remove_file(&project);
 }

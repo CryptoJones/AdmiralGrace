@@ -1,6 +1,6 @@
 //! Application state, messages, and the update loop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -167,6 +167,9 @@ pub enum Message {
     /// Allow or prevent one of the lift's judgment calls at the selected
     /// address.
     EditOverride,
+    /// Take one variable's dead stores out of the pseudocode, or put them
+    /// back.
+    EditDeadStores,
     /// Assemble an instruction over the bytes at the selection.
     EditAssemble,
     /// Fill the selected instruction with the architecture's no-op.
@@ -280,6 +283,8 @@ pub enum PromptKind {
     Mode,
     /// A word on a judgment call at the selection: `KIND on|off|clear`.
     Override,
+    /// A variable whose dead stores go, as `NAME` or `NAME keep`.
+    DeadStores,
     /// The address the image is moved to, or `none`.
     Rebase,
     /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
@@ -525,6 +530,9 @@ pub struct WorkSurface {
     pub graph: Graph,
     /// Pseudocode of the selected function.
     pub pseudocode: Option<String>,
+    /// The lines of it, counted from zero, that are dead code the analysis
+    /// kept: a store nothing reads, a branch that goes one way.
+    pub dead_lines: BTreeSet<usize>,
     /// The line of the pseudocode last clicked, counted from zero, while
     /// the selection is still one of its addresses: which of the lines
     /// sharing an instruction the analyst meant.
@@ -1121,6 +1129,7 @@ impl App {
             self.tell_modes();
             self.tell_jump_tables();
             self.tell_overrides();
+            self.tell_dead_stores();
         }
         task
     }
@@ -2371,6 +2380,7 @@ impl App {
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
         self.work.line_addresses = self.provider.line_addresses(address);
+        self.work.dead_lines = self.provider.dead_lines(address);
 
         if record_history {
             self.history.push(self.selection);
@@ -2912,6 +2922,7 @@ impl App {
                 self.tell_modes();
                 self.tell_jump_tables();
                 self.tell_overrides();
+                self.tell_dead_stores();
             }
         }
         task
@@ -2978,6 +2989,7 @@ impl App {
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
         }
         self.refresh_bytes();
     }
@@ -2994,6 +3006,7 @@ impl App {
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
         }
         self.refresh_bytes();
     }
@@ -3025,6 +3038,22 @@ impl App {
         Some(site.unwrap_or(address))
     }
 
+    /// Tell the analysis which variables' dead stores to take out, and read
+    /// the function on screen again when that changed anything.
+    fn tell_dead_stores(&mut self) {
+        if !self
+            .provider
+            .set_removable_stores(self.annotations.removable_stores())
+        {
+            return;
+        }
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
+        }
+    }
+
     /// Tell the analysis the analyst's words on the sites, and read the
     /// function on screen again when that changed anything.
     fn tell_overrides(&mut self) {
@@ -3047,6 +3076,7 @@ impl App {
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
         }
     }
 
@@ -3077,6 +3107,7 @@ impl App {
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.provider.pseudocode(function);
             self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
         }
     }
 
@@ -3212,6 +3243,29 @@ impl App {
                 });
             }
 
+            Message::EditDeadStores => {
+                let Some(address) = self.work.detail.as_ref().and_then(|detail| detail.start)
+                else {
+                    self.notice = Some("Open a function to drop its variables' dead stores".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let dropped: Vec<String> = self
+                    .declared_variables()
+                    .into_iter()
+                    .filter(|name| {
+                        self.annotations
+                            .variable_for(&key, name)
+                            .is_some_and(|record| record.drop_stores)
+                    })
+                    .collect();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::DeadStores,
+                    title: "Drop dead stores of variable (NAME, or NAME keep)",
+                    value: dropped.join(" "),
+                });
+            }
+
             Message::EditOverride => {
                 let Some(address) = self.override_site() else {
                     self.notice = Some(
@@ -3323,6 +3377,7 @@ impl App {
                 self.tell_modes();
                 self.tell_jump_tables();
                 self.tell_overrides();
+                self.tell_dead_stores();
             }
 
             Message::EditRedo => {
@@ -3342,6 +3397,7 @@ impl App {
                 self.tell_modes();
                 self.tell_jump_tables();
                 self.tell_overrides();
+                self.tell_dead_stores();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -3735,6 +3791,7 @@ impl App {
                                     self.tell_modes();
                                     self.tell_jump_tables();
                                     self.tell_overrides();
+                                    self.tell_dead_stores();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -4212,6 +4269,42 @@ impl App {
                                     .write_patch(kind, &key, Some((&bytes, Some(text))));
                             }
                         }
+                    }
+                    PromptKind::DeadStores => {
+                        let mut words = prompt.value.split_whitespace();
+                        let (Some(name), state) = (words.next(), words.next()) else {
+                            self.notice = Some(
+                                "Name the variable whose dead stores to drop, as the pseudocode declares it".into(),
+                            );
+                            return Task::none();
+                        };
+                        let drop = match state.map(str::to_ascii_lowercase).as_deref() {
+                            None | Some("drop") => true,
+                            Some("keep") => false,
+                            Some(other) => {
+                                self.notice = Some(format!("The state is drop or keep, not {other:?}"));
+                                return Task::none();
+                            }
+                        };
+                        let Some(address) =
+                            self.work.detail.as_ref().and_then(|detail| detail.start)
+                        else {
+                            self.notice = Some("Open a function to drop its variables' dead stores".into());
+                            return Task::none();
+                        };
+                        if !self.declared_variables().iter().any(|v| v == name) {
+                            self.notice = Some(format!("This function declares no variable {name}"));
+                            return Task::none();
+                        }
+                        let key = self.annotation_key(address);
+                        self.annotations.variable_mut(&key, name).drop_stores = drop;
+                        self.annotations.prune();
+                        self.notice = Some(if drop {
+                            format!("Dead stores of {name} dropped in {key}")
+                        } else {
+                            format!("Dead stores of {name} kept in {key}")
+                        });
+                        self.tell_dead_stores();
                     }
                     PromptKind::Override => {
                         // `KIND on|off|clear`, or several apart by commas —
@@ -10494,6 +10587,54 @@ mod tests {
             Some("fold off, guard off".to_string())
         );
         assert!(!folded(&app), "{:?}", app.work.pseudocode);
+    }
+
+    #[test]
+    fn a_dead_store_is_marked_and_one_variables_go_when_the_analyst_says() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // deregister_tm_clones stores `rax = &completed.0;` and never reads
+        // it, and tests a condition that can only go one way.
+        let _ = app.update(Message::FunctionSelected(0x1090));
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        let line = body
+            .lines()
+            .position(|line| line.contains("rax = &completed.0;"))
+            .unwrap_or_else(|| panic!("{body}"));
+        assert!(app.work.dead_lines.contains(&line), "{:?}\n{body}", app.work.dead_lines);
+        let constant = body
+            .lines()
+            .position(|line| line.contains("if (0) {"))
+            .unwrap_or_else(|| panic!("{body}"));
+        assert!(app.work.dead_lines.contains(&constant), "{:?}", app.work.dead_lines);
+
+        let _ = app.update(Message::EditDeadStores);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").kind,
+            PromptKind::DeadStores
+        );
+        let _ = app.update(Message::PromptChanged("rax".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(!body.contains("rax = &completed.0;"), "{body}");
+        assert!(body.contains("if (0) {"), "the rest of the dead code stays: {body}");
+        assert!(
+            app.annotations
+                .variable_for("0x1090", "rax")
+                .is_some_and(|record| record.drop_stores)
+        );
+
+        // `keep` puts the store back and takes the record off.
+        let _ = app.update(Message::EditDeadStores);
+        let _ = app.update(Message::PromptChanged("rax keep".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(body.contains("rax = &completed.0;"), "{body}");
+        assert!(app.annotations.variable_for("0x1090", "rax").is_none());
     }
 
     #[test]

@@ -297,6 +297,19 @@ pub enum ProjectCmd {
         /// The name to record.
         name: String,
     },
+    /// Say whether the stores to a local variable that nothing reads are
+    /// taken out of the pseudocode even when the dead code is kept.
+    Stores {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function's address, with its space when it names one.
+        address: String,
+        /// The variable's declared name, as the pseudocode writes it.
+        variable: String,
+        /// `drop` to take its dead stores out, `keep` to leave them in.
+        state: String,
+    },
     /// Record a name for a register as one function prints it.
     Reg {
         /// The project file to change.
@@ -626,6 +639,26 @@ pub fn run(
             &variable,
             |a| a.name = Some(name),
         ),
+        ProjectCmd::Stores {
+            file,
+            address,
+            variable,
+            state,
+        } => {
+            let drop = match state.trim().to_ascii_lowercase().as_str() {
+                "drop" | "off" | "remove" => true,
+                "keep" | "on" | "show" => false,
+                other => anyhow::bail!("the state is drop or keep, not {other:?}"),
+            };
+            edit_named(
+                &target,
+                &file,
+                Named::Variable,
+                &address,
+                &variable,
+                |a| a.drop_stores = drop,
+            )
+        }
         ProjectCmd::Reg {
             file,
             address,
@@ -1441,6 +1474,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(table) = &annotation.jump_table {
         parts.push(format!("switch {table}"));
+    }
+    if annotation.drop_stores {
+        parts.push("dead stores dropped".to_string());
     }
     if !annotation.overrides.is_empty() {
         parts.push(format!("override {}", annotation.overrides_label()));

@@ -11,7 +11,7 @@ pub mod kuna;
 pub mod kuna_json;
 pub mod sample;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::model::{Capabilities, Project};
@@ -402,6 +402,20 @@ pub trait Provider: Send + Sync {
     /// nothing here and fills it in when it arrives.
     fn line_addresses(&self, _address: u64) -> BTreeMap<usize, Vec<u64>> {
         BTreeMap::new()
+    }
+
+    /// The lines of the pseudocode, counted from zero, that are dead code
+    /// the analysis kept: a store nothing reads, a branch that goes one
+    /// way. A provider that does not tell marks none.
+    fn dead_lines(&self, _address: u64) -> BTreeSet<usize> {
+        BTreeSet::new()
+    }
+
+    /// Tell the analysis which variables' dead stores to take out of the
+    /// pseudocode, by the address of the function declaring each, and say
+    /// whether that changed anything.
+    fn set_removable_stores(&self, _removable: BTreeMap<u64, Vec<String>>) -> bool {
+        false
     }
 
     /// Bytes around an address, when available.
