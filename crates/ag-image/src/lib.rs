@@ -395,6 +395,9 @@ pub struct Binary {
     /// The mangled name of each function, data symbol and import slot whose
     /// name was demangled, by address: what the symbol table spelled.
     mangled: BTreeMap<u64, String>,
+    /// The short form of each demangled function name — the scope and the
+    /// name, no signature — by address: how the name stands in code.
+    short_names: BTreeMap<u64, String>,
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
@@ -535,13 +538,6 @@ impl Binary {
             })
             .collect();
 
-        // A C++ or Rust symbol is shown as the name the source spelled; the
-        // mangled one is kept beside it, for the inspector and the JSON.
-        let mut mangled: BTreeMap<u64, String> = image
-            .mangled_names()
-            .iter()
-            .map(|(address, name)| (unbit(*address), name.mangled.clone()))
-            .collect();
         let mut functions: Vec<Function> = image
             .function_symbols()
             .into_iter()
@@ -552,6 +548,26 @@ impl Binary {
             .collect();
         functions.sort_by_key(|function| function.address);
         functions.dedup_by(|a, b| a.address == b.address);
+
+        // A C++ or Rust symbol is shown as the name the source spelled; the
+        // mangled one is kept beside it, for the inspector and the JSON, and
+        // the short form for the places the name stands in code. A function
+        // is keyed without its Thumb bit, as the function list is; a piece
+        // of data keeps its address as it is.
+        let mut mangled: BTreeMap<u64, String> = BTreeMap::new();
+        let mut short_names: BTreeMap<u64, String> = BTreeMap::new();
+        for (address, name) in image.mangled_names() {
+            let is_function = functions
+                .binary_search_by_key(&unbit(*address), |function| function.address)
+                .is_ok();
+            let key = if is_function { unbit(*address) } else { *address };
+            mangled.entry(key).or_insert_with(|| name.mangled.clone());
+            if is_function {
+                short_names
+                    .entry(key)
+                    .or_insert_with(|| name.short.clone());
+            }
+        }
 
         // The entry point is a function of the program even when no symbol
         // names it, so it is listed under the name the loader would give it.
@@ -577,20 +593,40 @@ impl Binary {
 
         // The import slots: what a PLT stub jumps through, and what a call
         // through the GOT reads. They name the function at the other end.
-        let imports: BTreeMap<u64, String> = image
-            .import_slots()
-            .into_iter()
-            .map(|(slot, name)| {
-                let name = match ag_engine::demangle::demangle(&name) {
-                    Some(plain) => {
-                        mangled.entry(slot).or_insert(name);
-                        plain
+        // An import's name is demangled too, and a stub the loader named by
+        // the import's scope and name alone takes the import's full name,
+        // where one import alone has that short name.
+        let mut imports: BTreeMap<u64, String> = BTreeMap::new();
+        let mut imports_by_short: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for (slot, name) in image.import_slots() {
+            let shown = match ag_engine::demangle::demangle(&name) {
+                Some(plain) => {
+                    if let Some(short) = ag_engine::demangle::demangle_short(&name) {
+                        imports_by_short
+                            .entry(short)
+                            .or_default()
+                            .push((name.clone(), plain.clone()));
                     }
-                    None => name,
-                };
-                (slot, name)
-            })
-            .collect();
+                    mangled.entry(slot).or_insert(name);
+                    plain
+                }
+                None => name,
+            };
+            imports.insert(slot, shown);
+        }
+        for function in &mut functions {
+            if mangled.contains_key(&function.address) {
+                continue;
+            }
+            if let Some([(raw, plain)]) = imports_by_short
+                .get(&function.name)
+                .map(Vec::as_slice)
+            {
+                mangled.insert(function.address, raw.clone());
+                short_names.insert(function.address, function.name.clone());
+                function.name = plain.clone();
+            }
+        }
 
         // The bytes of every section the file holds are kept: the listing
         // decodes the code out of them, and the byte pane shows the rest.
@@ -630,6 +666,7 @@ impl Binary {
             data,
             imports,
             mangled,
+            short_names,
             file,
             strings,
             wide_strings,
@@ -898,6 +935,10 @@ impl Binary {
             .map(|(slot, name)| (shift(slot), name))
             .collect();
         self.mangled = std::mem::take(&mut self.mangled)
+            .into_iter()
+            .map(|(address, name)| (shift(address), name))
+            .collect();
+        self.short_names = std::mem::take(&mut self.short_names)
             .into_iter()
             .map(|(address, name)| (shift(address), name))
             .collect();
@@ -1356,12 +1397,28 @@ impl Binary {
     }
 
     /// The address of the function, data symbol or import slot whose mangled
-    /// name is `name`, so that a mangled name still names its thing.
+    /// name is `name`, so that a mangled name still names its thing. A
+    /// Mach-O's names carry a leading underscore the analyst may leave off.
     pub fn address_of_mangled(&self, name: &str) -> Option<u64> {
         self.mangled
             .iter()
-            .find(|(_, mangled)| mangled.as_str() == name)
+            .find(|(_, mangled)| {
+                mangled.as_str() == name
+                    || mangled
+                        .strip_prefix('_')
+                        .is_some_and(|rest| rest == name)
+            })
             .map(|(address, _)| *address)
+    }
+
+    /// The name of the function at `address` as it stands in code: the
+    /// scope and the name of a demangled symbol, without the signature, or
+    /// the name as shown for any other.
+    pub fn code_name(&self, address: u64) -> Option<&str> {
+        self.short_names
+            .get(&address)
+            .map(String::as_str)
+            .or_else(|| self.function_name(address))
     }
 
     /// The import whose address the GOT slot at `slot` holds, when the image
@@ -1672,7 +1729,7 @@ impl Binary {
         let decoded = self.decoded_of(code);
         let cfg = self.walk(&decoded.disasm, address);
         let name = self
-            .function_name(address)
+            .code_name(address)
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
 
@@ -2081,7 +2138,7 @@ struct ImageSymbols<'a>(&'a Binary);
 
 impl Symbols for ImageSymbols<'_> {
     fn function_name(&self, address: u64) -> Option<String> {
-        self.0.function_name(address).map(str::to_string)
+        self.0.code_name(address).map(str::to_string)
     }
 
     /// The call graph's callers of the function, each call site decided by

@@ -2221,7 +2221,7 @@ impl App {
             start: Some(symbol.address),
             end: symbol.size.map(|size| symbol.address.saturating_add(size)),
             provenance: "Program image".into(),
-            mangled: None,
+            mangled: self.provider.mangled_name(symbol.address),
             summary: match &symbol.section {
                 Some(section) => format!("The data lives in {section}."),
                 None => "The data lives in the program image.".to_string(),

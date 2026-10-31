@@ -9,23 +9,47 @@
 //! symbol, an Objective-C method's `-[Class sel]`, a name of the loader's.
 //! The signature is kept, since it is what tells two overloads apart.
 
-use cpp_demangle::Symbol;
+use cpp_demangle::{DemangleOptions, Symbol};
 use msvc_demangler::DemangleFlags;
 
-/// The name `mangled` spells, when it is a mangled one; `None` for a name
-/// that is not, which is to be shown as it is.
+/// No real mangled name is longer: a bound on what the demanglers are
+/// handed from a crafted file, whose depth of nesting is not theirs to
+/// refuse.
+const LONGEST_NAME: usize = 4096;
+
+/// The name `mangled` spells, when it is a mangled one, signature kept;
+/// `None` for a name that is not, which is to be shown as it is.
 pub fn demangle(mangled: &str) -> Option<String> {
+    read(mangled, false)
+}
+
+/// The scope and the name alone — `geometry::area` for `geometry::area(int,
+/// int)` — for the places a name stands in code, where a signature would
+/// not read: the pseudocode, and the calls in it. `None` for a name that
+/// is not mangled.
+pub fn demangle_short(mangled: &str) -> Option<String> {
+    read(mangled, true)
+}
+
+fn read(mangled: &str, short: bool) -> Option<String> {
+    if mangled.len() > LONGEST_NAME {
+        return None;
+    }
     // Microsoft C++: a leading `?` belongs to no other scheme. The access,
     // the calling convention and the storage class are dropped; the scope,
     // the name, the signature and a method's `const` are kept.
     if mangled.starts_with('?') {
-        let flags = DemangleFlags::NO_ACCESS_SPECIFIERS
-            | DemangleFlags::NO_MS_KEYWORDS
-            | DemangleFlags::NO_FUNCTION_RETURNS
-            | DemangleFlags::NO_MEMBER_TYPE
-            | DemangleFlags::NO_MS_THISTYPE
-            | DemangleFlags::NO_CLASS_TYPE
-            | DemangleFlags::SPACE_AFTER_COMMA;
+        let flags = if short {
+            DemangleFlags::NAME_ONLY | DemangleFlags::NO_CLASS_TYPE
+        } else {
+            DemangleFlags::NO_ACCESS_SPECIFIERS
+                | DemangleFlags::NO_MS_KEYWORDS
+                | DemangleFlags::NO_FUNCTION_RETURNS
+                | DemangleFlags::NO_MEMBER_TYPE
+                | DemangleFlags::NO_MS_THISTYPE
+                | DemangleFlags::NO_CLASS_TYPE
+                | DemangleFlags::SPACE_AFTER_COMMA
+        };
         return msvc_demangler::demangle(mangled, flags)
             .ok()
             .filter(|plain| !plain.is_empty() && plain != mangled);
@@ -45,9 +69,14 @@ pub fn demangle(mangled: &str) -> Option<String> {
         }
     }
     if itanium.starts_with("_Z") {
+        let options = if short {
+            DemangleOptions::new().no_params().no_return_type()
+        } else {
+            DemangleOptions::new()
+        };
         if let Some(plain) = Symbol::new(itanium)
             .ok()
-            .and_then(|symbol| symbol.demangle().ok())
+            .and_then(|symbol| symbol.demangle_with_options(&options).ok())
             .filter(|plain| !plain.is_empty() && plain != itanium)
         {
             return Some(plain);
@@ -57,22 +86,24 @@ pub fn demangle(mangled: &str) -> Option<String> {
 }
 
 /// Whether `name` is a Rust symbol: v0 (`_R…`), or legacy (`_ZN…E` ending
-/// in the `17h<16 hex digits>` hash the Rust compiler appends).
+/// in the `17h<16 hex digits>` hash the Rust compiler appends), either
+/// before a suffix the linker added past a `.` (`.llvm.1234`). Read as
+/// bytes, since a crafted name need not be ASCII.
 fn is_rust(name: &str) -> bool {
     if name.starts_with("_R") {
         return true;
     }
+    let name = name.split('.').next().unwrap_or(name);
     let Some(body) = name
         .strip_prefix("_ZN")
         .and_then(|rest| rest.strip_suffix('E'))
     else {
         return false;
     };
+    let body = body.as_bytes();
     body.len() > 19
-        && body[body.len() - 19..].starts_with("17h")
-        && body[body.len() - 16..]
-            .chars()
-            .all(|c| c.is_ascii_hexdigit())
+        && body[body.len() - 19..].starts_with(b"17h")
+        && body[body.len() - 16..].iter().all(u8::is_ascii_hexdigit)
 }
 
 /// A Rust name, with the hash dropped.
@@ -152,6 +183,48 @@ mod tests {
             demangle("_RNvCs1234_7mycrate4main").as_deref(),
             Some("mycrate::main")
         );
+    }
+
+    #[test]
+    fn the_short_form_is_the_scope_and_the_name() {
+        use super::demangle_short;
+        assert_eq!(
+            demangle_short("_ZN8geometry4areaEii").as_deref(),
+            Some("geometry::area")
+        );
+        assert_eq!(
+            demangle_short("_ZNK8geometry5Shape6cornerEi").as_deref(),
+            Some("geometry::Shape::corner")
+        );
+        assert_eq!(
+            demangle_short("?corner@Shape@geometry@@QEBA?AUPoint@2@H@Z").as_deref(),
+            Some("geometry::Shape::corner")
+        );
+        assert_eq!(
+            demangle_short("_ZN4core3fmt5write17h1234567890abcdefE").as_deref(),
+            Some("core::fmt::write")
+        );
+        assert_eq!(demangle_short("main"), None);
+    }
+
+    #[test]
+    fn a_rust_name_with_a_linker_suffix_is_still_rust() {
+        assert_eq!(
+            demangle("_ZN4core3fmt5write17h1234567890abcdefE.llvm.1234").as_deref(),
+            Some("core::fmt::write")
+        );
+    }
+
+    #[test]
+    fn a_crafted_name_neither_panics_nor_demangles() {
+        // A hash-length tail that is not ASCII must not be sliced inside a
+        // character.
+        assert_eq!(demangle("_ZNé012345678901234567E"), None);
+        assert_eq!(demangle("_ZNééééééééééE"), None);
+        let long = format!("?x@@3{}", "PEA".repeat(100_000));
+        assert_eq!(demangle(&long), None);
+        let long = format!("_Z{}", "N".repeat(10_000));
+        assert_eq!(demangle(&long), None);
     }
 
     #[test]

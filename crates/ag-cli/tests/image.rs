@@ -1465,6 +1465,16 @@ fn mangled_names_are_reported_demangled_and_still_name_their_functions() {
     assert!(report.contains("geometry::area(int, int)"), "{report}");
     let report = image("sample_cpp.elf", &["data", "_ZN8geometry5Shape5countE"]);
     assert!(report.contains("geometry::Shape::count"), "{report}");
+    // In the pseudocode a name stands as code: the scope and the name.
+    let report = image("sample_cpp.elf", &["pseudocode", "main"]);
+    assert!(report.contains("geometry::area("), "{report}");
+    assert!(!report.contains("geometry::area(int"), "{report}");
+    let report = image("sample_cpp.elf", &["pseudocode", "_ZN8geometry4areaEii"]);
+    assert!(report.contains(" geometry::area("), "{report}");
+    assert!(!report.contains("(int, int)("), "{report}");
+    // The PE's exported static member is data under either name.
+    let report = image("sample_cpp.exe", &["data", "?count@Shape@geometry@@2HA"]);
+    assert!(report.contains("geometry::Shape::count"), "{report}");
 
     // Microsoft names, from a PE's export table.
     let report = image("sample_cpp.exe", &["symbols"]);

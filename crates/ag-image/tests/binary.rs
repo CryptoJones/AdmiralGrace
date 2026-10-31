@@ -1131,8 +1131,9 @@ fn sum_to_lifts_as_a_counted_loop() {
 #[test]
 fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
     // The entry block falls through into the loop's head, which the loop's
-    // body also jumps back to. The globals the return reads have no symbol
-    // in either image, so they are typed dereferences of their addresses.
+    // body also jumps back to. The PE's export table names `counter`; the
+    // string the return reads has no symbol, so it is a typed dereference
+    // of its address.
     let pseudocode = pe().pseudocode(0x140001020).expect("main lifts");
     assert_eq!(
         pseudocode.text(),
@@ -1146,7 +1147,7 @@ fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
          \x20 for (local_c = 0; local_c < 3; local_c = local_c + 1) {\n\
          \x20   local_8 = add(local_8, local_c);\n\
          \x20 }\n\
-         \x20 return (local_8 + *(int *)0x140003000) + (int)*(char *)*(long *)0x140003008;\n\
+         \x20 return (local_8 + counter) + (int)*(char *)*(long *)0x140003008;\n\
          }"
     );
 
@@ -1925,18 +1926,21 @@ fn mangled_names_are_shown_demangled_and_kept_beside_the_shown_name() {
         assert_eq!(binary.mangled_name(area_address), Some(area));
         let sides_address = binary.address_of_mangled(sides).expect(sides);
         assert!(binary.function_name(sides_address).is_some());
-        // A data symbol too, where the loader lists the static member as one.
-        if let Some(count_address) = binary.address_of_mangled(count) {
-            if let Some(data) = binary
+        // The static member is named by either name in every container, the
+        // PE's by its export; the ELF and the PE list it as data. (The
+        // loader reads the Mach-O's, in `__common`, as a function.)
+        let count_address = binary.address_of_mangled(count).expect(count);
+        assert_eq!(binary.mangled_name(count_address), Some(count), "{file}");
+        if file != "sample_cpp.macho" {
+            let data = binary
                 .data_symbols()
                 .iter()
                 .find(|symbol| symbol.address == count_address)
-            {
-                assert_eq!(data.name, "geometry::Shape::count", "{file}");
-            }
-        } else {
-            assert_eq!(file, "sample_cpp.exe", "{file} should name {count}");
+                .unwrap_or_else(|| panic!("{file}: the static member is data"));
+            assert_eq!(data.name, "geometry::Shape::count", "{file}");
         }
+        // In code, the name stands without its signature.
+        assert_eq!(binary.code_name(area_address), Some("geometry::area"));
         // A C name is left alone, and has no mangled twin.
         let main = binary
             .functions()
@@ -1944,6 +1948,7 @@ fn mangled_names_are_shown_demangled_and_kept_beside_the_shown_name() {
             .find(|function| function.name == "main" || function.name == "_main")
             .expect("main");
         assert_eq!(binary.mangled_name(main.address), None);
+        assert_eq!(binary.code_name(main.address), Some(main.name.as_str()));
     }
 
     // Under another base the mangled names move with their functions.

@@ -110,7 +110,10 @@ on ELF and Mach-O), Microsoft (`?area@geometry@@YAHHH@Z`, on PE) or Rust (`_ZN4c
 `_R…`). Every report shows them demangled, signature kept, so two overloads read apart:
 `geometry::area(int)` and `geometry::area(int, int)`. The mangled name is kept beside the shown
 one: `symbols --json` carries it as `mangled`, and a command that takes a function or a piece of
-data by name — `disasm`, `cfg`, `pseudocode`, `data` — takes the mangled name too.
+data by name — `disasm`, `cfg`, `pseudocode`, `data` — takes the mangled name too. The
+pseudocode, where a name stands in code, uses the scope and the name alone: `geometry::area(2,
+3)`. `--filter` is a regular expression, so the brackets and question marks of a signature or a
+Microsoft name want escaping: `--filter 'area\(int'`.
 
 `ag image FILE objc --header` writes the same as an Objective-C header — the quickest
 overview of such a binary: every protocol, class and category declared, with its properties,

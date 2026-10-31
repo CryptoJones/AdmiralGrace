@@ -52,6 +52,8 @@ pub struct MangledName {
     pub mangled: String,
     /// The name the source spelled, signature kept: `geometry::area(int, int)`.
     pub plain: String,
+    /// The scope and the name alone, as it stands in code: `geometry::area`.
+    pub short: String,
 }
 
 /// One slice of a universal (fat) Mach-O: an image of one architecture
@@ -570,7 +572,20 @@ impl Image {
             .object()
             .map(|inner| inner.data_symbols())
             .unwrap_or_default();
-        self.show_demangled(symbols.iter_mut().map(|(address, name, _)| (*address, name)));
+        // A PE names its data through its export table, with no extent.
+        if let Some(inner) = self.object() {
+            for (address, name) in inner.data_exports() {
+                if !symbols.iter().any(|(found, _, _)| found == address) {
+                    symbols.push((*address, name.clone(), 0));
+                }
+            }
+            symbols.sort_by_key(|(address, _, _)| *address);
+        }
+        self.show_demangled(
+            symbols
+                .iter_mut()
+                .map(|(address, name, _)| (*address, name)),
+        );
         // A class object is data the loader registers, named by its class.
         if let Some(objc) = self.objc() {
             let named: std::collections::HashSet<u64> =
@@ -614,22 +629,37 @@ impl Image {
             let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
                 return names;
             };
+            // A relocatable object's addresses are the loader's to place,
+            // not the file's.
+            if file.kind() == object::ObjectKind::Relocatable {
+                return names;
+            }
             let mut note = |address: u64, name: &str| {
                 if address == 0 || names.contains_key(&address) {
                     return;
                 }
                 if let Some(plain) = crate::demangle::demangle(name) {
+                    let short =
+                        crate::demangle::demangle_short(name).unwrap_or_else(|| plain.clone());
                     names.insert(
                         address,
                         MangledName {
                             mangled: name.to_string(),
                             plain,
+                            short,
                         },
                     );
                 }
             };
             for symbol in file.symbols().chain(file.dynamic_symbols()) {
-                if !symbol.is_definition() {
+                if !symbol.is_definition()
+                    || !matches!(
+                        symbol.kind(),
+                        object::SymbolKind::Text
+                            | object::SymbolKind::Data
+                            | object::SymbolKind::Unknown
+                    )
+                {
                     continue;
                 }
                 if let Ok(name) = symbol.name() {

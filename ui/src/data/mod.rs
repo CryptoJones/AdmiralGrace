@@ -482,6 +482,12 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// The mangled name the symbol table spells for the function or data at
+    /// `address`, when its shown name was demangled from one.
+    fn mangled_name(&self, _address: u64) -> Option<String> {
+        None
+    }
+
     /// The Objective-C the image describes, as a header: every protocol,
     /// class and category declared. `None` where there is none, and the
     /// Header tab is not offered.
