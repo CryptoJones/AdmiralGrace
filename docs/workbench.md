@@ -404,8 +404,7 @@ reaches backwards, or into another section, does not switch what was already rea
 prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/
 `tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
 are not reached by the graph; and a call or jump through a register under a condition is read
-as falling through. A `tbb`/`tbh` table branch is an indirect branch whose table is not
-read yet, so the cases after it are not reached by the graph.
+as falling through.
 
 The image itself can be corrected, when the loader read it at the wrong base or missed a
 segment:
