@@ -82,11 +82,13 @@ impl Arrows {
     /// drawn from the taken edges of `graph`, and from the tail calls among
     /// the `listing`'s lines.
     pub fn of(rows: &[Option<u64>], graph: &Graph, listing: &[ListingLine]) -> Self {
-        let row_of: HashMap<u64, usize> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(row, address)| address.map(|address| (address, row)))
-            .collect();
+        // An instruction with several rows is reached at the first of them.
+        let mut row_of: HashMap<u64, usize> = HashMap::new();
+        for (row, address) in rows.iter().enumerate() {
+            if let Some(address) = address {
+                row_of.entry(*address).or_insert(row);
+            }
+        }
         let block_of: HashMap<u64, &GraphBlock> = graph
             .blocks
             .iter()

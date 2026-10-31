@@ -69,3 +69,6 @@ it through `ag run`. In Rust, `ag_image::Binary::il(address, level, ssa)` gives 
 `IlFunction`, and `ag_engine::il` holds the types, `build`, `to_ssa` and `correspondence`;
 `ag_engine::lift::lift_stages` keeps every stage of one lift for a plugin that wants them
 all at once.
+
+In the workbench, the Listing and Graph panes show any level: F7 cycles the active pane's
+level and Shift+F7 toggles its SSA form (`docs/workbench.md`).

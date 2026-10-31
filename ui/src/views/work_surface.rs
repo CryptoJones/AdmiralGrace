@@ -210,6 +210,20 @@ fn view_tabs(app: &App) -> Element<'_, Message> {
 
     row = row.push(Space::new().width(Length::Fill));
 
+    // The level the pane shows, when it is not the disassembly.
+    let level = match app.work.tab {
+        ViewTab::Listing => Some(app.work.listing_shown),
+        ViewTab::Graph => Some(app.work.graph_shown),
+        _ => None,
+    };
+    if let Some(level) = level.filter(|level| *level != crate::app::PaneLevel::Disassembly) {
+        row = row.push(
+            Container::new(Text::new(level.label()).size(11).color(color::AMBER))
+                .padding([4, 8])
+                .center_y(Length::Fill),
+        );
+    }
+
     Container::new(row)
         .padding([0, 12])
         .width(Length::Fill)
@@ -295,7 +309,7 @@ fn listing_content(app: &App) -> Element<'_, Message> {
     // The rows as they will stand, a comment's own row counted, so the
     // margin's arrows know which row a branch and its target are on.
     let rows = listing_rows(&app.work.listing, &renamed);
-    let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph, &app.work.listing);
+    let arrows = arrows_for(app, &rows);
     // The arrows of the focused instruction are brightened: a selected
     // function or range focuses no row, so it brightens none.
     let selected = match app.selection {
@@ -303,14 +317,20 @@ fn listing_content(app: &App) -> Element<'_, Message> {
         _ => None,
     };
     let mut row = 0;
+    let mut previous = None;
 
     for line in &app.work.listing {
+        // Several rows of a level can come from one instruction: what
+        // belongs to the instruction — its comment, its marks — is drawn on
+        // the first of them.
+        let first = previous != Some(line.address);
+        previous = Some(line.address);
         // A comment the analyst chose to stand above the instruction gets
         // its own line, indented to where the operands start; an inline
         // comment rides at the end of the instruction row itself.
         if let Some(comment) = renamed
             .comment_for(line.address)
-            .filter(|comment| comment.above)
+            .filter(|comment| first && comment.above)
         {
             list = list.push(with_margin(
                 arrows.margin(row, selected, crate::views::arrows::Marks::default()),
@@ -320,9 +340,9 @@ fn listing_content(app: &App) -> Element<'_, Message> {
         }
         // The debugger's marks on the instruction's row.
         let marks = crate::views::arrows::Marks {
-            address: Some(line.address),
-            breakpoint: app.debug.breakpoints.contains(&line.address),
-            at_pc: app.debug.pc == Some(line.address),
+            address: first.then_some(line.address),
+            breakpoint: first && app.debug.breakpoints.contains(&line.address),
+            at_pc: first && app.debug.pc == Some(line.address),
         };
         list = list.push(with_margin(
             arrows.margin(row, selected, marks),
@@ -346,18 +366,39 @@ pub(crate) fn listing_rows(
     listing: &[ListingLine],
     renamed: &crate::app::Renames,
 ) -> Vec<Option<u64>> {
+    let mut previous = None;
     listing
         .iter()
         .flat_map(|line| {
-            let above = renamed
-                .comment_for(line.address)
-                .is_some_and(|comment| comment.above);
+            let first = previous != Some(line.address);
+            previous = Some(line.address);
+            let above = first
+                && renamed
+                    .comment_for(line.address)
+                    .is_some_and(|comment| comment.above);
             above
                 .then_some(None)
                 .into_iter()
                 .chain(std::iter::once(Some(line.address)))
         })
         .collect()
+}
+
+/// The margin's arrows for the listing as it stands: from the disassembly's
+/// graph, for the disassembly and the lifted level, whose rows are the
+/// instructions; none for a level whose rows are statements, several to an
+/// instruction.
+pub(crate) fn arrows_for(app: &App, rows: &[Option<u64>]) -> crate::views::arrows::Arrows {
+    match app.work.listing_shown {
+        crate::app::PaneLevel::Disassembly
+        | crate::app::PaneLevel::Il {
+            level: ag_image::Level::Lifted,
+            ..
+        } => crate::views::arrows::Arrows::of(rows, &app.work.graph, &app.work.listing),
+        crate::app::PaneLevel::Il { .. } => {
+            crate::views::arrows::Arrows::of(rows, &crate::data::Graph::default(), &[])
+        }
+    }
 }
 
 /// A row of the listing with the margin's arrows beside it. The margin
@@ -682,7 +723,7 @@ fn graph_content(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    if app.work.graph.blocks.is_empty() {
+    if app.work.shown_graph().blocks.is_empty() {
         return empty_state(
             "This function has no control flow to draw",
             "Select a function that the analysis has walked to see its blocks.",

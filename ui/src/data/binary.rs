@@ -433,6 +433,10 @@ impl Provider for BinaryProvider {
         self.binary.section_of(address).is_some()
     }
 
+    fn il(&self, address: u64, level: ag_image::Level, ssa: bool) -> Option<ag_image::IlFunction> {
+        self.binary.il(address, level, ssa).ok()
+    }
+
     fn write_patched(&self, out: &Path) -> Option<Result<usize, String>> {
         let source = self.project.root.as_ref()?;
         let write = || -> Result<usize, String> {

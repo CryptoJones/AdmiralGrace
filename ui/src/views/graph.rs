@@ -976,7 +976,7 @@ pub fn node_at(layout: &GraphLayout, view: View, point: Point) -> Option<u64> {
 /// The graph of the selected function, drawn on a canvas.
 pub fn view(app: &App) -> Element<'_, Message> {
     let program = GraphProgram {
-        layout: layout(&app.work.graph, &app.renames()),
+        layout: layout(app.work.shown_graph(), &app.renames()),
         selected: app.selection.address(),
     };
 

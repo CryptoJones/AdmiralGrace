@@ -292,6 +292,9 @@ pub fn edges_of(from: u64, to: u64, successors: &[u64]) -> Vec<Edge> {
         .collect()
 }
 
+/// The lifted levels a [`Binary`] keeps: by function, level and SSA form.
+type LevelCache = HashMap<(u64, Level, bool), Result<IlFunction, NotLifted>>;
+
 /// The control-flow graph of one function.
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
@@ -430,6 +433,9 @@ pub struct Binary {
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
+    /// The levels of the lift, by function, level and form; forgotten with
+    /// the pseudocode.
+    levels: Mutex<LevelCache>,
     /// The program-wide indexes, each built once from every function's
     /// walk and forgotten when the walks change: a jump table the analyst
     /// places can reach blocks that call, or that read a string or data.
@@ -723,6 +729,7 @@ impl Binary {
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
+            levels: Mutex::new(HashMap::new()),
             graph: Mutex::new(None),
             string_users: Mutex::new(None),
             data_users: Mutex::new(None),
@@ -740,6 +747,9 @@ impl Binary {
             || options.code_sections != self.options.code_sections;
         self.options = options;
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
             cache.clear();
         }
         if rewalk {
@@ -877,6 +887,9 @@ impl Binary {
             cache.clear();
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
             cache.clear();
         }
         for index in [&self.string_users, &self.data_users] {
@@ -1405,6 +1418,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
         // The program-wide indexes were built from the old walks.
         for index in [&self.string_users, &self.data_users] {
             if let Ok(mut held) = index.lock() {
@@ -1815,6 +1831,19 @@ impl Binary {
     /// when asked. Every item carries the addresses it came from, so the
     /// levels map onto each other and onto the listing.
     pub fn il(&self, address: u64, level: Level, ssa: bool) -> Result<IlFunction, NotLifted> {
+        if let Ok(cache) = self.levels.lock() {
+            if let Some(found) = cache.get(&(address, level, ssa)) {
+                return found.clone();
+            }
+        }
+        let built = self.build_il(address, level, ssa);
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.insert((address, level, ssa), built.clone());
+        }
+        built
+    }
+
+    fn build_il(&self, address: u64, level: Level, ssa: bool) -> Result<IlFunction, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),
         })?;

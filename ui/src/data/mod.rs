@@ -94,7 +94,7 @@ pub struct FunctionDetail {
 }
 
 /// One line of a linear disassembly listing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ListingLine {
     /// Address of the instruction.
     pub address: u64,
@@ -484,6 +484,17 @@ pub trait Provider: Send + Sync {
     /// Whether `address` is in the image: in one of its sections.
     fn contains_address(&self, _address: u64) -> bool {
         false
+    }
+
+    /// The function at one level of the lift, in SSA form when asked, for
+    /// a provider whose engine lifts in stages.
+    fn il(
+        &self,
+        _address: u64,
+        _level: ag_image::Level,
+        _ssa: bool,
+    ) -> Option<ag_image::IlFunction> {
+        None
     }
 
     /// Write a copy of the program with the patches told to the provider

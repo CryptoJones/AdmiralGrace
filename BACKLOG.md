@@ -153,7 +153,7 @@ Filed 2026-10-26.
 ### Intermediate languages
 
 - [x] Expose a multi-level IL (low, medium, high) with SSA forms to the API — [#338](https://github.com/CryptoJones/AdmiralGrace/issues/338)
-- [ ] Workbench: switch any pane between disassembly and each IL level — [#339](https://github.com/CryptoJones/AdmiralGrace/issues/339)
+- [x] Workbench: switch any pane between disassembly and each IL level — [#339](https://github.com/CryptoJones/AdmiralGrace/issues/339)
 - [ ] IL render options: opcodes, flag use, stack pointer value, expression types, casts — [#340](https://github.com/CryptoJones/AdmiralGrace/issues/340)
 - [ ] IL rewriting API for plugins — [#341](https://github.com/CryptoJones/AdmiralGrace/issues/341)
 - [ ] Function-level, context-aware lifting for complex ISAs — [#342](https://github.com/CryptoJones/AdmiralGrace/issues/342)
