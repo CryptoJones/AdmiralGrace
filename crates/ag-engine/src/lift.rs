@@ -1475,18 +1475,35 @@ struct Slot {
     value: Value,
 }
 
-/// What set the flags last.
+/// What set a flag: the kind of write, and the operands it was written
+/// from, so a consumer can read the flag back as a relation.
 #[derive(Debug, Clone)]
 enum Producer {
-    /// `cmp lhs, rhs`.
+    /// `cmp lhs, rhs`: every flag of `lhs - rhs`.
     Cmp(Value, Value),
-    /// `test lhs, rhs`.
+    /// `test lhs, rhs`: the flags of `lhs & rhs`, the carry clear.
     Test(Value, Value),
-    /// An arithmetic instruction, by its result.
+    /// An arithmetic instruction with its operands and its result: the
+    /// zero and sign flags from the result, the carry from the operation —
+    /// a borrow for `sub`, a carry out for `add`, none for the logical
+    /// operations.
+    Arith {
+        op: BinaryOp,
+        lhs: Value,
+        rhs: Value,
+        result: Value,
+        /// Whether the source operand is the destination too (`add eax,
+        /// eax`), so neither operand's value stands after the write.
+        same: bool,
+    },
+    /// An instruction known only by its result: the zero and sign flags.
     Result(Value),
+    /// `bt value, index`: the carry is the bit.
+    Bit(Value, Value),
 }
 
-/// The flags: what set them, at what width, and where.
+/// The flags one instruction wrote: what set them, at what width, where,
+/// and which of the flags it wrote.
 #[derive(Debug, Clone)]
 struct Flags {
     producer: Producer,
@@ -1495,6 +1512,109 @@ struct Flags {
     at: u64,
     /// Its mnemonic, for the refusal.
     mnemonic: String,
+    /// The flags it wrote, as the decoder's bits.
+    written: u32,
+}
+
+/// The six status flags, as the decoder's bits.
+const CF: u32 = iced_x86::RflagsBits::CF;
+const PF: u32 = iced_x86::RflagsBits::PF;
+const AF: u32 = iced_x86::RflagsBits::AF;
+const ZF: u32 = iced_x86::RflagsBits::ZF;
+const SF: u32 = iced_x86::RflagsBits::SF;
+const OF: u32 = iced_x86::RflagsBits::OF;
+const STATUS_FLAGS: u32 = CF | PF | AF | ZF | SF | OF;
+
+/// A flag's name, for a refusal.
+fn flag_name(bit: u32) -> &'static str {
+    match bit {
+        CF => "CF",
+        PF => "PF",
+        AF => "AF",
+        ZF => "ZF",
+        SF => "SF",
+        OF => "OF",
+        _ => "a flag",
+    }
+}
+
+/// The flags of the machine as the lifter tracks them: each status flag
+/// with the instruction that wrote it last, when one tracked did. An
+/// instruction that writes some flags and not others — `inc`, which leaves
+/// the carry — leaves the others' producers standing, so a consumer that
+/// reads flags two instructions wrote is told so.
+#[derive(Debug, Clone, Default)]
+struct FlagState {
+    by_flag: BTreeMap<u32, Flags>,
+}
+
+impl FlagState {
+    fn clear(&mut self) {
+        self.by_flag.clear();
+    }
+
+    /// Record `flags` as the producer of every flag it wrote.
+    fn set(&mut self, flags: Flags) {
+        for bit in [CF, PF, AF, ZF, SF, OF] {
+            if flags.written & bit != 0 {
+                self.by_flag.insert(bit, flags.clone());
+            }
+        }
+    }
+
+    /// Drop the flags whose producer `reads` tells of.
+    fn retain(&mut self, mut keep: impl FnMut(&Flags) -> bool) {
+        self.by_flag.retain(|_, flags| keep(flags));
+    }
+
+    /// The one producer of the flags in `needed`, or why there is none:
+    /// a flag nothing tracked wrote, or flags two instructions wrote.
+    fn producer_of(&self, needed: u32, consumer: &str, at: u64) -> Result<Flags, NotLifted> {
+        let mut found: Option<&Flags> = None;
+        for bit in [CF, PF, AF, ZF, SF, OF] {
+            if needed & bit == 0 {
+                continue;
+            }
+            let Some(flags) = self.by_flag.get(&bit) else {
+                return Err(NotLifted::new(format!(
+                    "the {consumer} at {at:#x} reads {} that nothing tracked set",
+                    flag_name(bit)
+                )));
+            };
+            match found {
+                None => found = Some(flags),
+                Some(first) if first.at != flags.at => {
+                    return Err(NotLifted::new(format!(
+                        "the {consumer} at {at:#x} reads flags two instructions set: the {} at {:#x} and the {} at {:#x}",
+                        first.mnemonic, first.at, flags.mnemonic, flags.at
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        found
+            .cloned()
+            .ok_or_else(|| NotLifted::new(format!("the {consumer} at {at:#x} reads no flag")))
+    }
+
+    /// The flags every state agrees on: the same instruction wrote each.
+    fn merged(states: &[&FlagState]) -> FlagState {
+        let mut out = FlagState::default();
+        let Some(first) = states.first() else {
+            return out;
+        };
+        for (bit, flags) in &first.by_flag {
+            if states.iter().all(|state| {
+                state
+                    .by_flag
+                    .get(bit)
+                    .is_some_and(|other| other.at == flags.at)
+            }) {
+                out.by_flag.insert(*bit, flags.clone());
+            }
+        }
+        out
+    }
 }
 
 /// The symbolic machine state at one point of the function.
@@ -1504,8 +1624,8 @@ struct State {
     regs: BTreeMap<u32, Value>,
     /// The stack slots, by offset from the entry stack pointer.
     stack: BTreeMap<i64, Slot>,
-    /// What set the flags, if anything tracked did.
-    flags: Option<Flags>,
+    /// What set each flag, if anything tracked did.
+    flags: FlagState,
 }
 
 impl State {
@@ -1516,7 +1636,7 @@ impl State {
         Self {
             regs,
             stack: BTreeMap::new(),
-            flags: None,
+            flags: FlagState::default(),
         }
     }
 
@@ -1524,7 +1644,7 @@ impl State {
         Self {
             regs: BTreeMap::new(),
             stack: BTreeMap::new(),
-            flags: None,
+            flags: FlagState::default(),
         }
     }
 
@@ -2065,19 +2185,10 @@ impl<'a> Lifter<'a> {
             }
         }
 
-        // The flags survive a join only when every path set them the same
-        // way.
-        let first = states[0].flags.as_ref();
-        if let Some(flags) = first {
-            if states.iter().all(|state| {
-                state
-                    .flags
-                    .as_ref()
-                    .is_some_and(|other| other.at == flags.at)
-            }) {
-                out.flags = Some(flags.clone());
-            }
-        }
+        // A flag survives a join only when every path had the same
+        // instruction write it.
+        let flag_states: Vec<&FlagState> = states.iter().map(|state| &state.flags).collect();
+        out.flags = FlagState::merged(&flag_states);
         Ok((out, assignments))
     }
 
@@ -2605,15 +2716,19 @@ impl<'a> Lifter<'a> {
                 },
             );
         }
-        if self.state.flags.as_ref().is_some_and(|flags| {
+        // A flag whose producer read the variable is stale now.
+        self.state.flags.retain(|flags| {
             let reads = |value: &Value| value.reads_var(name);
-            match &flags.producer {
-                Producer::Cmp(lhs, rhs) | Producer::Test(lhs, rhs) => reads(lhs) || reads(rhs),
+            !match &flags.producer {
+                Producer::Cmp(lhs, rhs) | Producer::Test(lhs, rhs) | Producer::Bit(lhs, rhs) => {
+                    reads(lhs) || reads(rhs)
+                }
+                Producer::Arith {
+                    lhs, rhs, result, ..
+                } => reads(lhs) || reads(rhs) || reads(result),
                 Producer::Result(value) => reads(value),
             }
-        }) {
-            self.state.flags = None;
-        }
+        });
     }
 
     /// Forget every slot that overlaps the `bits` bits at `offset`.
@@ -2974,11 +3089,19 @@ impl<'a> Lifter<'a> {
 
     /// Record what set the flags.
     fn set_flags(&mut self, producer: Producer, bits: u32, ins: &DecodedInsn) {
-        self.state.flags = Some(Flags {
+        // The decoder says which flags the instruction writes; one that says
+        // nothing is taken to write them all.
+        let written = if ins.flags_written & STATUS_FLAGS == 0 {
+            STATUS_FLAGS
+        } else {
+            ins.flags_written & STATUS_FLAGS
+        };
+        self.state.flags.set(Flags {
             producer,
             bits,
             at: ins.address,
             mnemonic: mnemonic_name(ins),
+            written,
         });
     }
 
@@ -3011,12 +3134,25 @@ impl<'a> Lifter<'a> {
             Mnemonic::Imul => self.imul(ins),
             Mnemonic::Inc => self.step_by(BinaryOp::Add, ins),
             Mnemonic::Dec => self.step_by(BinaryOp::Sub, ins),
+            Mnemonic::Neg => self.neg(ins),
+            Mnemonic::Bt => self.bt(ins),
+            Mnemonic::Adc => self.carry_op(BinaryOp::Add, ins),
+            Mnemonic::Sbb => self.carry_op(BinaryOp::Sub, ins),
             Mnemonic::Lea => self.lea(ins),
             Mnemonic::Push => self.push(ins),
             Mnemonic::Pop => self.pop(ins),
             Mnemonic::Leave => self.leave(ins),
             Mnemonic::Call => self.call(ins),
             Mnemonic::Ret => self.ret(ins),
+            // The conditional families, by the condition code in the name.
+            _ if cc_of(mnemonic, "set").is_some() => {
+                let cc = cc_of(mnemonic, "set").expect("checked");
+                self.setcc(cc, ins)
+            }
+            _ if cc_of(mnemonic, "cmov").is_some() => {
+                let cc = cc_of(mnemonic, "cmov").expect("checked");
+                self.cmovcc(cc, ins)
+            }
             _ => Err(NotLifted::new(mnemonic_name(ins))),
         }
     }
@@ -3100,13 +3236,34 @@ impl<'a> Lifter<'a> {
         // `xor eax, eax` and `sub eax, eax` are how a register is zeroed.
         if matches!(op, BinaryOp::Xor | BinaryOp::Sub) && dest == src {
             let zero = Value::node(AstNode::constant(0, bits / 8), bits, vec![ins.address]);
-            self.set_flags(Producer::Result(zero.clone()), bits, ins);
+            // The flags of `0 ^ 0`: zero set, carry clear.
+            self.set_flags(
+                Producer::Arith {
+                    op: BinaryOp::Xor,
+                    lhs: zero.clone(),
+                    rhs: zero.clone(),
+                    result: zero.clone(),
+                    same: true,
+                },
+                bits,
+                ins,
+            );
             return self.assign(dest, bits, zero, ins);
         }
         let lhs = self.value_of(dest, bits, ins)?;
         let rhs = self.value_of(src, bits, ins)?;
-        let result = self.arith(op, lhs, rhs, bits, ins.address)?;
-        self.set_flags(Producer::Result(result.clone()), bits, ins);
+        let result = self.arith(op, lhs.clone(), rhs.clone(), bits, ins.address)?;
+        self.set_flags(
+            Producer::Arith {
+                op,
+                lhs,
+                rhs,
+                result: result.clone(),
+                same: dest == src,
+            },
+            bits,
+            ins,
+        );
         self.assign(dest, bits, result, ins)
     }
 
@@ -3122,9 +3279,226 @@ impl<'a> Lifter<'a> {
             .ok_or_else(|| NotLifted::new(format!("{} with no width", mnemonic_name(ins))))?;
         let lhs = self.value_of(dest, bits, ins)?;
         let one = Value::node(constant(1, bits), bits, vec![ins.address]);
-        let result = self.arith(op, lhs, one, bits, ins.address)?;
+        let result = self.arith(op, lhs.clone(), one.clone(), bits, ins.address)?;
+        self.set_flags(
+            Producer::Arith {
+                op,
+                lhs,
+                rhs: one,
+                result: result.clone(),
+                same: false,
+            },
+            bits,
+            ins,
+        );
+        self.assign(dest, bits, result, ins)
+    }
+
+    /// `neg dest`: zero minus the operand, the flags of the subtraction.
+    fn neg(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let [dest] = ins.operands.as_slice() else {
+            return Err(NotLifted::new("neg with no operand"));
+        };
+        let bits = width_of(dest).ok_or_else(|| NotLifted::new("neg with no width"))?;
+        let value = self.value_of(dest, bits, ins)?;
+        let zero = Value::node(constant(0, bits), bits, vec![ins.address]);
+        let result = self.arith(
+            BinaryOp::Sub,
+            zero.clone(),
+            value.clone(),
+            bits,
+            ins.address,
+        )?;
+        self.set_flags(
+            Producer::Arith {
+                op: BinaryOp::Sub,
+                lhs: zero,
+                rhs: value,
+                result: result.clone(),
+                same: true,
+            },
+            bits,
+            ins,
+        );
+        self.assign(dest, bits, result, ins)
+    }
+
+    /// `bt value, index`: the carry is the bit; nothing is written.
+    fn bt(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, bits) = self.two(ins)?;
+        let value = self.value_of(dest, bits, ins)?.also_from(ins.address);
+        let index = self.value_of(src, bits, ins)?.also_from(ins.address);
+        self.set_flags(Producer::Bit(value, index), bits, ins);
+        Ok(())
+    }
+
+    /// `setcc dest`: the condition as the byte it is, 1 or 0.
+    fn setcc(&mut self, cc: Cc, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let [dest] = ins.operands.as_slice() else {
+            return Err(NotLifted::new(format!(
+                "{} with no operand",
+                mnemonic_name(ins)
+            )));
+        };
+        let (cond, addresses) = self.condition_of(cc, ins)?;
+        // `xor eax, eax; setl al`: the byte lands in a register known to be
+        // zero, so the whole register is the condition, zero-extended — the
+        // idiom that spares a `movzx`.
+        let mut bits = 8;
+        if let Operand::Register(reg) = dest {
+            if reg.bit_size == 8 && reg.bit_offset == 0 {
+                if let Ok(index) = self.gpr(*reg) {
+                    if let Some(current) = self.state.regs.get(&index) {
+                        if current.bits >= 32
+                            && matches!(&current.sym, Sym::Node(AstNode::Constant { value: 0, .. }))
+                        {
+                            bits = current.bits;
+                        }
+                    }
+                }
+            }
+        }
+        self.assign(dest, bits, Value::node(cond, bits, addresses), ins)
+    }
+
+    /// `cmovcc dest, src`: the source when the condition holds, else the
+    /// destination as it was.
+    fn cmovcc(&mut self, cc: Cc, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, bits) = self.two(ins)?;
+        let (cond, mut addresses) = self.condition_of(cc, ins)?;
+        let then = self.value_of(src, bits, ins)?;
+        let otherwise = self.value_of(dest, bits, ins)?;
+        addresses.extend(then.from.iter().chain(&otherwise.from).copied());
+        let node = AstNode::Ternary {
+            cond: Box::new(cond),
+            then: Box::new(self.node_of(&then)?),
+            otherwise: Box::new(self.node_of(&otherwise)?),
+        };
+        self.assign(dest, bits, Value::node(node, bits, sorted(addresses)), ins)
+    }
+
+    /// `adc dest, src` and `sbb dest, src`: the operation with the carry
+    /// added or borrowed, the carry read from what set it. `sbb r, r` is the
+    /// idiom for zero minus the carry.
+    fn carry_op(&mut self, op: BinaryOp, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, bits) = self.two(ins)?;
+        let carry = self.carry(ins, bits)?;
+        let lhs = self.value_of(dest, bits, ins)?;
+        let rhs = self.value_of(src, bits, ins)?;
+        let at = ins.address;
+        let result = if op == BinaryOp::Sub && dest == src {
+            let zero = Value::node(constant(0, bits), bits, vec![at]);
+            self.arith(BinaryOp::Sub, zero, carry, bits, at)?
+        } else {
+            let partial = self.arith(op, lhs, rhs, bits, at)?;
+            self.arith(op, partial, carry, bits, at)?
+        };
         self.set_flags(Producer::Result(result.clone()), bits, ins);
         self.assign(dest, bits, result, ins)
+    }
+
+    /// The carry flag as a value, read back from what set it: a borrow
+    /// after a compare or a subtraction, a carry out after an addition,
+    /// clear after a logical operation, the bit after `bt`.
+    fn carry(&mut self, ins: &DecodedInsn, bits: u32) -> Result<Value, NotLifted> {
+        let flags = self
+            .state
+            .flags
+            .producer_of(CF, &mnemonic_name(ins), ins.address)?;
+        // The compare has a consumer now: the statement kept for it goes.
+        if let Some((produced, index)) = self.pending_compare {
+            if produced == flags.at && index < self.statements.len() {
+                self.statements.remove(index);
+            }
+            self.pending_compare = None;
+        }
+        let compared = flags.bits;
+        let mut from = vec![flags.at];
+        let unsigned_less = |lifter: &mut Self,
+                             l: &Value,
+                             r: &Value|
+         -> Result<AstNode, NotLifted> {
+            let (l, r) = (lifter.node_of(l)?, lifter.node_of(r)?);
+            Ok(match lifter.options.unsigned_compare {
+                UnsignedCompare::Cast => {
+                    AstNode::binary(unsigned(l, compared), BinaryOp::Less, unsigned(r, compared))
+                }
+                UnsignedCompare::Bare => AstNode::binary(l, BinaryOp::Less, r),
+            })
+        };
+        let node = match &flags.producer {
+            Producer::Cmp(lhs, rhs) => {
+                from.extend(lhs.from.iter().chain(&rhs.from).copied());
+                unsigned_less(self, lhs, rhs)?
+            }
+            // `neg`: a borrow unless the operand was zero, which its result says.
+            Producer::Arith {
+                op: BinaryOp::Sub,
+                lhs,
+                result,
+                ..
+            } if matches!(&lhs.sym, Sym::Node(AstNode::Constant { value: 0, .. })) => {
+                from.extend(result.from.iter().copied());
+                AstNode::binary(
+                    self.node_of(result)?,
+                    BinaryOp::NotEqual,
+                    constant(0, compared),
+                )
+            }
+            // The destination is written: the borrow of a subtraction is the
+            // difference plus the subtrahend wrapping below it, the carry of
+            // an addition the sum below the addend, when the source stands.
+            Producer::Arith {
+                op: BinaryOp::Sub,
+                rhs,
+                result,
+                same: false,
+                ..
+            } => {
+                from.extend(rhs.from.iter().chain(&result.from).copied());
+                let (r, result) = (self.node_of(rhs)?, self.node_of(result)?);
+                let sum = Value::node(
+                    AstNode::binary(result, BinaryOp::Add, r),
+                    compared,
+                    Vec::new(),
+                );
+                unsigned_less(self, &sum, rhs)?
+            }
+            Producer::Arith {
+                op: BinaryOp::Add,
+                rhs,
+                result,
+                same: false,
+                ..
+            } => {
+                from.extend(rhs.from.iter().chain(&result.from).copied());
+                unsigned_less(self, result, rhs)?
+            }
+            Producer::Test(..)
+            | Producer::Arith {
+                op: BinaryOp::And | BinaryOp::Or | BinaryOp::Xor,
+                ..
+            } => constant(0, bits),
+            Producer::Bit(value, index) => {
+                from.extend(value.from.iter().chain(&index.from).copied());
+                let (value, index) = (self.node_of(value)?, self.node_of(index)?);
+                AstNode::binary(
+                    AstNode::binary(value, BinaryOp::Shr, index),
+                    BinaryOp::And,
+                    constant(1, bits),
+                )
+            }
+            Producer::Arith { .. } | Producer::Result(_) => {
+                return Err(NotLifted::new(format!(
+                    "{} at {:#x} reads the carry of the {} at {:#x}, which its result does not say",
+                    mnemonic_name(ins),
+                    ins.address,
+                    flags.mnemonic,
+                    flags.at
+                )))
+            }
+        };
+        Ok(Value::node(node, bits, sorted(from)))
     }
 
     /// `imul dest, src` and `imul dest, src, imm`. The flags it sets say
@@ -3144,7 +3518,7 @@ impl<'a> Lifter<'a> {
         let lhs = self.value_of(lhs, bits, ins)?;
         let rhs = self.value_of(rhs, bits, ins)?;
         let result = self.arith(BinaryOp::Mul, lhs, rhs, bits, ins.address)?;
-        self.state.flags = None;
+        self.state.flags.clear();
         self.assign(dest, bits, result, ins)
     }
 
@@ -3181,29 +3555,22 @@ impl<'a> Lifter<'a> {
     /// The condition under which the conditional jump `ins` is taken, and
     /// the addresses it and its flags came from.
     fn condition(&mut self, ins: &DecodedInsn) -> Result<(AstNode, Vec<u64>), NotLifted> {
+        let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
+        let cc = cc_of(mnemonic, "j").ok_or_else(|| NotLifted::new(mnemonic_name(ins)))?;
+        self.condition_of(cc, ins)
+    }
+
+    /// The condition `cc` holds under, read back from what set the flags it
+    /// reads — a jump, a `setcc` or a `cmovcc` at `ins` consuming them — and
+    /// the addresses the condition came from.
+    fn condition_of(
+        &mut self,
+        cc: Cc,
+        ins: &DecodedInsn,
+    ) -> Result<(AstNode, Vec<u64>), NotLifted> {
         let at = ins.address;
         let jcc = mnemonic_name(ins);
-        let Some(flags) = self.state.flags.clone() else {
-            return Err(NotLifted::new(format!(
-                "the {jcc} at {at:#x} reads flags that nothing tracked set"
-            )));
-        };
-        let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
-        let cc = match mnemonic {
-            Mnemonic::Je => Cc::E,
-            Mnemonic::Jne => Cc::Ne,
-            Mnemonic::Jl => Cc::L,
-            Mnemonic::Jge => Cc::Ge,
-            Mnemonic::Jle => Cc::Le,
-            Mnemonic::Jg => Cc::G,
-            Mnemonic::Jb => Cc::B,
-            Mnemonic::Jae => Cc::Ae,
-            Mnemonic::Jbe => Cc::Be,
-            Mnemonic::Ja => Cc::A,
-            Mnemonic::Js => Cc::S,
-            Mnemonic::Jns => Cc::Ns,
-            _ => return Err(NotLifted::new(jcc.clone())),
-        };
+        let flags = self.state.flags.producer_of(cc.reads(), &jcc, at)?;
         // The compare has a consumer now: the statement kept for it goes.
         if let Some((produced, index)) = self.pending_compare {
             if produced == flags.at && index < self.statements.len() {
@@ -3238,7 +3605,95 @@ impl<'a> Lifter<'a> {
                     Cc::Ae => unsigned_op(BinaryOp::GreaterEqual),
                     Cc::Be => unsigned_op(BinaryOp::LessEqual),
                     Cc::A => unsigned_op(BinaryOp::Greater),
-                    Cc::S | Cc::Ns => return Err(unfit()),
+                    Cc::S | Cc::Ns | Cc::P | Cc::Np | Cc::O | Cc::No => return Err(unfit()),
+                }
+            }
+            // An arithmetic instruction has written its destination, so its
+            // operands' values may be gone: the relations are read from the
+            // result — the zero and sign flags are its — and the carry of an
+            // addition from the result and the source, which stands when it
+            // is not the destination too. The logical operations clear the
+            // carry and the overflow, so every relation is the result's.
+            Producer::Arith {
+                op,
+                lhs,
+                rhs,
+                result,
+                same,
+            } => {
+                addresses.extend(lhs.from.iter().chain(&rhs.from).copied());
+                addresses.extend(result.from.iter().copied());
+                let r = self.node_of(rhs)?;
+                let result = self.node_of(result)?;
+                let unsigned_op = |op, l: AstNode, r: AstNode| match self.options.unsigned_compare {
+                    UnsignedCompare::Cast => {
+                        AstNode::binary(unsigned(l, bits), op, unsigned(r, bits))
+                    }
+                    UnsignedCompare::Bare => AstNode::binary(l, op, r),
+                };
+                let of_result = |op| AstNode::binary(result.clone(), op, zero.clone());
+                match (op, cc, same) {
+                    (_, Cc::E, _) => of_result(BinaryOp::Equal),
+                    (_, Cc::Ne, _) => of_result(BinaryOp::NotEqual),
+                    (_, Cc::S, _) => of_result(BinaryOp::Less),
+                    (_, Cc::Ns, _) => of_result(BinaryOp::GreaterEqual),
+                    // A carry out of an addition: the sum wrapped below the
+                    // addend that still stands.
+                    (BinaryOp::Add, Cc::B, false) => unsigned_op(BinaryOp::Less, result, r),
+                    (BinaryOp::Add, Cc::Ae, false) => {
+                        unsigned_op(BinaryOp::GreaterEqual, result, r)
+                    }
+                    // A borrow out of a subtraction: the difference plus the
+                    // subtrahend wrapped below it.
+                    (BinaryOp::Sub, Cc::B, false) => unsigned_op(
+                        BinaryOp::Less,
+                        AstNode::binary(result, BinaryOp::Add, r.clone()),
+                        r,
+                    ),
+                    (BinaryOp::Sub, Cc::Ae, false) => unsigned_op(
+                        BinaryOp::GreaterEqual,
+                        AstNode::binary(result, BinaryOp::Add, r.clone()),
+                        r,
+                    ),
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::B, _) => {
+                        AstNode::ConditionFalse
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::Ae, _) => {
+                        AstNode::ConditionTrue
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::Be, _) => {
+                        of_result(BinaryOp::Equal)
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::A, _) => {
+                        of_result(BinaryOp::NotEqual)
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::L, _) => {
+                        of_result(BinaryOp::Less)
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::Ge, _) => {
+                        of_result(BinaryOp::GreaterEqual)
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::Le, _) => {
+                        of_result(BinaryOp::LessEqual)
+                    }
+                    (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, Cc::G, _) => {
+                        of_result(BinaryOp::Greater)
+                    }
+                    _ => return Err(unfit()),
+                }
+            }
+            // The carry is the bit tested.
+            Producer::Bit(value, index) => {
+                addresses.extend(value.from.iter().chain(&index.from).copied());
+                let bit = AstNode::binary(
+                    AstNode::binary(self.node_of(value)?, BinaryOp::Shr, self.node_of(index)?),
+                    BinaryOp::And,
+                    constant(1, bits),
+                );
+                match cc {
+                    Cc::B => AstNode::binary(bit, BinaryOp::NotEqual, zero),
+                    Cc::Ae => AstNode::binary(bit, BinaryOp::Equal, zero),
+                    _ => return Err(unfit()),
                 }
             }
             Producer::Test(lhs, rhs) => {
@@ -3253,7 +3708,12 @@ impl<'a> Lifter<'a> {
                         Cc::Ns | Cc::Ge => BinaryOp::GreaterEqual,
                         Cc::Le => BinaryOp::LessEqual,
                         Cc::G => BinaryOp::Greater,
-                        Cc::B | Cc::Ae | Cc::Be | Cc::A => return Err(unfit()),
+                        // The carry is clear: below never, above when not zero.
+                        Cc::B => return Ok((AstNode::ConditionFalse, sorted(addresses))),
+                        Cc::Ae => return Ok((AstNode::ConditionTrue, sorted(addresses))),
+                        Cc::Be => BinaryOp::Equal,
+                        Cc::A => BinaryOp::NotEqual,
+                        Cc::P | Cc::Np | Cc::O | Cc::No => return Err(unfit()),
                     };
                     AstNode::binary(l, op, zero)
                 } else {
@@ -3550,7 +4010,7 @@ impl<'a> Lifter<'a> {
                 );
             }
         }
-        self.state.flags = None;
+        self.state.flags.clear();
         let temp = self.temps.len() + self.saved.len();
         self.temps.push(Temp {
             name: format!("v{}", temp + 1),
@@ -4035,6 +4495,52 @@ enum Cc {
     A,
     S,
     Ns,
+    P,
+    Np,
+    O,
+    No,
+}
+
+impl Cc {
+    /// The flags the condition reads, as the decoder's bits.
+    fn reads(self) -> u32 {
+        match self {
+            Cc::E | Cc::Ne => ZF,
+            Cc::L | Cc::Ge => SF | OF,
+            Cc::Le | Cc::G => ZF | SF | OF,
+            Cc::B | Cc::Ae => CF,
+            Cc::Be | Cc::A => CF | ZF,
+            Cc::S | Cc::Ns => SF,
+            Cc::P | Cc::Np => PF,
+            Cc::O | Cc::No => OF,
+        }
+    }
+}
+
+/// The condition code of a conditional instruction of the `family` — `j`,
+/// `set` or `cmov` — or `None` for another instruction.
+fn cc_of(mnemonic: Mnemonic, family: &str) -> Option<Cc> {
+    let name = format!("{mnemonic:?}").to_ascii_lowercase();
+    let suffix = name.strip_prefix(family)?;
+    Some(match suffix {
+        "e" | "z" => Cc::E,
+        "ne" | "nz" => Cc::Ne,
+        "l" | "nge" => Cc::L,
+        "ge" | "nl" => Cc::Ge,
+        "le" | "ng" => Cc::Le,
+        "g" | "nle" => Cc::G,
+        "b" | "c" | "nae" => Cc::B,
+        "ae" | "nc" | "nb" => Cc::Ae,
+        "be" | "na" => Cc::Be,
+        "a" | "nbe" => Cc::A,
+        "s" => Cc::S,
+        "ns" => Cc::Ns,
+        "p" | "pe" => Cc::P,
+        "np" | "po" => Cc::Np,
+        "o" => Cc::O,
+        "no" => Cc::No,
+        _ => return None,
+    })
 }
 
 /// A statement resolved to a node: the temporary it defines, if it is a
@@ -4764,6 +5270,136 @@ mod tests {
     }
 
     #[test]
+    fn setcc_is_the_condition_as_a_byte() {
+        // cmp edi, esi; setl al; movzx eax, al; ret
+        let text = c(&[0x39, 0xf7, 0x0f, 0x9c, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3]);
+        assert!(text.contains("a < b"), "{text}");
+    }
+
+    #[test]
+    fn setcc_into_a_zeroed_register_is_the_whole_register() {
+        // xor eax, eax; cmp edi, esi; setl al; ret — the idiom without movzx.
+        let text = c(&[0x31, 0xc0, 0x39, 0xf7, 0x0f, 0x9c, 0xc0, 0xc3]);
+        assert!(text.contains("return a < b;"), "{text}");
+        // A dec's zero flag is its result's; the zero idiom's carry is
+        // clear, so a jb after it never goes.
+        // dec edi; jne .two; mov eax, 1; ret; .two: mov eax, 2; ret
+        let text = c(&[
+            0xff, 0xcf, 0x75, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ]);
+        assert!(text.contains("!= 0") || text.contains("== 0"), "{text}");
+        // xor eax, eax; jb .two; mov eax, 1; ret; .two: mov eax, 2; ret
+        let text = c(&[
+            0x31, 0xc0, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ]);
+        assert!(!text.contains("not lifted"), "{text}");
+        // test edi, edi; ja .two: above means not zero.
+        let text = c(&[
+            0x85, 0xff, 0x77, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ]);
+        assert!(text.contains("a != 0") || text.contains("a == 0"), "{text}");
+    }
+
+    #[test]
+    fn cmovcc_chooses_by_the_condition() {
+        // mov eax, edi; cmp edi, esi; cmovl eax, esi; ret
+        let text = c(&[0x89, 0xf8, 0x39, 0xf7, 0x0f, 0x4c, 0xc6, 0xc3]);
+        assert!(text.contains("return (a < b) ? b : a;"), "{text}");
+    }
+
+    #[test]
+    fn a_flag_the_producer_did_not_write_is_not_read_from_it() {
+        // inc edi; jb .two; mov eax, 1; ret; .two: mov eax, 2; ret — inc
+        // leaves the carry, so the jb reads one nothing set.
+        let code = [
+            0xff, 0xc7, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let reason = refused(&code);
+        assert!(
+            reason.contains("reads CF that nothing tracked set"),
+            "{reason}"
+        );
+        // The zero flag inc does write reads back as the result's.
+        let code = [
+            0xff, 0xc7, 0x74, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let text = c(&code);
+        assert!(
+            text.contains("(a + 1) == 0") || text.contains("(a + 1) != 0"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn flags_two_instructions_wrote_are_refused_by_name() {
+        // cmp edi, esi; inc edx; jbe .two; …: jbe reads the cmp's carry and
+        // the inc's zero flag.
+        let code = [
+            0x39, 0xf7, 0xff, 0xc2, 0x76, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let reason = refused(&code);
+        assert!(
+            reason.contains("reads flags two instructions set"),
+            "{reason}"
+        );
+        assert!(reason.contains("cmp") && reason.contains("inc"), "{reason}");
+    }
+
+    #[test]
+    fn an_arithmetic_instructions_flags_are_read_from_its_result() {
+        // sub edi, esi; jb .two; mov eax, 1; ret; .two: mov eax, 2; ret — the
+        // borrow, from the difference and the subtrahend that still stands.
+        let code = [
+            0x29, 0xf7, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let text = c(&code);
+        assert!(
+            text.contains("+ b) < (unsigned int)b") || text.contains("+ b) >= (unsigned int)b"),
+            "{text}"
+        );
+        // sub edi, esi; jl: the signed relation of the operands is gone with
+        // the destination, so it is refused by name.
+        let code = [
+            0x29, 0xf7, 0x7c, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let reason = refused(&code);
+        assert!(reason.contains("jl after sub"), "{reason}");
+        // add edi, esi; jb: the carry out, the sum below the addend.
+        let code = [
+            0x01, 0xf7, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let text = c(&code);
+        assert!(
+            text.contains("< (unsigned int)b") || text.contains(">= (unsigned int)b"),
+            "{text}"
+        );
+        // add edi, edi; jb: neither operand stands.
+        let code = [
+            0x01, 0xff, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        assert!(refused(&code).contains("jb after add"));
+    }
+
+    #[test]
+    fn the_carry_is_read_back_by_sbb_and_the_bit_by_bt() {
+        // cmp edi, esi; sbb eax, eax; ret: eax is 0 minus the borrow.
+        let text = c(&[0x39, 0xf7, 0x19, 0xc0, 0xc3]);
+        assert!(
+            text.contains("0 - ((unsigned int)a < (unsigned int)b)"),
+            "{text}"
+        );
+        // bt edi, 3; jb .two; mov eax, 1; ret; .two: mov eax, 2; ret
+        let code = [
+            0x0f, 0xba, 0xe7, 0x03, 0x72, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0, 0xc3,
+        ];
+        let text = c(&code);
+        assert!(text.contains("(a >> 3) & 1"), "{text}");
+        // neg edi; mov eax, edi; ret
+        let text = c(&[0xf7, 0xdf, 0x89, 0xf8, 0xc3]);
+        assert!(text.contains("0 - a"), "{text}");
+    }
+
+    #[test]
     fn leave_tears_the_frame_down() {
         // push rbp; mov rbp, rsp; sub rsp, 0x10; mov [rbp-4], edi; mov eax, [rbp-4]; leave; ret
         let code = [
@@ -5409,7 +6045,7 @@ mod tests {
         // mov eax, edi; je .ret; mov eax, 1; .ret: ret
         assert_eq!(
             refused(&[0x89, 0xf8, 0x74, 0x05, 0xb8, 1, 0, 0, 0, 0xc3]),
-            "not lifted yet: the je at 0x1002 reads flags that nothing tracked set"
+            "not lifted yet: the je at 0x1002 reads ZF that nothing tracked set"
         );
         // cmp edi, 0; js .ret; mov eax, 1; .ret: ret: the sign of a
         // subtraction is not a relation between the operands.

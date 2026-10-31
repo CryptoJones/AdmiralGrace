@@ -157,7 +157,7 @@ Filed 2026-10-26.
 - [x] IL render options: opcodes, flag use, stack pointer value, expression types, casts — [#340](https://github.com/CryptoJones/AdmiralGrace/issues/340)
 - [x] IL rewriting API for plugins — [#341](https://github.com/CryptoJones/AdmiralGrace/issues/341)
 - [x] Function-level, context-aware lifting for complex ISAs — [#342](https://github.com/CryptoJones/AdmiralGrace/issues/342)
-- [ ] Model architecture flags with producer and consumer semantics — [#343](https://github.com/CryptoJones/AdmiralGrace/issues/343)
+- [x] Model architecture flags with producer and consumer semantics — [#343](https://github.com/CryptoJones/AdmiralGrace/issues/343)
 - [ ] IL emulator — [#344](https://github.com/CryptoJones/AdmiralGrace/issues/344)
 - [ ] IL-to-C++ transpiler for testing lifters — [#345](https://github.com/CryptoJones/AdmiralGrace/issues/345)
 

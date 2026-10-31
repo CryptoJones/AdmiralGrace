@@ -259,8 +259,9 @@ absolute memory operands it names them with.
 
 `pseudocode` lifts one function to C with the engine's own lifter, which reads the whole
 control-flow graph of x86-64 code: integer `mov`, `movsx`, `movzx`, `cdqe`, `add`, `sub`,
-`and`, `or`, `xor`, `inc`, `dec`, `imul`, `lea`, `push`, `pop`, `leave`, a direct `call`,
-`cmp`, `test`, `jmp`, the conditional jumps and `ret`. Blocks joined only by fall-through
+`adc`, `sbb`, `and`, `or`, `xor`, `inc`, `dec`, `neg`, `imul`, `lea`, `push`, `pop`, `leave`,
+a direct `call`, `cmp`, `test`, `bt`, `jmp`, the conditional jumps, `setcc`, `cmovcc` and
+`ret`. Blocks joined only by fall-through
 are one node of the graph; the graph is structured with its dominators and the back edges
 that make its loops. A node that branches is an `if`, and its join is the nearest node both
 arms reach that the branch dominates; an arm that returns is an early `return` and the other
@@ -358,7 +359,8 @@ A function with an instruction outside that set, a 32-bit function, an indirect 
 `jmp` to an address outside the function that no symbol names (`jumps to 0x…`) or through a
 register or memory that holds no function the lifter can name (`an indirect jump at 0x…`),
 a `jmp` out with the stack not back at its entry value, a branch whose flags no tracked
-instruction set (`the je at 0x… reads flags that nothing tracked set`), a loop with two
+instruction set (`the je at 0x… reads ZF that nothing tracked set`) or that two instructions
+set (`reads flags two instructions set: the cmp at 0x… and the inc at 0x…`), a loop with two
 entries (`irreducible control flow at 0x…`), a stack pointer that differs between two paths,
 `ret`s that disagree, or a value the lifter cannot follow prints `not lifted yet` and the
 reason instead, with exit code 1 — the sample's `_init`, which calls through a register, says

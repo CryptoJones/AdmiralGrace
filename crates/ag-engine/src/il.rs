@@ -383,6 +383,15 @@ pub fn with_casts(node: &AstNode) -> AstNode {
             AstNode::Return { value } => AstNode::Return {
                 value: value.as_ref().map(|value| Box::new(walk(value, false))),
             },
+            AstNode::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => AstNode::Ternary {
+                cond: cond.clone(),
+                then: Box::new(walk(then, false)),
+                otherwise: Box::new(walk(otherwise, false)),
+            },
             other => other.clone(),
         }
     }
@@ -518,6 +527,15 @@ fn collect_names(node: &AstNode, names: &mut Vec<String>) {
             collect_names(body, names);
         }
         AstNode::ConstantCondition { compared, .. } => collect_names(compared, names),
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            collect_names(cond, names);
+            collect_names(then, names);
+            collect_names(otherwise, names);
+        }
         AstNode::Label { .. }
         | AstNode::Goto { .. }
         | AstNode::Constant { .. }
