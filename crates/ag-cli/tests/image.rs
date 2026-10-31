@@ -330,6 +330,14 @@ fn the_cfg_is_drawn_as_svg_and_pdf_when_asked() {
     assert!(bytes.ends_with(b"%%EOF\n"));
     let _ = std::fs::remove_file(&svg);
     let _ = std::fs::remove_file(&pdf);
+    // A picture and the JSON report are not asked for together.
+    let (ok, _, stderr) = image_result(
+        "sample.elf",
+        &["cfg", "main", "--json", "--svg", stem.to_str().unwrap()],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(!stem.exists());
 }
 
 #[test]

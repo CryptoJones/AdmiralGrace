@@ -136,11 +136,13 @@ the group as its arrows — empty text takes the block out again. Both are kept 
 file beside the block's highlight.
 
 **Export graph…** in the File menu writes the graph on screen as a picture, for a report or a
-write-up: the blocks as the tab draws them — groups, block text, highlights and the selected
-block — and the arrows along the routes it draws them by, fall-throughs blue and taken
-branches orange. The path's extension picks the picture, `.svg` or `.pdf`; the prompt offers
-a file named for the function beside the program, and a file already there is written over
-on a second submit of the same path. The command line draws the same graph with
+write-up: the blocks as the tab draws them — groups, block text, block highlights and the
+selected block — and the arrows along the routes it draws them by, fall-throughs blue and
+taken branches orange. The path's extension picks the picture, `.svg` or `.pdf`; the prompt
+offers a file named for the function beside the program (or beside the project file, when
+there is no program), and a file already there is written over on a second submit of the same
+path. The PDF uses the standard fonts every reader has, so text past Latin-1 is shown as `?`
+there; the SVG keeps every character. The command line draws the same graph with
 `ag image FILE cfg TARGET --svg PATH` or `--pdf PATH`, laid out in rows without the
 workbench's annotations.
 

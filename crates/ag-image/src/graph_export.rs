@@ -84,8 +84,8 @@ pub const MARGIN: f32 = 24.0;
 const CHAR_WIDTH: f32 = 6.6;
 /// No box is narrower.
 const LEAST_WIDTH: f32 = 200.0;
-/// No real graph has more blocks: a bound on the rank relaxation.
-const MOST_ROUNDS: usize = 1 << 14;
+/// The distance between two lanes at the right of the rows.
+const LANE: f32 = 8.0;
 
 /// Lay a control-flow graph out as a drawing, with every instruction of
 /// every block as a line.
@@ -124,11 +124,17 @@ pub fn layout(graph: &ControlFlowGraph) -> Drawing {
         .iter()
         .map(|edge| (edge.from, edge.to, edge.kind))
         .collect();
-    arrange(title, blocks, edges)
+    arrange(title, graph.function, blocks, edges)
 }
 
-/// Arrange blocks and the edges between them into a drawing.
-pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, EdgeKind)>) -> Drawing {
+/// Arrange blocks and the edges between them into a drawing, `entry` the
+/// block the function starts at.
+pub fn arrange(
+    title: String,
+    entry: u64,
+    blocks: Vec<LaidBlock>,
+    edges: Vec<(u64, u64, EdgeKind)>,
+) -> Drawing {
     if blocks.is_empty() {
         return Drawing {
             title,
@@ -140,7 +146,7 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
         .enumerate()
         .map(|(i, block)| (block.from, i))
         .collect();
-    let ranks = ranks(&blocks, &index);
+    let ranks = ranks(&blocks, &index, index.get(&entry).copied());
 
     // The boxes: wide enough for their longest line, tall enough for every
     // line.
@@ -176,6 +182,7 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
         row.sort_by_key(|i| blocks[*i].from);
     }
     let mut y = MARGIN;
+    let mut row_tops = Vec::new();
     let mut row_bottoms = Vec::new();
     for row in &rows {
         let mut x = MARGIN;
@@ -186,6 +193,7 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
             x += nodes[*i].width + GAP_X;
             tallest = tallest.max(nodes[*i].height);
         }
+        row_tops.push(y);
         row_bottoms.push(y + tallest);
         y += tallest + GAP_Y;
     }
@@ -194,9 +202,15 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
         .map(|node| node.x + node.width)
         .fold(0.0_f32, f32::max);
 
-    // The arrows: down from the bottom of the source to the top of the
-    // target, bending at the row's gap; back up round the right side.
+    // The arrows. One to the row below runs down from the bottom of the
+    // source to the top of the target, bending in the gap between the
+    // rows. One over a row or more, and one back up, runs round the right
+    // of the rows in a lane of its own, so it crosses no box between: it
+    // leaves in the gap under its row and arrives in the gap over the
+    // target's — a loop a little nearer the rows than a skip, so the two
+    // do not lie on one line.
     let mut drawn = Vec::new();
+    let mut lanes = 0usize;
     for (from, to, kind) in edges {
         let (Some(&s), Some(&t)) = (index.get(&from), index.get(&to)) else {
             continue;
@@ -207,7 +221,7 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
         let sy = source.y + source.height;
         let tx = target.x + target.width / 2.0;
         let ty = target.y;
-        let points = if ranks[t] > ranks[s] {
+        let points = if ranks[t] == ranks[s] + 1 {
             let bend = row_bottoms[ranks[s]] + GAP_Y / 2.0;
             if (sx - tx).abs() < 0.5 {
                 vec![(sx, sy), (tx, ty)]
@@ -215,14 +229,25 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
                 vec![(sx, sy), (sx, bend), (tx, bend), (tx, ty)]
             }
         } else {
-            // A loop, or a jump to a block beside: round the right.
-            let lane = right + GAP_X / 2.0 + 8.0 * (s % 3) as f32;
+            let lane = right + GAP_X / 2.0 + LANE * lanes as f32;
+            lanes += 1;
+            let (leave, arrive) = if ranks[t] > ranks[s] {
+                (
+                    row_bottoms[ranks[s]] + GAP_Y / 2.0,
+                    row_tops[ranks[t]] - GAP_Y / 3.0,
+                )
+            } else {
+                (
+                    row_bottoms[ranks[s]] + GAP_Y / 4.0,
+                    (row_tops[ranks[t]] - GAP_Y / 4.0).max(MARGIN / 2.0),
+                )
+            };
             vec![
                 (sx, sy),
-                (sx, sy + 10.0),
-                (lane, sy + 10.0),
-                (lane, ty - 10.0),
-                (tx, ty - 10.0),
+                (sx, leave),
+                (lane, leave),
+                (lane, arrive),
+                (tx, arrive),
                 (tx, ty),
             ]
         };
@@ -246,65 +271,99 @@ pub fn arrange(title: String, blocks: Vec<LaidBlock>, edges: Vec<(u64, u64, Edge
 
 /// The rank of every block: one row below the deepest block that reaches
 /// it, a loop back to a block already open pushing nothing further down,
-/// and a block nothing reaches below the ones that are.
-fn ranks(blocks: &[LaidBlock], index: &HashMap<u64, usize>) -> Vec<usize> {
+/// and a block the entry cannot reach below the ones it can — the rule
+/// the workbench ranks by.
+fn ranks(blocks: &[LaidBlock], index: &HashMap<u64, usize>, entry: Option<usize>) -> Vec<usize> {
     let n = blocks.len();
-    // A depth-first walk from the entry finds the back edges: the ways to
-    // a block still open on the stack.
+    // Depth-first walks find the back edges — the ways to a block still
+    // open on the stack — from the entry first, then from every block no
+    // walk has reached, so every cycle has one.
     let mut back: HashSet<(usize, usize)> = HashSet::new();
     let mut reached = vec![false; n];
     let mut on_stack = vec![false; n];
-    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
-    reached[0] = true;
-    on_stack[0] = true;
-    while let Some((node, next)) = stack.last().copied() {
-        let successors = &blocks[node].successors;
-        if next >= successors.len() {
-            on_stack[node] = false;
-            stack.pop();
+    for start in entry.into_iter().chain(0..n) {
+        if reached[start] {
             continue;
         }
-        stack.last_mut().expect("the top").1 += 1;
-        let Some(&to) = index.get(&successors[next]) else {
-            continue;
-        };
-        if on_stack[to] {
-            back.insert((node, to));
-        } else if !reached[to] {
-            reached[to] = true;
-            on_stack[to] = true;
-            stack.push((to, 0));
-        }
-    }
-    // Then the ranks relax over the forward edges until they settle.
-    let mut rank = vec![0usize; n];
-    for _ in 0..MOST_ROUNDS {
-        let mut changed = false;
-        for (from, block) in blocks.iter().enumerate() {
-            if !reached[from] {
+        reached[start] = true;
+        on_stack[start] = true;
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some((node, next)) = stack.last().copied() {
+            let successors = &blocks[node].successors;
+            if next >= successors.len() {
+                on_stack[node] = false;
+                stack.pop();
                 continue;
             }
-            for successor in &block.successors {
-                let Some(&to) = index.get(successor) else {
-                    continue;
-                };
-                if back.contains(&(from, to)) || to == from {
-                    continue;
-                }
-                if rank[to] < rank[from] + 1 {
-                    rank[to] = rank[from] + 1;
-                    changed = true;
+            stack.last_mut().expect("the top").1 += 1;
+            let Some(&to) = index.get(&successors[next]) else {
+                continue;
+            };
+            if on_stack[to] {
+                back.insert((node, to));
+            } else if !reached[to] {
+                reached[to] = true;
+                on_stack[to] = true;
+                stack.push((to, 0));
+            }
+        }
+    }
+    // The forward edges make a graph without cycles; the longest way to a
+    // block from any start is its rank, found in one pass in their
+    // topological order.
+    let mut forward: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut waiting = vec![0usize; n];
+    for (from, block) in blocks.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for successor in &block.successors {
+            let Some(&to) = index.get(successor) else {
+                continue;
+            };
+            if to == from || back.contains(&(from, to)) || !seen.insert(to) {
+                continue;
+            }
+            forward[from].push(to);
+            waiting[to] += 1;
+        }
+    }
+    let mut rank = vec![0usize; n];
+    let mut queue: Vec<usize> = (0..n).filter(|i| waiting[*i] == 0).collect();
+    let mut head = 0;
+    while head < queue.len() {
+        let node = queue[head];
+        head += 1;
+        for &to in &forward[node] {
+            rank[to] = rank[to].max(rank[node] + 1);
+            waiting[to] -= 1;
+            if waiting[to] == 0 {
+                queue.push(to);
+            }
+        }
+    }
+    // A block the entry cannot reach is put below the ones it can.
+    if let Some(entry) = entry {
+        let mut from_entry = vec![false; n];
+        from_entry[entry] = true;
+        let mut stack = vec![entry];
+        while let Some(node) = stack.pop() {
+            for successor in &blocks[node].successors {
+                if let Some(&to) = index.get(successor) {
+                    if !from_entry[to] {
+                        from_entry[to] = true;
+                        stack.push(to);
+                    }
                 }
             }
         }
-        if !changed {
-            break;
-        }
-    }
-    let deepest = rank.iter().copied().max().unwrap_or(0);
-    for i in 0..n {
-        if !reached[i] {
-            rank[i] = deepest + 1;
+        let floor = (0..n)
+            .filter(|i| from_entry[*i])
+            .map(|i| rank[i])
+            .max()
+            .map_or(0, |deepest| deepest + 1);
+        for i in 0..n {
+            if !from_entry[i] {
+                rank[i] += floor;
+            }
         }
     }
     rank
@@ -331,6 +390,9 @@ fn node_fill(node: &DrawnNode) -> [u8; 3] {
     }
 }
 
+/// No PDF page is longer than this, in points: the format's limit.
+const LONGEST_PAGE: f32 = 14400.0;
+
 /// The drawing as an SVG document.
 pub fn svg(drawing: &Drawing) -> String {
     let mut out = String::new();
@@ -352,6 +414,9 @@ pub fn svg(drawing: &Drawing) -> String {
     out.push_str("  </defs>\n");
     out.push_str("  <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
     for edge in &drawing.edges {
+        if edge.points.len() < 2 {
+            continue;
+        }
         let [r, g, b] = edge_color(edge.kind);
         let name = match edge.kind {
             EdgeKind::Fallthrough => "fall",
@@ -386,7 +451,7 @@ pub fn svg(drawing: &Drawing) -> String {
         ));
         for (row, line) in node.lines.iter().enumerate() {
             out.push_str(&format!(
-                "  <text x=\"{}\" y=\"{}\" font-family=\"Courier New, monospace\" font-size=\"11\" fill=\"#1c242c\" xml:space=\"preserve\">{}</text>\n",
+                "  <text x=\"{}\" y=\"{}\" font-family=\"Courier New, monospace\" font-size=\"11\" fill=\"#1c242c\" xml:space=\"preserve\" style=\"white-space:pre\">{}</text>\n",
                 round(node.x + PADDING),
                 round(node.y + HEADER_HEIGHT + PADDING + (row as f32 + 0.75) * LINE_HEIGHT),
                 escape_xml(line)
@@ -397,17 +462,26 @@ pub fn svg(drawing: &Drawing) -> String {
     out
 }
 
-/// The drawing as a PDF document: one page the size of the drawing.
+/// The drawing as a PDF document: one page the size of the drawing, or
+/// scaled down to the longest page the format allows.
 pub fn pdf(drawing: &Drawing) -> Vec<u8> {
     let width = drawing.width.max(1.0);
     let height = drawing.height.max(1.0);
+    let scale = (LONGEST_PAGE / width.max(height)).min(1.0);
     // PDF's origin is the bottom left; the drawing's the top left.
     let flip = |y: f32| height - y;
 
     let mut content = String::new();
+    if scale < 1.0 {
+        let s = round(scale);
+        content.push_str(&format!("{s} 0 0 {s} 0 0 cm\n"));
+    }
     content.push_str("1 1 1 rg 0 0 ");
     content.push_str(&format!("{} {} re f\n", round(width), round(height)));
     for edge in &drawing.edges {
+        if edge.points.len() < 2 {
+            continue;
+        }
         let [r, g, b] = edge_color(edge.kind);
         content.push_str(&format!(
             "{} {} {} RG {} {} {} rg 1.5 w\n",
@@ -426,12 +500,16 @@ pub fn pdf(drawing: &Drawing) -> Vec<u8> {
             content.push_str(&format!("{} {} l\n", round(*x), round(flip(*y))));
         }
         content.push_str("S\n");
-        // The arrowhead: a triangle at the tip, pointing the last way.
-        if edge.points.len() >= 2 {
-            let (tx, ty) = edge.points[edge.points.len() - 1];
-            let (px, py) = edge.points[edge.points.len() - 2];
+        // The arrowhead: a triangle at the tip, pointing the way of the
+        // last run that goes anywhere.
+        let (tx, ty) = edge.points[edge.points.len() - 1];
+        let before = edge.points[..edge.points.len() - 1]
+            .iter()
+            .rev()
+            .find(|(x, y)| (x - tx).abs() > 0.01 || (y - ty).abs() > 0.01);
+        if let Some(&(px, py)) = before {
             let (dx, dy) = (tx - px, ty - py);
-            let length = (dx * dx + dy * dy).sqrt().max(0.001);
+            let length = (dx * dx + dy * dy).sqrt();
             let (ux, uy) = (dx / length, dy / length);
             let (nx, ny) = (-uy, ux);
             let base_x = tx - ux * 8.0;
@@ -486,13 +564,19 @@ pub fn pdf(drawing: &Drawing) -> Vec<u8> {
         }
     }
 
+    // The title, as the document's: in UTF-16 with its byte-order mark, so
+    // any name survives.
+    let title_hex: String = std::iter::once(0xfeffu16)
+        .chain(drawing.title.encode_utf16())
+        .map(|unit| format!("{unit:04X}"))
+        .collect();
     let objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>",
-            round(width),
-            round(height)
+            round(width * scale),
+            round(height * scale)
         )
         .into_bytes(),
         {
@@ -501,8 +585,9 @@ pub fn pdf(drawing: &Drawing) -> Vec<u8> {
             stream.extend_from_slice(b"\nendstream");
             stream
         },
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        format!("<< /Title <{title_hex}> /Producer (ag) >>").into_bytes(),
     ];
     let mut out = Vec::new();
     out.extend_from_slice(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
@@ -521,7 +606,7 @@ pub fn pdf(drawing: &Drawing) -> Vec<u8> {
     }
     out.extend_from_slice(
         format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            "trailer\n<< /Size {} /Root 1 0 R /Info 7 0 R >>\nstartxref\n{xref}\n%%EOF\n",
             objects.len() + 1
         )
         .as_bytes(),
@@ -545,7 +630,9 @@ fn frac(channel: u8) -> String {
     round(channel as f32 / 255.0)
 }
 
-/// Text inside an SVG element.
+/// Text inside an SVG element: the markup escaped, and the characters XML
+/// has no place for — control characters other than tab and newline, and
+/// the two non-characters — shown as the replacement character.
 fn escape_xml(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -553,13 +640,17 @@ fn escape_xml(text: &str) -> String {
             '<' => "&lt;".to_string(),
             '>' => "&gt;".to_string(),
             '"' => "&quot;".to_string(),
+            '\t' | '\n' | '\r' => c.to_string(),
+            c if (c as u32) < 0x20 || c == '\u{fffe}' || c == '\u{ffff}' => '\u{fffd}'.to_string(),
             c => c.to_string(),
         })
         .collect()
 }
 
-/// Text inside a PDF string: the delimiters escaped, and anything past
-/// Latin-1 as a question mark, since the standard fonts reach no further.
+/// Text inside a PDF string, for a font in WinAnsi encoding: the
+/// delimiters escaped, Latin-1 as octal escapes, and anything the encoding
+/// has no glyph for — the C1 controls, and everything past Latin-1 — as a
+/// question mark.
 fn escape_pdf(text: &str) -> String {
     let mut out = String::new();
     for c in text.chars() {
@@ -570,7 +661,9 @@ fn escape_pdf(text: &str) -> String {
             }
             '\r' | '\n' => out.push(' '),
             c if (c as u32) < 0x80 => out.push(c),
-            c if (c as u32) < 0x100 => out.push_str(&format!("\\{:03o}", c as u32)),
+            c if (0xa0..0x100).contains(&(c as u32)) => {
+                out.push_str(&format!("\\{:03o}", c as u32))
+            }
             _ => out.push('?'),
         }
     }
@@ -594,6 +687,7 @@ mod tests {
     fn drawing() -> Drawing {
         arrange(
             "f at 0x1000".to_string(),
+            0x1000,
             vec![
                 laid(
                     0x1000,
@@ -703,9 +797,9 @@ mod tests {
         // startxref names where the table is, and each entry where its
         // object is.
         let start = number_at(find(b"startxref\n") + 10);
-        assert!(pdf[start..].starts_with(b"xref\n0 7\n"));
-        let mut entry = start + b"xref\n0 7\n".len() + b"0000000000 65535 f \n".len();
-        for number in 1..=6 {
+        assert!(pdf[start..].starts_with(b"xref\n0 8\n"));
+        let mut entry = start + b"xref\n0 8\n".len() + b"0000000000 65535 f \n".len();
+        for number in 1..=7 {
             let offset = number_at(entry);
             let expected = format!("{number} 0 obj\n");
             assert!(
@@ -721,14 +815,174 @@ mod tests {
         assert_eq!(stream_end - stream_start, length);
         let text = String::from_utf8_lossy(&pdf).into_owned();
         assert!(text.contains("(00001004  jne 0x1020) Tj"), "{text}");
-        assert!(text.contains("/BaseFont /Courier"));
-        // Delimiters and non-ASCII are escaped.
-        assert_eq!(escape_pdf("a(b)c\\d é ☃"), "a\\(b\\)c\\\\d \\351 ?");
+        assert!(text.contains("/BaseFont /Courier /Encoding /WinAnsiEncoding"));
+        assert!(text.contains("/Info 7 0 R"));
+        // The title in UTF-16 with its byte-order mark.
+        assert!(
+            text.contains("/Title <FEFF00660020006100740020003000780031003000300030>"),
+            "{text}"
+        );
+        // Delimiters and Latin-1 are escaped; the C1 controls and anything
+        // past Latin-1 have no glyph.
+        assert_eq!(
+            escape_pdf("a(b)c\\d é \u{85} ☃"),
+            "a\\(b\\)c\\\\d \\351 ? ?"
+        );
+    }
+
+    #[test]
+    fn a_long_drawing_is_scaled_onto_the_longest_page() {
+        let mut long = drawing();
+        long.height = 30_000.0;
+        let pdf = pdf(&long);
+        let text = String::from_utf8_lossy(&pdf).into_owned();
+        let media = text
+            .split("/MediaBox [0 0 ")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the box");
+        let sides: Vec<f32> = media
+            .split(' ')
+            .map(|side| side.parse().expect("a length"))
+            .collect();
+        assert!(sides.iter().all(|side| *side <= LONGEST_PAGE), "{media}");
+        assert!((sides[1] - LONGEST_PAGE).abs() < 0.01, "{media}");
+        assert!(text.contains("0.48 0 0 0.48 0 0 cm\n"), "{text}");
+        // One that fits is not scaled.
+        assert!(!String::from_utf8_lossy(&super::pdf(&drawing())).contains(" cm\n"));
+    }
+
+    #[test]
+    fn an_edge_without_a_route_and_bad_characters_are_left_out() {
+        let mut odd = drawing();
+        odd.edges.push(DrawnEdge {
+            points: vec![(1.0, 1.0)],
+            kind: EdgeKind::Taken,
+        });
+        odd.edges.push(DrawnEdge {
+            points: Vec::new(),
+            kind: EdgeKind::Taken,
+        });
+        odd.nodes[0].lines[0] = "esc\u{1b} nul\0 tab\t ok \u{fffe}".to_string();
+        let svg = svg(&odd);
+        assert_eq!(svg.matches("<polyline").count(), 5);
+        assert!(
+            svg.contains("esc\u{fffd} nul\u{fffd} tab\t ok \u{fffd}"),
+            "{svg}"
+        );
+        let pdf = pdf(&odd);
+        let text = String::from_utf8_lossy(&pdf).into_owned();
+        // Five routes stroked, no stroke without a path.
+        assert_eq!(text.matches("\nS\n").count(), 5, "{text}");
+        assert!(!text.contains("w\nS\n"));
+    }
+
+    #[test]
+    fn an_edge_over_a_row_runs_round_the_boxes_between() {
+        // The if-then shape: A -> B, A -> C, B -> C.
+        let drawing = arrange(
+            "f".to_string(),
+            0x1000,
+            vec![
+                laid(
+                    0x1000,
+                    0x1010,
+                    vec![0x1010, 0x1020],
+                    &["00001000  test eax, eax", "00001004  je 0x1020"],
+                ),
+                laid(0x1010, 0x1020, vec![0x1020], &["00001010  mov eax, 1"]),
+                laid(0x1020, 0x1030, vec![], &["00001020  ret"]),
+            ],
+            vec![
+                (0x1000, 0x1010, EdgeKind::Fallthrough),
+                (0x1000, 0x1020, EdgeKind::Taken),
+                (0x1010, 0x1020, EdgeKind::Fallthrough),
+            ],
+        );
+        assert_eq!(drawing.edges.len(), 3);
+        for edge in &drawing.edges {
+            for pair in edge.points.windows(2) {
+                let ((x1, y1), (x2, y2)) = (pair[0], pair[1]);
+                for node in &drawing.nodes {
+                    let (left, right) = (node.x, node.x + node.width);
+                    let (top, bottom) = (node.y, node.y + node.height);
+                    let inside_x = |x: f32| x > left + 0.01 && x < right - 0.01;
+                    let inside_y = |y: f32| y > top + 0.01 && y < bottom - 0.01;
+                    let crosses = if (x1 - x2).abs() < 0.01 {
+                        inside_x(x1) && y1.min(y2) < bottom - 0.01 && y1.max(y2) > top + 0.01
+                    } else {
+                        inside_y(y1) && x1.min(x2) < right - 0.01 && x1.max(x2) > left + 0.01
+                    };
+                    assert!(!crosses, "{edge:?} crosses {}", node.title);
+                }
+            }
+        }
+        // The skip leaves to the right of every box and comes back over C.
+        let skip = &drawing.edges[1];
+        assert_eq!(skip.points.len(), 6);
+        let right = drawing
+            .nodes
+            .iter()
+            .map(|n| n.x + n.width)
+            .fold(0.0, f32::max);
+        assert!(skip.points[2].0 > right);
+        assert!(skip.points[2].0 < drawing.width);
+    }
+
+    #[test]
+    fn the_entry_is_on_top_even_when_it_is_not_first_and_a_stray_block_goes_below() {
+        // The entry at 0x1010 jumps to 0x1020, which goes on to the tail
+        // at 0x1000; 0x1030 jumps into the tail too but nothing reaches it.
+        let drawing = arrange(
+            "f".to_string(),
+            0x1010,
+            vec![
+                laid(0x1000, 0x1010, vec![], &["ret"]),
+                laid(0x1010, 0x1020, vec![0x1020], &["jmp"]),
+                laid(0x1020, 0x1030, vec![0x1000], &["jmp"]),
+                laid(0x1030, 0x1040, vec![0x1000], &["jmp"]),
+            ],
+            vec![
+                (0x1010, 0x1020, EdgeKind::Fallthrough),
+                (0x1020, 0x1000, EdgeKind::Taken),
+                (0x1030, 0x1000, EdgeKind::Taken),
+            ],
+        );
+        let y = |from: &str| {
+            drawing
+                .nodes
+                .iter()
+                .find(|n| n.title.starts_with(from))
+                .unwrap()
+                .y
+        };
+        assert!(y("0x1010") < y("0x1020"));
+        assert!(y("0x1020") < y("0x1000"));
+        assert!(y("0x1000") < y("0x1030"));
+        // Odd shapes do not panic: a self loop, an edge to a block that is
+        // not there, and two blocks at one address.
+        let odd = arrange(
+            "g".to_string(),
+            0x1000,
+            vec![
+                laid(0x1000, 0x1010, vec![0x1000, 0x9999, 0x1010], &["x"]),
+                laid(0x1010, 0x1020, vec![], &["y"]),
+                laid(0x1010, 0x1020, vec![0x1000], &["z"]),
+            ],
+            vec![
+                (0x1000, 0x1000, EdgeKind::Taken),
+                (0x1000, 0x9999, EdgeKind::Taken),
+                (0x1000, 0x1010, EdgeKind::Fallthrough),
+            ],
+        );
+        assert_eq!(odd.nodes.len(), 3);
+        assert_eq!(odd.edges.len(), 2);
+        assert!(svg(&odd).contains("<svg"));
     }
 
     #[test]
     fn a_graph_of_nothing_is_an_empty_picture() {
-        let drawing = arrange("f".to_string(), Vec::new(), Vec::new());
+        let drawing = arrange("f".to_string(), 0, Vec::new(), Vec::new());
         assert!(drawing.nodes.is_empty());
         assert!(svg(&drawing).contains("<svg"));
         assert!(pdf(&drawing).starts_with(b"%PDF-1.4"));

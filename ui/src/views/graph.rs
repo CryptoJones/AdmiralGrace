@@ -678,9 +678,11 @@ pub fn drawing(
             }
         })
         .collect();
+    // An edge whose block was not found has no route, and is no arrow.
     let edges = layout
         .edges
         .iter()
+        .filter(|edge| edge.route.len() >= 2)
         .map(|edge| DrawnEdge {
             points: edge
                 .route
@@ -2032,6 +2034,11 @@ mod tests {
         assert_eq!(drawing.title, "f at 0x1000");
         assert_eq!(drawing.nodes.len(), 3);
         assert_eq!(drawing.edges.len(), layout.edges.len());
+        // An edge with no route is left out.
+        let mut cut = layout.clone();
+        cut.edges[0].route.clear();
+        let fewer = super::drawing(&cut, String::new(), None);
+        assert_eq!(fewer.edges.len(), layout.edges.len() - 1);
         let group = drawing
             .nodes
             .iter()

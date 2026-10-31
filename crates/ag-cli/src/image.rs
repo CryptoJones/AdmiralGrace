@@ -105,11 +105,13 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
-        /// Draw the graph as an SVG picture at this path.
-        #[arg(long, value_name = "PATH")]
+        /// Draw the graph as an SVG picture at this path, in place of the
+        /// report.
+        #[arg(long, value_name = "PATH", conflicts_with = "json")]
         svg: Option<PathBuf>,
-        /// Draw the graph as a one-page PDF at this path.
-        #[arg(long, value_name = "PATH")]
+        /// Draw the graph as a one-page PDF at this path, in place of the
+        /// report.
+        #[arg(long, value_name = "PATH", conflicts_with = "json")]
         pdf: Option<PathBuf>,
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]

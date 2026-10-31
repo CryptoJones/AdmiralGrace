@@ -1411,6 +1411,22 @@ impl App {
             self.notice = Some("Select a function to export its graph".into());
             return;
         };
+        // Neither the program nor the project file is written over, even
+        // when the program was opened from a picture's path.
+        if let Some(binary) = self.binary_path.as_deref() {
+            if path == binary || ag_image::same_file(path, binary) {
+                self.notice = Some(format!("{} is the program itself", path.display()));
+                return;
+            }
+        }
+        if self
+            .project_path
+            .as_deref()
+            .is_some_and(|project| project == path || ag_image::same_file(path, project))
+        {
+            self.notice = Some(format!("{} is the project file", path.display()));
+            return;
+        }
         let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -3926,20 +3942,30 @@ impl App {
                 // extension picks the picture. A file already there takes
                 // a second submit of its path.
                 self.confirm_write = None;
-                let name: String = self
-                    .place_name(function)
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
+                // The function's name as a file name: anything but letters,
+                // digits and underscores becomes one underscore, and a long
+                // demangled name is cut, so the name fits a file system.
+                let mut name = String::new();
+                for c in self.place_name(function).chars() {
+                    if c.is_ascii_alphanumeric() {
+                        name.push(c);
+                    } else if !name.ends_with('_') {
+                        name.push('_');
+                    }
+                    if name.len() >= 100 {
+                        break;
+                    }
+                }
+                let name = name.trim_matches('_');
+                let name = if name.is_empty() {
+                    format!("{function:#x}")
+                } else {
+                    name.to_string()
+                };
                 let beside = self
                     .binary_path
                     .as_deref()
+                    .or(self.project_path.as_deref())
                     .and_then(Path::parent)
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
@@ -6610,8 +6636,9 @@ mod tests {
         assert!(bytes.starts_with(b"%PDF-1.4"));
         assert!(bytes.ends_with(b"%%EOF\n"));
 
-        // A file already there takes a second submit of the same path.
-        let before = std::fs::metadata(&svg).expect("the SVG").len();
+        // A file already there takes a second submit of the same path,
+        // and is then written over.
+        std::fs::write(&svg, b"not a picture").expect("the sentinel");
         let _ = app.update(Message::FileExportGraph);
         let _ = app.update(Message::PromptChanged(svg.display().to_string()));
         let _ = app.update(Message::PromptSubmit);
@@ -6628,7 +6655,28 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|n| n.starts_with("Wrote ")));
-        assert_eq!(std::fs::metadata(&svg).expect("the SVG").len(), before);
+        let again = std::fs::read_to_string(&svg).expect("the SVG");
+        assert!(again.starts_with("<svg"), "{again}");
+        assert_eq!(again, text);
+
+        // The program itself is never the target.
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(
+            sample_elf().with_extension("svg").display().to_string(),
+        ));
+        // A path beside the program with a picture's extension is fine;
+        // the program's own path is refused before any extension check.
+        let _ = app.update(Message::PromptCancel);
+        let _ = app.update(Message::FileExportGraph);
+        let _ = app.update(Message::PromptChanged(sample_elf().display().to_string()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.ends_with("is the program itself")),
+            "{:?}",
+            app.notice
+        );
 
         let _ = std::fs::remove_file(&svg);
         let _ = std::fs::remove_file(&pdf);
