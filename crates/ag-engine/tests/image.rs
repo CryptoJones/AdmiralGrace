@@ -202,6 +202,15 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
             },
             "past the top",
         ),
+        (
+            RawSpec {
+                base: 0xffff_ffff_ffff_ff00,
+                length: Some(0x100),
+                entry: None,
+                ..spec.clone()
+            },
+            "past the top",
+        ),
     ] {
         let refused = Image::open_raw(&path, &spec).expect_err(says).to_string();
         assert!(refused.contains(says), "{refused}");

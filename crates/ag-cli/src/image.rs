@@ -570,13 +570,15 @@ pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Resu
     let raw = match (raw, &project) {
         (Some(raw), Some(project)) => {
             let recorded = crate::project::raw_of_project(project)?;
-            if let Some(recorded) = recorded.filter(|recorded| *recorded != raw) {
-                anyhow::bail!(
-                    "the --raw flags say the target loads {}, but the project says {}",
-                    crate::project::describe_raw(&raw),
-                    crate::project::describe_raw(&recorded)
-                );
-            }
+            anyhow::ensure!(
+                recorded.as_ref() == Some(&raw),
+                "the --raw flags say the target loads {}, but the project says {}",
+                crate::project::describe_raw(&raw),
+                recorded.as_ref().map_or(
+                    "it is not raw bytes".to_string(),
+                    crate::project::describe_raw
+                )
+            );
             Some(raw)
         }
         (Some(raw), None) => Some(raw),

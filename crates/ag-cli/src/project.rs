@@ -971,7 +971,7 @@ fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
 
 /// Write a copy of `target` with the patches `file` holds in it.
 fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<i32> {
-    let project = ProjectFile::load(file)?;
+    let project = load_project(file)?;
     let patches = project.patches();
     anyhow::ensure!(!patches.is_empty(), "{} holds no patches", file.display());
     // The target is never written, nor the project file: the copy goes
@@ -1023,7 +1023,7 @@ fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<
 
 /// Print what the project file of `target` holds.
 fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
-    let project = ProjectFile::load(file)?;
+    let project = load_project(file)?;
     if json {
         print!("{}", project.to_json()?);
         return Ok(0);
@@ -1078,7 +1078,7 @@ fn show(target: &Path, file: &Path, json: bool) -> Result<i32> {
 /// one, one line per place, in address order, in the shape `show` prints a
 /// record — the kind, the address, and what the record carries.
 fn tags(file: &Path, tag: Option<&str>) -> Result<i32> {
-    let project = ProjectFile::load(file)?;
+    let project = load_project(file)?;
     match tag {
         None => {
             let index = project.tags();
@@ -1201,23 +1201,37 @@ fn edit_named(
 }
 
 /// The project of `file`, created from `target` when the file is not there.
+/// The project says how its target loads; `--raw` flags that say otherwise
+/// would read other bytes under the same records, and are refused.
+fn check_raw_flags(project: &ProjectFile, file: &Path) -> Result<()> {
+    let flags = RAW.with(|held| held.borrow().clone());
+    if let Some(flags) = flags {
+        let recorded = raw_of_project(project)?;
+        anyhow::ensure!(
+            recorded.as_ref() == Some(&flags),
+            "the --raw flags say the target loads {}, but {} says {}: drop the flags, or make a new project",
+            describe_raw(&flags),
+            file.display(),
+            recorded
+                .as_ref()
+                .map_or("it is not raw bytes".to_string(), describe_raw)
+        );
+    }
+    Ok(())
+}
+
+/// Read the project at `file`, which has to exist, with the flags checked.
+fn load_project(file: &Path) -> Result<ProjectFile> {
+    let project = ProjectFile::load(file)?;
+    check_raw_flags(&project, file)?;
+    Ok(project)
+}
+
 fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     // The project may not exist yet: the first edit creates it from the target.
     match ProjectFile::load(file) {
         Ok(project) => {
-            // The project says how its target loads; flags that say
-            // otherwise would read other bytes under the same records.
-            let flags = RAW.with(|held| held.borrow().clone());
-            if let Some(flags) = flags {
-                let recorded = raw_of_project(&project)?;
-                anyhow::ensure!(
-                    recorded.as_ref() == Some(&flags),
-                    "the --raw flags say the target loads {}, but {} says {}: drop the flags, or make a new project",
-                    describe_raw(&flags),
-                    file.display(),
-                    recorded.as_ref().map_or("it is not raw bytes".to_string(), describe_raw)
-                );
-            }
+            check_raw_flags(&project, file)?;
             Ok(project)
         }
         Err(_) if !file.exists() => {

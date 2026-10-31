@@ -178,7 +178,8 @@ impl Image {
         let top = crate::arch::Bitness::of_language(&spec.language)
             .map_or(u128::from(u64::MAX) + 1, |width| 1u128 << width.bits());
         anyhow::ensure!(
-            u128::from(spec.base) + u128::from(length) <= top,
+            spec.base.checked_add(length).is_some()
+                && u128::from(spec.base) + u128::from(length) <= top,
             "{length} bytes at {:#x} run past the top of the program's address space",
             spec.base
         );
