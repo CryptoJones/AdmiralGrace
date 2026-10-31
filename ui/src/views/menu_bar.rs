@@ -244,6 +244,25 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     Message::ViewToggleSsa,
                 )),
                 Item::new(separator()),
+                Item::new(item_button(
+                    if app.rainbow_braces {
+                        "Rainbow braces: on"
+                    } else {
+                        "Rainbow braces: off"
+                    },
+                    "",
+                    Message::ViewToggleRainbowBraces,
+                )),
+                Item::new(item_button(
+                    if app.indent_guides {
+                        "Indent guides: on"
+                    } else {
+                        "Indent guides: off"
+                    },
+                    "",
+                    Message::ViewToggleIndentGuides,
+                )),
+                Item::new(separator()),
             ]
             .into_iter()
             .chain(

@@ -46,6 +46,10 @@ a store in the listing that the C says nothing about | `--option dead-code keep`
 `true` and `false` in an Objective-C program that says `YES` and `NO` | `--option language objc`
 braces, semicolons and declarations where indentation would do | `--option language python`
 bodies indented two spaces next to source indented four | `--option indent 4`
+`if (c) {` next to source that puts every brace on its own line | `--option brace-style broken`
+`x = (a && b) ? a : *(long *)b;` where two plain arms would read | `--option ternaries expand`
+a call of six arguments running off the pane | `--option wrap 80`
+`f(1, 0, 0, 1)` where which argument is which cannot be told | `--option call-hints names`
 
 ## Decode
 
@@ -85,6 +89,10 @@ Option | Tier | Takes | Default | What it decides
 `constant-style` | rendering | `mixed` \| `decimal` \| `hex` | `mixed` | How a constant is spelled: decimal below 10 and hex from 10 up, all decimal, or all hex.
 `language` | rendering | `c` \| `rust` \| `objc` \| `python` | `c` | The language the pseudocode reads as: C; Rust (`fn f(a: i32) -> i64`, `x as i64`, `match`); Objective-C (C with `YES` and `NO`); or Python (`def f(a):`, blocks by indentation, `and`/`or`). The same lift, spelled each language's way.
 `indent` | rendering | an integer, 1 to 8 | `2` | The spaces one level of a body is indented by.
+`brace-style` | rendering | `attached` \| `broken` | `attached` | Where a control statement's opening brace goes in C and Objective-C: `attached`, at the end of the head (`if (c) {`), or `broken`, on a line of its own under it, with `else` on its own line too. Rust keeps its braces attached and Python has none.
+`ternaries` | rendering | `keep` \| `expand` | `keep` | An assignment or a return of a conditional expression — `x = c ? a : b;` — kept as the one line it is, or expanded to an `if`/`else` that assigns or returns in each arm.
+`wrap` | rendering | an integer, 0 to 200 | `0` | The column a statement longer than it is wrapped at, between a call's arguments, the rest indented two levels on the lines after; `0` keeps every statement on one line.
+`call-hints` | rendering | `off` \| `names` | `off` | Whether a call's arguments are labelled with the callee's parameter names — `add(/* a */ 1, /* b */ 2)`, or `add(a=1, b=2)` in Python — where the callee is a function of the image whose parameters the lift has named.
 
 ## Tiers
 

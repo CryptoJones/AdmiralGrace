@@ -220,6 +220,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `pseudocode TARGET` | The function as C — its calls, branches and loops structured into `if`/`else`, `while`, `do`/`while`, `for` and early `return`: a `// name at 0x…` header, then a comment that says what decided the return type (`// returns int: main reads eax after the call`, `// void: no caller reads the result`), then the signature, the locals and the statements. A `jmp` to another function is `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result — and a function that is only that jump — a PLT stub — is the one line `// thunk for callee`. A function the lifter refuses prints the header with `not lifted yet` and the reason, and exit code 1. |
 | `pseudocode TARGET --option language c\|rust\|objc\|python` | The same lift, spelled each language's way: C; Rust (`fn sum_to(a: i32) -> i64 {`, `let mut local_14: i32;`, `x as i64`, `match`, `loop` for a do-while); Objective-C (C with `YES` and `NO`); Python (`def sum_to(a):`, blocks by indentation, `and`/`or`, `True`, `x if c else y`, the locals as a `# locals:` comment). The workbench's pseudocode pane and the MCP server's `decompile` take the same `--option`. |
 | `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
+| `pseudocode TARGET --option brace-style broken\|ternaries expand\|wrap N\|call-hints names` | How the text is laid out: `brace-style broken` puts each control statement's `{` on a line of its own under its head and `else` on its own line (C and Objective-C; Rust keeps its braces attached, Python has none); `ternaries expand` writes `x = c ? a : b;` as an `if`/`else` assigning in each arm, and a return of one as two returns; `wrap N` breaks a statement longer than `N` columns between a call's arguments, the rest indented two levels; `call-hints names` labels each argument with the callee's parameter name — `sum_to(/* a */ add(a, /* b */ 3))`, or `add(a=1, b=2)` in Python, where every argument has a name — where the callee is a function of the image; an argument that is the parameter's own name takes no label. The workbench's View menu adds rainbow braces and indent guides, which are drawing, not text. A registered formatter plugin has the last word on the lines (`docs/plugins.md`). |
 | `pseudocode TARGET --json` | The same as JSON: each line with the addresses it came from, and `dead` on a line the `dead-code` option kept that its `drop` would take out — a store nothing reads, a branch that can only go one way — so a reader can grey it out. A project's `stores drop` words (`--project FILE`) take one variable's dead stores out while the rest stay. |
 | `symbols\|disasm\|cfg\|calls … --option NAME VALUE` | The engine's decode options, which change what the walk finds: `branches-end-procedures yes` makes a branch out of a procedure's range a tail call, and `code-sections procedures` lists every run of instructions no named function reaches as a `sub_` procedure. The flag repeats; `ag catalog` lists the options. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`, then the jump tables the function's indirect jumps read, each with its cases. `--project FILE` tells the walk the project's jump-table notes. `--svg PATH` or `--pdf PATH` draws the graph as a picture instead — the blocks in rows, every instruction a line, fall-throughs blue and taken branches orange — for a report; both may be given, neither with `--json`. |
@@ -580,13 +581,14 @@ program's terminal is `/dev/null`. The workbench drives the same session with it
 ## Plugins: `ag plugins` and `ag tool`
 
 `ag plugins` lists the plugin directories, the manifests read from them, and every loader,
-architecture, tool and rewriter registered — as text, or as JSON with `--json`. `ag tool NAME IMAGE
+architecture, tool, rewriter and formatter registered — as text, or as JSON with `--json`. `ag tool NAME IMAGE
 [--project FILE] [--option N V]… [--arg name=value]…` runs a plugin's tool over the image and
 prints its answer: JSON pretty, or the text it is; a value that reads as JSON is given as
-JSON. A tool's own failure is exit code 1 with its message. The manifests, the four kinds of
+JSON. A tool's own failure is exit code 1 with its message. The manifests, the five kinds of
 plugin — loaders, architectures (which may recover a function's blocks and lift it whole
-themselves), tools and rewriters, which change a function's medium-level graph as it is
-lifted — and the conversations the commands speak are in `docs/plugins.md`.
+themselves), tools, rewriters, which change a function's medium-level graph as it is
+lifted, and formatters, which change the pseudocode's lines after they are printed — and the
+conversations the commands speak are in `docs/plugins.md`.
 
 ## An MCP server: `ag mcp`
 

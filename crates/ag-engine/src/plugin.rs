@@ -839,12 +839,171 @@ impl Rewriter for ExternalRewriter {
     }
 }
 
+/// A formatter changes the pseudocode's lines after they are printed —
+/// their text, their order, their number — for a house style the options
+/// do not cover: every function's pseudocode passes through every
+/// registered formatter in order, after the engine's own formatting. The
+/// lines come with the addresses each came from and whether it is dead
+/// code the `dead-code` option kept; a formatter that keeps a line keeps
+/// those, and one that adds a line gives it none.
+pub trait Formatter: Send + Sync {
+    /// The formatter's name.
+    fn name(&self) -> &str;
+
+    /// Change the lines. `Err` refuses the function's pseudocode, and the
+    /// reason is told with the formatter's name.
+    fn format(&self, formatting: &mut Formatting) -> Result<(), String>;
+}
+
+/// The pseudocode of one function as a formatter sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Formatting {
+    /// The function's address.
+    pub function: u64,
+    /// Its name.
+    pub name: String,
+    /// The language the pseudocode reads as: `c`, `rust`, `objc` or
+    /// `python`.
+    pub language: String,
+    /// The lines, in order.
+    pub lines: Vec<crate::emit::Line>,
+    /// The lines, counted from zero, that are dead code kept.
+    pub dead: std::collections::BTreeSet<usize>,
+}
+
+impl Formatting {
+    /// The lines as JSON for a formatter that is a command: each with its
+    /// `text`, its `addresses` (numbers, with an `addresses_hex` twin) and
+    /// whether it is `dead`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "function": self.function,
+            "function_hex": format!("{:#x}", self.function),
+            "name": self.name,
+            "language": self.language,
+            "lines": self.lines.iter().enumerate().map(|(index, line)| serde_json::json!({
+                "text": line.text,
+                "addresses": line.addresses,
+                "addresses_hex": line.addresses.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
+                "dead": self.dead.contains(&index),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Take the lines of a command's answer — `{"lines": [{"text": …,
+    /// "addresses": […], "dead": …}, …]}`, a line's `addresses` and `dead`
+    /// optional and none and false when left out — as the lines now. An
+    /// answer without `lines` leaves them as they are.
+    pub fn apply(&mut self, answer: &serde_json::Value) -> Result<(), String> {
+        if !answer.is_object() {
+            return Err("the answer is a JSON object, `{\"lines\": […]}` or `{}`".to_string());
+        }
+        let Some(lines) = answer.get("lines") else {
+            return Ok(());
+        };
+        let lines = lines
+            .as_array()
+            .ok_or_else(|| "\"lines\" is a JSON array".to_string())?;
+        let mut replaced = Vec::with_capacity(lines.len());
+        let mut dead = std::collections::BTreeSet::new();
+        for (index, line) in lines.iter().enumerate() {
+            let text = match line {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Object(object) => object
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| format!("line {index} has no \"text\""))?
+                    .to_string(),
+                _ => return Err(format!("line {index} is a string or an object")),
+            };
+            let addresses = line
+                .get("addresses")
+                .and_then(serde_json::Value::as_array)
+                .map(|addresses| {
+                    addresses
+                        .iter()
+                        .map(|a| {
+                            number(a).ok_or_else(|| format!("line {index}: {a} is not an address"))
+                        })
+                        .collect::<Result<Vec<u64>, String>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if line.get("dead").and_then(serde_json::Value::as_bool) == Some(true) {
+                dead.insert(index);
+            }
+            replaced.push(crate::emit::Line { text, addresses });
+        }
+        self.lines = replaced;
+        self.dead = dead;
+        Ok(())
+    }
+}
+
+/// A formatter that is a command: given the lines as JSON on its standard
+/// input, it prints the lines as they are to be, or nothing to leave them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFormatter {
+    pub name: String,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+}
+
+impl Formatter for ExternalFormatter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn format(&self, formatting: &mut Formatting) -> Result<(), String> {
+        let input = serde_json::to_vec(&formatting.to_json()).map_err(|error| error.to_string())?;
+        let output = run_command(&self.command, &input, self.timeout)?;
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return Ok(());
+        }
+        let answer: serde_json::Value = serde_json::from_slice(&output)
+            .map_err(|error| format!("the answer is not JSON: {error}"))?;
+        formatting.apply(&answer)
+    }
+}
+
+/// Run every registered formatter over `pseudocode`, in order. A
+/// formatter's failure is the reason, with its name.
+pub fn format_pseudocode(
+    pseudocode: &mut crate::emit::Pseudocode,
+    function: u64,
+    name: &str,
+    language: &str,
+) -> Result<(), String> {
+    let formatters = formatters();
+    if formatters.is_empty() {
+        return Ok(());
+    }
+    let mut formatting = Formatting {
+        function,
+        name: name.to_string(),
+        language: language.to_string(),
+        lines: std::mem::take(&mut pseudocode.lines),
+        dead: std::mem::take(&mut pseudocode.dead_lines),
+    };
+    for formatter in formatters {
+        if let Err(error) = formatter.format(&mut formatting) {
+            pseudocode.lines = formatting.lines;
+            pseudocode.dead_lines = formatting.dead;
+            return Err(format!("the formatter {}: {error}", formatter.name()));
+        }
+    }
+    pseudocode.lines = formatting.lines;
+    pseudocode.dead_lines = formatting.dead;
+    Ok(())
+}
+
 /// Everything registered in this process.
 #[derive(Default)]
 struct Registry {
     loaders: Vec<Arc<dyn Loader>>,
     architectures: Vec<Arc<dyn Architecture>>,
     rewriters: Vec<Arc<dyn Rewriter>>,
+    formatters: Vec<Arc<dyn Formatter>>,
 }
 
 fn registry() -> &'static RwLock<Registry> {
@@ -877,6 +1036,31 @@ pub fn register_rewriter(rewriter: Arc<dyn Rewriter>) {
     let name = rewriter.name().to_string();
     registry.rewriters.retain(|known| known.name() != name);
     registry.rewriters.push(rewriter);
+}
+
+/// Add a formatter: every function's pseudocode printed after passes
+/// through it, after the ones registered before. One of the same name is
+/// replaced.
+pub fn register_formatter(formatter: Arc<dyn Formatter>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = formatter.name().to_string();
+    registry.formatters.retain(|known| known.name() != name);
+    registry.formatters.push(formatter);
+}
+
+/// Take a formatter off, by name; for a test that registered one.
+pub fn unregister_formatter(name: &str) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    registry.formatters.retain(|known| known.name() != name);
+}
+
+/// The formatters registered, in the order they run.
+pub fn formatters() -> Vec<Arc<dyn Formatter>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .formatters
+        .clone()
 }
 
 /// The rewriters registered, in the order they run.
@@ -1404,7 +1588,8 @@ pub struct ExternalTool {
     pub input_schema: Option<serde_json::Value>,
 }
 
-/// One manifest: a JSON file declaring loaders, architectures and tools.
+/// One manifest: a JSON file declaring loaders, architectures, tools,
+/// rewriters and formatters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// Where the manifest was read from.
@@ -1415,6 +1600,7 @@ pub struct Manifest {
     pub architectures: Vec<ExternalArchitecture>,
     pub tools: Vec<ExternalTool>,
     pub rewriters: Vec<ExternalRewriter>,
+    pub formatters: Vec<ExternalFormatter>,
 }
 
 /// The directories manifests are read from: the ones `AG_PLUGINS` names,
@@ -1663,6 +1849,14 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             functions: strings(entry.get("functions")),
         });
     }
+    let mut formatters = Vec::new();
+    for (index, entry) in entries("formatters")?.iter().enumerate() {
+        formatters.push(ExternalFormatter {
+            name: entry_name(entry, index),
+            command: command_of(entry, "formatter")?,
+            timeout: timeout_of(entry)?,
+        });
+    }
     Ok(Manifest {
         path: path.to_path_buf(),
         name,
@@ -1670,6 +1864,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         architectures,
         tools,
         rewriters,
+        formatters,
     })
 }
 
@@ -1748,6 +1943,19 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                             ));
                         }
                         register_rewriter(Arc::new(rewriter.clone()));
+                    }
+                    for formatter in &manifest.formatters {
+                        if manifests
+                            .iter()
+                            .any(|known| known.formatters.iter().any(|f| f.name == formatter.name))
+                        {
+                            problems.push(format!(
+                                "{}: the formatter {:?} is declared again, and replaces the first",
+                                path.display(),
+                                formatter.name
+                            ));
+                        }
+                        register_formatter(Arc::new(formatter.clone()));
                     }
                     manifests.push(manifest);
                 }

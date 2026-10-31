@@ -231,6 +231,16 @@ with the words already at the site. The word is kept in the project file, the ps
 read again with it, and Undo takes it back. Click a line of the pseudocode to select it,
 then open the prompt from the Edit menu — the workbench has no context menus yet.
 
+## Rainbow braces and indent guides
+
+**View ▸ Rainbow braces** colors each brace of the pseudocode by its depth, the pair that
+opens and closes a block in one color; **View ▸ Indent guides** draws a line down each
+indented block, one per level of the engine's `indent`. Both are drawing, not text: the
+pseudocode's lines, their addresses and the project file are as they were. The text's own
+layout — the brace style, expanded conditional expressions, wrapping, the callees' parameter
+names beside the arguments — is the engine's `brace-style`, `ternaries`, `wrap` and
+`call-hints` options (`docs/options.md`), set with `--option` when the workbench is started.
+
 ## Dead stores, greyed out or gone
 
 Under **Dead code: shown** the pseudocode pane keeps every statement the lift made, and greys

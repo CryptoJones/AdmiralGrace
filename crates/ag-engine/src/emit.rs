@@ -19,7 +19,9 @@ use std::fmt::Write;
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
 use crate::lift::{signed, LiftedFunction, Statement, StatementKind};
-use crate::options::{ConstantConditions, ConstantStyle, Language, Options};
+use crate::options::{
+    BraceStyle, CallHints, ConstantConditions, ConstantStyle, Language, Options, Ternaries,
+};
 
 /// One line of pseudocode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,13 @@ struct Style {
     /// send; off for text a C++ compiler is to read.
     message_sends: bool,
     language: Language,
+    braces: BraceStyle,
+    ternaries: Ternaries,
+    /// The column statements are wrapped at; 0 for never.
+    wrap: usize,
+    /// The parameter names of the functions called, by address, when the
+    /// arguments are to be labelled with them.
+    hints: BTreeMap<u64, Vec<String>>,
 }
 
 impl Style {
@@ -99,6 +108,10 @@ impl Style {
             constant_conditions: options.constant_conditions,
             message_sends: true,
             language: options.language,
+            braces: options.brace_style,
+            ternaries: options.ternaries,
+            wrap: usize::from(options.wrap),
+            hints: BTreeMap::new(),
         }
     }
 
@@ -203,6 +216,33 @@ pub fn emit_function_with(
     options: &Options,
     removable: &[String],
 ) -> Pseudocode {
+    emit_function_in(function, options, removable, &())
+}
+
+/// Where the parameter names of the functions a body calls come from, for
+/// the `call-hints` option: the image, which lifts each callee as it is
+/// asked.
+pub trait Callees {
+    /// The names of the parameters of the function at `address`, in order,
+    /// when it is a function the lift has named them for.
+    fn parameter_names(&self, address: u64) -> Option<Vec<String>>;
+}
+
+/// No names: every call's arguments stand alone.
+impl Callees for () {
+    fn parameter_names(&self, _address: u64) -> Option<Vec<String>> {
+        None
+    }
+}
+
+/// [`emit_function_with`], with the callees' parameter names at hand for
+/// the `call-hints` option.
+pub fn emit_function_in(
+    function: &LiftedFunction,
+    options: &Options,
+    removable: &[String],
+    callees: &dyn Callees,
+) -> Pseudocode {
     // Under `dead-code drop` the body is pruned first: the statements whose
     // results nothing uses go, and the locals nothing names after them.
     // Under `keep`, the dead stores of the removable variables alone go,
@@ -228,7 +268,10 @@ pub fn emit_function_with(
         dead: &dead,
         spans: Vec::new(),
     };
-    let style = Style::of(options);
+    let mut style = Style::of(options);
+    if options.call_hints == CallHints::Names {
+        style.hints = parameter_names_of(function, callees);
+    }
     let mut lines = Vec::new();
 
     let mut signature_addresses = vec![function.address];
@@ -380,12 +423,127 @@ pub fn emit_function_with(
         }),
     }
 
-    Pseudocode {
+    let mut pseudocode = Pseudocode {
         lines,
         return_type: Some(function.return_type.clone()),
         return_reason: function.return_reason.clone(),
         dead_lines: marks.dead_lines(),
+    };
+    if style.braces == BraceStyle::Broken && matches!(style.language, Language::C | Language::ObjC)
+    {
+        break_braces(&mut pseudocode);
     }
+    pseudocode
+}
+
+/// The parameter names of every function the body calls by address, from
+/// `callees`, for the functions it knows.
+fn parameter_names_of(
+    function: &LiftedFunction,
+    callees: &dyn Callees,
+) -> BTreeMap<u64, Vec<String>> {
+    let called = std::cell::RefCell::new(BTreeSet::new());
+    let note = |node: &AstNode| {
+        node.any(&|n| {
+            if let AstNode::Call { callee, .. } = n {
+                if let AstNode::FunctionName { address, .. } = callee.as_ref() {
+                    called.borrow_mut().insert(*address);
+                }
+            }
+            false
+        });
+    };
+    for_each_node(&function.body, &note);
+    called
+        .into_inner()
+        .into_iter()
+        .filter(|address| *address != function.address)
+        .filter_map(|address| Some((address, callees.parameter_names(address)?)))
+        .collect()
+}
+
+/// Call `f` on the node of every statement, the nested ones too, and on a
+/// `for`'s init and step.
+fn for_each_node(statements: &[Statement], f: &dyn Fn(&AstNode)) {
+    for statement in statements {
+        f(&statement.node);
+        match &statement.kind {
+            StatementKind::Plain => {}
+            StatementKind::If {
+                then_part,
+                else_part,
+            } => {
+                for_each_node(then_part, f);
+                for_each_node(else_part, f);
+            }
+            StatementKind::While { body } | StatementKind::DoWhile { body } => {
+                for_each_node(body, f)
+            }
+            StatementKind::For { init, step, body } => {
+                f(&init.node);
+                f(&step.node);
+                for_each_node(body, f);
+            }
+            StatementKind::Switch { arms } => {
+                for arm in arms {
+                    for_each_node(&arm.body, f);
+                }
+            }
+        }
+    }
+}
+
+/// Put every control statement's opening brace on a line of its own under
+/// its head, and `else` on its own line between the braces — the broken
+/// brace style — keeping each line's addresses on the head and the dead
+/// lines on the lines they came from. The function's own brace already
+/// stands alone.
+fn break_braces(pseudocode: &mut Pseudocode) {
+    let mut lines = Vec::with_capacity(pseudocode.lines.len() + 8);
+    let mut dead = BTreeSet::new();
+    let brace_line = |text: &str, brace: &str| Line {
+        text: format!("{}{brace}", &text[..text.len() - text.trim_start().len()]),
+        addresses: Vec::new(),
+    };
+    for (index, line) in pseudocode.lines.iter().enumerate() {
+        let was_dead = pseudocode.dead_lines.contains(&index);
+        let first = lines.len();
+        let trimmed = line.text.trim_start();
+        if trimmed == "} else {" {
+            lines.push(brace_line(&line.text, "}"));
+            lines.push(brace_line(&line.text, "else"));
+            lines.push(brace_line(&line.text, "{"));
+        } else if let Some(head) = control_head(trimmed) {
+            let pad = &line.text[..line.text.len() - trimmed.len()];
+            lines.push(Line {
+                text: format!("{pad}{head}"),
+                addresses: line.addresses.clone(),
+            });
+            lines.push(brace_line(&line.text, "{"));
+        } else {
+            lines.push(line.clone());
+        }
+        if was_dead {
+            dead.extend(first..lines.len());
+        }
+    }
+    pseudocode.lines = lines;
+    pseudocode.dead_lines = dead;
+}
+
+/// The head of a control statement's line without its ` {`, when the line
+/// is one: `if (c) {`, `do {`, `switch (x) {`, or `if (0) { // constant: …`
+/// with its note kept on the head. A function's `{` alone, a label and a
+/// statement are not.
+fn control_head(trimmed: &str) -> Option<String> {
+    if trimmed == "{" || trimmed.starts_with("} ") || trimmed.starts_with("//") {
+        return None;
+    }
+    if let Some(head) = trimmed.strip_suffix(" {") {
+        return Some(head.to_string());
+    }
+    let (head, note) = trimmed.split_once(" { //")?;
+    Some(format!("{head} //{note}"))
 }
 
 /// The dead statements, found again as they are printed: each statement
@@ -419,6 +577,118 @@ impl Marks<'_> {
         }
         lines
     }
+}
+
+/// The condition and the two statements an assignment or a return of a
+/// conditional expression expands to: `x = c ? a : b` is `if (c) x = a;
+/// else x = b;`, and `return c ? a : b` the same with returns.
+fn expanded(node: &AstNode) -> Option<(AstNode, AstNode, AstNode)> {
+    match node {
+        AstNode::Assign { lhs, rhs } => match rhs.as_ref() {
+            AstNode::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => Some((
+                (**cond).clone(),
+                AstNode::Assign {
+                    lhs: lhs.clone(),
+                    rhs: then.clone(),
+                },
+                AstNode::Assign {
+                    lhs: lhs.clone(),
+                    rhs: otherwise.clone(),
+                },
+            )),
+            _ => None,
+        },
+        AstNode::Return { value: Some(value) } => match value.as_ref() {
+            AstNode::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => Some((
+                (**cond).clone(),
+                AstNode::Return {
+                    value: Some(then.clone()),
+                },
+                AstNode::Return {
+                    value: Some(otherwise.clone()),
+                },
+            )),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `line` broken at the commas between the arguments of its outermost call
+/// so that no piece runs past column `width` where that can be helped: the
+/// first piece ends after an argument's comma, the rest stand indented two
+/// levels past `pad`. A line with no such comma is returned as it is.
+fn wrapped(line: &str, width: usize, pad: &str, indent: &str) -> Vec<String> {
+    // The commas at depth one inside the first parenthesis, outside any
+    // string, are where the line may break; the break is after the comma
+    // and the space that follows it.
+    let chars: Vec<char> = line.chars().collect();
+    let mut breaks = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (i, c) in chars.iter().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if *c == '\\' {
+                escaped = true;
+            } else if *c == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 1 => breaks.push(i + 1),
+            _ => {}
+        }
+    }
+    if breaks.is_empty() {
+        return vec![line.to_string()];
+    }
+    let continuation = format!("{pad}{indent}{indent}");
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut head = String::new();
+    for end in breaks.into_iter().chain(std::iter::once(chars.len())) {
+        let piece: String = chars[start..end].iter().collect();
+        let piece = if head.is_empty() && start > 0 {
+            piece.trim_start().to_string()
+        } else {
+            piece
+        };
+        let joined = if head.is_empty() {
+            if start == 0 {
+                piece.clone()
+            } else {
+                format!("{continuation}{piece}")
+            }
+        } else {
+            format!("{head}{piece}")
+        };
+        if joined.chars().count() > width && !head.is_empty() {
+            pieces.push(head.trim_end().to_string());
+            head = format!("{continuation}{}", piece.trim_start());
+        } else {
+            head = joined;
+        }
+        start = end;
+    }
+    if !head.is_empty() {
+        pieces.push(head.trim_end().to_string());
+    }
+    pieces
 }
 
 /// Whether every line is a comment — or there is none — so that a Python
@@ -525,11 +795,50 @@ fn emit_statements(
                     format!("{pad}continue{semicolon}"),
                     &statement.addresses,
                 ),
+                node if style.ternaries == Ternaries::Expand && expanded(node).is_some() => {
+                    // `x = c ? a : b;` as an `if`/`else` that assigns in each
+                    // arm; a return of one the same.
+                    let (cond, then, otherwise) = expanded(node).expect("checked");
+                    push(
+                        lines,
+                        format!("{pad}{}", style.head("if", &condition(&cond, style))),
+                        &statement.addresses,
+                    );
+                    let arm = |node: &AstNode, lines: &mut Vec<Line>| {
+                        let mut text = String::new();
+                        emit_into(node, &mut text, 0, style);
+                        for part in text.lines() {
+                            push(
+                                lines,
+                                format!("{pad}{}{part}", style.indent),
+                                &statement.addresses,
+                            );
+                        }
+                    };
+                    arm(&then, lines);
+                    lines.push(Line {
+                        text: if brace {
+                            format!("{pad}}} else {{")
+                        } else {
+                            format!("{pad}else:")
+                        },
+                        addresses: Vec::new(),
+                    });
+                    arm(&otherwise, lines);
+                    close(lines);
+                }
                 node => {
                     let mut text = String::new();
                     emit_into(node, &mut text, 0, style);
                     for part in text.lines() {
-                        push(lines, format!("{pad}{part}"), &statement.addresses);
+                        let whole = format!("{pad}{part}");
+                        if style.wrap > 0 && whole.chars().count() > style.wrap {
+                            for piece in wrapped(&whole, style.wrap, &pad, &style.indent) {
+                                push(lines, piece, &statement.addresses);
+                            }
+                        } else {
+                            push(lines, whole, &statement.addresses);
+                        }
                     }
                 }
             },
@@ -1114,8 +1423,12 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
             if let Some(send) = message_send(callee, args, style).filter(|_| style.message_sends) {
                 out.push_str(&send);
             } else {
+                let names = match callee.as_ref() {
+                    AstNode::FunctionName { address, .. } => style.hints.get(address),
+                    _ => None,
+                };
                 expr(callee, out, true, style);
-                arguments(args, out, style);
+                arguments_named(args, names.map(Vec::as_slice), out, style);
             }
         }
         AstNode::Intrinsic { name, args } => {
@@ -1252,12 +1565,38 @@ fn message_send(callee: &AstNode, args: &[AstNode], style: &Style) -> Option<Str
 
 /// A parenthesised, comma-separated argument list.
 fn arguments(args: &[AstNode], out: &mut String, style: &Style) {
+    arguments_named(args, None, out, style);
+}
+
+/// The arguments in parentheses, each labelled with the callee's parameter
+/// name where one is known: `/* a */ 1`, or `a=1` in Python.
+fn arguments_named(args: &[AstNode], names: Option<&[String]>, out: &mut String, style: &Style) {
+    // Python names an argument with `name=`, after which every argument
+    // must be named: the labels go on only where every argument has one.
+    let names =
+        names.filter(|names| style.language != Language::Python || names.len() >= args.len());
     out.push('(');
     for (i, a) in args.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        expr(a, out, false, style);
+        let mut text = String::new();
+        expr(a, &mut text, false, style);
+        // An argument that is the parameter's own name needs no label.
+        if let Some(name) = names
+            .and_then(|names| names.get(i))
+            .filter(|name| **name != text)
+        {
+            match style.language {
+                Language::Python => {
+                    let _ = write!(out, "{name}=");
+                }
+                _ => {
+                    let _ = write!(out, "/* {name} */ ");
+                }
+            }
+        }
+        out.push_str(&text);
     }
     out.push(')');
 }
@@ -2157,5 +2496,306 @@ mod tests {
                 "{dropped}"
             );
         }
+    }
+
+    #[test]
+    fn the_formatting_options_break_braces_expand_ternaries_wrap_and_label_arguments() {
+        let with = |pairs: &[(&str, &str)]| {
+            let options = Options::from_pairs(pairs.iter().copied()).expect("options");
+            emit_function(&every_statement(), &options)
+        };
+        // Broken braces: each `{` under its head, `else` alone, the
+        // function's own brace as it was, the addresses on the heads.
+        let broken = with(&[("brace-style", "broken")]);
+        let text = broken.text();
+        assert!(text.contains("long f(int a)\n{\n"), "{text}");
+        assert!(
+            text.contains(
+                "  for (i = 0; i < a; i = i + 1)\n  {\n    total = total + (long)i;\n  }\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  if (a == 0)\n  {\n    return 0;\n  }\n  else\n  {\n    total = total * 2;\n  }\n"),
+            "{text}"
+        );
+        assert!(text.contains("  switch (a)\n  {\n  case 1:"), "{text}");
+        assert!(
+            text.contains("  do\n  {\n    total = total >> 1;\n  } while (total > 0x64);"),
+            "{text}"
+        );
+        assert!(text.contains("  while (1)\n  {\n"), "{text}");
+        let head = broken
+            .lines
+            .iter()
+            .position(|line| line.text.trim() == "if (a == 0)")
+            .expect("the head");
+        assert_eq!(
+            broken.lines[head].addresses,
+            vec![0x40],
+            "the head keeps the condition's addresses"
+        );
+        assert_eq!(broken.lines[head + 1].text, "  {");
+        assert!(
+            broken.lines[head + 1].addresses.is_empty(),
+            "a brace alone has none"
+        );
+        // Rust and Python are not touched.
+        let rust = with(&[("brace-style", "broken"), ("language", "rust")]).text();
+        assert!(rust.contains("if a == 0 {"), "{rust}");
+
+        // Ternaries: the assignment in the loop becomes an if/else.
+        let text = with(&[("ternaries", "expand")]).text();
+        assert!(
+            text.contains("  while (1) {\n    if (total && a) {\n      total = total;\n    } else {\n      total = *(long *)a;\n    }\n  }\n"),
+            "{text}"
+        );
+        let python = with(&[("ternaries", "expand"), ("language", "python")]).text();
+        assert!(
+            python.contains("  while True:\n    if total and a:\n      total = total\n    else:\n      total = deref_long(a)\n"),
+            "{python}"
+        );
+        // A return of a conditional expression returns in each arm.
+        let mut function = every_statement();
+        function.body = vec![Statement {
+            node: AstNode::Return {
+                value: Some(Box::new(AstNode::Ternary {
+                    cond: Box::new(AstNode::binary(
+                        AstNode::var("a"),
+                        BinaryOp::Less,
+                        AstNode::constant(0, 4),
+                    )),
+                    then: Box::new(AstNode::constant(1, 8)),
+                    otherwise: Box::new(AstNode::constant(2, 8)),
+                })),
+            },
+            addresses: vec![0x90],
+            kind: StatementKind::Plain,
+        }];
+        let text = emit_function(
+            &function,
+            &Options::from_pairs([("ternaries", "expand")]).expect("an option"),
+        )
+        .text();
+        assert!(
+            text.contains("  if (a < 0) {\n    return 1;\n  } else {\n    return 2;\n  }\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_call_is_wrapped_between_its_arguments() {
+        let call = AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: "printf".to_string(),
+                address: 0x2000,
+            }),
+            args: vec![
+                AstNode::StringLiteral {
+                    text: "%d, %d, %d".to_string(),
+                },
+                AstNode::var("first_argument"),
+                AstNode::var("second_argument"),
+                AstNode::var("third"),
+            ],
+        };
+        let mut function = every_statement();
+        function.locals.clear();
+        function.body = vec![Statement {
+            node: call,
+            addresses: vec![0x90],
+            kind: StatementKind::Plain,
+        }];
+        let one = emit_function(&function, &Options::default());
+        let line = one
+            .lines
+            .iter()
+            .find(|l| l.text.contains("printf"))
+            .expect("the call");
+        assert_eq!(
+            line.text,
+            "  printf(\"%d, %d, %d\", first_argument, second_argument, third);"
+        );
+        // The comma inside the string is not a break; every piece carries
+        // the statement's addresses.
+        let wrapped = emit_function(
+            &function,
+            &Options::from_pairs([("wrap", "40")]).expect("an option"),
+        );
+        let pieces: Vec<&Line> = wrapped
+            .lines
+            .iter()
+            .filter(|l| !l.addresses.is_empty() && l.addresses != vec![0x10])
+            .collect();
+        assert_eq!(
+            pieces.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            [
+                "  printf(\"%d, %d, %d\", first_argument,",
+                "      second_argument, third);",
+            ],
+            "{}",
+            wrapped.text()
+        );
+        assert!(pieces.iter().all(|l| l.addresses == vec![0x90]));
+        // A statement no wider than the column, or without a call's commas,
+        // is left alone.
+        let wide = emit_function(
+            &function,
+            &Options::from_pairs([("wrap", "120")]).expect("an option"),
+        );
+        assert_eq!(wide.text(), one.text());
+        assert_eq!(
+            super::wrapped("  x = y + z;", 4, "  ", "  "),
+            vec!["  x = y + z;"]
+        );
+    }
+
+    #[test]
+    fn the_callees_parameter_names_label_the_arguments_when_asked() {
+        struct Known;
+        impl Callees for Known {
+            fn parameter_names(&self, address: u64) -> Option<Vec<String>> {
+                (address == 0x2000).then(|| vec!["count".to_string(), "base".to_string()])
+            }
+        }
+        let call = |address: u64, args: Vec<AstNode>| AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: if address == 0x2000 { "sum" } else { "other" }.to_string(),
+                address,
+            }),
+            args,
+        };
+        let three = || {
+            vec![
+                AstNode::var("a"),
+                AstNode::constant(3, 4),
+                AstNode::constant(4, 4),
+            ]
+        };
+        let mut function = every_statement();
+        function.locals.clear();
+        function.body = vec![
+            Statement {
+                node: call(0x2000, three()),
+                addresses: vec![0x90],
+                kind: StatementKind::Plain,
+            },
+            Statement {
+                node: call(0x3000, three()),
+                addresses: vec![0x94],
+                kind: StatementKind::Plain,
+            },
+            Statement {
+                node: call(0x2000, vec![AstNode::var("count"), AstNode::constant(7, 4)]),
+                addresses: vec![0x98],
+                kind: StatementKind::Plain,
+            },
+        ];
+        let off = emit_function_in(&function, &Options::default(), &[], &Known).text();
+        assert!(
+            off.contains("  sum(a, 3, 4);\n  other(a, 3, 4);\n  sum(count, 7);"),
+            "{off}"
+        );
+        let names = Options::from_pairs([("call-hints", "names")]).expect("an option");
+        let on = emit_function_in(&function, &names, &[], &Known).text();
+        // A third argument past the names stands bare; an unknown callee's
+        // all do; an argument that is the parameter's own name needs none.
+        assert!(
+            on.contains(
+                "  sum(/* count */ a, /* base */ 3, 4);\n  other(a, 3, 4);\n  sum(count, /* base */ 7);"
+            ),
+            "{on}"
+        );
+        // Python names every argument or none: a bare one after a named one
+        // would not be Python.
+        let python = Options::from_pairs([("call-hints", "names"), ("language", "python")])
+            .expect("options");
+        let on = emit_function_in(&function, &python, &[], &Known).text();
+        assert!(
+            on.contains("  sum(a, 3, 4)\n  other(a, 3, 4)\n  sum(count, base=7)"),
+            "{on}"
+        );
+        // Without a source of names the option changes nothing.
+        assert_eq!(emit_function(&function, &names).text(), off);
+    }
+
+    #[test]
+    fn the_dead_lines_follow_the_broken_braces() {
+        use crate::lift::{Statement, StatementKind};
+        let var = AstNode::var;
+        let plain = |node: AstNode, at: u64| Statement {
+            node,
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        };
+        let assign = |name: &str, rhs: AstNode| AstNode::Assign {
+            lhs: Box::new(AstNode::var(name)),
+            rhs: Box::new(rhs),
+        };
+        // x = 1 (overwritten); if (0) { y = 2; } x = a; return x.
+        let function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x10,
+            return_type: "int".to_string(),
+            params: vec![Variable {
+                ty: "int".to_string(),
+                name: "a".to_string(),
+            }],
+            locals: vec![
+                Variable {
+                    ty: "int".to_string(),
+                    name: "x".to_string(),
+                },
+                Variable {
+                    ty: "int".to_string(),
+                    name: "y".to_string(),
+                },
+            ],
+            body: vec![
+                plain(assign("x", AstNode::constant(1, 4)), 0x20),
+                Statement {
+                    node: AstNode::ConstantCondition {
+                        holds: false,
+                        compared: Box::new(AstNode::binary(var("a"), BinaryOp::Less, var("a"))),
+                    },
+                    addresses: vec![0x24],
+                    kind: StatementKind::If {
+                        then_part: vec![plain(assign("y", AstNode::constant(2, 4)), 0x28)],
+                        else_part: Vec::new(),
+                    },
+                },
+                plain(assign("x", var("a")), 0x30),
+                plain(
+                    AstNode::Return {
+                        value: Some(Box::new(var("x"))),
+                    },
+                    0x34,
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let broken = emit_function(
+            &function,
+            &Options::from_pairs([("brace-style", "broken")]).expect("an option"),
+        );
+        let dead: Vec<&str> = broken
+            .dead_lines
+            .iter()
+            .map(|line| broken.lines[*line].text.as_str())
+            .collect();
+        assert_eq!(
+            dead,
+            [
+                "  x = 1;",
+                "  if (0) // constant: a < a",
+                "  {",
+                "    y = 2;",
+                "  }",
+            ],
+            "{}",
+            broken.text()
+        );
     }
 }

@@ -17,7 +17,7 @@
 //! 32-bit image reads like a 64-bit one.
 //!
 //! The pseudocode is the engine's too: the instructions of a function go
-//! through [`lift_function`] and [`emit_function_with`], and what comes back is C
+//! through [`lift_function`] and [`emit_function_in`], and what comes back is C
 //! with every line mapped to the instructions it came from, or the reason
 //! the lifter refused. The calling convention is read from the image's
 //! language, so a Windows image passes its arguments the Microsoft way, and
@@ -45,7 +45,7 @@ use iced_x86::Formatter as _;
 use ag_engine::arm::ArmVariant;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
-use ag_engine::emit::emit_function_with;
+use ag_engine::emit::{emit_function_in, Callees};
 use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
@@ -2042,9 +2042,30 @@ impl Binary {
             .unwrap_or_else(|| format!("sub_{address:x}"));
 
         let removable = self.removable_of(address);
+        let callees = ImageCallees {
+            image: self,
+            caller: address,
+        };
+        // The registered formatters have the last word on the lines.
+        let formatted = |mut pseudocode: Pseudocode| -> Result<Pseudocode, NotLifted> {
+            ag_engine::plugin::format_pseudocode(
+                &mut pseudocode,
+                address,
+                &name,
+                self.options.language.name(),
+            )
+            .map_err(|reason| NotLifted { reason })?;
+            Ok(pseudocode)
+        };
         if let Some(stages) = self.architecture_stages(&decoded, &cfg, address, &name) {
-            return stages
-                .map(|stages| emit_function_with(&stages.function, &self.options, &removable));
+            return stages.and_then(|stages| {
+                formatted(emit_function_in(
+                    &stages.function,
+                    &self.options,
+                    &removable,
+                    &callees,
+                ))
+            });
         }
         let function = lift_function(
             &decoded.disasm,
@@ -2056,7 +2077,12 @@ impl Binary {
             &ImageSymbols(self),
             &self.options,
         )?;
-        Ok(emit_function_with(&function, &self.options, &removable))
+        formatted(emit_function_in(
+            &function,
+            &self.options,
+            &removable,
+            &callees,
+        ))
     }
 
     /// The control-flow graph of the function at `address`.
@@ -2780,6 +2806,35 @@ impl Entries for Binary {
 /// The image, as the lifter asks it: the names of its functions, and what a
 /// pointer lands on.
 struct ImageSymbols<'a>(&'a Binary);
+
+/// The parameter names of the functions a body calls, from the image's
+/// own lift of each — for the `call-hints` option, which asks only when it
+/// is on.
+struct ImageCallees<'a> {
+    image: &'a Binary,
+    /// The function being printed, which is not asked about itself.
+    caller: u64,
+}
+
+impl Callees for ImageCallees<'_> {
+    fn parameter_names(&self, address: u64) -> Option<Vec<String>> {
+        if address == self.caller || self.image.code_at(address).is_none() {
+            return None;
+        }
+        let stages = self.image.stages(address).ok()?;
+        if stages.function.thunk.is_some() || stages.function.params.is_empty() {
+            return None;
+        }
+        Some(
+            stages
+                .function
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect(),
+        )
+    }
+}
 
 impl Symbols for ImageSymbols<'_> {
     fn function_name(&self, address: u64) -> Option<String> {

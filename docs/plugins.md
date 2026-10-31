@@ -41,6 +41,9 @@ registered, as text or with `--json`.
   ],
   "rewriters": [
     { "name": "unflatten", "command": ["python3", "/opt/toy/unflatten.py"] }
+  ],
+  "formatters": [
+    { "name": "house-style", "command": ["python3", "/opt/toy/format.py"] }
   ]
 }
 ```
@@ -54,7 +57,8 @@ and may give two more commands: `blocks`, which recovers a function's basic bloc
 and `lift`, which lifts a whole function at once (below).
 A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
 Schema of its arguments (an object). A rewriter needs only its command: every function lifted
-passes through it. An entry without a `name` is named for the manifest,
+passes through it. A formatter needs only its command too: every function's pseudocode passes
+through it after the engine has printed it. An entry without a `name` is named for the manifest,
 the second and later with their place (`toy-1`); a name declared twice is reported, and the
 later declaration replaces the earlier. Every command is a list: the program and its
 arguments. A bare program name is found on `PATH`, as a shell finds it; a program that names
@@ -63,7 +67,7 @@ relative; the arguments are passed as they are, with `${dir}` in any element sta
 the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
 not answered by then is ended and its answer is an error.
 
-## The four conversations
+## The five conversations
 
 Each command is given its input on standard input and answers on standard output, in one
 go; its standard error is the terminal's. Numbers may be JSON numbers or hex text such as
@@ -220,6 +224,32 @@ applied in order, each naming blocks and statements as they stand when it is app
 | `{"op": "switch_case", "block": B, "from": T1, "to": T2}` | The cases of `B`'s switch that led to `T1` lead to `T2`. |
 | `{"op": "prune"}` | Drops the blocks the entry no longer reaches and renumbers the rest; until then a block cut off stays, so it can still be copied from. |
 
+**A formatter** is given a function's pseudocode after the engine has printed it — under the
+options in force, `brace-style`, `wrap` and the rest — and answers with the lines as they are
+to be: a house style the options do not cover, a line joined or split, a note added. It is
+run for every function's pseudocode, in the order the formatters were registered; the levels
+(`docs/il.md`) and the transpiler are not formatted. The lines, each with the addresses it
+came from and whether it is dead code the `dead-code` option kept:
+
+```json
+{ "function": 4425, "function_hex": "0x1149", "name": "add", "language": "c",
+  "lines": [
+    { "text": "// returns long: main reads rax after the call", "addresses": [], "addresses_hex": [], "dead": false },
+    { "text": "long add(int a, int b)", "addresses": [4425], "addresses_hex": ["0x1149"], "dead": false },
+    { "text": "{", "addresses": [], "addresses_hex": [], "dead": false },
+    { "text": "  return (long)(a + b);", "addresses": [4440, 4443], "addresses_hex": ["0x1158", "0x115b"], "dead": false },
+    { "text": "}", "addresses": [], "addresses_hex": [], "dead": false }
+  ] }
+```
+
+The answer is `{"lines": […]}` — or nothing, or `{}`, for pseudocode left alone — each line
+an object with its `text` and, optional, its `addresses` (none when left out, so a line
+added maps to no instruction) and whether it is `dead` (false when left out); a bare string
+is a line with neither. The lines replace the function's wholesale, so a formatter that keeps
+a line passes its addresses and its `dead` back. A formatter that fails, or answers with
+something that is not lines, refuses the function's pseudocode with the formatter's name
+and the reason, as a rewriter does the lift.
+
 A command cannot write expressions, only reuse the lifter's; a rewriter in Rust can (below).
 An edit that names a block or statement there is not, a terminator left pointing outside the
 graph, two blocks left at one address, an answer that is not JSON, or a command that fails or
@@ -271,6 +301,14 @@ plugin::register_loader(Arc::new(Toy));
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.
+- `ag_engine::plugin::Formatter` — `name` and `format(&mut Formatting)`, over a function's
+  pseudocode after the engine has printed it: `Formatting` holds the `function`, its `name`,
+  the `language` and the `lines` (each an `emit::Line` with its `text` and `addresses`) with
+  the indices of the `dead` ones, and offers `to_json` and `apply(&answer)`, the shapes the
+  command conversation uses. Registered with `register_formatter`; `formatters()` lists them
+  in the order they run, `unregister_formatter(name)` takes one off, and
+  `format_pseudocode(&mut pseudocode, function, name, language)` runs them all, as the
+  image does after each `emit_function_in`.
 - `ag_engine::plugin::Rewriter` — `name`, `wants(address, name)` (every function unless
   said) and `rewrite(&mut Rewrite)`, over a function's medium-level graph before it is
   structured: `Rewrite` holds the `nodes` (each a `Node` of `Statement`s over `AstNode`s

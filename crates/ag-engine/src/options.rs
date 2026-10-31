@@ -458,6 +458,54 @@ pub const OPTIONS: &[OptionSpec] = &[
             "4",
         )],
     },
+    OptionSpec {
+        name: "brace-style",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["attached", "broken"]),
+        default: "attached",
+        description: "Where a control statement's opening brace goes in C and Objective-C: `attached`, at the end of the head (`if (c) {`), or `broken`, on a line of its own under it, with `else` on its own line too. Rust keeps its braces attached and Python has none.",
+        symptoms: &[symptom(
+            "`if (c) {` next to source that puts every brace on its own line",
+            "broken",
+        )],
+    },
+    OptionSpec {
+        name: "ternaries",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["keep", "expand"]),
+        default: "keep",
+        description: "An assignment or a return of a conditional expression — `x = c ? a : b;` — kept as the one line it is, or expanded to an `if`/`else` that assigns or returns in each arm.",
+        symptoms: &[symptom(
+            "`x = (a && b) ? a : *(long *)b;` where two plain arms would read",
+            "expand",
+        )],
+    },
+    OptionSpec {
+        name: "wrap",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Integer { min: 0, max: 200 },
+        default: "0",
+        description: "The column a statement longer than it is wrapped at, between a call's arguments, the rest indented two levels on the lines after; `0` keeps every statement on one line.",
+        symptoms: &[symptom(
+            "a call of six arguments running off the pane",
+            "80",
+        )],
+    },
+    OptionSpec {
+        name: "call-hints",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["off", "names"]),
+        default: "off",
+        description: "Whether a call's arguments are labelled with the callee's parameter names — `add(/* a */ 1, /* b */ 2)`, or `add(a=1, b=2)` in Python — where the callee is a function of the image whose parameters the lift has named.",
+        symptoms: &[symptom(
+            "`f(1, 0, 0, 1)` where which argument is which cannot be told",
+            "names",
+        )],
+    },
 ];
 
 /// The row named `name`, when there is one.
@@ -705,6 +753,11 @@ pub struct Options {
     pub constant_style: ConstantStyle,
     pub indent: u8,
     pub language: Language,
+    pub brace_style: BraceStyle,
+    pub ternaries: Ternaries,
+    /// The column statements are wrapped at; 0 for never.
+    pub wrap: u16,
+    pub call_hints: CallHints,
 }
 
 /// The analyst's word at one site — the address of a branch or an indirect
@@ -800,6 +853,38 @@ impl Sites for std::collections::BTreeMap<u64, SiteOverride> {
     }
 }
 
+/// Where a control statement's opening brace goes, in a language with
+/// braces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BraceStyle {
+    /// At the end of the head: `if (c) {`.
+    #[default]
+    Attached,
+    /// On a line of its own under the head.
+    Broken,
+}
+
+/// What becomes of an assignment or a return of a conditional expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ternaries {
+    /// The one line it is.
+    #[default]
+    Keep,
+    /// An `if`/`else` assigning or returning in each arm.
+    Expand,
+}
+
+/// Whether a call's arguments are labelled with the callee's parameter
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallHints {
+    /// The arguments alone.
+    #[default]
+    Off,
+    /// `/* name */` before each, or `name=` in Python.
+    Names,
+}
+
 /// The language the pseudocode reads as: the same lift, spelled each
 /// language's way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -851,6 +936,10 @@ impl Default for Options {
             constant_style: ConstantStyle::default(),
             indent: 2,
             language: Language::default(),
+            brace_style: BraceStyle::default(),
+            ternaries: Ternaries::default(),
+            wrap: 0,
+            call_hints: CallHints::default(),
         }
     }
 }
@@ -1077,9 +1166,9 @@ impl Options {
                     ],
                 )?
             }
-            "indent" => {
+            "indent" | "wrap" => {
                 let Kind::Integer { min, max } = spec.kind else {
-                    unreachable!("indent is an integer");
+                    unreachable!("{name} is an integer");
                 };
                 let bad = || OptionError::BadValue {
                     name: spec.name.to_string(),
@@ -1090,7 +1179,35 @@ impl Options {
                 if n < min || n > max {
                     return Err(bad());
                 }
-                self.indent = n as u8;
+                if name == "indent" {
+                    self.indent = n as u8;
+                } else {
+                    self.wrap = n as u16;
+                }
+            }
+            "brace-style" => {
+                self.brace_style = choose(
+                    spec,
+                    value,
+                    &[
+                        ("attached", BraceStyle::Attached),
+                        ("broken", BraceStyle::Broken),
+                    ],
+                )?
+            }
+            "ternaries" => {
+                self.ternaries = choose(
+                    spec,
+                    value,
+                    &[("keep", Ternaries::Keep), ("expand", Ternaries::Expand)],
+                )?
+            }
+            "call-hints" => {
+                self.call_hints = choose(
+                    spec,
+                    value,
+                    &[("off", CallHints::Off), ("names", CallHints::Names)],
+                )?
             }
             _ => unreachable!("every row of OPTIONS is matched above: {name}"),
         }
@@ -1173,7 +1290,20 @@ impl Options {
                     ConstantStyle::Hex => "hex",
                 },
                 "indent" => return Some(self.indent.to_string()),
+                "wrap" => return Some(self.wrap.to_string()),
                 "language" => self.language.name(),
+                "brace-style" => match self.brace_style {
+                    BraceStyle::Attached => "attached",
+                    BraceStyle::Broken => "broken",
+                },
+                "ternaries" => match self.ternaries {
+                    Ternaries::Keep => "keep",
+                    Ternaries::Expand => "expand",
+                },
+                "call-hints" => match self.call_hints {
+                    CallHints::Off => "off",
+                    CallHints::Names => "names",
+                },
                 _ => return None,
             }
             .to_string(),

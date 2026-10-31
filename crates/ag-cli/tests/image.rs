@@ -1954,3 +1954,40 @@ fn the_pseudocode_reads_as_rust_or_python_when_asked() {
         .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn the_formatting_options_reach_the_command_line() {
+    // Broken braces: the `for` head alone, its brace under it.
+    let broken = image(
+        "sample.elf",
+        &["pseudocode", "sum_to", "--option", "brace-style", "broken"],
+    );
+    assert!(
+        broken.contains("  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1)\n  {\n"),
+        "{broken}"
+    );
+    // Wrapped at a narrow column: printf's arguments on two lines.
+    let wrapped = image("sample.elf", &["pseudocode", "main", "--option", "wrap", "16"]);
+    assert!(
+        wrapped.contains("  printf(\"%ld\\n\",\n      v2);"),
+        "{wrapped}"
+    );
+    // The callees' parameter names: main calls sum_to(add(a, 3)).
+    let hinted = image(
+        "sample.elf",
+        &["pseudocode", "main", "--option", "call-hints", "names"],
+    );
+    // add's first argument is `a`, which is its parameter's own name.
+    assert!(
+        hinted.contains("sum_to(/* a */ add(a, /* b */ 3))"),
+        "{hinted}"
+    );
+    let plain = image("sample.elf", &["pseudocode", "main"]);
+    assert!(plain.contains("sum_to(add(a, 3))"), "{plain}");
+    // Expanded ternaries change nothing where there is none.
+    let expanded = image(
+        "sample.elf",
+        &["pseudocode", "main", "--option", "ternaries", "expand"],
+    );
+    assert_eq!(expanded, plain);
+}

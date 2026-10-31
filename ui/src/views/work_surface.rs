@@ -600,6 +600,18 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
     // the first that carries a note wins, in the order the addresses come.
     let renamed = app.renames();
     let mut list = Column::new().spacing(0).width(Length::Fill);
+    // How the text is decorated: braces colored by depth, guides down the
+    // indented blocks, by the engine's indent.
+    let decor = Decor {
+        rainbow: app.rainbow_braces,
+        guides: app.indent_guides,
+        indent: app
+            .options
+            .get("indent")
+            .and_then(|indent| indent.parse().ok())
+            .unwrap_or(2),
+    };
+    let mut depth = 0usize;
 
     for (index, line) in body.lines().enumerate() {
         let addresses = app.work.line_addresses.get(&index).cloned();
@@ -617,7 +629,8 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
             None => text,
         };
         let dead = app.work.dead_lines.contains(&index);
-        list = list.push(pseudocode_row(index, shown, addresses, selection, dead));
+        let spans = spans(&shown, dead, &decor, &mut depth);
+        list = list.push(pseudocode_row(index, spans, addresses, selection));
     }
 
     let body = scrollable(list).height(Length::Fill).width(Length::Fill);
@@ -662,11 +675,14 @@ fn pseudocode_comment_row(text: &str) -> Element<'static, Message> {
 /// highlighted, so the listing and the pseudocode stay in step.
 fn pseudocode_row(
     index: usize,
-    line: String,
+    spans: Vec<(String, iced::Color)>,
     addresses: Option<Vec<u64>>,
     selection: Option<u64>,
-    dead: bool,
 ) -> Element<'static, Message> {
+    let mut text = Row::new().width(Length::Fill);
+    for (piece, color) in spans {
+        text = text.push(Text::new(piece).size(12).color(color).font(MONO));
+    }
     let focused = addresses
         .as_ref()
         .is_some_and(|addresses| selection.is_some_and(|address| addresses.contains(&address)));
@@ -682,14 +698,7 @@ fn pseudocode_row(
                     .font(MONO)
                     .width(Length::Fixed(38.0)),
             )
-            .push(
-                Text::new(line)
-                    .size(12)
-                    // Dead code the analysis kept reads greyed out.
-                    .color(if dead { color::DIM } else { color::TEXT })
-                    .font(MONO)
-                    .width(Length::Fill),
-            ),
+            .push(text),
     )
     .width(Length::Fill)
     .style(move |_| container::Style {
@@ -714,6 +723,130 @@ fn pseudocode_row(
             .into(),
         None => row.into(),
     }
+}
+
+/// How a line of pseudocode is decorated beyond its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decor {
+    /// Braces colored by their depth.
+    pub rainbow: bool,
+    /// A guide down each indented block.
+    pub guides: bool,
+    /// The spaces one level is indented by.
+    pub indent: usize,
+}
+
+/// The colors the braces cycle through, by depth.
+const BRACE_COLORS: [iced::Color; 6] = [
+    color::CYAN,
+    color::AMBER,
+    color::PURPLE,
+    color::GREEN,
+    color::BLUE,
+    color::RED,
+];
+
+/// The pieces of one line of pseudocode with their colors: the text in
+/// `base` — dimmed when the line is dead code — the leading indentation
+/// as guides when asked, and each brace in its depth's color when asked.
+/// `depth` is the brace depth at the line's start, and is left at its end,
+/// so the lines are decorated in order.
+pub fn spans(line: &str, dead: bool, decor: &Decor, depth: &mut usize) -> Vec<(String, iced::Color)> {
+    let base = if dead { color::DIM } else { color::TEXT };
+    let mut spans: Vec<(String, iced::Color)> = Vec::new();
+    let push = |text: String, color: iced::Color, spans: &mut Vec<(String, iced::Color)>| {
+        if text.is_empty() {
+            return;
+        }
+        match spans.last_mut() {
+            Some((last, last_color)) if *last_color == color => last.push_str(&text),
+            _ => spans.push((text, color)),
+        }
+    };
+    let leading = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[leading..];
+    // A closing brace at the line's start closes the depth it was opened at.
+    let closes_first = rest.starts_with('}');
+    if closes_first {
+        *depth = depth.saturating_sub(1);
+    }
+    if decor.guides && decor.indent > 0 && leading >= decor.indent {
+        let levels = leading / decor.indent;
+        let mut guides = String::new();
+        for _ in 0..levels {
+            guides.push('│');
+            guides.push_str(&" ".repeat(decor.indent - 1));
+        }
+        push(guides, color::LINE, &mut spans);
+        push(" ".repeat(leading - levels * decor.indent), base, &mut spans);
+    } else {
+        push(" ".repeat(leading), base, &mut spans);
+    }
+    if !decor.rainbow {
+        push(rest.to_string(), base, &mut spans);
+        if !closes_first {
+            // Keep the depth in step for the lines after.
+            for c in rest.chars() {
+                match c {
+                    '{' => *depth += 1,
+                    '}' => *depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        } else {
+            for c in rest.chars().skip(1) {
+                match c {
+                    '{' => *depth += 1,
+                    '}' => *depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        return spans;
+    }
+    let mut plain = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut first = true;
+    for (i, c) in rest.char_indices() {
+        // A comment is text to its end, braces and all.
+        if !quoted && rest[i..].starts_with("//") {
+            plain.push_str(&rest[i..]);
+            break;
+        }
+        let brace = !quoted && (c == '{' || c == '}');
+        if quoted && escaped {
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        }
+        if brace {
+            push(std::mem::take(&mut plain), base, &mut spans);
+            let level = if c == '{' {
+                let level = *depth;
+                *depth += 1;
+                level
+            } else if first && closes_first {
+                *depth
+            } else {
+                *depth = depth.saturating_sub(1);
+                *depth
+            };
+            let color = if dead {
+                color::DIM
+            } else {
+                BRACE_COLORS[level % BRACE_COLORS.len()]
+            };
+            push(c.to_string(), color, &mut spans);
+        } else {
+            plain.push(c);
+        }
+        first = false;
+    }
+    push(plain, base, &mut spans);
+    spans
 }
 
 /// The control-flow graph view.
@@ -1420,4 +1553,101 @@ fn debug_panel(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_braces_take_their_depths_colors_and_the_guides_stand_in_the_indent() {
+        let decor = Decor {
+            rainbow: true,
+            guides: true,
+            indent: 2,
+        };
+        let mut depth = 0;
+        let head = spans("long f(int a)", false, &decor, &mut depth);
+        assert_eq!(head, vec![("long f(int a)".to_string(), color::TEXT)]);
+        let open = spans("{", false, &decor, &mut depth);
+        assert_eq!(open, vec![("{".to_string(), BRACE_COLORS[0])]);
+        assert_eq!(depth, 1);
+        let inner = spans("  if (a == 0) {", false, &decor, &mut depth);
+        assert_eq!(
+            inner,
+            vec![
+                ("│ ".to_string(), color::LINE),
+                ("if (a == 0) ".to_string(), color::TEXT),
+                ("{".to_string(), BRACE_COLORS[1]),
+            ]
+        );
+        assert_eq!(depth, 2);
+        let body = spans("    return \"{\";", true, &decor, &mut depth);
+        assert_eq!(
+            body,
+            vec![
+                ("│ │ ".to_string(), color::LINE),
+                ("return \"{\";".to_string(), color::DIM),
+            ],
+            "a brace in a string is text, and a dead line is dim"
+        );
+        assert_eq!(depth, 2);
+        // `} else {` closes the block at its level and opens another there.
+        let else_line = spans("  } else {", false, &decor, &mut depth);
+        assert_eq!(else_line.len(), 4, "{else_line:?}");
+        assert_eq!(else_line[1].1, BRACE_COLORS[1]);
+        assert_eq!(else_line[3].1, BRACE_COLORS[1]);
+        assert_eq!(depth, 2);
+        let close = spans("  }", false, &decor, &mut depth);
+        assert_eq!(
+            close,
+            vec![
+                ("│ ".to_string(), color::LINE),
+                ("}".to_string(), BRACE_COLORS[1]),
+            ]
+        );
+        assert_eq!(depth, 1);
+        assert_eq!(
+            spans("}", false, &decor, &mut depth),
+            vec![("}".to_string(), BRACE_COLORS[0])]
+        );
+        assert_eq!(depth, 0);
+        // A brace in a comment, or after an escaped quote, is text.
+        let mut depth = 1;
+        assert_eq!(
+            spans("  if (0) { // constant: {", false, &decor, &mut depth),
+            vec![
+                ("│ ".to_string(), color::LINE),
+                ("if (0) ".to_string(), color::TEXT),
+                ("{".to_string(), BRACE_COLORS[1]),
+                (" // constant: {".to_string(), color::TEXT),
+            ]
+        );
+        assert_eq!(depth, 2);
+        assert_eq!(
+            spans("    s = \"\\\"{\";", false, &decor, &mut depth),
+            vec![
+                ("│ │ ".to_string(), color::LINE),
+                ("s = \"\\\"{\";".to_string(), color::TEXT),
+            ]
+        );
+        assert_eq!(depth, 2);
+        // Nothing asked: the text in one piece, the depth still counted.
+        let plain = Decor {
+            rainbow: false,
+            guides: false,
+            indent: 2,
+        };
+        let mut depth = 0;
+        assert_eq!(
+            spans("  while (1) {", false, &plain, &mut depth),
+            vec![("  while (1) {".to_string(), color::TEXT)]
+        );
+        assert_eq!(depth, 1);
+        assert_eq!(
+            spans("  }", true, &plain, &mut depth),
+            vec![("  }".to_string(), color::DIM)]
+        );
+        assert_eq!(depth, 0);
+    }
 }
