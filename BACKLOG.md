@@ -140,7 +140,7 @@ Filed 2026-10-26.
 
 - [x] MCP server over the ag data layer — [#334](https://github.com/CryptoJones/AdmiralGrace/issues/334)
 - [x] Scripting API with headless script execution — [#335](https://github.com/CryptoJones/AdmiralGrace/issues/335)
-- [ ] Plugin SDK for loaders, architectures and tools — [#336](https://github.com/CryptoJones/AdmiralGrace/issues/336)
+- [x] Plugin SDK for loaders, architectures and tools — [#336](https://github.com/CryptoJones/AdmiralGrace/issues/336)
 
 ### Dynamic analysis
 

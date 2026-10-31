@@ -27,6 +27,7 @@ pub struct Census {
     pub cancel_requested: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Debug, Default)]
 pub struct Disasm {
     pub file_offset_of_segment: u64,
     pub instructions: Vec<DecodedInsn>,

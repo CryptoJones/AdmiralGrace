@@ -146,6 +146,19 @@ cargo run --bin ag -- run ./sample.elf --project ./sample.agproj -- python3 my_s
 
 See [docs/scripting.md](docs/scripting.md).
 
+## Plugins
+
+A loader, an architecture or a tool is added without forking: in Rust, against the traits
+of `ag_engine::plugin` and `ag_image::plugin`; or in any language, as a command declared in
+a JSON manifest in a plugin directory (`AG_PLUGINS`, or `~/.config/ag/plugins`) that `ag`
+finds as it starts. `ag plugins` lists what is registered; `ag tool` runs a plugin's tool.
+
+```bash
+cargo run --bin ag -- plugins
+```
+
+See [docs/plugins.md](docs/plugins.md).
+
 ## Corpus format
 
 A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points. The leading `//` comment header of a body is dropped; the signature and the locals are kept.
@@ -171,7 +184,7 @@ ag docs cli
 ag install-skill --agent claude
 ```
 
-`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, scripting and the workbench.
+`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, plugins, scripting and the workbench.
 
 ## Desktop workbench
 

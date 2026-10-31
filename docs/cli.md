@@ -550,6 +550,15 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
+## Plugins: `ag plugins` and `ag tool`
+
+`ag plugins` lists the plugin directories, the manifests read from them, and every loader,
+architecture and tool registered — as text, or as JSON with `--json`. `ag tool NAME IMAGE
+[--project FILE] [--option N V]… [--arg name=value]…` runs a plugin's tool over the image and
+prints its answer: JSON pretty, or the text it is; a value that reads as JSON is given as
+JSON. A tool's own failure is exit code 1 with its message. The manifests, the three kinds of
+plugin and the conversations the commands speak are in `docs/plugins.md`.
+
 ## An MCP server: `ag mcp`
 
 Language models drive analysis through the Model Context Protocol, and `ag mcp` serves the
@@ -667,7 +676,7 @@ ag install-skill --agent claude
 `ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`,
 `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with
 `--project`). `ag docs` prints the manual: the command reference, the corpus format, the
-project file, the engine's options, scripting and the workbench.
+project file, the engine's options, plugins, scripting and the workbench.
 
 | Command | What it does |
 |---|---|

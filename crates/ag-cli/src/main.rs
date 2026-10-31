@@ -11,6 +11,7 @@ mod docs;
 mod export;
 mod image;
 mod mcp;
+mod plugins;
 mod project;
 mod run;
 mod skill;
@@ -114,6 +115,33 @@ enum Cmd {
         /// The command to run, and its arguments: `-- python3 script.py`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// The plugins: the loaders, architectures and tools registered, and
+    /// the manifests they were read from.
+    Plugins {
+        /// Print the list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a plugin's tool over the image, and print its answer.
+    Tool {
+        /// The tool's name, as `ag plugins` lists it.
+        name: String,
+        /// The program image to run it over.
+        binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
+        /// The project file the tool is told about.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Set an engine option. May be repeated; `ag catalog` lists the
+        /// options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// An argument to the tool, as `name=value`; a value that reads as
+        /// JSON is given as JSON, anything else as text. May be repeated.
+        #[arg(long = "arg", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
+        arguments: Vec<String>,
     },
     /// Assemble one instruction to its bytes, as it would sit at an address.
     Asm {
@@ -276,6 +304,13 @@ fn expand_tilde(p: &Path) -> PathBuf {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // The plugins declared in the plugin directories are there for every
+    // command: a loader for the image about to be opened, an architecture
+    // for its code, a tool for `ag tool` and the server.
+    let (_, problems) = ag_image::plugin::load_all();
+    for problem in problems {
+        eprintln!("warning: a plugin manifest was skipped: {problem}");
+    }
     match cmd_run(cli.cmd) {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
@@ -317,6 +352,23 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Project { binary, raw, cmd } => {
             project::run(binary, raw.spec()?, raw.slice.clone(), cmd)
         }
+        Cmd::Plugins { json } => plugins::list(json),
+        Cmd::Tool {
+            name,
+            binary,
+            raw,
+            project,
+            options,
+            arguments,
+        } => plugins::tool(
+            &name,
+            &binary,
+            raw.spec()?,
+            raw.slice.clone(),
+            project.as_deref(),
+            options,
+            &arguments,
+        ),
         Cmd::Run {
             binary,
             raw,

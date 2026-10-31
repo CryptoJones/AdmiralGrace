@@ -505,6 +505,19 @@ impl Server {
                         "description": tool.description,
                         "inputSchema": tool.schema,
                     }))
+                    // The plugins' tools come after the image's own, under
+                    // their own names; one named like a built-in tool is
+                    // left out, since the built-in answers to the name.
+                    .chain(
+                        ag_image::plugin::tools()
+                            .iter()
+                            .filter(|plugin| !tools().iter().any(|tool| tool.name == plugin.name()))
+                            .map(|plugin| json!({
+                                "name": plugin.name(),
+                                "description": plugin.description(),
+                                "inputSchema": plugin.input_schema(),
+                            }))
+                    )
                     .collect::<Vec<Value>>()
             })),
             "tools/call" => self.call(&params),
@@ -567,8 +580,37 @@ impl Server {
                 ))
             }
         };
-        if !tools().iter().any(|tool| tool.name == name) {
-            return Err((INVALID_PARAMS, format!("unknown tool {name:?}")));
+        let plugin = if tools().iter().any(|tool| tool.name == name) {
+            None
+        } else {
+            Some(
+                ag_image::plugin::tool(name)
+                    .ok_or_else(|| (INVALID_PARAMS, format!("unknown tool {name:?}")))?,
+            )
+        };
+        if let Some(plugin) = plugin {
+            let context = ag_image::plugin::ToolContext {
+                image_path: Some(self.binary.clone()),
+                project_path: self.project.as_ref().map(|project| project.path.clone()),
+            };
+            let arguments = Value::Object(arguments.clone());
+            let answer = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.run(&self.image, &context, &arguments)
+            })) {
+                Ok(Ok(Value::String(text))) => Answer::text(text),
+                Ok(Ok(value)) if value.is_object() => Answer::json(value),
+                Ok(Ok(value)) => Answer::text(value.to_string()),
+                Ok(Err(message)) => Answer::failed(message),
+                Err(_) => Answer::failed(format!("the tool {name} failed inside the plugin")),
+            };
+            let mut result = json!({
+                "content": [ { "type": "text", "text": answer.text } ],
+                "isError": answer.error,
+            });
+            if let Some(structured) = answer.structured {
+                result["structuredContent"] = structured;
+            }
+            return Ok(result);
         }
         // A fault in the engine under one call is that call's failure, not
         // the server's end.

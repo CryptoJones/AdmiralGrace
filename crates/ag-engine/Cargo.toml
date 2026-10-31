@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The manifests of plugins and the answers of external ones are JSON.
+serde_json.workspace = true
 kuna-analysis.workspace = true
 kuna-sleigh.workspace = true
 kuna-base.workspace = true

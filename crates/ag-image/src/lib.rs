@@ -72,6 +72,7 @@ pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
 pub mod graph_export;
+pub mod plugin;
 
 /// One section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,6 +374,9 @@ impl CallGraph {
 /// A program image, read.
 pub struct Binary {
     language: String,
+    /// The registered architecture that decodes the language, when the
+    /// engine's own decoders do not and a plugin's does.
+    plugin_arch: Option<Arc<dyn ag_engine::plugin::Architecture>>,
     /// The width of the program, when the native decoder reads its language.
     bitness: Option<Bitness>,
     /// Which ARM specification the image decodes under, when it is ARM —
@@ -511,6 +515,12 @@ impl Binary {
         // function's symbol carries its mode in its low bit, which is not
         // part of its address.
         let arm = ArmVariant::of_language(&language);
+        // A language neither decoder reads may be a registered plugin's.
+        let plugin_arch = if bitness.is_none() && arm.is_none() {
+            ag_engine::plugin::architecture_for(&language)
+        } else {
+            None
+        };
         let unbit = |address: u64| {
             if arm.is_some_and(|arm| arm.has_modes()) {
                 address & !1
@@ -669,8 +679,11 @@ impl Binary {
                     section: section.clone(),
                     bytes,
                     // An image the decoder does not read is never decoded,
-                    // so the width it would be decoded at does not matter.
-                    bitness: bitness.unwrap_or(Bitness::Bits64),
+                    // so the width it would be decoded at does not matter;
+                    // a plugin's architecture says its own.
+                    bitness: bitness
+                        .or_else(|| plugin_arch.as_ref().map(|arch| arch.bitness(&language)))
+                        .unwrap_or(Bitness::Bits64),
                     decoded: Mutex::new(None),
                 })
             })
@@ -682,6 +695,7 @@ impl Binary {
 
         Binary {
             language,
+            plugin_arch,
             bitness,
             arm,
             symbol_modes,
@@ -1227,6 +1241,18 @@ impl Binary {
             return decoded;
         }
         let bytes = self.patched(&code.bytes, code.section.vma);
+        if let Some(arch) = &self.plugin_arch {
+            let decoded = Arc::new(decode_plugin_section(
+                arch.as_ref(),
+                &self.language,
+                &bytes,
+                code.section.vma,
+            ));
+            if let Ok(mut held) = code.decoded.lock() {
+                *held = Some(Arc::clone(&decoded));
+            }
+            return decoded;
+        }
         let decoded = Arc::new(match self.arm {
             Some(variant) => {
                 let marks = self
@@ -1711,7 +1737,15 @@ impl Binary {
     /// and AArch64; an image of another architecture is read and reported,
     /// but not disassembled.
     pub fn supports_disassembly(&self) -> bool {
-        self.bitness.is_some() || self.arm.is_some()
+        self.bitness.is_some() || self.arm.is_some() || self.plugin_arch.is_some()
+    }
+
+    /// The name of the plugin's architecture decoding the image, when one
+    /// does.
+    pub fn plugin_architecture(&self) -> Option<String> {
+        self.plugin_arch
+            .as_ref()
+            .map(|arch| arch.name().to_string())
     }
 
     /// The disassembly of the function at `address`.
@@ -2645,6 +2679,40 @@ fn decode_arm_section(
     }
 }
 
+/// Decode the bytes of a section through a plugin's architecture; a
+/// section it cannot decode is reported and left empty, as the engine's
+/// own decoders leave one.
+fn decode_plugin_section(
+    arch: &dyn ag_engine::plugin::Architecture,
+    language: &str,
+    bytes: &[u8],
+    base: u64,
+) -> Decoded {
+    match arch.decode_section(language, bytes, base) {
+        Ok(decoded) => Decoded {
+            disasm: decoded.disasm,
+            text: decoded.text,
+            bytes: bytes.to_vec(),
+            base,
+        },
+        Err(error) => {
+            eprintln!(
+                "warning: {} did not decode the section at {base:#x}: {error}",
+                arch.name()
+            );
+            Decoded {
+                disasm: Disasm {
+                    file_offset_of_segment: 0,
+                    instructions: Vec::new(),
+                },
+                text: HashMap::new(),
+                bytes: bytes.to_vec(),
+                base,
+            }
+        }
+    }
+}
+
 /// A decoder that keeps the text of what it decodes.
 struct TextContext {
     /// The engine's decoder, at the width of the program.
@@ -2670,11 +2738,7 @@ impl CpuContext for TextContext {
         let text = match instruction.flow {
             // A byte that does not decode is data, not an instruction, and
             // iced has no spelling for it: it is shown as the byte it is.
-            Flow::Invalid => Some((
-                "db".to_string(),
-                format!("0x{:02x}", bytes[0]),
-                Vec::new(),
-            )),
+            Flow::Invalid => Some(("db".to_string(), format!("0x{:02x}", bytes[0]), Vec::new())),
             _ => iced_text(bytes, address, self.inner.bitness()),
         };
 
@@ -2826,11 +2890,19 @@ mod tests {
 
         assert_eq!(
             decoded.text.get(&0x8049000),
-            Some(&("push".to_string(), "ebp".to_string(), vec!["ebp".to_string()]))
+            Some(&(
+                "push".to_string(),
+                "ebp".to_string(),
+                vec!["ebp".to_string()]
+            ))
         );
         assert_eq!(
             decoded.text.get(&0x8049001),
-            Some(&("mov".to_string(), "ebp,esp".to_string(), vec!["ebp".to_string(), "esp".to_string()]))
+            Some(&(
+                "mov".to_string(),
+                "ebp,esp".to_string(),
+                vec!["ebp".to_string(), "esp".to_string()]
+            ))
         );
     }
 
@@ -3215,8 +3287,11 @@ mod named_registers {
         // mov rax,[rip+0x1234] : 48 8b 05 34 12 00 00. iced resolves the
         // address and prints `000000000000223Bh`, not `rip`, so `rip` is
         // not a token a rename could replace in the text.
-        let decoded =
-            decode_section(&[0x48, 0x8b, 0x05, 0x34, 0x12, 0x00, 0x00], 0x1000, Bitness::Bits64);
+        let decoded = decode_section(
+            &[0x48, 0x8b, 0x05, 0x34, 0x12, 0x00, 0x00],
+            0x1000,
+            Bitness::Bits64,
+        );
         let (mnemonic, operands, registers) = decoded.text.get(&0x1000).expect("decoded").clone();
         assert_eq!(mnemonic, "mov");
         assert!(
