@@ -35,7 +35,7 @@
 //! strings of the data sections — and that is what the workbench and the CLI
 //! both read.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -451,6 +451,13 @@ pub struct Binary {
     /// address of the function that declares them: taken out of the
     /// pseudocode even when the dead code is kept.
     removable_stores: Mutex<BTreeMap<u64, Vec<String>>>,
+    /// The analyst's words on which functions are inlined into their
+    /// callers' pseudocode, by entry: `true` to inline, `false` never to.
+    inlines: Mutex<BTreeMap<u64, bool>>,
+    /// The functions being lifted, by the thread lifting them, so that a
+    /// cycle of calls through the bodies inlined is not followed round —
+    /// and another thread lifting the same function at once is no cycle.
+    inline_visiting: Mutex<HashSet<(std::thread::ThreadId, u64)>>,
     /// Whether each function never returns, as the walks found; forgotten
     /// with the walks. Decided outside the lock, so two threads asking at
     /// once may both decide it — the same answer, written twice.
@@ -775,6 +782,8 @@ impl Binary {
             noreturn_visiting: Mutex::new(BTreeSet::new()),
             facts_visiting: Mutex::new(BTreeSet::new()),
             removable_stores: Mutex::new(BTreeMap::new()),
+            inlines: Mutex::new(BTreeMap::new()),
+            inline_visiting: Mutex::new(HashSet::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
             plugin_stages: Mutex::new(HashMap::new()),
@@ -1552,6 +1561,37 @@ impl Binary {
         true
     }
 
+    /// Tell the lift which functions to inline into their callers'
+    /// pseudocode — by entry, `true` to inline and `false` never to — and
+    /// say whether that changed anything. The pseudocode and the levels are
+    /// read again after; the walks are kept, since inlining changes no
+    /// function's graph.
+    pub fn set_inlines(&self, inlines: BTreeMap<u64, bool>) -> bool {
+        if let Ok(mut held) = self.inlines.lock() {
+            if *held == inlines {
+                return false;
+            }
+            *held = inlines;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        true
+    }
+
+    /// Whether the analyst said to inline the function at `address` into
+    /// its callers' pseudocode.
+    pub fn inlines(&self, address: u64) -> bool {
+        self.inlines
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).copied())
+            .unwrap_or(false)
+    }
+
     /// The variables of the function at `address` whose dead stores go.
     fn removable_of(&self, address: u64) -> Vec<String> {
         self.removable_stores
@@ -2235,16 +2275,19 @@ impl Binary {
                 ))
             });
         }
-        let function = lift_function(
-            &decoded.disasm,
-            &cfg,
-            address,
-            &name,
-            code.bitness,
-            self.abi(),
-            &ImageSymbols(self),
-            &self.options,
-        )?;
+        let function = {
+            let _lifting = Lifting::new(self, address);
+            lift_function(
+                &decoded.disasm,
+                &cfg,
+                address,
+                &name,
+                code.bitness,
+                self.abi(),
+                &ImageSymbols(self),
+                &self.options,
+            )?
+        };
         formatted(emit_function_in(
             &function,
             &self.options,
@@ -2482,16 +2525,19 @@ impl Binary {
     ) -> Result<Arc<Stages>, NotLifted> {
         match self.architecture_stages(decoded, cfg, address, name) {
             Some(stages) => stages,
-            None => Ok(Arc::new(ag_engine::lift::lift_stages(
-                &decoded.disasm,
-                cfg,
-                address,
-                name,
-                code.bitness,
-                self.abi(),
-                &ImageSymbols(self),
-                &self.options,
-            )?)),
+            None => {
+                let _lifting = Lifting::new(self, address);
+                Ok(Arc::new(ag_engine::lift::lift_stages(
+                    &decoded.disasm,
+                    cfg,
+                    address,
+                    name,
+                    code.bitness,
+                    self.abi(),
+                    &ImageSymbols(self),
+                    &self.options,
+                )?))
+            }
         }
     }
 
@@ -2995,6 +3041,38 @@ impl Entries for Binary {
 /// pointer lands on.
 struct ImageSymbols<'a>(&'a Binary);
 
+/// A lift of one function under way on this thread, for as long as the
+/// value lives: a call to the function from within it — from a body being
+/// inlined into it — is a cycle, and is not inlined.
+struct Lifting<'a> {
+    image: &'a Binary,
+    /// The key, when this lift put it there: an outer lift of the same
+    /// function takes it away.
+    key: Option<(std::thread::ThreadId, u64)>,
+}
+
+impl<'a> Lifting<'a> {
+    fn new(image: &'a Binary, address: u64) -> Self {
+        let key = (std::thread::current().id(), address);
+        let key = image
+            .inline_visiting
+            .lock()
+            .ok()
+            .and_then(|mut visiting| visiting.insert(key).then_some(key));
+        Self { image, key }
+    }
+}
+
+impl Drop for Lifting<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key {
+            if let Ok(mut visiting) = self.image.inline_visiting.lock() {
+                visiting.remove(&key);
+            }
+        }
+    }
+}
+
 /// The parameter names of the functions a body calls, from the image's
 /// own lift of each — for the `call-hints` option, which asks only when it
 /// is on.
@@ -3093,6 +3171,30 @@ impl Symbols for ImageSymbols<'_> {
             held.insert(address, facts.clone());
         }
         facts
+    }
+
+    /// The function's own lift, when the analyst said to inline it: lifted
+    /// afresh for each caller, the functions it inlines inlined in turn; a
+    /// cycle of calls is not followed round.
+    fn inline_body(&self, address: u64) -> Option<Result<ag_engine::lift::LiftedFunction, String>> {
+        if !self.0.inlines(address) {
+            return None;
+        }
+        let key = (std::thread::current().id(), address);
+        if self
+            .0
+            .inline_visiting
+            .lock()
+            .map_or(true, |visiting| visiting.contains(&key))
+        {
+            return Some(Err("it is recursive".to_string()));
+        }
+        Some(
+            self.0
+                .stages(address)
+                .map(|stages| stages.function.clone())
+                .map_err(|error| format!("it is not lifted: {}", error.reason)),
+        )
     }
 
     /// The call graph's callers of the function, each call site decided by

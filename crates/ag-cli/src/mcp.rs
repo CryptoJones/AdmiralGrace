@@ -337,6 +337,18 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_inline",
+            description: "Say whether a function is inlined into its callers' pseudocode: a call to it reads as its own lifted body — its parameters standing for the call's arguments, its locals declared in the caller as `<function>_<local>`, the value it returns at its end the call's value — after the comment `// inlined: <function>`. A call stays where the body cannot stand in its place — its body has a `goto` or returns before its end, the call passes another number of arguments, the call is inside a larger expression and the body is more than one `return` — and the caller's leading comments say why: `f is not inlined at 0x401020: its body has a goto`. The pseudocode is read again with the word. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "on": { "type": ["boolean", "null"], "description": "true (the default) to inline it, false never to, null to leave it to the analysis, which inlines nothing by itself." },
+                },
+                "required": ["function"]
+            }),
+        },
+        Tool {
             name: "set_dead_stores",
             description: "Say whether the stores to a local variable that nothing reads are taken out of the pseudocode even when the dead code is kept: `drop` true takes them out, false leaves them in, marked. The variable is named as the pseudocode declares it, under the function that declares it. The project is saved and the pseudocode read again.",
             schema: json!({
@@ -1009,6 +1021,23 @@ impl Server {
                     address,
                 )))
             }
+            "set_inline" => {
+                let function = text("function")?;
+                let address = crate::image::find_function(&self.image, function.trim())
+                    .ok_or_else(|| format!("no function matching {function:?}"))?;
+                let on = match arguments.get("on") {
+                    None => Some(true),
+                    Some(Value::Null) => None,
+                    Some(Value::Bool(on)) => Some(*on),
+                    Some(_) => return Err("\"on\" is true, false or null".to_string()),
+                };
+                self.change(TargetKind::Function, address, |record| record.inline = on)?;
+                self.image.set_inlines(self.project()?.file.inlines());
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
             "set_dead_stores" => {
                 let address = parse_address(&text("address")?)?;
                 let variable = text("variable")?;
@@ -1667,6 +1696,7 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
             "references": record.references,
             "color": record.color,
             "overrides": record.overrides,
+            "inline": record.inline,
         })
     };
     json!({
@@ -1886,6 +1916,7 @@ mod tests {
                 "set_name",
                 "set_comment",
                 "set_override",
+                "set_inline",
                 "set_dead_stores",
                 "set_bookmark",
                 "bookmarks",

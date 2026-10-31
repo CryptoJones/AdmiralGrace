@@ -11,6 +11,7 @@ pub mod emit;
 pub mod emulate;
 pub mod il;
 pub mod image;
+pub mod inline;
 pub mod lift;
 pub mod liveness;
 pub mod objc;

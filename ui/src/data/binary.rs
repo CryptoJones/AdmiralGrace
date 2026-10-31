@@ -390,6 +390,10 @@ impl Provider for BinaryProvider {
         self.binary.set_removable_stores(removable)
     }
 
+    fn set_inlines(&self, inlines: BTreeMap<u64, bool>) -> bool {
+        self.binary.set_inlines(inlines)
+    }
+
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
         Some(self.byte_rows(address))
     }

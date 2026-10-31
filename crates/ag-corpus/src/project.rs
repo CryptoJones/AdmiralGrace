@@ -533,6 +533,14 @@ pub struct Annotation {
     /// even when the dead code is kept. Absent means kept and marked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drop_stores: bool,
+    /// On a function's record: the analyst's word that a call to the
+    /// function reads as the function's own body in its callers'
+    /// pseudocode — `true` to inline it, `false` never to. Absent leaves it
+    /// to the analysis, which inlines nothing by itself. A reader that does
+    /// not know the field prints the call and misreads nothing, so the
+    /// format version does not change for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<bool>,
 }
 
 impl Annotation {
@@ -562,6 +570,7 @@ impl Annotation {
             mode: None,
             overrides: BTreeMap::new(),
             drop_stores: false,
+            inline: None,
         }
     }
 
@@ -591,6 +600,7 @@ impl Annotation {
             mode: None,
             overrides: BTreeMap::new(),
             drop_stores: false,
+            inline: None,
         }
     }
 
@@ -619,6 +629,7 @@ impl Annotation {
             mode: None,
             overrides: BTreeMap::new(),
             drop_stores: false,
+            inline: None,
         }
     }
 
@@ -834,6 +845,7 @@ impl Annotation {
             && self.mode.is_none()
             && self.overrides.is_empty()
             && !self.drop_stores
+            && self.inline.is_none()
     }
 }
 
@@ -1293,6 +1305,21 @@ impl ProjectFile {
                 .push(variable.to_string());
         }
         removable
+    }
+
+    /// The analyst's words on which functions are inlined into their
+    /// callers' pseudocode, by the value of each function's entry: `true`
+    /// to inline it, `false` never to. A word on a spaced address keys on
+    /// its value, as an override does.
+    pub fn inlines(&self) -> BTreeMap<u64, bool> {
+        self.places()
+            .filter(|a| !a.block)
+            .filter_map(|a| {
+                let on = a.inline?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, on))
+            })
+            .collect()
     }
 
     /// The analyst's overrides, by the value of the address each is at —
@@ -2430,6 +2457,46 @@ mod tests {
         record.drop_stores = true;
         assert!(!record.is_empty());
         record.drop_stores = false;
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_word_to_inline_a_function_is_kept_on_its_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Function, "0x401000")
+            .inline = Some(true);
+        project
+            .annotation_mut(TargetKind::Function, "0x401020")
+            .inline = Some(false);
+        // A word on a block, or on a thing at the address, is not the
+        // function's.
+        project
+            .annotation_mut(TargetKind::Region, "0x401040")
+            .inline = Some(true);
+        project.variable_mut("0x401040", "x").inline = Some(true);
+        let inlines = project.inlines();
+        assert_eq!(
+            inlines,
+            BTreeMap::from([(0x401000, true), (0x401020, false)])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"inline\": true"), "{json}");
+        assert!(json.contains("\"inline\": false"), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.inlines(), inlines);
+        assert_eq!(read.format, FORMAT_VERSION);
+        // A record without the field reads as no word.
+        let bare = ProjectFile::from_json(
+            r#"{"format": 6, "annotations": [{"kind": "function", "address": "0x401000", "name": "f"}]}"#,
+        )
+        .unwrap();
+        assert!(bare.inlines().is_empty());
+        // The word alone keeps a record; cleared, the record goes.
+        let mut record = Annotation::new(TargetKind::Function, "0x401000");
+        record.inline = Some(false);
+        assert!(!record.is_empty());
+        record.inline = None;
         assert!(record.is_empty());
     }
 }

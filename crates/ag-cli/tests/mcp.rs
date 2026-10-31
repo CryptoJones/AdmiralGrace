@@ -163,3 +163,79 @@ fn a_project_file_is_made_and_written_through_the_server() {
         .is_some_and(|record| record.drop_stores));
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn a_function_is_marked_inline_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-inline-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("sample.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"set_inline","arguments":{{"function":"add"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"decompile","arguments":{{"target":"main"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"set_inline","arguments":{{"function":"0x1149","on":null}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"decompile","arguments":{{"target":"main"}}}}}}"#
+        )
+        .unwrap();
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 4);
+    assert_eq!(replies[0]["result"]["isError"], false, "{:?}", replies[0]);
+    assert!(
+        replies[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"inline\": true"),
+        "{:?}",
+        replies[0]
+    );
+    // add's body is one `return`, spliced into the argument it was.
+    let decompiled = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        decompiled.contains("  // inlined: add\n  v2 = sum_to(3 + a);\n"),
+        "{decompiled}"
+    );
+    let decompiled = replies[3]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        decompiled.contains("v2 = sum_to(add(a, 3));"),
+        "{decompiled}"
+    );
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    assert!(
+        saved.inlines().is_empty(),
+        "the word taken back leaves none"
+    );
+    let _ = std::fs::remove_file(&project);
+}
