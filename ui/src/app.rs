@@ -113,6 +113,14 @@ pub enum Message {
     EditColor,
     /// Set or clear the highlight color on the block holding the selection.
     EditColorBlock,
+    /// Set or clear the analyst's text on the block holding the selection:
+    /// its title in the graph.
+    EditBlockText,
+    /// Put the block holding the selection in a group, or take it out: the
+    /// blocks of a group are one node of the graph.
+    EditGroup,
+    /// Move the selection to a neighbouring block of the graph.
+    GraphMove(crate::views::graph::Direction),
     /// Record a cross reference from the selection that the analysis
     /// cannot see.
     EditReference,
@@ -256,6 +264,10 @@ pub enum PromptKind {
     },
     /// The tags on the selection, as words separated by spaces or commas.
     Tags,
+    /// The analyst's text on the block holding the selection.
+    BlockText,
+    /// The group the block holding the selection is in.
+    Group,
     /// A highlight color: on the selection, or on the block holding it.
     Color {
         /// Whether the color goes on the block rather than the one place.
@@ -425,6 +437,28 @@ pub(crate) struct Renames {
     /// The highlight on the function on screen, when the analyst gave it
     /// one: the color every line of it falls back to.
     function_color: Option<iced::Color>,
+    /// The analyst's text on blocks, keyed by the bare hex address the
+    /// block starts at: the block's title in the graph.
+    block_labels: std::collections::HashMap<String, String>,
+    /// The groups blocks are drawn in, keyed the same way: every block of
+    /// a function in one group is one node of the graph.
+    block_groups: std::collections::HashMap<String, String>,
+}
+
+impl Renames {
+    /// Put the block starting at `from` in `group`, as the analyst would.
+    #[cfg(test)]
+    pub(crate) fn set_block_group(&mut self, from: u64, group: &str) {
+        self.block_groups
+            .insert(format!("{from:#x}"), group.to_string());
+    }
+
+    /// Put `label` on the block starting at `from`, as the analyst would.
+    #[cfg(test)]
+    pub(crate) fn set_block_label(&mut self, from: u64, label: &str) {
+        self.block_labels
+            .insert(format!("{from:#x}"), label.to_string());
+    }
 }
 
 /// One analyst comment, with where it stands.
@@ -492,6 +526,20 @@ impl Renames {
     }
 
     /// The analyst's highlight on the block starting at `from`.
+    /// The analyst's text on the block starting at `from`, when there is one.
+    pub(crate) fn block_label(&self, from: u64) -> Option<&str> {
+        self.block_labels
+            .get(&format!("{from:#x}"))
+            .map(String::as_str)
+    }
+
+    /// The group the block starting at `from` is drawn in, when it is in one.
+    pub(crate) fn block_group(&self, from: u64) -> Option<&str> {
+        self.block_groups
+            .get(&format!("{from:#x}"))
+            .map(String::as_str)
+    }
+
     pub(crate) fn block_color(&self, from: u64) -> Option<iced::Color> {
         self.block_colors.get(&format!("{from:#x}")).copied()
     }
@@ -1134,6 +1182,7 @@ impl App {
             .work
             .listing_of
             .and_then(|function| colors.get(&format!("{function:#x}")).copied());
+        let (block_labels, block_groups) = self.block_texts();
         Renames {
             addresses: self.renamed_names(),
             registers: self.renamed_registers(),
@@ -1141,7 +1190,37 @@ impl App {
             colors,
             block_colors,
             function_color,
+            block_labels,
+            block_groups,
         }
+    }
+
+    /// The analyst's text on blocks and the groups they are in, keyed by
+    /// the bare hex address each block starts at.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn block_texts(
+        &self,
+    ) -> (
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    ) {
+        let mut labels = std::collections::HashMap::new();
+        let mut groups = std::collections::HashMap::new();
+        for annotation in &self.annotations.annotations {
+            if !annotation.block {
+                continue;
+            }
+            let key = ag_corpus::parse_addr_space(&annotation.address)
+                .map(|(value, _)| format!("{value:#x}"))
+                .unwrap_or_else(|_| annotation.address.clone());
+            if let Some(label) = &annotation.label {
+                labels.insert(key.clone(), label.clone());
+            }
+            if let Some(group) = &annotation.group {
+                groups.insert(key, group.clone());
+            }
+        }
+        (labels, groups)
     }
 
     /// Every highlight the analyst set, keyed by the bare hex address: the
@@ -1283,6 +1362,44 @@ impl App {
 
     /// Open the highlight prompt for the selection, or for the block
     /// holding it.
+    /// Ask for the text on the block holding the selection, or for its
+    /// group, with what it has now.
+    fn block_text_prompt(&mut self, group: bool) -> Task<Message> {
+        let Some(address) = self.selection.address() else {
+            self.notice = Some(if group {
+                "Select a block to group".into()
+            } else {
+                "Select a block to label".into()
+            });
+            return Task::none();
+        };
+        let Some(from) = self.block_of(address) else {
+            self.notice = Some("No block of the function on screen holds the selection".into());
+            return Task::none();
+        };
+        let record = self.annotations.block_for(&self.annotation_key(from));
+        let current = if group {
+            record.and_then(|a| a.group.clone())
+        } else {
+            record.and_then(|a| a.label.clone())
+        }
+        .unwrap_or_default();
+        self.prompt = Some(Prompt {
+            kind: if group {
+                PromptKind::Group
+            } else {
+                PromptKind::BlockText
+            },
+            title: if group {
+                "Group (a name shared by the blocks drawn as one, or empty to take the block out)"
+            } else {
+                "Block text (the block's title in the graph, or empty to clear)"
+            },
+            value: current,
+        });
+        Task::none()
+    }
+
     fn color_prompt(&mut self, block: bool) -> Task<Message> {
         let Some(address) = self.selection.address() else {
             self.notice = Some("Select something to highlight".into());
@@ -3250,6 +3367,36 @@ impl App {
                             });
                         }
                     }
+                    PromptKind::BlockText | PromptKind::Group => {
+                        let text = prompt.value.trim();
+                        let group = prompt.kind == PromptKind::Group;
+                        if let Some(address) = self.selection.address() {
+                            let Some(from) = self.block_of(address) else {
+                                self.notice = Some(
+                                    "No block of the function on screen holds the selection".into(),
+                                );
+                                return Task::none();
+                            };
+                            let key = self.annotation_key(from);
+                            let value = (!text.is_empty()).then(|| text.to_string());
+                            let annotation = self
+                                .annotations
+                                .annotation_mut(ag_corpus::project::TargetKind::Region, &key);
+                            annotation.block = true;
+                            if group {
+                                annotation.group = value.clone();
+                            } else {
+                                annotation.label = value.clone();
+                            }
+                            self.annotations.prune();
+                            self.notice = Some(match (group, value) {
+                                (true, Some(name)) => format!("Grouped {key} as {name}"),
+                                (true, None) => format!("Ungrouped {key}"),
+                                (false, Some(_)) => format!("Labelled {key}"),
+                                (false, None) => format!("Label cleared at {key}"),
+                            });
+                        }
+                    }
                     PromptKind::Color { block } => {
                         let text = prompt.value.trim();
                         if let Some(address) = self.selection.address() {
@@ -3906,6 +4053,25 @@ impl App {
 
             Message::EditColorBlock => return self.color_prompt(true),
 
+            Message::EditBlockText => return self.block_text_prompt(false),
+
+            Message::EditGroup => return self.block_text_prompt(true),
+
+            Message::GraphMove(direction) => {
+                // The keys reach every pane; only the graph moves by them,
+                // and not while a prompt is being typed.
+                if self.work.tab != ViewTab::Graph || self.prompt.is_some() {
+                    return Task::none();
+                }
+                let Some(current) = self.selection.address().or(self.work.listing_of) else {
+                    return Task::none();
+                };
+                let layout = crate::views::graph::layout(&self.work.graph, &self.renames());
+                if let Some(next) = crate::views::graph::neighbour(&layout, current, direction) {
+                    return self.update(Message::AddressSelected(next));
+                }
+            }
+
             Message::EditReference => return self.reference_prompt(false),
 
             Message::EditReferenceRemove => return self.reference_prompt(true),
@@ -4503,6 +4669,22 @@ fn shortcut(event: keyboard::Event) -> Message {
         // block holding it.
         (Key::Character("h"), true, false) => Message::EditColor,
         (Key::Character("h"), true, true) => Message::EditColorBlock,
+        // Text on the block holding the selection; a group for it.
+        (Key::Character("l"), true, true) => Message::EditBlockText,
+        (Key::Character("g"), true, false) => Message::EditGroup,
+        // The arrows walk the graph from block to block.
+        (Key::Named(keyboard::key::Named::ArrowUp), false, false) => {
+            Message::GraphMove(crate::views::graph::Direction::Up)
+        }
+        (Key::Named(keyboard::key::Named::ArrowDown), false, false) => {
+            Message::GraphMove(crate::views::graph::Direction::Down)
+        }
+        (Key::Named(keyboard::key::Named::ArrowLeft), false, false) => {
+            Message::GraphMove(crate::views::graph::Direction::Left)
+        }
+        (Key::Named(keyboard::key::Named::ArrowRight), false, false) => {
+            Message::GraphMove(crate::views::graph::Direction::Right)
+        }
         // The plain chord records a cross reference from the selection;
         // Shift takes one back.
         (Key::Character("x"), true, false) => Message::EditReference,
@@ -6215,6 +6397,105 @@ mod tests {
         let own = renamed.address_color(inside).expect("the line's color");
         assert_eq!(renamed.line_color(inside, Some(from)), Some(own));
         assert_ne!(renamed.block_color(from), Some(own));
+    }
+
+    #[test]
+    fn block_text_and_a_group_are_recorded_on_the_block_and_drawn() {
+        let mut app = app();
+        let function = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(function));
+        let inside = 0x100084A28;
+        let from = app
+            .block_of(inside)
+            .expect("the sample's graph holds the address");
+        let _ = app.update(Message::AddressSelected(inside));
+
+        // The text goes on the block's record, and titles the node.
+        let _ = app.update(Message::EditBlockText);
+        assert_eq!(app.prompt.as_ref().map(|p| p.value.as_str()), Some(""));
+        let _ = app.update(Message::PromptChanged("check the flag".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let record = app
+            .annotations
+            .block_for(&app.annotation_key(from))
+            .expect("the block's record");
+        assert!(record.block);
+        assert_eq!(record.label.as_deref(), Some("check the flag"));
+        let layout = crate::views::graph::layout(&app.work.graph, &app.renames());
+        let node = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == from)
+            .expect("the block's node");
+        assert_eq!(node.label.as_deref(), Some("check the flag"));
+        // The prompt offers the text again; emptied, it is cleared.
+        let _ = app.update(Message::EditBlockText);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("check the flag")
+        );
+        let _ = app.update(Message::PromptChanged("".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .annotations
+            .block_for(&app.annotation_key(from))
+            .and_then(|a| a.label.clone())
+            .is_none());
+
+        // A group: the block and another are one node.
+        let before = crate::views::graph::layout(&app.work.graph, &app.renames())
+            .nodes
+            .len();
+        let other = app
+            .work
+            .graph
+            .blocks
+            .iter()
+            .map(|block| block.from)
+            .find(|start| *start != from)
+            .expect("another block");
+        for start in [from, other] {
+            let _ = app.update(Message::AddressSelected(start));
+            let _ = app.update(Message::EditGroup);
+            let _ = app.update(Message::PromptChanged("setup".into()));
+            let _ = app.update(Message::PromptSubmit);
+        }
+        let layout = crate::views::graph::layout(&app.work.graph, &app.renames());
+        assert_eq!(layout.nodes.len(), before - 1);
+        let group = layout
+            .nodes
+            .iter()
+            .find(|node| node.group.is_some())
+            .expect("the group node");
+        assert_eq!(group.group, Some(("setup".to_string(), 2)));
+        assert_eq!(group.from, from.min(other));
+        // The project file carries both.
+        let json = serde_json::to_string(&app.annotations).expect("serializes");
+        assert!(json.contains("\"group\":\"setup\""), "{json}");
+    }
+
+    #[test]
+    fn the_arrow_keys_walk_the_graph_while_it_is_open() {
+        let mut app = app();
+        let function = 0x100084A20;
+        let _ = app.update(Message::FunctionSelected(function));
+        let entry = app.block_of(function).expect("the entry block");
+        // The keys do nothing in another tab, or while a prompt is open.
+        let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Down));
+        assert_eq!(app.selection.address(), Some(function));
+        let _ = app.update(Message::ViewTabSelected(ViewTab::Graph));
+        let _ = app.update(Message::EditBlockText);
+        let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Down));
+        assert_eq!(app.selection.address(), Some(function));
+        let _ = app.update(Message::PromptCancel);
+        // Down leaves the entry for the block it goes on to.
+        let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Down));
+        let moved = app.selection.address().expect("a selection");
+        assert_ne!(moved, entry);
+        assert!(app.work.graph.blocks.iter().any(|block| block.from == moved));
+        // Up comes back.
+        let _ = app.update(Message::GraphMove(crate::views::graph::Direction::Up));
+        assert_eq!(app.selection.address(), Some(entry));
     }
 
     #[test]

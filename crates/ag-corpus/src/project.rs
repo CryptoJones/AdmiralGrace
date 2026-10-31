@@ -479,6 +479,17 @@ pub struct Annotation {
     /// A color for the target, as `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The analyst's text on a block — its title in the graph, in place of
+    /// the range of addresses. On block records only. A reader that does
+    /// not know the field shows the range and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The group the block is drawn in: every block of a function with the
+    /// same group name is one node of its graph, under the name. On block
+    /// records only. A reader that does not know the field draws the
+    /// blocks apart and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// How the bytes at the target are classified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_type: Option<String>,
@@ -530,6 +541,8 @@ impl Annotation {
             bookmark: false,
             tags: Vec::new(),
             color: None,
+            label: None,
+            group: None,
             byte_type: None,
             mode: None,
         }
@@ -555,6 +568,8 @@ impl Annotation {
             bookmark: false,
             tags: Vec::new(),
             color: None,
+            label: None,
+            group: None,
             byte_type: None,
             mode: None,
         }
@@ -579,6 +594,8 @@ impl Annotation {
             bookmark: false,
             tags: Vec::new(),
             color: None,
+            label: None,
+            group: None,
             byte_type: None,
             mode: None,
         }
@@ -758,6 +775,8 @@ impl Annotation {
             && !self.bookmark
             && self.tags.is_empty()
             && self.color.is_none()
+            && self.label.is_none()
+            && self.group.is_none()
             && self.byte_type.is_none()
             && self.mode.is_none()
     }
