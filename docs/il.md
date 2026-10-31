@@ -100,10 +100,12 @@ The memory operations a compiler writes inline are read back as the calls they s
 b, c)` and `__builtin_memset(a, (char)b, c)`, the count in bytes (`c * 8` for `rep stosq`),
 and `rdi`, `rsi` and `rcx` after them are what the instruction leaves: the pointers past what
 was moved, the count at zero, the direction flag taken as clear. A string put on the stack
-word by word — `mov rax, 0x77202c6f6c6c6568; mov [rsp+3], rax` and the word after it — is one
-`__builtin_strcpy(&local_d, "hello, world")` when the bytes read as text ending in NUL, or a
-`__builtin_memcpy(&local_d, "text", n)` of bytes that read as text with no NUL; the stores
-must be two or more and cover their span, so one wide constant stays the number it may be.
+word by word — `mov rax, 0x77202c6f6c6c6568; mov [rsp+3], rax` and the word after it — or
+byte by byte is one `__builtin_strcpy(&local_d, "hello, world")` when the bytes read as text
+ending in NUL, or a `__builtin_memcpy(&local_d, "text", n)` of bytes that read as text with no
+NUL; the stores must be two or more, to or into one variable whose address is taken, and
+cover their span, so one wide constant stays the number it may be and another variable's
+store stays its own. The variable keeps the type of its first word; the string runs past it.
 `--option builtins keep` leaves the stores as they are — the second word written into the
 first's variable as `*(long *)((char *)&local_d + 5) = 0x646c726f77202c;` — while the `rep`
 instructions are builtins either way, having no other reading. The byte loops a compiler

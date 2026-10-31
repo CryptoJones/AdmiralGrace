@@ -168,10 +168,10 @@ way out, with a `main` to run one against the program it came from. The pseudoco
 reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
 each language's way; and the analyst has the last word at any one site — a guard, a folded
 condition, a turned-round branch, a switch — recorded in the project file. Dead code the
-lift keeps is greyed out, and one variable's unused stores can be dropped on their own. `rep movs` and `rep stos` read as
-`__builtin_memcpy` and `__builtin_memset`, and a string put on the stack word by word as one
-`__builtin_strcpy` (`--option builtins keep` for the stores). The
-text's layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
+lift keeps is greyed out, and one variable's unused stores can be dropped on their own.
+`rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset`, and a string put
+on the stack word by word, or byte by byte, as one `__builtin_strcpy`
+(`--option builtins keep` for the stores). The text's layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
 `wrap 80`, `call-hints names` — with rainbow braces and indent guides in the workbench, and a
 formatter plugin has the last word on the lines.
 

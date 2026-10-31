@@ -199,6 +199,36 @@ fn text_of(node: &AstNode) -> String {
 /// address or a string to an integer variable converts it, as the machine
 /// did by holding it in a register.
 fn statement_text(node: &AstNode) -> String {
+    // A builtin's pointer arguments are the integers the machine held;
+    // the compiler's builtin wants pointers.
+    if let AstNode::Intrinsic { name, args } = node {
+        let types: &[&str] = match name.as_str() {
+            "__builtin_memcpy" => &["void *", "const void *", "unsigned long"],
+            "__builtin_memset" => &["void *", "int", "unsigned long"],
+            "__builtin_strcpy" => &["char *", "const char *"],
+            _ => &[],
+        };
+        if !types.is_empty() {
+            let args = args
+                .iter()
+                .zip(types.iter().chain(std::iter::repeat(&"")))
+                .map(|(arg, ty)| {
+                    if ty.is_empty() || matches!(arg, AstNode::StringLiteral { .. }) {
+                        arg.clone()
+                    } else {
+                        AstNode::Cast {
+                            ty: ty.to_string(),
+                            target: Box::new(arg.clone()),
+                        }
+                    }
+                })
+                .collect();
+            return text_of(&AstNode::Intrinsic {
+                name: name.clone(),
+                args,
+            });
+        }
+    }
     if let AstNode::Assign { lhs, rhs } = node {
         let converts = match rhs.as_ref() {
             AstNode::FunctionName { .. }
@@ -749,5 +779,38 @@ mod tests {
         };
         let text = function(&switched);
         assert!(text.contains("  switch (a) {\n  case 1:\n  case 2:\n    goto block_30;\n  case 3:\n    goto block_40;\n  default:\n    abort();"), "{text}");
+    }
+
+    #[test]
+    fn a_builtins_pointer_arguments_are_cast_for_the_compiler() {
+        let call = |name: &str, args: Vec<AstNode>| AstNode::Intrinsic {
+            name: name.to_string(),
+            args,
+        };
+        assert_eq!(
+            statement_text(&call(
+                "__builtin_memcpy",
+                vec![AstNode::var("a"), AstNode::var("b"), AstNode::var("c")]
+            )),
+            "__builtin_memcpy((void *)a, (const void *)b, (unsigned long)c)"
+        );
+        assert_eq!(
+            statement_text(&call(
+                "__builtin_strcpy",
+                vec![
+                    AstNode::AddressOf {
+                        target: Box::new(AstNode::var("local_d")),
+                    },
+                    AstNode::StringLiteral {
+                        text: "hi".to_string(),
+                    },
+                ]
+            )),
+            "__builtin_strcpy((char *)&local_d, \"hi\")"
+        );
+        assert_eq!(
+            statement_text(&call("__cmp", vec![AstNode::var("a"), AstNode::var("b")])),
+            "__cmp(a, b)"
+        );
     }
 }
