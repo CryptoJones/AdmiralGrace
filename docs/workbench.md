@@ -25,7 +25,7 @@ the workbench in more detail.
 |---|---|
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
 | Work surface | The selected function: listing, pseudocode, graph, bytes, and references; for an Objective-C image, a Header tab with the recovered declarations. |
-| Inspector | The selection's detail — its name, and the mangled name a C++ or Rust symbol spelled — its cross references, the project's provenance and its shape. |
+| Inspector | The selection's detail — its name, the mangled name a C++ or Rust symbol spelled, its size from the unwind data — its cross references, the project's provenance and its shape. |
 | Bottom workspace | Search results, problems, and the log. |
 
 ## A kuna project export in the workbench
@@ -412,6 +412,11 @@ A C++ or Rust image's functions are listed under their demangled names, the sign
 graph; the pseudocode, where a name stands in code, uses the scope and the name alone
 (`geometry::area(2, 3)`); the inspector's **Mangled** row shows what the symbol table spelled,
 for a function and for a piece of data alike.
+
+The functions an image's unwind data names — `.eh_frame`, `.pdata`, `__unwind_info` — are in
+the navigator whether or not a symbol names them, a nameless one as `sub_` and its address, so
+a stripped binary lists its functions; the inspector's **Size** is the unwind data's where it
+has one.
 
 A Swift Mach-O's functions are listed under their demangled names — `sample.Derived.greet(times:
 Swift.Int) -> Swift.Int` — the mangled `$s…` name in the inspector's **Mangled** row; a method

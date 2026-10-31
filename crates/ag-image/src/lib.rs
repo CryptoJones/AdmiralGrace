@@ -403,6 +403,8 @@ pub struct Binary {
     /// The short form of each demangled function name — the scope and the
     /// name, no signature — by address: how the name stands in code.
     short_names: BTreeMap<u64, String>,
+    /// Where each function the unwind data knows ends, by its start.
+    function_ends: BTreeMap<u64, u64>,
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
@@ -554,6 +556,13 @@ impl Binary {
         functions.sort_by_key(|function| function.address);
         functions.dedup_by(|a, b| a.address == b.address);
 
+        // The unwind data says where a function ends, symbols or none.
+        let function_ends: BTreeMap<u64, u64> = image
+            .unwind_functions()
+            .iter()
+            .map(|(start, end)| (unbit(*start), *end))
+            .collect();
+
         // A C++ or Rust symbol is shown as the name the source spelled; the
         // mangled one is kept beside it, for the inspector and the JSON, and
         // the short form for the places the name stands in code. A function
@@ -672,6 +681,7 @@ impl Binary {
             imports,
             mangled,
             short_names,
+            function_ends,
             file,
             strings,
             wide_strings,
@@ -954,6 +964,10 @@ impl Binary {
         self.short_names = std::mem::take(&mut self.short_names)
             .into_iter()
             .map(|(address, name)| (shift(address), name))
+            .collect();
+        self.function_ends = std::mem::take(&mut self.function_ends)
+            .into_iter()
+            .map(|(start, end)| (shift(start), shift(end)))
             .collect();
         self.entry = self.entry.map(shift);
         if let Some(objc) = &mut self.objc {
@@ -1423,6 +1437,13 @@ impl Binary {
                     || mangled.strip_prefix('_').is_some_and(|rest| rest == name)
             })
             .map(|(address, _)| *address)
+    }
+
+    /// Where the function starting at `address` ends — the address past its
+    /// last byte — when the unwind data says: an ELF's `.eh_frame`, a PE's
+    /// `.pdata`, a Mach-O's `__unwind_info`.
+    pub fn function_end(&self, address: u64) -> Option<u64> {
+        self.function_ends.get(&address).copied()
     }
 
     /// The name of the function at `address` as it stands in code: the

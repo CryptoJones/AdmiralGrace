@@ -7584,6 +7584,35 @@ mod tests {
     }
 
     #[test]
+    fn the_inspector_sizes_a_function_by_its_unwind_data() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-engine/tests/fixtures/sample.elf");
+        let app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        let detail = app.provider.function_detail(0x1149).expect("add");
+        assert_eq!(detail.start, Some(0x1149));
+        assert_eq!(detail.end, Some(0x1161));
+        // A stripped image lists what the unwind data names.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/unwind_stripped.elf");
+        let app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        let names: Vec<String> = app
+            .provider
+            .functions()
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        assert_eq!(names, ["sub_401000", "sub_401014", "sub_401047"]);
+    }
+
+    #[test]
     fn a_mangled_symbol_is_listed_demangled_and_the_inspector_keeps_the_mangled_name() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../crates/ag-image/tests/fixtures/sample_cpp.elf");

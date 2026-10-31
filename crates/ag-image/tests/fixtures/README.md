@@ -20,6 +20,7 @@ The images the image tests read, and how they were made.
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
 | `sample_cpp.elf`, `sample_cpp.macho`, `sample_cpp.exe` | A C++ program built from `sample.cpp` for the three containers, with no runtime library: a namespace, a class with a constructor, two methods and a static member, two overloads of a free function and two instances of a template — every common shape of a mangled name, Itanium in the ELF and the Mach-O, Microsoft in the PE's export table. |
+| `unwind.elf`, `unwind_stripped.elf`, `unwind.exe`, `unwind_stripped.macho` | Images whose functions only the unwind data names: `unwind.c` (three functions, two of them static) built as an ELF with its `.eh_frame` and then stripped of every symbol, and as a PE with its `.pdata` and no export table; and `sample.macho` with its symbol table emptied, its `__unwind_info` kept. |
 | `sample_swift_x86`, `sample_swift_arm64`, `sample_swift_x86_stripped` | A Swift program built from `sample.swift` for x86-64 and arm64 macOS 12, and the x86-64 image with its symbol table emptied by `strip_symtab.py`: a protocol, a struct, an enum with payloads, a class and a subclass with properties and methods, a generic function and a closure, with the `__swift5_*` metadata the runtime reads and every symbol the compiler kept. `crates/ag-engine/tests/fixtures/swift_names.tsv` holds every mangled name of the x86-64 image beside what the Swift toolchain's own demangler says of it, and `swift_names2.tsv` the same for a second program (`swift_names2.swift`, not shipped as an image) whose names hold optionals, arrays, dictionaries, `throws`, `async`, associated types and multi-parameter generics. |
 | `sample_objc_chained` | The same source linked for macOS 12 with chained fixups (`LC_DYLD_CHAINED_FIXUPS`): every pointer slot of the metadata holds a packed fixup, not an address, as every Mach-O linked for macOS 12 or iOS 15 and later does. |
 | `sample.m` | The Objective-C source of the two. |
@@ -189,6 +190,20 @@ ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -o sample_cpp.macho samp
 clang++ -target x86_64-pc-windows-msvc -fno-exceptions -fno-rtti -O0 -c sample.cpp -o sample_cpp.obj
 lld-link /entry:main /subsystem:console /out:sample_cpp.exe /nodefaultlib /noimplib sample_cpp.obj
 ```
+
+The unwind fixtures were built with the toolchains' default unwind tables, and stripped:
+
+```sh
+gcc -O0 -fno-pic -no-pie -fno-stack-protector -fcf-protection=none -nostdlib -static -Wl,-e,main \
+    -o unwind.elf unwind.c
+strip --strip-all -o unwind_stripped.elf unwind.elf
+clang -target x86_64-pc-windows-msvc -O0 -c unwind.c -o unwind.obj
+lld-link /entry:main /subsystem:console /out:unwind.exe /nodefaultlib unwind.obj
+python3 strip_symtab.py sample.macho unwind_stripped.macho
+```
+
+In `unwind.elf` `add` is at `0x401000`, `sum_to` at `0x401014` and `main` at `0x401047`; in
+`unwind.exe` the three begin at `0x140001000`, `0x140001070` and `0x140001090`.
 
 The Swift program was built on a Mac with the Swift 6.4 toolchain (no Swift compiler runs
 here), and its names were demangled there for the oracle:

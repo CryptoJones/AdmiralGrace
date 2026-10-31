@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT"
 
@@ -30,6 +30,9 @@ kuna-num = { git = "https://github.com/Noelo-Lab/kuna", rev = "28219c99ff90d89b1
 # The demanglers: Itanium C++, Microsoft C++ and Rust names, read back to the
 # names the source spelled.
 cpp_demangle = "0.5.1"
+# The DWARF call-frame reader, for the `.eh_frame` that names a function's
+# start and end where no symbol does.
+gimli = { version = "0.33", default-features = false, features = ["read"] }
 msvc-demangler = "0.11.0"
 rustc-demangle = "0.1.28"
 

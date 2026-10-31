@@ -200,6 +200,9 @@ struct FunctionJson {
     /// The mangled name the symbol table spelled, when the name was
     /// demangled from one.
     mangled: Option<String>,
+    /// The address past the function's last byte, when the unwind data
+    /// says where it ends.
+    end: Option<u64>,
 }
 
 /// One data symbol, as JSON.
@@ -1121,6 +1124,7 @@ pub(crate) fn symbols_json(image: &Binary, filter: Option<&str>) -> Result<Symbo
             address_hex: format!("{:#x}", function.address),
             name: function.name.clone(),
             mangled: image.mangled_name(function.address).map(str::to_string),
+            end: image.function_end(function.address),
         })
         .collect();
 
@@ -1924,6 +1928,7 @@ fn function_json(image: &Binary, function: &ag_image::Function) -> FunctionJson 
         address_hex: format!("{:#x}", function.address),
         name: function.name.clone(),
         mangled: image.mangled_name(function.address).map(str::to_string),
+        end: image.function_end(function.address),
     }
 }
 
