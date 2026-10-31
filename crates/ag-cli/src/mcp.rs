@@ -200,6 +200,19 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
+            name: "il",
+            description: "The function at one level of the lift — lifted (the machine's instructions with the registers each touches), low (the lifter's statements over temporaries and slots), medium (statements over variables on the block graph) or high (the structured body) — each item with the addresses it came from, in SSA form when asked.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "level": { "type": "string", "enum": ["lifted", "low", "medium", "high"], "description": "The level (default medium)." },
+                    "ssa": { "type": "boolean", "description": "Static single assignment form: every definition a version, a φ where paths meet (default false)." },
+                },
+                "required": ["target"]
+            }),
+        },
+        Tool {
             name: "control_flow",
             description: "The control-flow graph of one function: its blocks with their instructions, the edges between them (fall-through or taken), and the jump tables its indirect jumps read.",
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
@@ -717,6 +730,23 @@ impl Server {
                         pseudocode.reason.unwrap_or_default()
                     ))
                 }
+            }
+            "il" => {
+                let address = self.function(&text("target")?)?;
+                let level = match optional_text("level")? {
+                    None => ag_image::Level::Medium,
+                    Some(level) => ag_image::Level::parse(&level).ok_or_else(|| {
+                        format!("the level is lifted, low, medium or high, not {level:?}")
+                    })?,
+                };
+                let ssa = flag("ssa", false)?;
+                let function = self
+                    .image
+                    .il(address, level, ssa)
+                    .map_err(|error| format!("{address:#x} was not lifted: {}", error.reason))?;
+                let mut answer = Answer::json(crate::image::il_json(&function));
+                answer.text = function.text();
+                Ok(answer)
             }
             "control_flow" => {
                 let address = self.function(&text("target")?)?;
@@ -1644,6 +1674,7 @@ mod tests {
                 "search",
                 "disassemble",
                 "decompile",
+                "il",
                 "control_flow",
                 "callers",
                 "callees",

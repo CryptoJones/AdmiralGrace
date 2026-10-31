@@ -150,6 +150,30 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The function at one level of the lift: the machine's instructions
+    /// (`lifted`), the lifter's statements over temporaries (`low`), the
+    /// statements over variables (`medium`), or the structured body
+    /// (`high`), each with the addresses it came from.
+    Il {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// The level: lifted, low, medium or high.
+        #[arg(long, default_value = "medium")]
+        level: String,
+        /// In static single assignment form: every definition a version,
+        /// a φ where paths meet.
+        #[arg(long)]
+        ssa: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Set an engine option. May be repeated; `ag catalog` lists them.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// A project file whose jump-table notes the walk is told.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The data the image holds, and the functions that use it.
     Data {
         /// The function or the data: an address such as `0x1198`, or a name.
@@ -704,6 +728,7 @@ pub fn run(
         | ImageCmd::Cfg { options, .. }
         | ImageCmd::Calls { options, .. }
         | ImageCmd::Pseudocode { options, .. }
+        | ImageCmd::Il { options, .. }
         | ImageCmd::Export { options, .. } => {
             Options::from_flat(options).map_err(|error| anyhow::anyhow!("{error}"))?
         }
@@ -717,6 +742,7 @@ pub fn run(
         | ImageCmd::Symbols { project, .. }
         | ImageCmd::Disasm { project, .. }
         | ImageCmd::Cfg { project, .. }
+        | ImageCmd::Il { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -747,6 +773,13 @@ pub fn run(
         } => cfg(&image, &target, json, svg.as_deref(), pdf.as_deref()),
         ImageCmd::Calls { target, json, .. } => calls(&image, target.as_deref(), json),
         ImageCmd::Pseudocode { target, json, .. } => pseudocode(&image, &target, json),
+        ImageCmd::Il {
+            target,
+            level,
+            ssa,
+            json,
+            ..
+        } => il(&image, &target, &level, ssa, json),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
             dir,
@@ -1581,6 +1614,74 @@ pub(crate) fn pseudocode_json(image: &Binary, address: u64) -> PseudocodeJson {
             lines: Vec::new(),
         },
     }
+}
+
+/// Report the function at one level of the lift.
+fn il(image: &Binary, target: &str, level: &str, ssa: bool, json: bool) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_pseudocode(),
+        "the lifter reads 64-bit x86, and this image is {}",
+        image.language()
+    );
+    let level = ag_image::Level::parse(level).ok_or_else(|| {
+        anyhow::anyhow!("the level is lifted, low, medium or high, not {level:?}")
+    })?;
+    let address = resolve(image, target)?;
+    match image.il(address, level, ssa) {
+        Ok(function) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&il_json(&function))?);
+            } else {
+                print!("{}", function.text());
+            }
+            Ok(0)
+        }
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "function": address,
+                        "function_hex": format!("{address:#x}"),
+                        "lifted": false,
+                        "reason": error.reason,
+                    }))?
+                );
+            } else {
+                println!("// {target} at {address:#x}: {error}");
+            }
+            Ok(1)
+        }
+    }
+}
+
+/// A function at one level, as JSON.
+pub(crate) fn il_json(function: &ag_image::IlFunction) -> serde_json::Value {
+    serde_json::json!({
+        "function": function.address,
+        "function_hex": format!("{:#x}", function.address),
+        "name": function.name,
+        "level": function.level.name(),
+        "ssa": function.ssa,
+        "blocks": function.blocks.iter().map(|block| serde_json::json!({
+            "id": block.id,
+            "address": block.address,
+            "address_hex": format!("{:#x}", block.address),
+            "successors": block.successors,
+            "items": block.items,
+        })).collect::<Vec<_>>(),
+        "items": function.items.iter().map(|item| serde_json::json!({
+            "id": item.id,
+            "block": item.block,
+            "depth": item.depth,
+            "addresses": item.addresses,
+            "addresses_hex": item.addresses.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
+            "text": item.text,
+            "defines": item.defines,
+            "uses": item.uses,
+            "phi": item.phi,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// Report the calls of one function, or of the whole image.

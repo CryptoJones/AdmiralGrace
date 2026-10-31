@@ -120,7 +120,7 @@ pub struct Loop {
 }
 
 /// What [`analyze`] found: the order, the dominators and the loops.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Analysis {
     /// The reachable nodes in reverse post-order.
     pub rpo: Vec<usize>,

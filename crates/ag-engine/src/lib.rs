@@ -8,6 +8,7 @@ pub mod cpu_context;
 pub mod dead;
 pub mod demangle;
 pub mod emit;
+pub mod il;
 pub mod image;
 pub mod lift;
 pub mod liveness;
@@ -26,8 +27,11 @@ pub use arch::Bitness;
 pub use ast::AstNode;
 pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg, TailCall};
 pub use emit::{Line, Pseudocode};
+pub use il::{IlBlock, IlFunction, IlItem, Level};
 pub use image::{Image, Section};
-pub use lift::{Abi, LiftedFunction, NotLifted, Statement, StatementKind};
+pub use lift::{
+    Abi, LiftedFunction, LowStatement, NotLifted, StageChain, Stages, Statement, StatementKind,
+};
 pub use options::{OptionError, Options};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{Architecture, DecodedSection, LoadedImage, Loader, Manifest};

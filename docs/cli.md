@@ -221,6 +221,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `pseudocode TARGET --option NAME VALUE` | The same with an engine option set, such as `--option loop-form while`; the flag repeats. `ag catalog` lists the options. |
 | `symbols\|disasm\|cfg\|calls … --option NAME VALUE` | The engine's decode options, which change what the walk finds: `branches-end-procedures yes` makes a branch out of a procedure's range a tail call, and `code-sections procedures` lists every run of instructions no named function reaches as a `sub_` procedure. The flag repeats; `ag catalog` lists the options. |
 | `cfg TARGET` | The control-flow graph of the function: a `block 0x… - 0x…` header per block, with its successors and the addresses of its instructions, then the edges, each marked `fall-through` or `taken`, then the jump tables the function's indirect jumps read, each with its cases. `--project FILE` tells the walk the project's jump-table notes. `--svg PATH` or `--pdf PATH` draws the graph as a picture instead — the blocks in rows, every instruction a line, fall-throughs blue and taken branches orange — for a report; both may be given, neither with `--json`. |
+| `il TARGET [--level lifted\|low\|medium\|high] [--ssa]` | The function at one level of the lift — the machine's instructions, the lifter's statements over temporaries and slots, the statements over variables on the block graph, or the structured body — each item with the addresses it came from; `--ssa` for the static single assignment form, every definition a version and a φ where paths meet. `medium` unless said. A function the lifter refuses prints `not lifted yet` with the reason, exit code 1. See `docs/il.md`. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. A `jmp` out of a function — to a function the image names, or through a GOT slot it resolves to an import — is a call marked `(tail call)`. |
 | `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
@@ -612,6 +613,7 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `disassemble target` | The listing of one function, as `ag image disasm` prints it. A target is an address, such as `0x1198`, or a name — exact first, then a substring, a mangled name too. |
 | `decompile target` | The pseudocode of one function; a function the lifter refuses is a tool error with the reason. |
 | `control_flow target` | The blocks, edges and jump tables of one function, as `ag image cfg --json` reports them. |
+| `il target [level] [ssa]` | The function at one level of the lift — `lifted`, `low`, `medium` (the default) or `high` — in SSA form when `ssa` is true, as `ag image il --json` reports it (`docs/il.md`). |
 | `callers target`, `callees target` | Who calls the function; the calls it makes, tail calls marked. |
 | `cross_references target` | For a function: the data and strings it refers to, its callers and callees. For a piece of data or a string: the functions that refer to it. Both with the references the analyst recorded in the project, to and from the address. |
 | `strings [filter] [limit]` | The strings of the image with the functions that use them. |
@@ -693,7 +695,8 @@ ag install-skill --agent claude
 `ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`,
 `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with
 `--project`). `ag docs` prints the manual: the command reference, the corpus format, the
-project file, the engine's options, plugins, scripting and the workbench.
+project file, the engine's options, the intermediate languages, plugins, scripting and the
+workbench.
 
 | Command | What it does |
 |---|---|

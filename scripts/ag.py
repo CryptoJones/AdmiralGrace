@@ -153,6 +153,10 @@ class Session:
     def control_flow(self, target):
         return self.call("control_flow", target=str(target))
 
+    def il(self, target, level="medium", ssa=False):
+        """The function at one level of the lift: lifted, low, medium or high."""
+        return self.call("il", target=str(target), level=level, ssa=ssa)
+
     def callers(self, target):
         return self.call("callers", target=str(target))
 
