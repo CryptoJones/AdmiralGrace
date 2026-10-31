@@ -105,6 +105,18 @@ or the class a category extends — is bound at load, so a category on one names
 `?`. (The external method map `ag corpus … --methods` takes is for a corpus; an image needs
 none.)
 
+`ag image FILE objc --header` writes the same as an Objective-C header — the quickest
+overview of such a binary: every protocol, class and category declared, with its properties,
+instance variables and methods under the types the runtime's encodings say (`i20@0:8i16` is
+`- (int)greet:(int)arg1;`). Every class and protocol is forward-declared first, those of other
+images marked as such; the structs the encodings spell out are defined, each after the structs
+it holds; a protocol comes before the protocol that adopts it, a superclass before its subclass,
+a class before its categories; a category on a class of another image is kept as a comment; a
+property's accessors are not listed again as methods; where an encoding is missing, the type is
+`id`. The header compiles against the runtime's `objc/objc.h` where the image is whole; a
+superclass or a type of another image needs that image's headers too. `export` writes it as
+`objc.h`, beside `objc.json`, when the image has Objective-C.
+
 A universal (fat) Mach-O holds several images, one per architecture. `ag image FILE slices`
 lists them, and `--slice ARCH` (or the slice's position, from 0) before the subcommand says
 which one to read: `ag image app --slice arm64 disasm main`. Opened without one, the file is
@@ -156,7 +168,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 
 | Subcommand | What it prints |
 |---|---|
-| `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
+| `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name`, and the data symbols with their size. |
@@ -171,7 +183,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
 | `data [TARGET]` | The data of the image: the address, the section, the name, and the functions that use it. With a function, the data that function refers to. With a piece of data, the functions that use it. |
-| `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
+| `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, `objc.json` and `objc.h` when the image has Objective-C, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
 | `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
 | `export DIR --force` | Write into a directory that is not empty. |
 | `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |

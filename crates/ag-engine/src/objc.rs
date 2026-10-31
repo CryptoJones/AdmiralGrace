@@ -20,8 +20,17 @@
 //!
 //! Every count and every string is bounded, since the records are read from
 //! an untrusted file: no list is read past [`ObjcMetadata::MOST_IN_A_LIST`]
-//! entries, no image past [`ObjcMetadata::MOST_METHODS`] methods, and no
-//! name past [`ObjcMetadata::LONGEST_NAME`] bytes.
+//! entries, no image past [`ObjcMetadata::MOST_ENTRIES`] methods, instance
+//! variables and properties together, and no name past
+//! [`ObjcMetadata::LONGEST_NAME`] bytes. A class listed twice is read once.
+//! Class properties — a metaclass's, a protocol's `_classProperties` — are
+//! not read; their `+` accessors show as class methods.
+//!
+//! [`ObjcMetadata::header`] writes what was read as an Objective-C header:
+//! the quickest overview of such a binary. The type encodings are decoded
+//! by [`header`].
+
+pub mod header;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -40,6 +49,16 @@ pub struct ObjcMethod {
     pub types: Option<String>,
     /// The address of the implementation; a protocol's methods have none.
     pub imp: Option<u64>,
+}
+
+/// One property of a class, a category or a protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjcProperty {
+    /// Its name.
+    pub name: String,
+    /// The runtime's attribute string, when it has one: `Ti,N,V_count` —
+    /// the type encoding, the attributes, the instance variable behind it.
+    pub attributes: Option<String>,
 }
 
 /// One instance variable of a class.
@@ -71,6 +90,8 @@ pub struct ObjcClass {
     pub class_methods: Vec<ObjcMethod>,
     /// Its instance variables.
     pub ivars: Vec<ObjcIvar>,
+    /// Its properties.
+    pub properties: Vec<ObjcProperty>,
 }
 
 /// One category: methods added to a class, this image's or another's.
@@ -88,6 +109,8 @@ pub struct ObjcCategory {
     pub instance_methods: Vec<ObjcMethod>,
     /// Its class methods (`+`).
     pub class_methods: Vec<ObjcMethod>,
+    /// Its properties.
+    pub properties: Vec<ObjcProperty>,
 }
 
 /// One protocol: selectors a class promises, with no code of their own.
@@ -107,6 +130,8 @@ pub struct ObjcProtocol {
     pub optional_instance_methods: Vec<ObjcMethod>,
     /// Optional class methods.
     pub optional_class_methods: Vec<ObjcMethod>,
+    /// Its properties.
+    pub properties: Vec<ObjcProperty>,
 }
 
 /// Everything the image says about its Objective-C.
@@ -197,14 +222,22 @@ impl ObjcMetadata {
         }
     }
 
+    /// The metadata as an Objective-C header: every protocol, class and
+    /// category declared, with its properties, instance variables and
+    /// methods under the types their encodings say. See [`header`].
+    pub fn header(&self) -> String {
+        header::write(self)
+    }
+
     /// The size of a class object (`class_t`) in a 64-bit image: the extent
     /// of the data symbol `OBJC_CLASS_$_Name`.
     pub const CLASS_OBJECT_SIZE: u64 = 0x28;
     /// No real list is longer: a bound on a corrupt count.
     pub const MOST_IN_A_LIST: u64 = 4096;
-    /// No real image holds more methods: a bound on the lists of a crafted
-    /// one, across every class, category and protocol.
-    pub const MOST_METHODS: usize = 1 << 20;
+    /// No real image holds more: a bound on the entries — methods, instance
+    /// variables, properties — read from the lists of a crafted one, across
+    /// every class, category and protocol.
+    pub const MOST_ENTRIES: usize = 1 << 20;
     /// No real name — a class, a selector, a type encoding — is longer: a
     /// bound on a pointer into a crafted string section.
     pub const LONGEST_NAME: usize = 4096;
@@ -215,23 +248,32 @@ impl ObjcMetadata {
 mod layout {
     /// `class_t.superclass`.
     pub const CLASS_SUPERCLASS: u64 = 0x08;
-    /// `class_ro_t`: name, baseProtocols.
+    /// `class_ro_t`: name, baseProtocols, baseProperties.
     pub const RO_NAME: u64 = 0x18;
     pub const RO_BASE_PROTOCOLS: u64 = 0x28;
-    /// `category_t`: name, cls, instanceMethods, classMethods, protocols.
+    pub const RO_BASE_PROPERTIES: u64 = 0x40;
+    /// `category_t`: name, cls, instanceMethods, classMethods, protocols,
+    /// instanceProperties.
     pub const CATEGORY_NAME: u64 = 0x00;
     pub const CATEGORY_CLASS: u64 = 0x08;
     pub const CATEGORY_INSTANCE_METHODS: u64 = 0x10;
     pub const CATEGORY_CLASS_METHODS: u64 = 0x18;
     pub const CATEGORY_PROTOCOLS: u64 = 0x20;
+    pub const CATEGORY_INSTANCE_PROPERTIES: u64 = 0x28;
     /// `protocol_t`: isa, mangledName, protocols, instanceMethods,
-    /// classMethods, optionalInstanceMethods, optionalClassMethods.
+    /// classMethods, optionalInstanceMethods, optionalClassMethods,
+    /// instanceProperties.
     pub const PROTOCOL_NAME: u64 = 0x08;
     pub const PROTOCOL_PROTOCOLS: u64 = 0x10;
     pub const PROTOCOL_INSTANCE_METHODS: u64 = 0x18;
     pub const PROTOCOL_CLASS_METHODS: u64 = 0x20;
     pub const PROTOCOL_OPTIONAL_INSTANCE_METHODS: u64 = 0x28;
     pub const PROTOCOL_OPTIONAL_CLASS_METHODS: u64 = 0x30;
+    pub const PROTOCOL_INSTANCE_PROPERTIES: u64 = 0x38;
+    /// `property_t`: the name and the attributes, two pointers.
+    pub const PROPERTY_NAME: u64 = 0x00;
+    pub const PROPERTY_ATTRIBUTES: u64 = 0x08;
+    pub const PROPERTY_SIZE: u64 = 16;
     /// `method_list_t` and `ivar_list_t`: entsize and flags, count, then the
     /// entries.
     pub const LIST_ENTSIZE_AND_FLAGS: u64 = 0x00;
@@ -255,10 +297,11 @@ mod layout {
 }
 
 /// The image under the walk: kuna's view of its sections with the chained
-/// fixups resolved, and the count of methods read so far, against the bound.
+/// fixups resolved, and the count of list entries read so far, against the
+/// bound.
 struct Walk<'a> {
     img: MachoImage<'a>,
-    methods: Cell<usize>,
+    entries: Cell<usize>,
 }
 
 impl Walk<'_> {
@@ -297,7 +340,17 @@ impl Walk<'_> {
         Some(text)
     }
 
-    /// The header of a `method_list_t` or `ivar_list_t` at `list`: the
+    /// Count one list entry against the bound: whether it may be read.
+    fn take_entry(&self) -> bool {
+        if self.entries.get() >= ObjcMetadata::MOST_ENTRIES {
+            return false;
+        }
+        self.entries.set(self.entries.get() + 1);
+        true
+    }
+
+    /// The header of a `method_list_t`, `ivar_list_t` or `property_list_t`
+    /// at `list`: the
     /// entsize, and the count bounded by [`ObjcMetadata::MOST_IN_A_LIST`].
     fn list_header(&self, list: u64) -> Option<(u32, u64)> {
         let ent = self
@@ -312,7 +365,7 @@ impl Walk<'_> {
     /// layout, or as three offsets from each field's own address in the
     /// relative one — where the selector offset reaches a selector reference,
     /// a pointer to the string. A protocol's entries have no implementation.
-    /// Nothing is read once the image's methods pass the bound.
+    /// Nothing is read once the image's entries pass the bound.
     fn method_list(&self, list: u64) -> Vec<ObjcMethod> {
         let mut methods = Vec::new();
         if list == 0 {
@@ -332,10 +385,9 @@ impl Walk<'_> {
             return methods;
         }
         for index in 0..count {
-            if self.methods.get() >= ObjcMetadata::MOST_METHODS {
+            if !self.take_entry() {
                 break;
             }
-            self.methods.set(self.methods.get() + 1);
             let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
             let (selector, types, imp) = if relative {
                 let field = |offset: u64| -> Option<u64> {
@@ -383,6 +435,9 @@ impl Walk<'_> {
             return ivars;
         }
         for index in 0..count {
+            if !self.take_entry() {
+                break;
+            }
             let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
             let Some(name) = self
                 .pointer(entry.wrapping_add(layout::IVAR_NAME))
@@ -401,6 +456,41 @@ impl Walk<'_> {
             });
         }
         ivars
+    }
+
+    /// The properties of a `property_list_t` at `list`: each a name and an
+    /// attribute string.
+    fn property_list(&self, list: u64) -> Vec<ObjcProperty> {
+        let mut properties = Vec::new();
+        if list == 0 {
+            return properties;
+        }
+        let Some((ent, count)) = self.list_header(list) else {
+            return properties;
+        };
+        let entsize = u64::from(ent & layout::LIST_ENTSIZE_MASK);
+        if entsize < layout::PROPERTY_SIZE {
+            return properties;
+        }
+        for index in 0..count {
+            if !self.take_entry() {
+                break;
+            }
+            let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
+            let Some(name) = self
+                .pointer(entry.wrapping_add(layout::PROPERTY_NAME))
+                .and_then(|name| self.name_at(name))
+            else {
+                continue;
+            };
+            properties.push(ObjcProperty {
+                name,
+                attributes: self
+                    .pointer(entry.wrapping_add(layout::PROPERTY_ATTRIBUTES))
+                    .and_then(|attributes| self.name_at(attributes)),
+            });
+        }
+        properties
     }
 
     /// The name of the class object at `class`, when the image holds it: a
@@ -450,7 +540,7 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
     }
     let walk = Walk {
         img: MachoImage::with_fixups(&file, resolve_chained_fixups(&file, bytes)),
-        methods: Cell::new(0),
+        entries: Cell::new(0),
     };
     let mut metadata = ObjcMetadata::default();
 
@@ -469,7 +559,12 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
             .collect()
     };
 
+    // A class listed twice is read once.
+    let mut seen = std::collections::BTreeSet::new();
     for class_ptr in pointers("__objc_classlist") {
+        if !seen.insert(class_ptr) {
+            continue;
+        }
         let Some(class) = classt::read_class_t(&walk.img, class_ptr) else {
             continue;
         };
@@ -493,6 +588,10 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
         let ivars = classt::base_ivars(&walk.img, class.ro)
             .map(|list| walk.ivar_list(list))
             .unwrap_or_default();
+        let properties = walk
+            .pointer(class.ro.wrapping_add(layout::RO_BASE_PROPERTIES))
+            .map(|list| walk.property_list(list))
+            .unwrap_or_default();
         metadata.classes.push(ObjcClass {
             address: class.addr,
             name,
@@ -501,6 +600,7 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
             instance_methods,
             class_methods,
             ivars,
+            properties,
         });
     }
 
@@ -516,6 +616,7 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
             protocols: walk.protocol_names_at(field(layout::CATEGORY_PROTOCOLS)),
             instance_methods: walk.method_list(field(layout::CATEGORY_INSTANCE_METHODS)),
             class_methods: walk.method_list(field(layout::CATEGORY_CLASS_METHODS)),
+            properties: walk.property_list(field(layout::CATEGORY_INSTANCE_PROPERTIES)),
         });
     }
 
@@ -534,6 +635,7 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
                 .method_list(field(layout::PROTOCOL_OPTIONAL_INSTANCE_METHODS)),
             optional_class_methods: walk
                 .method_list(field(layout::PROTOCOL_OPTIONAL_CLASS_METHODS)),
+            properties: walk.property_list(field(layout::PROTOCOL_INSTANCE_PROPERTIES)),
         });
     }
 

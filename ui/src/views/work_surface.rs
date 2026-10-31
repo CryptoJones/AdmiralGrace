@@ -1,4 +1,5 @@
-//! The center work surface: listing, pseudocode, graph, bytes, references.
+//! The center work surface: listing, pseudocode, graph, bytes, references,
+//! and the Objective-C header of an image that has one.
 
 use std::collections::BTreeMap;
 
@@ -27,16 +28,20 @@ pub enum ViewTab {
     Bytes,
     /// Cross references.
     References,
+    /// The Objective-C header recovered from the image's metadata; offered
+    /// only when the image has any.
+    Header,
 }
 
 impl ViewTab {
     /// Every tab, in display order.
-    pub const ALL: [ViewTab; 5] = [
+    pub const ALL: [ViewTab; 6] = [
         ViewTab::Listing,
         ViewTab::Pseudocode,
         ViewTab::Graph,
         ViewTab::Bytes,
         ViewTab::References,
+        ViewTab::Header,
     ];
 
     /// The tab label.
@@ -47,6 +52,7 @@ impl ViewTab {
             ViewTab::Graph => "Graph",
             ViewTab::Bytes => "Bytes",
             ViewTab::References => "References",
+            ViewTab::Header => "Header",
         }
     }
 }
@@ -187,6 +193,10 @@ fn view_tabs(app: &App) -> Element<'_, Message> {
     let mut row = Row::new().spacing(4);
 
     for tab in ViewTab::ALL {
+        // The header is offered where there is one to show.
+        if tab == ViewTab::Header && app.work.objc_header.is_none() {
+            continue;
+        }
         row = row.push(tab_button(
             tab.label(),
             app.work.tab == tab,
@@ -219,7 +229,41 @@ fn main_content(app: &App) -> Element<'_, Message> {
         ViewTab::Graph => graph_content(app),
         ViewTab::Bytes => bytes_content(app),
         ViewTab::References => references_content(app),
+        ViewTab::Header => header_content(app),
     }
+}
+
+/// The Objective-C header view: the declarations recovered from the
+/// image, one line per row, read-only.
+fn header_content(app: &App) -> Element<'_, Message> {
+    let Some(header) = app.work.objc_header.as_deref() else {
+        return empty_state(
+            "No Objective-C in this image",
+            "The header is written from a Mach-O's Objective-C metadata; this image has none.",
+        )
+        .into();
+    };
+    let mut list = Column::new().spacing(0).width(Length::Fill);
+    for line in header.lines() {
+        list = list.push(
+            Container::new(
+                Text::new(line.to_string())
+                    .size(12)
+                    .font(MONO)
+                    .color(if line.starts_with("//") {
+                        color::MUTED
+                    } else {
+                        color::TEXT
+                    }),
+            )
+            .padding([1, 12])
+            .width(Length::Fill),
+        );
+    }
+    scrollable(list)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }
 
 /// The linear listing.

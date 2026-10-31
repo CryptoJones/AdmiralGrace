@@ -383,6 +383,29 @@ fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
     assert_eq!(derived.superclass.as_deref(), Some("Base"));
     assert_eq!(derived.protocols, ["Greeting"]);
     assert_eq!(derived.instance_methods[0].selector, "greet:");
+    // The properties, with the attribute string the runtime reads: the
+    // type, the qualifiers, the instance variable behind it.
+    let properties: Vec<(&str, Option<&str>)> = derived
+        .properties
+        .iter()
+        .map(|property| (property.name.as_str(), property.attributes.as_deref()))
+        .collect();
+    assert_eq!(
+        properties,
+        [
+            ("count", Some("Ti,N,V_count")),
+            ("origin", Some("T{Point=ii},R,N,V_origin")),
+            ("parent", Some("T@\"Base\",N,V_parent")),
+        ]
+    );
+    assert_eq!(derived.ivars.len(), 3);
+    assert_eq!(derived.ivars[1].types.as_deref(), Some("@\"Base\""));
+    assert_eq!(objc.categories[0].properties[0].name, "thriceOfOne");
+    assert_eq!(objc.protocols[0].class_methods[0].selector, "greeter");
+    assert_eq!(
+        objc.protocols[0].optional_instance_methods[0].selector,
+        "wave:"
+    );
     assert_eq!(objc.categories.len(), 1);
     assert_eq!(objc.categories[0].name, "Extra");
     assert_eq!(objc.categories[0].class.as_deref(), Some("Base"));
@@ -516,10 +539,69 @@ fn an_image_with_chained_fixups_reads_the_same_objective_c() {
     };
     assert_eq!(shape(objc), shape(expected));
     assert_eq!(objc.classes.len(), 2);
+    assert_eq!(objc.classes[1].properties, expected.classes[1].properties);
+    assert_eq!(objc.header(), expected.header());
     assert!(chained
         .function_symbols()
         .iter()
         .any(|(_, name)| name == "-[Derived greet:]"));
+}
+
+#[test]
+fn an_objective_c_image_is_written_as_a_header() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    let image = Image::open(&fixtures.join("sample_objc_stripped")).expect("loads");
+    let header = image.objc().expect("Objective-C").header();
+    let expected = "\
+// Objective-C declarations recovered from the image: 2 classes, 1 category, 1 protocol.
+// Types are read from the runtime's encodings; where an encoding is missing, a type is `id`.
+#import <objc/objc.h>
+
+@class Base, Derived;
+@protocol Greeting;
+
+struct Point {
+    int x;
+    int y;
+};
+
+@protocol Greeting
++ (id)greeter;
+- (int)greet:(int)arg1;
+@optional
+- (void)wave:(const char *)arg1;
+@end
+
+__attribute__((objc_root_class))
+@interface Base {
+    Class isa;
+}
++ (int)answer;
+- (int)twice:(int)arg1;
+@end
+
+@interface Base (Extra)
+@property (nonatomic, readonly) int thriceOfOne;
+- (int)thrice:(int)arg1;
+@end
+
+@interface Derived : Base <Greeting> {
+    struct Point _origin;
+    Base *_parent;
+    int _count;
+}
+@property (nonatomic) int count;
+@property (nonatomic, readonly) struct Point origin;
+@property (nonatomic, assign) Base *parent;
+- (int)greet:(int)arg1;
+- (unsigned long long)hash:(const char *)arg1 at:(unsigned long long)arg2;
+- (void)each:(id /* block */)arg1;
+@end
+";
+    assert_eq!(header, expected);
 }
 
 #[test]

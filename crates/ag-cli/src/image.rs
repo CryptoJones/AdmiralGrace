@@ -25,12 +25,16 @@ pub enum ImageCmd {
         json: bool,
     },
     /// The Objective-C the image describes: its classes with their
-    /// superclass, protocols, methods and instance variables; its categories;
-    /// its protocols.
+    /// superclass, protocols, properties, methods and instance variables;
+    /// its categories; its protocols.
     Objc {
         /// Report as JSON.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "header")]
         json: bool,
+        /// Write it as an Objective-C header instead: every protocol, class
+        /// and category declared, with the types the encodings say.
+        #[arg(long)]
+        header: bool,
     },
     /// The language, the entry point and the sections of the image.
     Info {
@@ -687,7 +691,7 @@ pub fn run(
 
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
-        ImageCmd::Objc { json } => objc(&image, json),
+        ImageCmd::Objc { json, header } => objc(&image, json, header),
         // Answered above, before any image was read.
         ImageCmd::Slices { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
@@ -710,18 +714,11 @@ pub fn run(
     }
 }
 
-/// Print the Objective-C the image describes.
-fn objc(image: &Binary, json: bool) -> Result<i32> {
+/// The Objective-C the image describes, as `objc --json` prints it: empty
+/// lists for an image without any.
+pub(crate) fn objc_json(image: &Binary) -> serde_json::Value {
     let Some(objc) = image.objc() else {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({ "classes": [], "categories": [], "protocols": [] })
-            );
-        } else {
-            println!("no Objective-C metadata");
-        }
-        return Ok(0);
+        return serde_json::json!({ "classes": [], "categories": [], "protocols": [] });
     };
     let method_json = |method: &ag_image::ObjcMethod| {
         serde_json::json!({
@@ -733,40 +730,67 @@ fn objc(image: &Binary, json: bool) -> Result<i32> {
     let methods_json = |methods: &[ag_image::ObjcMethod]| -> Vec<serde_json::Value> {
         methods.iter().map(method_json).collect()
     };
+    let properties_json = |properties: &[ag_image::ObjcProperty]| -> Vec<serde_json::Value> {
+        properties
+            .iter()
+            .map(|property| {
+                serde_json::json!({
+                    "name": property.name,
+                    "attributes": property.attributes,
+                })
+            })
+            .collect()
+    };
+    serde_json::json!({
+        "classes": objc.classes.iter().map(|class| serde_json::json!({
+            "name": class.name,
+            "address": format!("{:#x}", class.address),
+            "superclass": class.superclass,
+            "protocols": class.protocols,
+            "properties": properties_json(&class.properties),
+            "instance_methods": methods_json(&class.instance_methods),
+            "class_methods": methods_json(&class.class_methods),
+            "ivars": class.ivars.iter().map(|ivar| serde_json::json!({
+                "name": ivar.name,
+                "types": ivar.types,
+                "offset": ivar.offset,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "categories": objc.categories.iter().map(|category| serde_json::json!({
+            "name": category.name,
+            "address": format!("{:#x}", category.address),
+            "class": category.class,
+            "protocols": category.protocols,
+            "properties": properties_json(&category.properties),
+            "instance_methods": methods_json(&category.instance_methods),
+            "class_methods": methods_json(&category.class_methods),
+        })).collect::<Vec<_>>(),
+        "protocols": objc.protocols.iter().map(|protocol| serde_json::json!({
+            "name": protocol.name,
+            "address": format!("{:#x}", protocol.address),
+            "protocols": protocol.protocols,
+            "properties": properties_json(&protocol.properties),
+            "instance_methods": methods_json(&protocol.instance_methods),
+            "class_methods": methods_json(&protocol.class_methods),
+            "optional_instance_methods": methods_json(&protocol.optional_instance_methods),
+            "optional_class_methods": methods_json(&protocol.optional_class_methods),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Print the Objective-C the image describes: as text, as JSON, or as a
+/// header.
+fn objc(image: &Binary, json: bool, header: bool) -> Result<i32> {
     if json {
-        let report = serde_json::json!({
-            "classes": objc.classes.iter().map(|class| serde_json::json!({
-                "name": class.name,
-                "address": format!("{:#x}", class.address),
-                "superclass": class.superclass,
-                "protocols": class.protocols,
-                "instance_methods": methods_json(&class.instance_methods),
-                "class_methods": methods_json(&class.class_methods),
-                "ivars": class.ivars.iter().map(|ivar| serde_json::json!({
-                    "name": ivar.name,
-                    "types": ivar.types,
-                    "offset": ivar.offset,
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-            "categories": objc.categories.iter().map(|category| serde_json::json!({
-                "name": category.name,
-                "address": format!("{:#x}", category.address),
-                "class": category.class,
-                "protocols": category.protocols,
-                "instance_methods": methods_json(&category.instance_methods),
-                "class_methods": methods_json(&category.class_methods),
-            })).collect::<Vec<_>>(),
-            "protocols": objc.protocols.iter().map(|protocol| serde_json::json!({
-                "name": protocol.name,
-                "address": format!("{:#x}", protocol.address),
-                "protocols": protocol.protocols,
-                "instance_methods": methods_json(&protocol.instance_methods),
-                "class_methods": methods_json(&protocol.class_methods),
-                "optional_instance_methods": methods_json(&protocol.optional_instance_methods),
-                "optional_class_methods": methods_json(&protocol.optional_class_methods),
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(&objc_json(image))?);
+        return Ok(0);
+    }
+    let Some(objc) = image.objc() else {
+        println!("no Objective-C metadata");
+        return Ok(0);
+    };
+    if header {
+        print!("{}", objc.header());
         return Ok(0);
     }
     let print_methods = |kind: char, methods: &[ag_image::ObjcMethod]| {
@@ -781,6 +805,19 @@ fn objc(image: &Binary, json: bool) -> Result<i32> {
                 .map(|types| format!("  {types}"))
                 .unwrap_or_default();
             println!("    {kind} {}{imp}{types}", method.selector);
+        }
+    };
+    let print_properties = |properties: &[ag_image::ObjcProperty]| {
+        for property in properties {
+            println!(
+                "    property {}{}",
+                property.name,
+                property
+                    .attributes
+                    .as_deref()
+                    .map(|attributes| format!("  {attributes}"))
+                    .unwrap_or_default()
+            );
         }
     };
     let adopts = |protocols: &[String]| {
@@ -803,6 +840,7 @@ fn objc(image: &Binary, json: bool) -> Result<i32> {
             adopts(&class.protocols),
             class.address
         );
+        print_properties(&class.properties);
         print_methods('+', &class.class_methods);
         print_methods('-', &class.instance_methods);
         for ivar in &class.ivars {
@@ -828,6 +866,7 @@ fn objc(image: &Binary, json: bool) -> Result<i32> {
             adopts(&category.protocols),
             category.address
         );
+        print_properties(&category.properties);
         print_methods('+', &category.class_methods);
         print_methods('-', &category.instance_methods);
     }
@@ -839,6 +878,7 @@ fn objc(image: &Binary, json: bool) -> Result<i32> {
             adopts(&protocol.protocols),
             protocol.address
         );
+        print_properties(&protocol.properties);
         print_methods('+', &protocol.class_methods);
         print_methods('-', &protocol.instance_methods);
         if !protocol.optional_class_methods.is_empty()

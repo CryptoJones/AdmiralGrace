@@ -526,6 +526,10 @@ impl Provider for BinaryProvider {
         }
     }
 
+    fn objc_header(&self) -> Option<String> {
+        self.binary.objc_header()
+    }
+
     fn strings(&self) -> Vec<StringEntry> {
         // Which functions use a string is only known once the whole program
         // has been read, so the strings carry no users until then.

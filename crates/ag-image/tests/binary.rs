@@ -1888,6 +1888,10 @@ fn an_objective_c_images_methods_are_functions_under_their_runtime_names() {
     assert!(binary.disassembly(greet).is_some());
     assert!(binary.function_name(greet).is_some());
     assert!(macho().objc().is_none());
+    assert!(macho().objc_header().is_none());
+    let header = binary.objc_header().expect("a header");
+    assert!(header.contains("@interface Derived : Base <Greeting>"), "{header}");
+    assert!(header.contains("@property (nonatomic) int count;"), "{header}");
 
     // Read at another base, the metadata's addresses move with the functions.
     let layout = ag_image::Layout {

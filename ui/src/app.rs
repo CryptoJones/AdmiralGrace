@@ -379,6 +379,9 @@ pub struct WorkSurface {
     pub references: Vec<Reference>,
     /// The filter of the strings list.
     pub string_filter: String,
+    /// The Objective-C header of the image, when it has any: what the
+    /// Header tab shows, and whether the tab is offered at all.
+    pub objc_header: Option<String>,
 }
 
 /// The bottom workspace.
@@ -861,6 +864,7 @@ impl App {
         self.bottom.problems = self.provider.problems();
         self.selection = Selection::None;
         self.work = WorkSurface::default();
+        self.work.objc_header = self.provider.objc_header();
         // Annotations belong to the analysis they were made against. Opening
         // a different binary or corpus drops them — a rename of `0x1198`
         // means that address in the other file, not this one — while a
@@ -7574,6 +7578,37 @@ mod tests {
             "{:?}",
             again.notice
         );
+    }
+
+    #[test]
+    fn an_objective_c_image_offers_its_header_and_another_image_does_not() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/sample_objc_stripped");
+        let app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        let header = app.work.objc_header.as_deref().expect("a header");
+        assert!(
+            header.contains("@interface Derived : Base <Greeting>"),
+            "{header}"
+        );
+        assert!(
+            header.contains("@property (nonatomic) int count;"),
+            "{header}"
+        );
+        assert!(header.contains("- (int)greet:(int)arg1;"), "{header}");
+        assert!(header.contains("@interface Base (Extra)"), "{header}");
+
+        let plain = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/sample.macho");
+        let app = App::boot(Config {
+            binary: Some(plain),
+            ..Config::default()
+        })
+        .0;
+        assert!(app.work.objc_header.is_none());
     }
 
     #[test]
