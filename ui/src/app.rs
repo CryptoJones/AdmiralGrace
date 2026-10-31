@@ -35,6 +35,9 @@ pub enum Message {
     FunctionSelected(u64),
     /// An address inside the current function was activated.
     AddressSelected(u64),
+    /// A line of the pseudocode was clicked: the line, counted from zero,
+    /// and the first of its addresses, which becomes the selection.
+    PseudocodeLineSelected(usize, u64),
     /// A string in the strings list was picked.
     StringSelected(u64),
     /// A piece of data in the navigator was picked.
@@ -161,6 +164,9 @@ pub enum Message {
     EditMark(Mark),
     /// Say where the jump table the selected `jmp` reads is.
     EditSwitch,
+    /// Allow or prevent one of the lift's judgment calls at the selected
+    /// address.
+    EditOverride,
     /// Assemble an instruction over the bytes at the selection.
     EditAssemble,
     /// Fill the selected instruction with the architecture's no-op.
@@ -272,6 +278,8 @@ pub enum PromptKind {
     /// The instruction set from the selection onward: `arm`, `thumb`, or
     /// `none` to let the image say.
     Mode,
+    /// A word on a judgment call at the selection: `KIND on|off|clear`.
+    Override,
     /// The address the image is moved to, or `none`.
     Rebase,
     /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
@@ -517,6 +525,10 @@ pub struct WorkSurface {
     pub graph: Graph,
     /// Pseudocode of the selected function.
     pub pseudocode: Option<String>,
+    /// The line of the pseudocode last clicked, counted from zero, while
+    /// the selection is still one of its addresses: which of the lines
+    /// sharing an instruction the analyst meant.
+    pub selected_line: Option<usize>,
     /// The addresses each line of the pseudocode came from.
     ///
     /// The keys are line numbers counted from zero, so they line up with the
@@ -1108,6 +1120,7 @@ impl App {
             self.tell_patches();
             self.tell_modes();
             self.tell_jump_tables();
+            self.tell_overrides();
         }
         task
     }
@@ -2881,6 +2894,7 @@ impl App {
                         | PromptKind::Color { .. }
                         | PromptKind::Reference { .. }
                         | PromptKind::Switch
+                        | PromptKind::Override
                         | PromptKind::Assemble
                         | PromptKind::Nop
                         | PromptKind::Bytes
@@ -2897,6 +2911,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
         }
         task
@@ -2981,6 +2996,58 @@ impl App {
             self.work.line_addresses = self.provider.line_addresses(function);
         }
         self.refresh_bytes();
+    }
+
+    /// The site an override at the selection speaks to: the branch or the
+    /// jump of the pseudocode line the selection is on — the last of the
+    /// line's instructions, since a line's compare and the instructions
+    /// that fed it are not sites. An instruction several lines share picks
+    /// the nearest of their branches; an instruction no line holds is the
+    /// site itself.
+    fn override_site(&self) -> Option<u64> {
+        let address = self.selection.address()?;
+        // The line the analyst clicked, while the selection is still on it.
+        let clicked = self
+            .work
+            .selected_line
+            .and_then(|line| self.work.line_addresses.get(&line))
+            .filter(|addresses| addresses.contains(&address));
+        let site = match clicked {
+            Some(addresses) => addresses.iter().max().copied(),
+            None => self
+                .work
+                .line_addresses
+                .values()
+                .filter(|addresses| addresses.len() > 1 && addresses.contains(&address))
+                .filter_map(|addresses| addresses.iter().max().copied())
+                .min(),
+        };
+        Some(site.unwrap_or(address))
+    }
+
+    /// Tell the analysis the analyst's words on the sites, and read the
+    /// function on screen again when that changed anything.
+    fn tell_overrides(&mut self) {
+        let overrides = self
+            .annotations
+            .overrides()
+            .into_iter()
+            .map(|(address, words)| {
+                let mut word = ag_image::SiteOverride::default();
+                for (kind, on) in &words {
+                    word.set(kind, Some(*on));
+                }
+                (address, word)
+            })
+            .collect();
+        if !self.provider.set_site_overrides(overrides) {
+            return;
+        }
+        self.refresh_listing();
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+        }
     }
 
     /// Tell the analysis where the analyst's jump tables are, and read the
@@ -3145,6 +3212,26 @@ impl App {
                 });
             }
 
+            Message::EditOverride => {
+                let Some(address) = self.override_site() else {
+                    self.notice = Some(
+                        "Select the pseudocode line of the branch or the jump, or the instruction itself".into(),
+                    );
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .map(|a| a.overrides_label())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Override,
+                    title: "Override (guard|fold|invert|switch on|off|clear)",
+                    value: current,
+                });
+            }
+
             Message::EditMark(mark) => {
                 use ag_corpus::project::{ByteType, TargetKind};
                 let Some(address) = self.selection.address() else {
@@ -3235,6 +3322,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
 
             Message::EditRedo => {
@@ -3253,6 +3341,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -3270,6 +3359,11 @@ impl App {
                 } else {
                     self.navigator.selected = Some(address);
                 }
+            }
+
+            Message::PseudocodeLineSelected(line, address) => {
+                self.work.selected_line = Some(line);
+                return self.update(Message::AddressSelected(address));
             }
 
             Message::AddressSelected(address) => {
@@ -3640,6 +3734,7 @@ impl App {
                                     self.tell_patches();
                                     self.tell_modes();
                                     self.tell_jump_tables();
+                                    self.tell_overrides();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -4116,6 +4211,64 @@ impl App {
                                 self.annotations
                                     .write_patch(kind, &key, Some((&bytes, Some(text))));
                             }
+                        }
+                    }
+                    PromptKind::Override => {
+                        // `KIND on|off|clear`, or several apart by commas —
+                        // the shape the prompt is filled with.
+                        let text = prompt.value.trim().to_ascii_lowercase();
+                        if let Some(address) = self.override_site() {
+                            let mut words = Vec::new();
+                            for pair in text.split(',').filter(|pair| !pair.trim().is_empty()) {
+                                let mut parts = pair.split_whitespace();
+                                let (Some(kind), Some(state), None) =
+                                    (parts.next(), parts.next(), parts.next())
+                                else {
+                                    self.notice = Some(
+                                        "An override is KIND on|off|clear: guard, fold, invert or switch"
+                                            .into(),
+                                    );
+                                    return Task::none();
+                                };
+                                if !ag_corpus::project::Annotation::OVERRIDE_KINDS.contains(&kind) {
+                                    self.notice = Some(format!(
+                                        "The kind is guard, fold, invert or switch, not {kind:?}"
+                                    ));
+                                    return Task::none();
+                                }
+                                let on = match state {
+                                    "on" | "allow" => Some(true),
+                                    "off" | "prevent" => Some(false),
+                                    "clear" | "none" => None,
+                                    other => {
+                                        self.notice = Some(format!(
+                                            "The state is on, off or clear, not {other:?}"
+                                        ));
+                                        return Task::none();
+                                    }
+                                };
+                                words.push((kind.to_string(), on));
+                            }
+                            if words.is_empty() {
+                                self.notice = Some(
+                                    "An override is KIND on|off|clear: guard, fold, invert or switch".into(),
+                                );
+                                return Task::none();
+                            }
+                            let key = self.annotation_key(address);
+                            let kind_at = self.kind_at(address);
+                            let record = self.annotations.annotation_mut(kind_at, &key);
+                            for (kind, on) in &words {
+                                record.set_override(kind, *on);
+                            }
+                            let label = record.overrides_label();
+                            self.annotations.prune();
+                            self.notice = Some(if label.is_empty() {
+                                format!("Every call at {key} left to the lift")
+                            } else {
+                                format!("At {key}: {label}")
+                            });
+                            self.tell_overrides();
                         }
                     }
                     PromptKind::Switch => {
@@ -10243,6 +10396,104 @@ mod tests {
         let after = app.shown_reference_labels(&app.work.references);
         assert!(after.iter().any(|label| label == "decode"), "{after:?}");
         assert!(!after.iter().any(|label| label == "add"), "{after:?}");
+    }
+
+    #[test]
+    fn an_override_at_a_pseudocode_line_reaches_its_branch_and_undo_takes_it_back() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // deregister_tm_clones opens with a condition that folds to a
+        // constant; its line maps to the compare and the branch after it.
+        let _ = app.update(Message::FunctionSelected(0x1090));
+        let folded = |app: &App| {
+            app.work
+                .pseudocode
+                .as_deref()
+                .is_some_and(|code| code.contains("if (0) {"))
+        };
+        assert!(folded(&app), "{:?}", app.work.pseudocode);
+        // The analyst clicks the `if` line; the site is its branch, the
+        // last of the line's instructions.
+        let line = app
+            .work
+            .pseudocode
+            .as_deref()
+            .and_then(|code| code.lines().position(|line| line.contains("if (0) {")))
+            .expect("the folded condition's line");
+        let _ = app.update(Message::PseudocodeLineSelected(line, 0x1090));
+        assert_eq!(app.override_site(), Some(0x10a1));
+
+        let _ = app.update(Message::EditOverride);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").kind,
+            PromptKind::Override
+        );
+        let _ = app.update(Message::PromptChanged("fold off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x10a1")
+                .and_then(|a| a.overrides.get("fold").copied()),
+            Some(false)
+        );
+        assert!(!folded(&app), "{:?}", app.work.pseudocode);
+        assert!(
+            app.work
+                .pseudocode
+                .as_deref()
+                .is_some_and(|code| code.contains("if (&completed.0 != &completed.0) {")),
+            "{:?}",
+            app.work.pseudocode
+        );
+
+        // The prompt reads back what it is filled with, and a bad kind is
+        // refused whole.
+        let _ = app.update(Message::EditOverride);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "fold off");
+        let _ = app.update(Message::PromptChanged("fold off, guard off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x10a1")
+                .map(|a| a.overrides_label()),
+            Some("fold off, guard off".to_string())
+        );
+        let _ = app.update(Message::EditOverride);
+        let _ = app.update(Message::PromptChanged("tail off".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("not \"tail\"")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x10a1")
+                .map(|a| a.overrides_label()),
+            Some("fold off, guard off".to_string()),
+            "a refused word changes nothing"
+        );
+        let _ = app.update(Message::EditOverride);
+        let _ = app.update(Message::PromptChanged("fold clear, guard clear".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x10a1").is_none());
+        assert!(folded(&app), "{:?}", app.work.pseudocode);
+
+        // Undo takes the last word back, and the pseudocode follows.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x10a1")
+                .map(|a| a.overrides_label()),
+            Some("fold off, guard off".to_string())
+        );
+        assert!(!folded(&app), "{:?}", app.work.pseudocode);
     }
 
     #[test]

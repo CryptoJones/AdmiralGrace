@@ -214,6 +214,23 @@ use** (what an instruction reads and writes, at the lifted level), **Stack point
 offset from the entry's), **Types** (of every name the item uses) and **Explicit casts**
 (every constant with its width). The levels are described in `docs/il.md`.
 
+## Overriding the lift at one site
+
+**Edit ▸ Override at address…** records the analyst's word on a judgment call the lift makes
+at the branch or the jump of the selected pseudocode line — the last of the line's
+instructions; the compare before it and the instructions that fed it are not the site — as
+`KIND on`, `KIND off` or `KIND clear`, several apart by commas: `guard` (a branch whose one
+arm never falls through is read as a guard the rest follows unnested; `off` keeps the
+`if`/`else`), `fold` (a condition comparing an expression with itself is folded to the
+constant it is; `off` keeps the comparison), `invert` (`on` turns the condition round with
+its arms and the lift does not turn it back; `off` keeps the taken arm first even where the
+lift would turn it to make a guard), `switch` (the indirect jump reads a jump table the
+analysis recovers or is told; `off`, it reads none, and the function is not lifted — the
+Problems panel says why). `on` is the lift's own call, the default. The prompt opens filled
+with the words already at the site. The word is kept in the project file, the pseudocode is
+read again with it, and Undo takes it back. Click a line of the pseudocode to select it,
+then open the prompt from the Edit menu — the workbench has no context menus yet.
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or

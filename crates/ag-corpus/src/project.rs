@@ -518,6 +518,16 @@ pub struct Annotation {
     /// instruction: `mov eax, 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_text: Option<String>,
+    /// The analyst's word at the address on the judgment calls the lift
+    /// makes there, each `true` to allow or `false` to prevent: `guard` (a
+    /// branch whose one arm never falls through is a guard the rest
+    /// follows), `fold` (a condition comparing an expression with itself
+    /// is the constant it is), `invert` (the condition turned round with
+    /// its arms), `switch` (the indirect jump reads a jump table). A kind
+    /// left out is the lift's own call. A reader that does not know the
+    /// field lifts as it always did and misreads nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, bool>,
 }
 
 impl Annotation {
@@ -545,6 +555,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -572,6 +583,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -598,6 +610,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -736,6 +749,37 @@ impl Annotation {
         self.jump_table = note.map(JumpTableNote::label);
     }
 
+    /// The kinds of judgment call an override speaks to, as the file
+    /// spells them.
+    pub const OVERRIDE_KINDS: [&'static str; 4] = ["guard", "fold", "invert", "switch"];
+
+    /// Say `on` about the judgment call `kind` at the address — `true` to
+    /// allow it, `false` to prevent it — or leave it to the lift with
+    /// `None`. False for a kind that is not one.
+    pub fn set_override(&mut self, kind: &str, on: Option<bool>) -> bool {
+        if !Self::OVERRIDE_KINDS.contains(&kind) {
+            return false;
+        }
+        match on {
+            Some(on) => {
+                self.overrides.insert(kind.to_string(), on);
+            }
+            None => {
+                self.overrides.remove(kind);
+            }
+        }
+        true
+    }
+
+    /// The overrides as text: `guard off, fold on`.
+    pub fn overrides_label(&self) -> String {
+        self.overrides
+            .iter()
+            .map(|(kind, on)| format!("{kind} {}", if *on { "on" } else { "off" }))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// The bytes the patch at the target writes, when there is one and
     /// this program reads its spelling.
     pub fn patch_bytes(&self) -> Option<Vec<u8>> {
@@ -779,6 +823,7 @@ impl Annotation {
             && self.group.is_none()
             && self.byte_type.is_none()
             && self.mode.is_none()
+            && self.overrides.is_empty()
     }
 }
 
@@ -1219,6 +1264,22 @@ impl ProjectFile {
             .collect();
         sort_by_address(&mut sources);
         sources
+    }
+
+    /// The analyst's overrides, by the value of the address each is at —
+    /// the branch or the indirect jump — the kind and whether it is
+    /// allowed. A word on a spaced address keys on its value, as a jump
+    /// table note does.
+    pub fn overrides(&self) -> BTreeMap<u64, BTreeMap<String, bool>> {
+        self.places()
+            .filter_map(|a| {
+                if a.overrides.is_empty() {
+                    return None;
+                }
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, a.overrides.clone()))
+            })
+            .collect()
     }
 
     /// Every jump table the analyst placed, by the value of the address of
@@ -2269,5 +2330,43 @@ mod tests {
             .to_json()
             .unwrap()
             .contains("layout"));
+    }
+
+    #[test]
+    fn a_site_override_is_a_word_on_a_kind_and_the_project_lists_them() {
+        let mut record = Annotation::new(TargetKind::Address, "0x1000");
+        assert!(record.is_empty());
+        assert!(record.set_override("guard", Some(false)));
+        assert!(record.set_override("fold", Some(true)));
+        assert!(!record.set_override("tail", Some(true)), "no such kind");
+        assert!(!record.is_empty());
+        assert_eq!(record.overrides_label(), "fold on, guard off");
+        assert!(record.set_override("fold", None));
+        assert_eq!(record.overrides_label(), "guard off");
+        assert!(record.set_override("guard", None));
+        assert!(record.is_empty(), "a cleared word is no record");
+
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Address, "0x401000")
+            .set_override("guard", Some(false));
+        project
+            .annotation_mut(TargetKind::Address, "EXTERNAL:0x10")
+            .set_override("switch", Some(false));
+        // A record on a thing at a place is not a site.
+        project
+            .variable_mut("0x401000", "x")
+            .overrides
+            .insert("fold".into(), true);
+        let overrides = project.overrides();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[&0x401000].get("guard"), Some(&false));
+        assert_eq!(overrides[&0x10].get("switch"), Some(&false));
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"overrides\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.overrides(), overrides);
+        // A record without the field reads as no word.
+        assert!(!json.contains("\"overrides\": {}"), "{json}");
     }
 }

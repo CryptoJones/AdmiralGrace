@@ -388,6 +388,10 @@ impl Provider for BinaryProvider {
         self.binary.set_jump_table_hints(hints)
     }
 
+    fn set_site_overrides(&self, overrides: BTreeMap<u64, ag_image::SiteOverride>) -> bool {
+        self.binary.set_site_overrides(overrides)
+    }
+
     fn set_patches(&self, patches: BTreeMap<u64, Vec<u8>>) -> bool {
         self.binary.set_patches(patches)
     }

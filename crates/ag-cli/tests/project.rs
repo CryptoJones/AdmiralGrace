@@ -1587,3 +1587,204 @@ fn a_slice_flag_that_disagrees_with_the_project_is_refused_and_save_checks_the_s
     assert!(!ok);
     assert!(stderr.contains("say which one with --slice"), "{stderr}");
 }
+
+#[test]
+fn a_site_override_is_recorded_and_told_to_the_image() {
+    let file = TempFile::new("override");
+    // What `ag image switch.elf COMMAND classify --project FILE` prints,
+    // and whether it succeeded: `pseudocode` fails when the lift does.
+    let classify = |file: &TempFile, command: &str| -> (bool, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("switch.elf"))
+            .args([command, "classify", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    // classify begins with a guard — `if (a > 5) return;` — and a switch.
+    // The site of the guard is its branch, the `ja` at 0x401003.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "guard",
+            "off",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401003 now override guard off"),
+        "{stdout}"
+    );
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("    return;\n  } else {\n    switch ("),
+        "the else is kept: {text}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["annotations"][0]["overrides"]["guard"],
+        serde_json::json!(false)
+    );
+
+    // `invert on` turns the condition round with its arms.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "guard",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "invert",
+            "on",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401003 now override invert on"),
+        "{stdout}"
+    );
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("if ((unsigned int)a <= 5) {\n    switch ("),
+        "the condition is turned round: {text}"
+    );
+    assert!(
+        text.contains("  } else {\n    return;\n  }"),
+        "and the lift does not turn it back into a guard: {text}"
+    );
+
+    // `switch off` at the jump keeps it from being read as a table.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401007",
+            "switch",
+            "off",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, cfg) = classify(&file, "cfg");
+    assert!(ok, "{cfg}");
+    assert!(!cfg.contains("jmp at 0x401007: table"), "{cfg}");
+    assert!(
+        cfg.contains("block 0x401005 - 0x40100e\n  successors: -\n"),
+        "{cfg}"
+    );
+    // Without the table the jump goes nowhere the lift can follow, and the
+    // lift says so rather than guess.
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(!ok, "{text}");
+    assert!(text.contains("an indirect jump at 0x401007"), "{text}");
+    assert!(!text.contains("switch ("), "{text}");
+
+    // Clearing the words takes the records off.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401007",
+            "switch",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x401007 cleared"), "{stdout}");
+    let (ok, cfg) = classify(&file, "cfg");
+    assert!(ok, "{cfg}");
+    assert!(
+        cfg.contains("jmp at 0x401007: table 0x402000, 6 entries"),
+        "{cfg}"
+    );
+
+    // A word at the compare before the branch is not the branch's.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &["override", "--file", &file.text(), "0x401003", "invert", "clear"],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &["override", "--file", &file.text(), "0x401000", "guard", "off"],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(ok, "{text}");
+    assert!(text.contains("    return;\n  }\n  switch ("), "{text}");
+
+    // A kind or a state that is not one is refused.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &["override", "--file", &file.text(), "0x401003", "tail", "on"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("guard, fold, invert or switch"), "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "guard",
+            "maybe",
+        ],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("on, off or clear"), "{stderr}");
+}
+
+#[test]
+fn a_fold_off_word_keeps_the_comparison_a_constant_condition_folded_from() {
+    let file = TempFile::new("fold");
+    // deregister_tm_clones compares an address with itself; the lift folds
+    // that to `if (0)` and notes the comparison. The branch is at 0x10a1.
+    let (ok, stdout, stderr) = project_with(
+        "sample.elf",
+        &["override", "--file", &file.text(), "0x10a1", "fold", "off"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("address 0x10a1 now override fold off"), "{stdout}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["pseudocode", "deregister_tm_clones", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("if (&completed.0 != &completed.0) {"), "{text}");
+    assert!(!text.contains("if (0) {"), "{text}");
+}
