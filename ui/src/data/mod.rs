@@ -94,7 +94,7 @@ pub struct FunctionDetail {
 }
 
 /// One line of a linear disassembly listing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ListingLine {
     /// Address of the instruction.
     pub address: u64,

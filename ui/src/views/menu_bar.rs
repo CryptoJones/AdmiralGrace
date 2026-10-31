@@ -222,7 +222,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::ViewToggleBottom,
             )),
             Item::new(separator()),
-            Item::new(separator()),
             Item::new(item_button(
                 "Cycle the pane's level",
                 "F7",

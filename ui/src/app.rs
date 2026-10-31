@@ -466,6 +466,15 @@ pub struct WorkSurface {
     pub listing_level: PaneLevel,
     /// What the graph pane's blocks hold.
     pub graph_level: PaneLevel,
+    /// What the listing pane shows: its level when the lifter read the
+    /// function, the disassembly otherwise.
+    pub listing_shown: PaneLevel,
+    /// What the graph pane shows.
+    pub graph_shown: PaneLevel,
+    /// The graph of the level the graph pane shows, when it is at one;
+    /// `graph` stays the disassembly's, which the arrows, the block lookups
+    /// and the block edits read.
+    pub il_graph: Option<Graph>,
     /// The control-flow graph of the selected function.
     pub graph: Graph,
     /// Pseudocode of the selected function.
@@ -484,6 +493,14 @@ pub struct WorkSurface {
     /// The Objective-C header of the image, when it has any: what the
     /// Header tab shows, and whether the tab is offered at all.
     pub objc_header: Option<String>,
+}
+
+impl WorkSurface {
+    /// The graph the graph pane draws: the level's when it is at one, the
+    /// disassembly's otherwise.
+    pub fn shown_graph(&self) -> &Graph {
+        self.il_graph.as_ref().unwrap_or(&self.graph)
+    }
 }
 
 /// The bottom workspace.
@@ -1353,6 +1370,32 @@ impl App {
 
     /// The first address of the block of the function on screen that holds
     /// `address`, when one does.
+    /// The level a pane is set to; none for a pane without levels.
+    fn pane_level(&self, tab: ViewTab) -> Option<PaneLevel> {
+        match tab {
+            ViewTab::Listing => Some(self.work.listing_level),
+            ViewTab::Graph => Some(self.work.graph_level),
+            _ => None,
+        }
+    }
+
+    /// The level a pane shows.
+    fn pane_shown(&self, tab: ViewTab) -> Option<PaneLevel> {
+        match tab {
+            ViewTab::Listing => Some(self.work.listing_shown),
+            ViewTab::Graph => Some(self.work.graph_shown),
+            _ => None,
+        }
+    }
+
+    fn set_pane_level(&mut self, tab: ViewTab, level: PaneLevel) {
+        match tab {
+            ViewTab::Listing => self.work.listing_level = level,
+            ViewTab::Graph => self.work.graph_level = level,
+            _ => {}
+        }
+    }
+
     pub(crate) fn block_of(&self, address: u64) -> Option<u64> {
         self.work
             .graph
@@ -1706,7 +1749,7 @@ impl App {
             return;
         }
         self.confirm_write = None;
-        let layout = crate::views::graph::layout(&self.work.graph, &self.renames());
+        let layout = crate::views::graph::layout(self.work.shown_graph(), &self.renames());
         let title = format!("{} at {function:#x}", self.place_name(function));
         let drawing = crate::views::graph::drawing(&layout, title, self.selection.address());
         let bytes = if pdf {
@@ -2276,16 +2319,44 @@ impl App {
             );
         }
         self.work.graph = graph;
+        self.work.il_graph = None;
+        self.work.listing_shown = PaneLevel::Disassembly;
+        self.work.graph_shown = PaneLevel::Disassembly;
         // A pane set to a level of the lift shows that instead, when the
-        // lifter reads the function; otherwise the disassembly stands.
+        // lifter reads the function; otherwise the disassembly stands and
+        // the status line says so. One lift serves both panes at one level.
+        let mut lifted: Option<(PaneLevel, ag_image::IlFunction)> = None;
         if let PaneLevel::Il { level, ssa } = self.work.listing_level {
-            if let Some(il) = self.provider.il(function, level, ssa) {
-                self.work.listing = il_rows(&il);
+            match self.provider.il(function, level, ssa) {
+                Some(il) => {
+                    self.work.listing = il_rows(&il);
+                    self.work.listing_shown = self.work.listing_level;
+                    lifted = Some((self.work.listing_level, il));
+                }
+                None => {
+                    self.notice = Some(
+                        "Listing: the lifter does not read this function; showing the disassembly"
+                            .into(),
+                    );
+                }
             }
         }
         if let PaneLevel::Il { level, ssa } = self.work.graph_level {
-            if let Some(il) = self.provider.il(function, level, ssa) {
-                self.work.graph = il_graph(&il);
+            let il = match lifted {
+                Some((at, il)) if at == self.work.graph_level => Some(il),
+                _ => self.provider.il(function, level, ssa),
+            };
+            match il {
+                Some(il) => {
+                    self.work.il_graph = Some(il_graph(&il, &self.work.graph));
+                    self.work.graph_shown = self.work.graph_level;
+                }
+                None => {
+                    self.notice = Some(
+                        "Graph: the lifter does not read this function; showing the disassembly"
+                            .into(),
+                    );
+                }
             }
         }
     }
@@ -4203,50 +4274,39 @@ impl App {
 
             Message::ViewCycleLevel | Message::ViewToggleSsa => {
                 let cycle = matches!(message, Message::ViewCycleLevel);
-                let pane = match self.work.tab {
-                    ViewTab::Listing => &mut self.work.listing_level,
-                    ViewTab::Graph => &mut self.work.graph_level,
-                    _ => {
-                        self.notice =
-                            Some("The Listing and Graph panes show the lift's levels".into());
-                        return Task::none();
-                    }
+                let tab = self.work.tab;
+                let Some(current) = self.pane_level(tab) else {
+                    self.notice = Some("The Listing and Graph panes show the lift's levels".into());
+                    return Task::none();
                 };
                 let next = if cycle {
-                    pane.cycled()
+                    current.cycled()
                 } else {
-                    pane.ssa_toggled()
+                    current.ssa_toggled()
                 };
-                if next != PaneLevel::Disassembly {
-                    let Some(function) = self.work.listing_of else {
-                        self.notice = Some("Select a function to show a level of its lift".into());
-                        return Task::none();
-                    };
-                    let PaneLevel::Il { level, ssa } = next else {
-                        unreachable!()
-                    };
-                    if self.provider.il(function, level, ssa).is_none() {
-                        self.notice = Some(if matches!(*pane, PaneLevel::Disassembly) {
-                            "The lift has no levels for this function: the lifter does not read it, or this project has no engine".into()
-                        } else {
-                            "The lifter does not read this function at that level".into()
-                        });
-                        if matches!(*pane, PaneLevel::Disassembly) {
-                            return Task::none();
-                        }
-                        *pane = PaneLevel::Disassembly;
-                        self.refresh_listing();
-                        self.notice = Some(format!(
-                            "{}: back to the disassembly",
-                            self.work.tab.label()
-                        ));
-                        return Task::none();
-                    }
+                if next != PaneLevel::Disassembly && self.work.listing_of.is_none() {
+                    self.notice = Some("Select a function to show a level of its lift".into());
+                    return Task::none();
                 }
-                *pane = next;
-                let label = next.label();
+                self.set_pane_level(tab, next);
                 self.refresh_listing();
-                self.notice = Some(format!("{}: {label}", self.work.tab.label()));
+                if self.pane_shown(tab) == Some(next) {
+                    self.notice = Some(format!("{}: {}", tab.label(), next.label()));
+                } else {
+                    // The lifter does not read the function there: the pane
+                    // keeps what it had.
+                    self.set_pane_level(tab, current);
+                    self.refresh_listing();
+                    self.notice = Some(if current == PaneLevel::Disassembly {
+                        "The lift has no levels for this function: the lifter does not read it, or this project has no engine".into()
+                    } else {
+                        format!(
+                            "The lifter does not read this function at the {}; keeping the {}",
+                            next.label(),
+                            current.label()
+                        )
+                    });
+                }
             }
             Message::DebugStart => return self.debug_start(),
             Message::DebugAttach => {
@@ -4361,7 +4421,7 @@ impl App {
                     self.notice = Some("Select a function to export its graph".into());
                     return Task::none();
                 };
-                if self.work.graph.blocks.is_empty() {
+                if self.work.shown_graph().blocks.is_empty() {
                     self.notice = Some("The function has no graph to export".into());
                     return Task::none();
                 }
@@ -4621,7 +4681,7 @@ impl App {
                 let Some(current) = self.selection.address().or(self.work.listing_of) else {
                     return Task::none();
                 };
-                let layout = crate::views::graph::layout(&self.work.graph, &self.renames());
+                let layout = crate::views::graph::layout(self.work.shown_graph(), &self.renames());
                 if let Some(next) = crate::views::graph::neighbour(&layout, current, direction) {
                     return self.update(Message::AddressSelected(next));
                 }
@@ -4810,16 +4870,17 @@ impl App {
 }
 
 /// The items of a level of the lift as the listing's rows: each with the
-/// first address it came from, its text in the operands column indented by
-/// its depth, and nothing in the columns a machine instruction fills.
+/// first address it came from — or the row before's, for an item with
+/// none — its text in the operands column indented by its depth, and
+/// nothing in the columns a machine instruction fills.
 pub(crate) fn il_rows(il: &ag_image::IlFunction) -> Vec<ListingLine> {
     let mut rows = Vec::new();
     for block in &il.blocks {
+        let mut last = block.address;
         for id in &block.items {
             let item = &il.items[*id];
-            let Some(address) = item.addresses.first().copied() else {
-                continue;
-            };
+            let address = item.addresses.first().copied().unwrap_or(last);
+            last = address;
             rows.push(ListingLine {
                 address,
                 bytes: String::new(),
@@ -4836,19 +4897,23 @@ pub(crate) fn il_rows(il: &ag_image::IlFunction) -> Vec<ListingLine> {
 }
 
 /// The blocks of a level of the lift as the graph's: one per block of the
-/// level, its items as its lines, its successors by address.
-pub(crate) fn il_graph(il: &ag_image::IlFunction) -> Graph {
+/// level, its items as its lines, its successors by address. A block ends
+/// where the `disassembly`'s block holding its last instruction ends, so
+/// an edge to the block after it is the fall-through it is.
+pub(crate) fn il_graph(il: &ag_image::IlFunction, disassembly: &Graph) -> Graph {
     let blocks: Vec<GraphBlock> = il
         .blocks
         .iter()
         .map(|block| {
+            let mut last = block.address;
             let instructions: Vec<ListingLine> = block
                 .items
                 .iter()
-                .filter_map(|id| {
+                .map(|id| {
                     let item = &il.items[*id];
-                    let address = item.addresses.first().copied()?;
-                    Some(ListingLine {
+                    let address = item.addresses.first().copied().unwrap_or(last);
+                    last = address;
+                    ListingLine {
                         address,
                         bytes: String::new(),
                         mnemonic: String::new(),
@@ -4857,14 +4922,20 @@ pub(crate) fn il_graph(il: &ag_image::IlFunction) -> Graph {
                         tail: false,
                         registers: Vec::new(),
                         comment: None,
-                    })
+                    }
                 })
                 .collect();
-            let to = instructions
+            let end = instructions
                 .iter()
                 .map(|line| line.address)
                 .max()
-                .map_or(block.address, |last| last.saturating_add(1))
+                .unwrap_or(block.address);
+            let to = disassembly
+                .blocks
+                .iter()
+                .find(|block| block.from <= end && end < block.to)
+                .map(|block| block.to)
+                .unwrap_or_else(|| end.saturating_add(1))
                 .max(block.address.saturating_add(1));
             GraphBlock {
                 from: block.address,
@@ -7180,23 +7251,67 @@ mod tests {
                 ssa: false
             }
         );
-        assert_eq!(app.work.graph.blocks.len(), 4);
+        assert_eq!(app.work.shown_graph().blocks.len(), 4);
         assert!(
-            app.work.graph.edges.len() >= 4,
+            app.work.shown_graph().edges.len() >= 4,
             "{:?}",
-            app.work.graph.edges
+            app.work.shown_graph().edges
         );
-        assert!(app.work.graph.blocks.iter().any(|b| b
+        assert!(app.work.shown_graph().blocks.iter().any(|b| b
             .instructions
             .iter()
             .any(|l| l.operands.starts_with("if ("))));
+        // The disassembly's graph is kept for the arrows and the block
+        // lookups, and the level's edges know a fall-through from a jump.
+        assert!(app.work.il_graph.is_some());
+        assert!(app
+            .work
+            .graph
+            .blocks
+            .iter()
+            .any(|b| b.instructions.iter().any(|l| l.mnemonic == "cmp")));
+        assert!(
+            app.work
+                .shown_graph()
+                .edges
+                .iter()
+                .any(|e| matches!(e.kind, ag_image::EdgeKind::Fallthrough)),
+            "{:?}",
+            app.work.shown_graph().edges
+        );
+        assert!(app
+            .work
+            .shown_graph()
+            .edges
+            .iter()
+            .any(|e| matches!(e.kind, ag_image::EdgeKind::Taken)));
+        assert_eq!(
+            app.block_of(0x118a),
+            Some(0x118a),
+            "the block lookup is the disassembly's"
+        );
         // The level follows the function: another function at the same level.
         let _ = app.update(Message::FunctionSelected(0x1149));
-        assert_eq!(app.work.graph.blocks.len(), 1);
-        assert!(app.work.graph.blocks[0]
+        assert_eq!(app.work.shown_graph().blocks.len(), 1);
+        assert!(app.work.shown_graph().blocks[0]
             .instructions
             .iter()
             .any(|l| l.operands.contains("return")));
+        // A function the lifter does not read shows the disassembly and says
+        // so; the pane keeps its level for the next function.
+        let _ = app.update(Message::FunctionSelected(0x1060));
+        assert_eq!(app.work.graph_shown, PaneLevel::Disassembly);
+        assert!(matches!(app.work.graph_level, PaneLevel::Il { .. }));
+        assert!(app.work.il_graph.is_none());
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("showing the disassembly")),
+            "{:?}",
+            app.notice
+        );
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        assert_eq!(app.work.graph_shown, app.work.graph_level);
         // Other panes have no level to cycle.
         let _ = app.update(Message::ViewTabSelected(ViewTab::Bytes));
         let _ = app.update(Message::ViewCycleLevel);
@@ -7237,6 +7352,68 @@ mod tests {
                 .cycled(),
             PaneLevel::Disassembly
         );
+    }
+
+    #[test]
+    fn the_margins_arrows_follow_the_disassembly_and_stop_at_the_statement_levels() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let _ = app.update(Message::ViewTabSelected(ViewTab::Listing));
+        let renamed = app.renames();
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        let plain = crate::views::work_surface::arrows_for(&app, &rows);
+        assert!(!plain.arrows.is_empty());
+        // The lifted level is the instructions, one row each: the arrows stand.
+        let _ = app.update(Message::ViewCycleLevel);
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        let lifted = crate::views::work_surface::arrows_for(&app, &rows);
+        assert_eq!(lifted.arrows.len(), plain.arrows.len());
+        // The statement levels share addresses between rows: no arrows, and
+        // the rows are still counted one per line.
+        let _ = app.update(Message::ViewCycleLevel);
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        assert_eq!(rows.len(), app.work.listing.len());
+        assert!(crate::views::work_surface::arrows_for(&app, &rows)
+            .arrows
+            .is_empty());
+        // A branch target with several rows lands on the first of them.
+        let first = crate::views::arrows::Arrows::of(
+            &[Some(0x10), Some(0x10), Some(0x20), Some(0x20)],
+            &Graph {
+                blocks: vec![
+                    GraphBlock {
+                        from: 0x10,
+                        to: 0x20,
+                        successors: vec![0x20],
+                        instructions: vec![ListingLine {
+                            address: 0x10,
+                            ..Default::default()
+                        }],
+                    },
+                    GraphBlock {
+                        from: 0x20,
+                        to: 0x30,
+                        successors: vec![0x10],
+                        instructions: vec![ListingLine {
+                            address: 0x20,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                edges: vec![ag_image::Edge {
+                    from: 0x20,
+                    to: 0x10,
+                    kind: ag_image::EdgeKind::Taken,
+                }],
+            },
+            &[],
+        );
+        assert_eq!(first.arrows.len(), 1);
+        assert_eq!(first.arrows[0].to, Some(0));
     }
 
     #[test]

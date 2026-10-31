@@ -201,9 +201,14 @@ pane's level** (F7) moves the active pane on: the disassembly, then the `lifted`
 every definition versioned and a φ where paths meet. Each pane keeps its own level — the
 graph at the medium level beside the listing's disassembly, say — and the level follows the
 function selected. A row or a block line of a level carries the addresses the statement came
-from, so the selection, the highlights and the breakpoints still land, and the tab row shows
-the level. A function the lifter does not read keeps the disassembly, and the status line
-says so. The levels are described in `docs/il.md`.
+from, so the selection, the highlights and the breakpoints still land; what belongs to an
+instruction — its comment, its breakpoint, the debugger's mark — is drawn on the first of the
+rows that came from it. The tab row names the level the pane shows. A function the lifter does
+not read shows the disassembly, and the status line says so; the pane keeps its level for the
+next function. The margin's arrows and the block lookups follow the disassembly, and the
+arrows are drawn for the disassembly and the lifted level, whose rows are the instructions.
+The analyst's names for variables and registers reach the disassembly and the pseudocode, not
+yet a level's text. The levels are described in `docs/il.md`.
 
 ## Debugging
 
