@@ -88,6 +88,9 @@ pub struct FunctionDetail {
     pub provenance: String,
     /// Human-readable summary of the analysis state.
     pub summary: String,
+    /// The mangled name the symbol table spelled, when the shown name was
+    /// demangled from one.
+    pub mangled: Option<String>,
 }
 
 /// One line of a linear disassembly listing.
@@ -477,6 +480,12 @@ pub trait Provider: Send + Sync {
     /// The strings the project holds.
     fn strings(&self) -> Vec<StringEntry> {
         Vec::new()
+    }
+
+    /// The mangled name the symbol table spells for the function or data at
+    /// `address`, when its shown name was demangled from one.
+    fn mangled_name(&self, _address: u64) -> Option<String> {
+        None
     }
 
     /// The Objective-C the image describes, as a header: every protocol,

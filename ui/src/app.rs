@@ -1932,6 +1932,7 @@ impl App {
             start: Some(address),
             end: None,
             provenance: "Analyst".into(),
+            mangled: None,
             summary: "The analyst marked these bytes as a function; the analysis found none here."
                 .into(),
         })
@@ -2195,6 +2196,7 @@ impl App {
             start: Some(string.address),
             end: None,
             provenance: "String scan".into(),
+            mangled: None,
             summary: match &string.section {
                 Some(section) => format!("The string lives in {section}."),
                 None => "The string lives in the program image.".to_string(),
@@ -2219,6 +2221,7 @@ impl App {
             start: Some(symbol.address),
             end: symbol.size.map(|size| symbol.address.saturating_add(size)),
             provenance: "Program image".into(),
+            mangled: self.provider.mangled_name(symbol.address),
             summary: match &symbol.section {
                 Some(section) => format!("The data lives in {section}."),
                 None => "The data lives in the program image.".to_string(),
@@ -7577,6 +7580,39 @@ mod tests {
                 .is_some_and(|language| language.starts_with("AARCH64")),
             "{:?}",
             again.notice
+        );
+    }
+
+    #[test]
+    fn a_mangled_symbol_is_listed_demangled_and_the_inspector_keeps_the_mangled_name() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/ag-image/tests/fixtures/sample_cpp.elf");
+        let app = App::boot(Config {
+            binary: Some(fixture),
+            ..Config::default()
+        })
+        .0;
+        let area = app
+            .provider
+            .functions()
+            .into_iter()
+            .find(|row| row.name == "geometry::area(int, int)")
+            .expect("the overload is listed by its signature");
+        let detail = app.provider.function_detail(area.address).expect("detail");
+        assert_eq!(detail.name, "geometry::area(int, int)");
+        assert_eq!(detail.mangled.as_deref(), Some("_ZN8geometry4areaEii"));
+        let main = app
+            .provider
+            .functions()
+            .into_iter()
+            .find(|row| row.name == "main")
+            .expect("main");
+        assert_eq!(
+            app.provider
+                .function_detail(main.address)
+                .expect("detail")
+                .mangled,
+            None
         );
     }
 

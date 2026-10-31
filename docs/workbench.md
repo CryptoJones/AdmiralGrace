@@ -25,7 +25,7 @@ the workbench in more detail.
 |---|---|
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
 | Work surface | The selected function: listing, pseudocode, graph, bytes, and references; for an Objective-C image, a Header tab with the recovered declarations. |
-| Inspector | The selection's detail, its cross references, the project's provenance and its shape. |
+| Inspector | The selection's detail — its name, and the mangled name a C++ or Rust symbol spelled — its cross references, the project's provenance and its shape. |
 | Bottom workspace | Search results, problems, and the log. |
 
 ## A kuna project export in the workbench
@@ -388,7 +388,7 @@ pushes and pops, branches to an address, `nop`, `ret`, `int3` and their kin — 
 anything else by name rather than guess.
 
 A 32-bit ARM image is decoded too, in both its instruction sets: the SLEIGH decoder reads
-Ghidra's ARM specification, and the mode of each address — ARM or Thumb — comes from the
+the ARM processor specification SLEIGH reads, and the mode of each address — ARM or Thumb — comes from the
 image's symbols (a Thumb function's symbol has its low bit set), from the instructions
 themselves (`blx` to an address switches it), and from the analyst:
 
@@ -406,6 +406,12 @@ prompt offers the mode the marks and symbols give an address, not one a `blx` se
 `tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
 are not reached by the graph; and a call or jump through a register under a condition is read
 as falling through.
+
+A C++ or Rust image's functions are listed under their demangled names, the signature kept —
+`geometry::area(int, int)`, not `_ZN8geometry4areaEii` — in the navigator, the listing and the
+graph; the pseudocode, where a name stands in code, uses the scope and the name alone
+(`geometry::area(2, 3)`); the inspector's **Mangled** row shows what the symbol table spelled,
+for a function and for a piece of data alike.
 
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
 `+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped

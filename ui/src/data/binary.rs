@@ -275,6 +275,7 @@ impl Provider for BinaryProvider {
                 start: Some(address),
                 end: Some(address + symbol.size),
                 provenance: "Symbol table".to_string(),
+                mangled: self.binary.mangled_name(address).map(str::to_string),
                 summary: match section {
                     Some(section) => format!("The symbol lives in {}.", section.name),
                     None => "The symbol lives outside every section.".to_string(),
@@ -314,6 +315,7 @@ impl Provider for BinaryProvider {
             start: Some(address),
             end: section.map(|section| section.vma + section.size),
             provenance,
+            mangled: self.binary.mangled_name(address).map(str::to_string),
             summary,
         })
     }
@@ -528,6 +530,10 @@ impl Provider for BinaryProvider {
 
     fn objc_header(&self) -> Option<String> {
         self.binary.objc_header()
+    }
+
+    fn mangled_name(&self, address: u64) -> Option<String> {
+        self.binary.mangled_name(address).map(str::to_string)
     }
 
     fn strings(&self) -> Vec<StringEntry> {
