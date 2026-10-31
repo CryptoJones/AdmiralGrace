@@ -4075,7 +4075,19 @@ impl<'a> Lifter<'a> {
     /// so is a jump through an expression that is not a variable, which is
     /// a jump table the walk did not read, not a tail call.
     fn callee_of(&mut self, value: &Value, at: u64, how: How) -> Result<Option<Callee>, NotLifted> {
-        let refused = || match how {
+        self.callee_through(value, at, how, how)
+    }
+
+    /// [`Self::callee_of`], with `origin` the way the callee was first
+    /// reached, for the refusal's wording after the dispatcher is followed.
+    fn callee_through(
+        &mut self,
+        value: &Value,
+        at: u64,
+        how: How,
+        origin: How,
+    ) -> Result<Option<Callee>, NotLifted> {
+        let refused = || match origin {
             How::Jump => NotLifted::new(format!("an indirect jump at {at:#x}")),
             How::Call | How::Dispatch => NotLifted::new("an indirect call"),
         };
@@ -4084,10 +4096,17 @@ impl<'a> Lifter<'a> {
             _ => return Err(refused()),
         };
         match self.guard_slot(&node) {
+            // The dispatcher's target is the function in `rax`; a `rax` that
+            // holds a guard pointer itself leads nowhere, and is refused
+            // rather than followed round.
+            Some(_) if how == How::Dispatch => return Err(refused()),
             Some(Guard::Check) => return Ok(None),
             Some(Guard::Dispatch) => {
                 let target = self.read(RegisterId::new(RC_GPR, RAX, 64), at)?;
-                return self.callee_of(&target, at, How::Dispatch);
+                return match self.callee_through(&target, at, How::Dispatch, origin)? {
+                    Some(callee) => Ok(Some(callee)),
+                    None => Err(refused()),
+                };
             }
             None => {}
         }
@@ -4129,8 +4148,10 @@ impl<'a> Lifter<'a> {
             _ => return None,
         };
         match name.as_str() {
-            "__guard_dispatch_icall_fptr" => Some(Guard::Dispatch),
-            "__guard_check_icall_fptr" => Some(Guard::Check),
+            "__guard_dispatch_icall_fptr"
+            | "__guard_xfg_dispatch_icall_fptr"
+            | "__guard_xfg_table_dispatch_icall_fptr" => Some(Guard::Dispatch),
+            "__guard_check_icall_fptr" | "__guard_xfg_check_icall_fptr" => Some(Guard::Check),
             _ => None,
         }
     }
@@ -6532,6 +6553,38 @@ mod tests {
             &[],
         );
         assert_eq!(checked, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        // A `rax` that holds the dispatcher itself goes nowhere: refused,
+        // not followed round. mov rax, [0x4000]; call rax; ret — and the
+        // same through the slot.
+        assert_eq!(
+            c_with(
+                &[0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xff, 0xd0, 0xc3],
+                &Guarded,
+                &[]
+            ),
+            "not lifted yet: an indirect call"
+        );
+        assert_eq!(
+            c_with(
+                &[
+                    0x48, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xff, 0x15, 0xf3, 0x2f, 0x00, 0x00,
+                    0xc3
+                ],
+                &Guarded,
+                &[]
+            ),
+            "not lifted yet: an indirect call"
+        );
+        // A jump through the dispatcher to a `rax` the lift does not know
+        // is refused as the jump it is. mov rax, [0x4008]; jmp [0x4000]
+        assert_eq!(
+            c_with(
+                &[0x48, 0x8b, 0x05, 0x01, 0x30, 0x00, 0x00, 0xff, 0x25, 0xf3, 0x2f, 0x00, 0x00],
+                &Guarded,
+                &[]
+            ),
+            "not lifted yet: an indirect jump at 0x1007"
+        );
         // Under `indirect-calls refuse` the dispatch to a parameter is refused
         // as the indirect call it is, and the named target still goes.
         let refused = c_with(

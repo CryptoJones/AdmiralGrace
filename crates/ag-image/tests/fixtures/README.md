@@ -69,8 +69,8 @@ lld-link /def:exports.def /entry:main /subsystem:console /out:sample.exe sample.
 The guarded PE:
 
 ```sh
-clang-cl /c /guard:cf /O1 /Fo cfg.obj cfg.c
-clang-cl /c /O1 /Fo cfg_guard.obj cfg_guard.c
+clang-cl /c /guard:cf /O1 /Focfg.obj cfg.c
+clang-cl /c /O1 /Focfg_guard.obj cfg_guard.c
 lld-link /def:cfg_exports.def /entry:main /subsystem:console /nodefaultlib /out:cfg.exe cfg.obj cfg_guard.obj
 ```
 

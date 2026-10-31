@@ -3309,6 +3309,9 @@ fn collect_calls(node: &ag_engine::AstNode, found: &mut dyn FnMut(&str, u64)) {
                 collect_calls(arg, found);
             }
         }
+        // A function passed as a value is named too: the program must
+        // declare it.
+        AstNode::FunctionName { name, address } => found(name, *address),
         AstNode::Assign { lhs, rhs } | AstNode::Binary { lhs, rhs, .. } => {
             collect_calls(lhs, found);
             collect_calls(rhs, found);

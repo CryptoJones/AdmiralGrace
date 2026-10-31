@@ -2088,7 +2088,6 @@ fn a_windows_control_flow_guard_dispatch_reads_as_the_call_it_guards() {
     assert!(through.contains("  return a(b, 1);"), "{through}");
     let tail = image("cfg.exe", &["pseudocode", "tail_through"]);
     assert!(tail.contains("  a(a);"), "{tail}");
-    // Through a pointer loaded from a struct.
     // Through a pointer loaded from a struct; the register the function's
     // own parameter was moved into is passed on, as any call's are.
     let field = image("cfg.exe", &["pseudocode", "field_call"]);
@@ -2111,8 +2110,9 @@ fn a_windows_control_flow_guard_dispatch_reads_as_the_call_it_guards() {
         .output()
         .expect("the ag binary runs");
     assert!(!output.status.success());
+    // The dispatch here is a jump, and is refused as the jump it is.
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("an indirect call"),
+        String::from_utf8_lossy(&output.stdout).contains("an indirect jump at 0x140001015"),
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );

@@ -201,3 +201,47 @@ fn the_builtins_transpile_to_c_plus_plus_a_compiler_reads() {
         String::from_utf8_lossy(&checked.stderr)
     );
 }
+
+#[test]
+fn the_guarded_calls_transpile_to_c_plus_plus_a_compiler_reads() {
+    let compiler = ["c++", "g++", "clang++"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    });
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let image = Binary::open(&root.join("tests/fixtures/cfg.exe")).expect("the fixture opens");
+    let targets: Vec<u64> = ["call_through", "tail_through", "field_call", "main"]
+        .iter()
+        .map(|name| address_of(&image, name))
+        .collect();
+    let text = image
+        .transpile(&targets, true, None)
+        .expect("the four lift");
+    assert!(text.contains("((long (*)(...))a)(b, 1)"), "{text}");
+    assert!(text.contains("call_through((long)add, 2)"), "{text}");
+    let Some(compiler) = compiler else {
+        eprintln!("no C++ compiler on this machine: the text is not compiled");
+        return;
+    };
+    let dir = Scratch(std::env::temp_dir().join(format!(
+        "ag-transpile-cfg-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let source = dir.0.join("cfg.cpp");
+    std::fs::write(&source, &text).unwrap();
+    let checked = Command::new(compiler)
+        .args(["-fsyntax-only", "-x", "c++"])
+        .arg(&source)
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        checked.status.success(),
+        "{}\n{text}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}

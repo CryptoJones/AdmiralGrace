@@ -314,9 +314,27 @@ fn renamed(node: &AstNode) -> AstNode {
             ty: ty.clone(),
             target: Box::new(renamed(target)),
         },
+        // A call through an expression goes through a pointer to a function
+        // of integers, and a function passed as an argument is the integer
+        // the machine held — a compiler reads neither bare.
         AstNode::Call { callee, args } => AstNode::Call {
-            callee: Box::new(renamed(callee)),
-            args: args.iter().map(renamed).collect(),
+            callee: Box::new(match callee.as_ref() {
+                AstNode::FunctionName { .. } => renamed(callee),
+                through => AstNode::Cast {
+                    ty: "long (*)(...)".to_string(),
+                    target: Box::new(renamed(through)),
+                },
+            }),
+            args: args
+                .iter()
+                .map(|arg| match arg {
+                    AstNode::FunctionName { .. } => AstNode::Cast {
+                        ty: "long".to_string(),
+                        target: Box::new(renamed(arg)),
+                    },
+                    other => renamed(other),
+                })
+                .collect(),
         },
         AstNode::Intrinsic { name, args } => AstNode::Intrinsic {
             name: name.clone(),
@@ -858,5 +876,28 @@ mod tests {
             statement_text(&call("__cmp", vec![AstNode::var("a"), AstNode::var("b")])),
             "__cmp(a, b)"
         );
+    }
+
+    #[test]
+    fn a_call_through_an_expression_and_a_function_passed_are_cast_for_the_compiler() {
+        let through = AstNode::Call {
+            callee: Box::new(AstNode::var("a")),
+            args: vec![AstNode::var("b"), AstNode::constant(1, 4)],
+        };
+        assert_eq!(statement_text(&through), "((long (*)(...))a)(b, 1)");
+        let passed = AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: "call_through".to_string(),
+                address: 0x2000,
+            }),
+            args: vec![
+                AstNode::FunctionName {
+                    name: "add".to_string(),
+                    address: 0x1000,
+                },
+                AstNode::constant(2, 4),
+            ],
+        };
+        assert_eq!(statement_text(&passed), "call_through((long)add, 2)");
     }
 }
