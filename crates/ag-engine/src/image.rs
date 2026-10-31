@@ -60,17 +60,42 @@ pub struct RawSpec {
     pub length: Option<u64>,
 }
 
+/// The architectures raw bytes are read as: the word the command line and
+/// the workbench spell each by, and the language id it stands for.
+const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
+    ("x86-64", "x86:LE:64:default:gcc"),
+    ("x86", "x86:LE:32:default:gcc"),
+    ("arm", "ARM:LE:32:v8:default"),
+    // Cortex-M: Thumb throughout, under the ARMv7 specification.
+    ("thumb", "ARM:LE:32:Cortex:default"),
+    ("aarch64", "AARCH64:LE:64:v8A:default"),
+];
+
 /// The language id an architecture's name stands for, as the command line
-/// and the workbench spell it: `x86-64`, `x86`, `arm`, `thumb`, `aarch64`.
+/// and the workbench spell it: `x86-64`, `x86`, `arm`, `thumb`, `aarch64`,
+/// and the usual other spellings of each.
 pub fn raw_language(arch: &str) -> Option<&'static str> {
-    Some(match arch.trim().to_ascii_lowercase().as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => "x86:LE:64:default:gcc",
-        "x86" | "x86-32" | "i386" | "i686" => "x86:LE:32:default:gcc",
-        "arm" | "arm32" | "armv7" => "ARM:LE:32:v8:default",
-        "thumb" | "cortex" | "cortex-m" => "ARM:LE:32:Cortex:default",
-        "aarch64" | "arm64" => "AARCH64:LE:64:v8A:default",
+    let word = match arch.trim().to_ascii_lowercase().as_str() {
+        "x86-64" | "x86_64" | "x64" | "amd64" => "x86-64",
+        "x86" | "x86-32" | "i386" | "i686" => "x86",
+        "arm" | "arm32" | "armv7" => "arm",
+        "thumb" | "cortex" | "cortex-m" => "thumb",
+        "aarch64" | "arm64" => "aarch64",
         _ => return None,
-    })
+    };
+    RAW_ARCHITECTURE_TABLE
+        .iter()
+        .find(|(name, _)| *name == word)
+        .map(|(_, language)| *language)
+}
+
+/// The architecture's name a raw language id stands for: what the project
+/// file records. Only the ids [`raw_language`] hands out have one.
+pub fn raw_arch(language: &str) -> Option<&'static str> {
+    RAW_ARCHITECTURE_TABLE
+        .iter()
+        .find(|(_, known)| *known == language)
+        .map(|(name, _)| *name)
 }
 
 /// The architecture names [`raw_language`] knows, for a message.
@@ -138,8 +163,23 @@ impl Image {
             None => rest,
         };
         anyhow::ensure!(
-            spec.base.checked_add(length).is_some(),
-            "{length} bytes at {:#x} run past the top of the address space",
+            length > 0,
+            "there are no bytes to read at the offset {:#x}",
+            spec.offset
+        );
+        // Address 0 is where nothing is mapped, to every reader of the
+        // image: bytes said to load there would be read as unmapped.
+        anyhow::ensure!(
+            spec.base != 0,
+            "raw bytes cannot load at address 0: say a base above it"
+        );
+        // The bytes have to fit the address space of the architecture: a
+        // 32-bit program's ends at 4 GiB.
+        let top = crate::arch::Bitness::of_language(&spec.language)
+            .map_or(u128::from(u64::MAX) + 1, |width| 1u128 << width.bits());
+        anyhow::ensure!(
+            u128::from(spec.base) + u128::from(length) <= top,
+            "{length} bytes at {:#x} run past the top of the program's address space",
             spec.base
         );
         if let Some(entry) = spec.entry {

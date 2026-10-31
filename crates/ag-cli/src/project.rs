@@ -652,10 +652,8 @@ fn target_of(target: &Path, sha256: Option<String>) -> Target {
         path: Some(target.display().to_string()),
         sha256,
         raw: raw.map(|spec| {
-            let arch = ag_image::RAW_ARCHITECTURES
-                .split(", ")
-                .find(|arch| ag_image::raw_language(arch) == Some(spec.language.as_str()))
-                .unwrap_or("x86-64");
+            let arch = ag_image::raw_arch(&spec.language)
+                .expect("a raw language the command line handed out has its word");
             RawArgs::target(&spec, arch)
         }),
     }
@@ -750,6 +748,24 @@ impl RawArgs {
             length: spec.length.map(|length| format!("{length:#x}")),
         }
     }
+}
+
+/// How raw bytes were said to load, in a sentence.
+pub fn describe_raw(spec: &ag_image::RawSpec) -> String {
+    format!(
+        "as {} at {:#x}{}{}{}",
+        ag_image::raw_arch(&spec.language).unwrap_or(&spec.language),
+        spec.base,
+        spec.entry
+            .map_or(String::new(), |entry| format!(", entry {entry:#x}")),
+        if spec.offset != 0 {
+            format!(", from offset {:#x}", spec.offset)
+        } else {
+            String::new()
+        },
+        spec.length
+            .map_or(String::new(), |length| format!(", {length} bytes")),
+    )
 }
 
 /// How a project's target loads as raw bytes, when it says it does, in the
@@ -1188,7 +1204,22 @@ fn edit_named(
 fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     // The project may not exist yet: the first edit creates it from the target.
     match ProjectFile::load(file) {
-        Ok(project) => Ok(project),
+        Ok(project) => {
+            // The project says how its target loads; flags that say
+            // otherwise would read other bytes under the same records.
+            let flags = RAW.with(|held| held.borrow().clone());
+            if let Some(flags) = flags {
+                let recorded = raw_of_project(&project)?;
+                anyhow::ensure!(
+                    recorded.as_ref() == Some(&flags),
+                    "the --raw flags say the target loads {}, but {} says {}: drop the flags, or make a new project",
+                    describe_raw(&flags),
+                    file.display(),
+                    recorded.as_ref().map_or("it is not raw bytes".to_string(), describe_raw)
+                );
+            }
+            Ok(project)
+        }
         Err(_) if !file.exists() => {
             let sha256 = match sha256_of(target) {
                 Ok(sha) => Some(sha),

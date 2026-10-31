@@ -57,7 +57,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::JumpTable;
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
-pub use ag_engine::image::{raw_language, RawSpec, RAW_ARCHITECTURES};
+pub use ag_engine::image::{raw_arch, raw_language, RawSpec, RAW_ARCHITECTURES};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::Bitness;

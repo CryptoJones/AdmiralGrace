@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The format version this program writes and reads.
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 
 /// The file extension of a project file.
 pub const PROJECT_EXTENSION: &str = "agproj";
@@ -2225,6 +2225,22 @@ mod tests {
         // An older file has no layout, and is read all the same.
         let older = ProjectFile::from_json(r#"{"format": 4, "target": {}}"#).unwrap();
         assert!(older.layout.is_empty());
+
+        // A target of raw bytes round-trips, at a version an older reader
+        // refuses rather than reads as a container.
+        let mut raw = ProjectFile::new(Target::default());
+        raw.target.raw = Some(RawTarget {
+            arch: "thumb".into(),
+            base: "0x8000000".into(),
+            entry: Some("0x8000101".into()),
+            offset: None,
+            length: None,
+        });
+        let json = raw.to_json().unwrap();
+        assert!(json.contains("\"format\": 6"), "{json}");
+        assert!(json.contains("\"arch\": \"thumb\""), "{json}");
+        let again = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(again.target.raw, raw.target.raw);
         assert!(!ProjectFile::new(Target::default())
             .to_json()
             .unwrap()

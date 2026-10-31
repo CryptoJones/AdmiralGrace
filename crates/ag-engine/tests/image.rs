@@ -166,4 +166,44 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
     .expect("loads");
     assert_eq!(thumb.arm_mode_hints(), vec![(0x1060, true)]);
     assert_eq!(raw_language("sparc"), None);
+    assert_eq!(
+        ag_engine::image::raw_arch("ARM:LE:32:Cortex:default"),
+        Some("thumb")
+    );
+    assert_eq!(
+        ag_engine::image::raw_arch("x86:LE:64:default:gcc"),
+        Some("x86-64")
+    );
+    assert_eq!(ag_engine::image::raw_arch("x86:LE:64:default:clang"), None);
+
+    // Nowhere to load: address 0, no bytes, or past a 32-bit program's space.
+    for (spec, says) in [
+        (
+            RawSpec {
+                base: 0,
+                ..spec.clone()
+            },
+            "address 0",
+        ),
+        (
+            RawSpec {
+                length: Some(0),
+                ..spec.clone()
+            },
+            "no bytes",
+        ),
+        (
+            RawSpec {
+                language: raw_language("x86").unwrap().to_string(),
+                base: 0xffff_ff80,
+                length: Some(0x100),
+                entry: None,
+                ..spec.clone()
+            },
+            "past the top",
+        ),
+    ] {
+        let refused = Image::open_raw(&path, &spec).expect_err(says).to_string();
+        assert!(refused.contains(says), "{refused}");
+    }
 }

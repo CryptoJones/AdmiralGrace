@@ -564,9 +564,22 @@ pub fn run(binary: &Path, raw: Option<ag_image::RawSpec>, cmd: ImageCmd) -> Resu
         Some(project) => crate::project::layout_of(project)?,
         None => ag_image::Layout::default(),
     };
-    // Raw bytes load as the flags say, or as the project remembers.
+    // Raw bytes load as the flags say, or as the project remembers; flags
+    // that disagree with the project would read other bytes under its
+    // records, and are refused.
     let raw = match (raw, &project) {
-        (Some(raw), _) => Some(raw),
+        (Some(raw), Some(project)) => {
+            let recorded = crate::project::raw_of_project(project)?;
+            if let Some(recorded) = recorded.filter(|recorded| *recorded != raw) {
+                anyhow::bail!(
+                    "the --raw flags say the target loads {}, but the project says {}",
+                    crate::project::describe_raw(&raw),
+                    crate::project::describe_raw(&recorded)
+                );
+            }
+            Some(raw)
+        }
+        (Some(raw), None) => Some(raw),
         (None, Some(project)) => crate::project::raw_of_project(project)?,
         (None, None) => None,
     };

@@ -830,6 +830,7 @@ impl App {
         self.corpus_root = None;
         self.kuna_root = None;
         self.binary_path = None;
+        self.raw = None;
         self.methods_path = None;
         self.kuna = None;
         self.annotations =
@@ -2795,6 +2796,7 @@ impl App {
                         } else {
                             self.corpus_root = Some(path);
                             self.kuna_root = None;
+                            self.raw = None;
                             return self.load_project();
                         }
                     }
@@ -2807,6 +2809,7 @@ impl App {
                         } else {
                             self.kuna_root = Some(path);
                             self.corpus_root = None;
+                            self.raw = None;
                             return self.load_project();
                         }
                     }
@@ -2906,6 +2909,21 @@ impl App {
                                         }
                                         None => None,
                                     };
+                                    // A project with no program open names
+                                    // its own: it is opened.
+                                    if self.binary_path.is_none() && raw.is_some() {
+                                        if let Some(target) = project
+                                            .target
+                                            .path
+                                            .as_deref()
+                                            .map(PathBuf::from)
+                                            .filter(|target| target.is_file())
+                                        {
+                                            self.binary_path = Some(target);
+                                            self.corpus_root = None;
+                                            self.kuna_root = None;
+                                        }
+                                    }
                                     let reread = raw != self.raw && self.binary_path.is_some();
                                     self.raw = raw;
                                     self.annotations = project;
@@ -4524,10 +4542,8 @@ fn layout_of(project: &ag_corpus::project::ProjectFile) -> Result<ag_image::Layo
 
 /// How raw bytes load, as the project file records it.
 fn raw_target_of(spec: &ag_image::RawSpec) -> ag_corpus::project::RawTarget {
-    let arch = ag_image::RAW_ARCHITECTURES
-        .split(", ")
-        .find(|arch| ag_image::raw_language(arch) == Some(spec.language.as_str()))
-        .unwrap_or("x86-64");
+    let arch = ag_image::raw_arch(&spec.language)
+        .expect("a raw language the prompt handed out has its word");
     ag_corpus::project::RawTarget {
         arch: arch.to_string(),
         base: format!("{:#x}", spec.base),
@@ -7390,9 +7406,22 @@ mod tests {
         let _ = again.update(Message::FileOpenProject);
         let _ = again.update(Message::PromptChanged(file.display().to_string()));
         let _ = again.update(Message::PromptSubmit);
-        let _ = std::fs::remove_file(&file);
         assert_eq!(again.provider.functions().len(), 1, "{:?}", again.notice);
         assert!(again.raw.is_some());
+
+        // A raw project opened with no program open opens its own.
+        let mut alone = App::boot(Config::default()).0;
+        let _ = alone.update(Message::FileOpenProject);
+        let _ = alone.update(Message::PromptChanged(file.display().to_string()));
+        let _ = alone.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(
+            alone.binary_path.as_deref(),
+            Some(sample_elf().as_path()),
+            "{:?}",
+            alone.notice
+        );
+        assert_eq!(alone.provider.functions().len(), 1, "{:?}", alone.notice);
 
         // What is not raw bytes is refused by name.
         let _ = app.update(Message::FileOpenRaw);

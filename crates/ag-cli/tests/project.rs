@@ -433,7 +433,7 @@ fn a_color_is_set_normalized_and_cleared() {
     let report = show_json(&file);
     assert_eq!(
         report["format"],
-        serde_json::json!(5),
+        serde_json::json!(6),
         "a block record names the version"
     );
     let annotations = report["annotations"].as_array().expect("the annotations");
@@ -1046,7 +1046,7 @@ fn the_image_is_rebased_and_its_segments_edited_through_the_project() {
     assert!(!ok);
     assert!(stderr.contains("already"), "{stderr}");
     let report = show_json(&file);
-    assert_eq!(report["format"], serde_json::json!(5));
+    assert_eq!(report["format"], serde_json::json!(6));
     assert_eq!(report["layout"]["base"], serde_json::json!("0x400000"));
     assert_eq!(
         report["layout"]["segments"].as_array().map(Vec::len),
@@ -1247,4 +1247,55 @@ fn a_project_remembers_how_raw_bytes_load() {
     ]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains("nop"), "{stdout}");
+
+    // Flags that disagree with the project are refused, in both commands;
+    // the same flags again are fine.
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "aarch64",
+        "--base",
+        "0x9000",
+        "patch",
+        "--file",
+        &file.text(),
+        "0x9000",
+        "90",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("but") && stderr.contains("says"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = run(&[
+        "image",
+        &sample,
+        "--raw",
+        "aarch64",
+        "--base",
+        "0x9000",
+        "info",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("the project says"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &sample,
+        "--raw",
+        "x86-64",
+        "--base",
+        "0x1060",
+        "--offset",
+        "0x1060",
+        "--length",
+        "0x18c",
+        "--entry",
+        "0x1149",
+        "show",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
 }
