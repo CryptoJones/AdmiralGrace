@@ -133,6 +133,11 @@ beside; a vtable entry no symbol names is a function under `Type.<kind>#N` — `
 the records are decoded the same way, symbolic references followed to the descriptor they
 name.
 
+`--option dead-code drop` prunes the pseudocode of the statements whose results nothing uses
+— a variable assigned and never read, or assigned again before it is read, a branch whose
+condition can only go one way — keeping a call a dropped assignment held, as the call it is;
+the default, `keep`, shows the code as it was made.
+
 The pseudocode reads a call of the runtime's dispatcher — `objc_msgSend` and its variants, for
 the superclass and for a struct result — as the message it sends, the selector resolved from
 the selector reference the code loads: `[0 greet:[Base answer]]`, `[a twice:c] + 1`, a class

@@ -5,6 +5,7 @@ pub mod ast;
 pub mod cfg;
 pub mod cfgwalk;
 pub mod cpu_context;
+pub mod dead;
 pub mod demangle;
 pub mod emit;
 pub mod image;

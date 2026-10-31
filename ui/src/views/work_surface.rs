@@ -448,12 +448,34 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
 
     let body = app.work.pseudocode.clone().unwrap_or_default();
 
+    // The dead-code toggle, for a program image: the engine's `dead-code`
+    // option, which the toolbar line names and flips.
+    let toolbar = (app.project.kind == crate::model::ProjectKind::Binary).then(|| {
+        let dropping = app.options.get("dead-code").as_deref() == Some("drop");
+        Container::new(
+            Row::new().spacing(4).push(tab_button(
+                if dropping {
+                    "Dead code: hidden"
+                } else {
+                    "Dead code: shown"
+                },
+                dropping,
+                Message::ToggleDeadCode,
+            )),
+        )
+        .padding([2, 12])
+        .width(Length::Fill)
+    });
+
     if body.trim().is_empty() {
-        return empty_state(
+        let empty = empty_state(
             "No pseudocode for this function",
             "The provider recorded no body for this address; the Problems panel says why when it knows.",
-        )
-        .into();
+        );
+        return match toolbar {
+            Some(toolbar) => Column::new().push(toolbar).push(empty).into(),
+            None => empty.into(),
+        };
     }
 
     let selection = app.selection.address();
@@ -490,10 +512,11 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
         list = list.push(pseudocode_row(index, shown, addresses, selection));
     }
 
-    scrollable(list)
-        .height(Length::Fill)
-        .width(Length::Fill)
-        .into()
+    let body = scrollable(list).height(Length::Fill).width(Length::Fill);
+    match toolbar {
+        Some(toolbar) => Column::new().push(toolbar).push(body).into(),
+        None => body.into(),
+    }
 }
 
 /// A comment standing on its own line above a pseudocode line.

@@ -108,6 +108,15 @@ impl Default for Style {
 /// carry none. `options` says how a constant is spelled and how far a body
 /// is indented.
 pub fn emit_function(function: &LiftedFunction, options: &Options) -> Pseudocode {
+    // Under `dead-code drop` the body is pruned first: the statements whose
+    // results nothing uses go, and the locals nothing names after them.
+    let pruned;
+    let function = if options.dead_code == crate::options::DeadCode::Drop {
+        pruned = crate::dead::pruned(function);
+        &pruned
+    } else {
+        function
+    };
     let style = Style::of(options);
     let mut lines = Vec::new();
 
