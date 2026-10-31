@@ -4657,6 +4657,7 @@ fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) ->
         mnemonic: mnemonic.to_string(),
         operands,
         call_target: None,
+        tail: false,
         registers: Vec::new(),
         comment: None,
     };
@@ -6683,6 +6684,92 @@ mod tests {
     }
 
     #[test]
+    fn the_listings_branches_are_arrows_to_their_targets_rows() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // register_tm_clones: two forward jumps to the return at 0x10f8,
+        // from 0x10e2 and 0x10ee.
+        let _ = app.update(Message::FunctionSelected(0x10c0));
+        assert!(!app.work.listing.is_empty());
+        let renamed = app.renames();
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph, &app.work.listing);
+        let mut jumps: Vec<(u64, u64)> = arrows
+            .arrows
+            .iter()
+            .map(|arrow| (arrow.source, arrow.target))
+            .collect();
+        jumps.sort_unstable();
+        assert_eq!(jumps, [(0x10e2, 0x10f8), (0x10ee, 0x10f8)]);
+        let target_row = rows.iter().position(|row| *row == Some(0x10f8));
+        for arrow in &arrows.arrows {
+            assert_eq!(arrow.to, target_row);
+            assert_eq!(rows[arrow.from], Some(arrow.source));
+            assert!(arrow.to > Some(arrow.from));
+        }
+        // The two overlap, so they take two lanes; the shorter one, from
+        // 0x10ee, is nearest the text.
+        assert_eq!(arrows.lanes, 2);
+        let far_from = arrows
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10e2)
+            .expect("the far jump")
+            .from;
+        let near = arrows
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10ee)
+            .expect("the near jump");
+        assert_eq!(near.lane, 0);
+        let near_from = near.from;
+
+        // A comment above an instruction between the far jump and the near
+        // one adds a row: the far jump's row stays, the near jump's and the
+        // target's move down by one.
+        let _ = app.update(Message::AddressSelected(0x10e4));
+        let _ = app.update(Message::EditCommentAbove);
+        let _ = app.update(Message::PromptChanged("the second check".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let renamed = app.renames();
+        assert!(renamed
+            .comment_for(0x10e4)
+            .is_some_and(|comment| comment.above));
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        assert_eq!(rows.iter().filter(|row| row.is_none()).count(), 1);
+        let again = crate::views::arrows::Arrows::of(&rows, &app.work.graph, &app.work.listing);
+        let far = again
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10e2)
+            .expect("the far jump");
+        let near = again
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10ee)
+            .expect("the near jump");
+        assert_eq!(far.from, far_from);
+        assert_eq!(near.from, near_from + 1);
+        assert_eq!(far.to, target_row.map(|row| row + 1));
+        assert_eq!(near.to, far.to);
+
+        // frame_dummy ends in a tail jump to register_tm_clones: a jump out
+        // of the function, with no row to arrive at.
+        let _ = app.update(Message::FunctionSelected(0x1140));
+        let renamed = app.renames();
+        let rows = crate::views::work_surface::listing_rows(&app.work.listing, &renamed);
+        let tail = crate::views::arrows::Arrows::of(&rows, &app.work.graph, &app.work.listing);
+        assert!(app.work.listing.iter().any(|line| line.tail), "a tail call");
+        assert_eq!(tail.arrows.len(), 1, "{:?}", tail.arrows);
+        assert_eq!(tail.arrows[0].to, None);
+        assert_eq!(tail.arrows[0].target, 0x10c0);
+        assert_eq!(rows[tail.arrows[0].from], Some(tail.arrows[0].source));
+    }
+
+    #[test]
     fn block_text_and_a_group_are_recorded_on_the_block_and_drawn() {
         let mut app = app();
         let function = 0x100084A20;
@@ -7175,6 +7262,7 @@ mod tests {
             mnemonic: "nop".into(),
             operands: String::new(),
             call_target: None,
+            tail: false,
             registers: Vec::new(),
             comment: None,
         };
@@ -8980,6 +9068,7 @@ mod tests {
             mnemonic: "call".into(),
             operands: "funct_1180".into(),
             call_target: Some(0x1180),
+            tail: false,
             registers: Vec::new(),
             comment: None,
         };

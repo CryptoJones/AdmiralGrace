@@ -1,6 +1,7 @@
 //! The workbench views.
 
 pub mod about;
+pub mod arrows;
 pub mod bottom_panel;
 pub mod graph;
 pub mod inspector;

@@ -1652,6 +1652,7 @@ mod tests {
                     mnemonic: "mov".into(),
                     operands: "rbp, rsp".into(),
                     call_target: None,
+                    tail: false,
                     registers: Vec::new(),
                     comment: None,
                 })
