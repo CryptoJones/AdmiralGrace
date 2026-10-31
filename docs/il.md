@@ -45,10 +45,13 @@ code needs: `je` the zero flag, `jl` the sign and overflow flags, `jb` the carry
 carry and the zero flag. The producers are kinds of write: a compare (`cmp a, b`: every flag
 of `a - b`, so `jl` is `a < b` and `jb` is `(unsigned int)a < (unsigned int)b`), a test
 (`test a, b`: the flags of `a & b`, the carry clear, so `jne` after `test a, a` is `a != 0`),
-an arithmetic instruction with its operands and result (`sub` reads as a compare of its
-operands; the zero and sign flags of any operation are its result's, `(a + 1) == 0` after
-`inc`; the carry of an addition is the sum wrapping below an operand, and the logical
-operations clear it), and `bt` (the carry is the bit, `(a >> 3) & 1`). The consumers are the
+an arithmetic instruction with its operands and result (the destination is written, so the
+relations are read from the result — the zero and sign flags are its, `(a + 1) == 0` after
+`inc` — the carry of an addition from the sum wrapping below the source, the borrow of a
+subtraction from the difference plus the subtrahend wrapping below it, when the source is
+not the destination too; the logical operations clear the carry and the overflow, so every
+relation is the result's; a signed relation after `sub` is refused), and `bt` (the carry is
+the bit, `(a >> 3) & 1`). The consumers are the
 conditional jumps, `setcc` (the condition as the byte it is: `eax = a < b`), `cmovcc` (a
 value chosen by the condition: `(a < b) ? b : a`) and `adc`/`sbb` (the carry added or borrowed,
 `sbb eax, eax` the idiom for `0 - (a < b)`).

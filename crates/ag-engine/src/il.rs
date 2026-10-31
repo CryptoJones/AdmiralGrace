@@ -388,7 +388,7 @@ pub fn with_casts(node: &AstNode) -> AstNode {
                 then,
                 otherwise,
             } => AstNode::Ternary {
-                cond: Box::new(walk(cond, false)),
+                cond: cond.clone(),
                 then: Box::new(walk(then, false)),
                 otherwise: Box::new(walk(otherwise, false)),
             },
