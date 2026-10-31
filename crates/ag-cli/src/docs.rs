@@ -62,6 +62,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/options.md"),
     },
     Doc {
+        topic: "plugins",
+        summary: "The plugin SDK: loaders, architectures and tools, in Rust or as commands declared in a manifest.",
+        readme_sections: &["Plugins"],
+        body: include_str!("../../../docs/plugins.md"),
+    },
+    Doc {
         topic: "scripting",
         summary: "Scripts against the image: ag run, the tool protocol, and the Python client.",
         readme_sections: &["Scripting"],

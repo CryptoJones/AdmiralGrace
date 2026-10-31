@@ -144,6 +144,9 @@ enum Loaded {
     /// Boxed: the loader's reading is large, the raw spec small.
     Object(Box<ObjectLoadImage>),
     Raw(RawSpec),
+    /// What a registered loader read: a container the engine does not read
+    /// itself.
+    Plugin(Box<crate::plugin::LoadedImage>),
 }
 
 /// How raw bytes — firmware, shellcode, a dump — are to be read: a file with
@@ -222,6 +225,11 @@ impl Image {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        // A registered loader that knows the bytes has the first word: a
+        // format of its own may share a magic with a universal Mach-O.
+        if crate::plugin::loader_for(&bytes).is_some() {
+            return Image::from_bytes(&name, bytes);
+        }
         // A universal Mach-O is several images in one file: which one is
         // the analyst's to say.
         if let Some(slices) = fat_slices(&bytes) {
@@ -289,6 +297,29 @@ impl Image {
 
     /// Parse an image already in memory; `name` labels it in errors.
     pub fn from_bytes(name: &str, bytes: Vec<u8>) -> Result<Image> {
+        // A registered loader that knows the bytes reads them first: that
+        // is how a format the engine does not read is added. One that
+        // fails is reported, and the engine's own loaders have their say.
+        if let Some(loader) = crate::plugin::loader_for(&bytes) {
+            match loader.load(name, &bytes) {
+                Ok(loaded) => {
+                    return Ok(Image {
+                        inner: Loaded::Plugin(Box::new(loaded)),
+                        bytes,
+                        name: name.to_string(),
+                        slice: None,
+                        objc: std::cell::OnceCell::new(),
+                        mangled: std::cell::OnceCell::new(),
+                        swift: std::cell::OnceCell::new(),
+                        unwind: std::cell::OnceCell::new(),
+                    });
+                }
+                Err(error) => eprintln!(
+                    "warning: the loader {} did not read {name}: {error}; reading it as the engine does",
+                    loader.name()
+                ),
+            }
+        }
         let inner = ObjectLoadImage::from_bytes(name, &bytes)
             .map_err(|error| anyhow::anyhow!("loading {name}: {error}"))?;
         Ok(Image {
@@ -413,7 +444,7 @@ impl Image {
     fn object(&self) -> Option<&ObjectLoadImage> {
         match &self.inner {
             Loaded::Object(inner) => Some(inner.as_ref()),
-            Loaded::Raw(_) => None,
+            Loaded::Raw(_) | Loaded::Plugin(_) => None,
         }
     }
 
@@ -421,7 +452,15 @@ impl Image {
     pub fn raw(&self) -> Option<&RawSpec> {
         match &self.inner {
             Loaded::Raw(spec) => Some(spec),
-            Loaded::Object(_) => None,
+            Loaded::Object(_) | Loaded::Plugin(_) => None,
+        }
+    }
+
+    /// What a registered loader read, when a plugin read the image.
+    pub fn plugin_loaded(&self) -> Option<&crate::plugin::LoadedImage> {
+        match &self.inner {
+            Loaded::Plugin(loaded) => Some(loaded.as_ref()),
+            Loaded::Object(_) | Loaded::Raw(_) => None,
         }
     }
 
@@ -442,6 +481,10 @@ impl Image {
     /// bit set, which is a Thumb function. Empty for every other
     /// architecture.
     pub fn arm_mode_hints(&self) -> Vec<(u64, bool)> {
+        if let Loaded::Plugin(_) = &self.inner {
+            // A plugin's image has no mapping symbols the engine reads.
+            return Vec::new();
+        }
         if let Loaded::Raw(spec) = &self.inner {
             // Raw bytes have no symbols; the entry's low bit is all there is.
             return match spec.entry {
@@ -499,6 +542,9 @@ impl Image {
         if let Loaded::Raw(spec) = &self.inner {
             return Some(spec.base);
         }
+        if let Loaded::Plugin(loaded) = &self.inner {
+            return loaded.base;
+        }
         use object::read::{Object, ObjectSegment};
         let file = object::File::parse(self.bytes.as_slice()).ok()?;
         if file.format() == object::BinaryFormat::Pe {
@@ -515,6 +561,7 @@ impl Image {
         match &self.inner {
             Loaded::Object(inner) => String::from_utf8_lossy(inner.arch_id()).into_owned(),
             Loaded::Raw(spec) => spec.language.clone(),
+            Loaded::Plugin(loaded) => loaded.language.clone(),
         }
     }
 
@@ -523,6 +570,7 @@ impl Image {
         match &self.inner {
             Loaded::Object(inner) => inner.image_entry(),
             Loaded::Raw(spec) => spec.entry,
+            Loaded::Plugin(loaded) => loaded.entry,
         }
     }
 
@@ -530,6 +578,7 @@ impl Image {
     pub fn sections(&self) -> Vec<Section> {
         let inner = match &self.inner {
             Loaded::Object(inner) => inner,
+            Loaded::Plugin(loaded) => return loaded.sections.clone(),
             // Raw bytes are one section of code, named for what they are.
             Loaded::Raw(spec) => {
                 return vec![Section {
@@ -564,15 +613,24 @@ impl Image {
         match &self.inner {
             Loaded::Object(inner) => inner.executable_ranges(),
             Loaded::Raw(spec) => vec![(spec.base, spec.length.unwrap_or(0))],
+            Loaded::Plugin(loaded) => loaded
+                .sections
+                .iter()
+                .filter(|section| section.executable)
+                .map(|section| (section.vma, section.size))
+                .collect(),
         }
     }
 
     /// The function symbols as `(address, name)`, rebased to the load address.
     pub fn function_symbols(&self) -> Vec<(u64, String)> {
-        let mut symbols = self
-            .object()
-            .map(|inner| inner.func_symbols())
-            .unwrap_or_default();
+        let mut symbols = match &self.inner {
+            Loaded::Plugin(loaded) => loaded.functions.clone(),
+            _ => self
+                .object()
+                .map(|inner| inner.func_symbols())
+                .unwrap_or_default(),
+        };
         self.show_demangled(symbols.iter_mut().map(|(address, name)| (*address, name)));
         // An Objective-C method's implementation is named by the metadata —
         // `-[Class sel]` — where no symbol names it, as in a stripped image.
@@ -647,10 +705,13 @@ impl Image {
 
     /// The named data objects as `(address, name, size)`.
     pub fn data_symbols(&self) -> Vec<(u64, String, u64)> {
-        let mut symbols = self
-            .object()
-            .map(|inner| inner.data_symbols())
-            .unwrap_or_default();
+        let mut symbols = match &self.inner {
+            Loaded::Plugin(loaded) => loaded.data.clone(),
+            _ => self
+                .object()
+                .map(|inner| inner.data_symbols())
+                .unwrap_or_default(),
+        };
         // A PE names its data through its export table, with no extent.
         if let Some(inner) = self.object() {
             for (address, name) in inner.data_exports() {
@@ -776,6 +837,9 @@ impl Image {
     /// pointer sections, named by the indirect symbol table. Empty for
     /// every other container and architecture.
     pub fn import_slots(&self) -> Vec<(u64, String)> {
+        if let Loaded::Plugin(loaded) = &self.inner {
+            return loaded.imports.clone();
+        }
         if self.object().is_none() {
             return Vec::new();
         }
