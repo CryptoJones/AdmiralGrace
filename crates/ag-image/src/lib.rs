@@ -1892,11 +1892,17 @@ impl Binary {
         let medium = (level == Level::High).then(|| {
             il::to_ssa(
                 &il::build(Level::Medium, &stages, &decoded.disasm, &text, casts),
-                &stages.analysis,
+                &stages.medium_analysis,
                 None,
             )
         });
-        Ok(il::to_ssa(&function, &stages.analysis, medium.as_ref()))
+        // The lifted and low levels lie on the chains; the medium and high
+        // on the graph a rewriter may have changed.
+        let analysis = match level {
+            Level::Lifted | Level::Low => &stages.analysis,
+            Level::Medium | Level::High => &stages.medium_analysis,
+        };
+        Ok(il::to_ssa(&function, analysis, medium.as_ref()))
     }
 
     /// Lift the function at `address` and print it.

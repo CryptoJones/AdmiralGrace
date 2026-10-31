@@ -115,19 +115,25 @@ the image's answers to the name.
 
 **A rewriter** is given a function's medium-level graph — the blocks of statements over
 variables the lifter built, before they are structured into pseudocode — and answers with
-the edits to make. It is run for every function lifted, in the order the rewriters were
-registered; what it leaves is what the medium and high levels (`docs/il.md`) and the
-pseudocode show, while the lifted and low levels stay the machine's. The graph:
+the edits to make. It is run for every function lifted — or for the ones its manifest entry
+names under `functions`, by name or address, which spares the process for the rest — in the
+order the rewriters were registered; what it leaves is what the medium and high levels
+(`docs/il.md`) and the pseudocode show, while the lifted and low levels stay the machine's.
+A thunk, which has no graph, passes no rewriter. The graph, its numbers as JSON numbers with
+a `_hex` twin beside each address:
 
 ```json
-{ "function": "0x1161", "name": "sum_to", "entry": 0,
+{ "function": 4449, "function_hex": "0x1161", "name": "sum_to", "entry": 0,
   "blocks": [
-    { "id": 0, "address": "0x1161",
-      "statements": [ { "index": 0, "text": "local_10 = 0", "addresses": ["0x116c"] }, { "index": 1, "text": "local_14 = 1", "addresses": ["0x1174"] } ],
+    { "id": 0, "address": 4449, "address_hex": "0x1161",
+      "statements": [ { "index": 0, "text": "local_10 = 0", "addresses": [4460] }, { "index": 1, "text": "local_14 = 1", "addresses": [4468] } ],
       "terminator": { "kind": "goto", "target": 1 } },
-    { "id": 1, "address": "0x118a", "statements": [],
+    { "id": 1, "address": 4490, "address_hex": "0x118a", "statements": [],
       "terminator": { "kind": "branch", "cond": "local_14 <= a", "taken": 2, "next": 3 } },
-    { "id": 3, "address": "0x1192", "statements": [ { "index": 0, "text": "return local_10", "addresses": ["0x1192"] } ],
+    { "id": 2, "address": 4477, "address_hex": "0x117d",
+      "statements": [ { "index": 0, "text": "local_10 = local_10 + (long)local_14", "addresses": [4477, 4480, 4483] }, { "index": 1, "text": "local_14 = local_14 + 1", "addresses": [4486] } ],
+      "terminator": { "kind": "goto", "target": 1 } },
+    { "id": 3, "address": 4498, "address_hex": "0x1192", "statements": [ { "index": 0, "text": "return local_10", "addresses": [4498, 4499, 4500] } ],
       "terminator": { "kind": "return" } }
   ] }
 ```
@@ -140,8 +146,8 @@ applied in order, each naming blocks and statements as they stand when it is app
 | Edit | What it does |
 |---|---|
 | `{"op": "remove", "block": B, "statement": I}` | Takes statement `I` out of block `B`. |
-| `{"op": "copy", "from": B, "statement": I, "to": B2, "at": I2}` | Puts a copy of the statement at `I2` of `B2` (its end without `at`). `move` does the same and takes the original out. |
-| `{"op": "add_block", "address": A, "statements": [{"from": B, "statement": I}, …], "terminator": T}` | Adds a block of copied statements; its id is the next number. `address` is optional (one past the highest), `terminator` is `return` unless given — `{"kind": "goto", "target": T}` or `{"kind": "branch", "cond_of": B, "taken": T1, "next": T2}`, the condition reused from block `B`'s branch. |
+| `{"op": "copy", "from": B, "statement": I, "to": B2, "at": I2}` | Puts a copy of the statement at `I2` of `B2` (its end without `at`). `move` does the same and takes the original out first — so `at` within the same block counts after the removal. |
+| `{"op": "add_block", "address": A, "statements": [{"from": B, "statement": I}, …], "terminator": T}` | Adds a block of copied statements; its id is the next number. `address` labels the block and is optional (one past the highest, a label rather than an instruction's address) but must be no other block's; `terminator` is required — `{"kind": "return"}`, `{"kind": "goto", "target": T}` or `{"kind": "branch", "cond_of": B, "taken": T1, "next": T2}`, the condition reused from block `B`'s branch. |
 | `{"op": "redirect", "block": B, "from": T1, "to": T2}` | Every way out of `B` that led to `T1` leads to `T2`. |
 | `{"op": "goto", "block": B, "target": T}` | `B` goes straight to `T`. |
 | `{"op": "return", "block": B}` | `B` returns. |
@@ -151,10 +157,14 @@ applied in order, each naming blocks and statements as they stand when it is app
 
 A command cannot write expressions, only reuse the lifter's; a rewriter in Rust can (below).
 An edit that names a block or statement there is not, a terminator left pointing outside the
-graph, an answer that is not JSON, or a command that fails or runs out of time, refuses the
-function: it is not lifted, and the reason names the rewriter — `not lifted yet: the rewriter
-unflatten: edit 2 (goto): no block 99: there are 4`. Control-flow unflattening is the kind of
-work a rewriter is for: find the dispatcher's switch, point each block at the block the state
+graph, two blocks left at one address, an answer that is not JSON, or a command that fails or
+runs out of time, refuses the function: it is not lifted, and the reason names the rewriter —
+`not lifted yet: the rewriter unflatten: edit 2 (goto): no block 99: there are 4`. The
+instructions of a statement a rewriter removes belong to no statement afterwards, so the
+listing counts them with the frame. A command is a process started per function lifted, and a
+function is lifted again for each level, form and option asked of it: name the functions
+under `functions`, and keep the command quick. Control-flow unflattening is the kind of work
+a rewriter is for: find the dispatcher's switch, point each block at the block the state
 variable would have led to next, and remove the dispatcher.
 
 ## In Rust
@@ -189,13 +199,14 @@ plugin::register_loader(Arc::new(Toy));
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.
-- `ag_engine::plugin::Rewriter` — `name` and `rewrite(&mut Rewrite)`, over a function's
-  medium-level graph before it is structured: `Rewrite` holds the `nodes` (each a
-  `Node` of `Statement`s over `AstNode`s and a `Terminator`) and the `entry`, and offers
+- `ag_engine::plugin::Rewriter` — `name`, `wants(address, name)` (every function unless
+  said) and `rewrite(&mut Rewrite)`, over a function's medium-level graph before it is
+  structured: `Rewrite` holds the `nodes` (each a `Node` of `Statement`s over `AstNode`s
+  and a `Terminator`) and the `entry()`, which cannot move, and offers
   `add_block`, `copy_statement`, `remove_statement`, `insert_statement`, `redirect`,
   `set_goto`, `set_return`, `set_branch`, `set_terminator`, `fresh_address`,
-  `prune_unreachable` and `validate`; the nodes may also be edited directly, with `mark_changed` so the graph is
-  analyzed again. `Rewrite::statement(node, addresses)` makes a plain statement of an
+  `prune_unreachable` and `validate`; the nodes may also be edited directly — the graph is
+  analyzed again after every rewriter that ran. `Rewrite::statement(node, addresses)` makes a plain statement of an
   expression the rewriter builds. An `Err` refuses the function with the rewriter's name.
   Registered with `register_rewriter`; run for every function lifted, in order.
 

@@ -181,7 +181,7 @@ json.dump({"edits": [
         dir.0.join("cut.json"),
         serde_json::json!({
             "name": "cut",
-            "rewriters": [{ "name": "cut-loop", "command": ["python3", dir.0.join("cut.py")] }]
+            "rewriters": [{ "name": "cut-loop", "command": ["python3", dir.0.join("cut.py")], "functions": ["sum_to", "0x1198"] }]
         })
         .to_string(),
     )

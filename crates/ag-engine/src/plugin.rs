@@ -116,6 +116,12 @@ pub trait Architecture: Send + Sync {
 pub trait Rewriter: Send + Sync {
     /// The rewriter's name.
     fn name(&self) -> &str;
+    /// Whether the rewriter wants the function at `address` named `name`;
+    /// every function, unless said. A rewriter that is a command is not
+    /// started for a function it does not want.
+    fn wants(&self, _address: u64, _name: &str) -> bool {
+        true
+    }
     /// Rewrite the graph, or fail with a reason: the function is then not
     /// lifted, and the reason is told with the rewriter's name.
     fn rewrite(&self, rewrite: &mut Rewrite) -> Result<(), String>;
@@ -130,7 +136,7 @@ pub struct Rewrite {
     /// The function's name.
     pub name: String,
     /// The index of the node the function is entered at.
-    pub entry: usize,
+    entry: usize,
     /// The nodes: each with the address that labels it, its statements and
     /// how it leaves.
     pub nodes: Vec<Node>,
@@ -147,6 +153,12 @@ impl Rewrite {
             nodes,
             changed: false,
         }
+    }
+
+    /// The index of the node the function is entered at; a rewriter cannot
+    /// move it.
+    pub fn entry(&self) -> usize {
+        self.entry
     }
 
     /// Whether anything was changed through the helpers, or marked so.
@@ -169,7 +181,7 @@ impl Rewrite {
     }
 
     /// An address no node has, for a block the rewriter adds: one past the
-    /// highest in the graph.
+    /// highest in the graph — a label, not an instruction's address.
     pub fn fresh_address(&self) -> u64 {
         self.nodes
             .iter()
@@ -178,20 +190,32 @@ impl Rewrite {
             .map_or(self.function, |most| most.saturating_add(1))
     }
 
-    /// Add a block; its index, for the gotos that lead to it.
+    /// Add a block; its index, for the gotos that lead to it. The address
+    /// labels the block, so one another block has is refused.
     pub fn add_block(
         &mut self,
         address: u64,
         statements: Vec<Statement>,
         terminator: Terminator,
-    ) -> usize {
+    ) -> Result<usize, String> {
+        if let Some(taken) = self.nodes.iter().position(|node| node.address == address) {
+            return Err(format!(
+                "block {taken} has the address {address:#x} already"
+            ));
+        }
+        let count = self.nodes.len();
+        for target in terminator.successors() {
+            if target > count {
+                return Err(format!("no block {target}: there are {count}"));
+            }
+        }
         self.nodes.push(Node {
             address,
             statements,
             terminator,
         });
         self.changed = true;
-        self.nodes.len() - 1
+        Ok(count)
     }
 
     fn node_mut(&mut self, block: usize) -> Result<&mut Node, String> {
@@ -244,6 +268,9 @@ impl Rewrite {
         let count = self.nodes.len();
         if to >= count {
             return Err(format!("no block {to}: there are {count}"));
+        }
+        if from == to {
+            return Ok(());
         }
         let node = self.node_mut(block)?;
         let mut hit = false;
@@ -413,6 +440,15 @@ impl Rewrite {
                     ));
                 }
             }
+            if let Some(other) = self.nodes[..index]
+                .iter()
+                .position(|earlier| earlier.address == node.address)
+            {
+                return Err(format!(
+                    "blocks {other} and {index} both at {:#x}, the address that labels a block",
+                    node.address
+                ));
+            }
         }
         Ok(())
     }
@@ -533,11 +569,14 @@ impl Rewrite {
                         statements.push(self.copy_statement(from as usize, statement as usize)?);
                     }
                     let terminator = match object.get("terminator") {
-                        None | Some(serde_json::Value::Null) => Terminator::Return,
+                        None | Some(serde_json::Value::Null) => {
+                            return Err(format!(
+                                "edit {at} (add_block): a new block names its terminator"
+                            ))
+                        }
                         Some(given) => self.terminator_of(given, at)?,
                     };
-                    self.add_block(address, statements, terminator);
-                    Ok(())
+                    self.add_block(address, statements, terminator).map(|_| ())
                 }
                 "redirect" => self.redirect(index("block")?, index("from")?, index("to")?),
                 "prune" => {
@@ -594,7 +633,8 @@ impl Rewrite {
             .as_object()
             .ok_or_else(|| format!("edit {at}: the terminator is a JSON object"))?;
         match object.get("kind").and_then(serde_json::Value::as_str) {
-            Some("return") | None => Ok(Terminator::Return),
+            Some("return") => Ok(Terminator::Return),
+            None => Err(format!("edit {at}: a terminator names its kind")),
             Some("goto") => {
                 let target = object
                     .get("target")
@@ -667,11 +707,26 @@ pub struct ExternalRewriter {
     pub name: String,
     pub command: Vec<String>,
     pub timeout: Duration,
+    /// The functions the command is run for, by name or address; every
+    /// function when empty.
+    pub functions: Vec<String>,
 }
 
 impl Rewriter for ExternalRewriter {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn wants(&self, address: u64, name: &str) -> bool {
+        self.functions.is_empty()
+            || self.functions.iter().any(|wanted| {
+                wanted == name
+                    || wanted
+                        .strip_prefix("0x")
+                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                        .is_some_and(|wanted| wanted == address)
+                    || wanted.parse::<u64>().is_ok_and(|wanted| wanted == address)
+            })
     }
 
     fn rewrite(&self, rewrite: &mut Rewrite) -> Result<(), String> {
@@ -735,10 +790,11 @@ pub fn rewriters() -> Vec<Arc<dyn Rewriter>> {
         .clone()
 }
 
-/// Run every registered rewriter over the medium-level graph of a
-/// function, in order: the nodes as they stand after, and whether any
-/// rewriter changed them. A rewriter's failure, or a graph it leaves
-/// pointing outside itself, refuses the lift with the rewriter's name.
+/// Run every registered rewriter that wants the function over its
+/// medium-level graph, in order: the nodes as they stand after, and whether
+/// any rewriter ran. A rewriter's failure, or a graph it leaves pointing
+/// outside itself or with two blocks at one address, refuses the lift with
+/// the rewriter's name.
 pub(crate) fn rewrite_nodes(
     function: u64,
     name: &str,
@@ -756,7 +812,12 @@ pub(crate) fn rewrite_nodes(
         nodes,
         changed: false,
     };
+    let mut ran = false;
     for rewriter in rewriters {
+        if !rewriter.wants(function, name) {
+            continue;
+        }
+        ran = true;
         rewriter.rewrite(&mut rewrite).map_err(|error| {
             NotLifted::new(format!("the rewriter {}: {error}", rewriter.name()))
         })?;
@@ -764,7 +825,9 @@ pub(crate) fn rewrite_nodes(
             NotLifted::new(format!("the rewriter {} left {error}", rewriter.name()))
         })?;
     }
-    Ok((rewrite.nodes, rewrite.changed))
+    // Analyzed again whenever one ran: a rewriter may edit the nodes
+    // directly without marking them changed.
+    Ok((rewrite.nodes, ran))
 }
 
 /// The loaders registered, in the order they were.
@@ -1098,6 +1161,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             name: entry_name(entry, index),
             command: command_of(entry, "rewriter")?,
             timeout: timeout_of(entry)?,
+            functions: strings(entry.get("functions")),
         });
     }
     Ok(Manifest {
@@ -1671,15 +1735,34 @@ mod tests {
         // A new block with a copy, entered by the loop's back edge.
         let fresh = rewrite.fresh_address();
         assert_eq!(fresh, 0x1011);
-        let added = rewrite.add_block(
-            fresh,
-            vec![rewrite.copy_statement(1, 1).unwrap()],
-            Terminator::Goto {
-                target: 1,
-                addresses: Vec::new(),
-            },
-        );
+        let copied = rewrite.copy_statement(1, 1).unwrap();
+        let added = rewrite
+            .add_block(
+                fresh,
+                vec![copied.clone()],
+                Terminator::Goto {
+                    target: 1,
+                    addresses: Vec::new(),
+                },
+            )
+            .unwrap();
         assert_eq!(added, 2);
+        // An address in use labels a block already; a way out past the end
+        // is refused too.
+        assert!(rewrite
+            .add_block(0x1000, Vec::new(), Terminator::Return)
+            .unwrap_err()
+            .contains("block 0 has the address 0x1000 already"));
+        assert!(rewrite
+            .add_block(
+                0x2000,
+                vec![copied],
+                Terminator::Goto {
+                    target: 9,
+                    addresses: Vec::new()
+                }
+            )
+            .is_err());
         rewrite.redirect(0, 0, added).unwrap();
         assert_eq!(rewrite.nodes[0].terminator.successors(), vec![1, 2]);
         assert!(rewrite.redirect(1, 0, 1).is_err(), "a return leads nowhere");
@@ -1700,7 +1783,9 @@ mod tests {
         assert_eq!(rewrite.prune_unreachable(), 0);
         // Pruning renumbers the blocks after the ones dropped.
         let mut rewrite = two_blocks();
-        let third = rewrite.add_block(0x1020, Vec::new(), Terminator::Return);
+        let third = rewrite
+            .add_block(0x1020, Vec::new(), Terminator::Return)
+            .unwrap();
         rewrite.set_goto(0, third).unwrap();
         assert_eq!(rewrite.prune_unreachable(), 1);
         assert_eq!(rewrite.nodes.len(), 2);
@@ -1710,6 +1795,44 @@ mod tests {
         ));
         assert_eq!(rewrite.nodes[1].address, 0x1020);
         rewrite.validate().unwrap();
+        // A switch's cases are renumbered with the rest.
+        let mut rewrite = two_blocks();
+        let third = rewrite
+            .add_block(0x1020, Vec::new(), Terminator::Return)
+            .unwrap();
+        rewrite
+            .set_terminator(
+                0,
+                Terminator::Switch {
+                    index: AstNode::var("i"),
+                    cases: vec![(vec![0], third), (vec![1], 0)],
+                    addresses: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(rewrite.prune_unreachable(), 1);
+        assert!(matches!(
+            &rewrite.nodes[0].terminator,
+            Terminator::Switch { cases, .. } if cases == &vec![(vec![0], 1), (vec![1], 0)]
+        ));
+        // Two blocks at one address do not validate.
+        let mut rewrite = two_blocks();
+        rewrite.nodes[1].address = 0x1000;
+        assert!(rewrite.validate().unwrap_err().contains("both at 0x1000"));
+        // Redirecting a way to where it already leads changes nothing.
+        let mut rewrite = two_blocks();
+        rewrite.redirect(0, 1, 1).unwrap();
+        assert!(!rewrite.changed());
+        // A command's filter.
+        let external = ExternalRewriter {
+            name: "x".to_string(),
+            command: vec!["true".to_string()],
+            timeout: Duration::from_secs(1),
+            functions: vec!["main".to_string(), "0x1161".to_string()],
+        };
+        assert!(external.wants(0x1198, "main"));
+        assert!(external.wants(0x1161, "sum_to"));
+        assert!(!external.wants(0x1149, "add"));
         rewrite.nodes[0].terminator = Terminator::Goto {
             target: 5,
             addresses: Vec::new(),
@@ -1759,6 +1882,10 @@ mod tests {
             error.starts_with("edit 0 (remove): block 0 has no statement 4"),
             "{error}"
         );
+        let error = rewrite
+            .apply_edits(&serde_json::json!([{ "op": "add_block", "statements": [] }]))
+            .unwrap_err();
+        assert!(error.contains("names its terminator"), "{error}");
         let error = rewrite
             .apply_edits(&serde_json::json!([{ "op": "fold" }]))
             .unwrap_err();
