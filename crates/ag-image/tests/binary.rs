@@ -1868,6 +1868,32 @@ fn a_slice_of_a_universal_macho_is_a_program_whose_patches_land_in_its_part_of_t
 }
 
 #[test]
+fn a_swift_images_functions_are_named_demangled_and_its_types_are_read() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_swift_x86");
+    let binary = Binary::open(&path).expect("loads");
+    let swift = binary.swift().expect("Swift");
+    assert_eq!(swift.types.len(), 4);
+    // (`greet` is folded into its protocol witness by the optimizer; `area`
+    // stands on its own.)
+    let area = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "sample.Derived.area(of: sample.Shape) -> Swift.Int")
+        .expect("area, demangled");
+    assert_eq!(
+        binary.mangled_name(area.address),
+        Some("_$s6sample7DerivedC4area2ofSiAA5ShapeO_tF")
+    );
+    assert_eq!(binary.code_name(area.address), Some("sample.Derived.area"));
+    assert_eq!(
+        binary.address_of_mangled("$s6sample7DerivedC4area2ofSiAA5ShapeO_tF"),
+        Some(area.address)
+    );
+    assert!(binary.disassembly(area.address).is_some());
+    assert!(macho().swift().is_none());
+}
+
+#[test]
 fn mangled_names_are_shown_demangled_and_kept_beside_the_shown_name() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for (file, area, sides, count) in [

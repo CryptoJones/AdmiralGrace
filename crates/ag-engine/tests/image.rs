@@ -605,6 +605,138 @@ __attribute__((objc_root_class))
 }
 
 #[test]
+fn a_swift_image_names_its_types_fields_conformances_and_vtable_methods() {
+    use ag_engine::image::Image;
+    use ag_engine::swift::SwiftKind;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    for file in ["sample_swift_x86", "sample_swift_arm64"] {
+        let image = Image::open(&fixtures.join(file)).expect(file);
+        let swift = image.swift().expect("Swift metadata");
+        let names: Vec<(&str, SwiftKind)> = swift
+            .types
+            .iter()
+            .map(|ty| (ty.name.as_str(), ty.kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("sample.Point", SwiftKind::Struct),
+                ("sample.Shape", SwiftKind::Enum),
+                ("sample.Base", SwiftKind::Class),
+                ("sample.Derived", SwiftKind::Class),
+            ],
+            "{file}"
+        );
+        let point = &swift.types[0];
+        assert_eq!(point.module, "sample");
+        let fields: Vec<(&str, Option<&str>, bool)> = point
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.as_str(),
+                    field.type_name.as_deref(),
+                    field.is_var,
+                )
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("x", Some("Swift.Int"), true),
+                ("y", Some("Swift.Int"), true)
+            ]
+        );
+        // An enum's cases, with their payloads where they have one.
+        let shape = &swift.types[1];
+        let cases: Vec<(&str, Option<&str>)> = shape
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.type_name.as_deref()))
+            .collect();
+        assert_eq!(
+            cases,
+            [
+                ("circle", Some("(radius: Swift.Int)")),
+                ("square", Some("(side: Swift.Int)")),
+                ("empty", None),
+            ]
+        );
+        // A class: its vtable, with the kinds, and the names its symbols
+        // give the implementations.
+        let base = &swift.types[2];
+        assert_eq!(base.superclass, None);
+        let kinds: Vec<(&str, bool)> = base
+            .methods
+            .iter()
+            .map(|method| (method.kind, method.is_instance))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("getter", true),
+                ("setter", true),
+                ("modify", true),
+                ("init", false),
+                ("method", true),
+                ("method", false),
+            ]
+        );
+        let twice = base.methods[4].imp.expect("an implementation");
+        assert_eq!(
+            image.function_name(twice).as_deref(),
+            Some("sample.Base.twice(Swift.Int) -> Swift.Int")
+        );
+        // The subclass: its superclass, its fields by their own types, and
+        // the protocol it conforms to.
+        let derived = &swift.types[3];
+        assert_eq!(derived.superclass.as_deref(), Some("sample.Base"));
+        assert_eq!(derived.protocols, ["sample.Greeting"]);
+        assert_eq!(derived.fields[0].type_name.as_deref(), Some("sample.Point"));
+        assert_eq!(derived.fields[1].type_name.as_deref(), Some("sample.Shape"));
+        assert_eq!(swift.protocols.len(), 1);
+        assert_eq!(swift.protocols[0].name, "sample.Greeting");
+        assert_eq!(swift.protocols[0].requirements, 1);
+    }
+
+    // Stripped, the vtable still names its implementations.
+    let stripped = Image::open(&fixtures.join("sample_swift_x86_stripped")).expect("loads");
+    let names: Vec<String> = stripped
+        .function_symbols()
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        names.contains(&"sample.Base.getter#0".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"sample.Base.method#4".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("sample.Base.twice")),
+        "{names:?}"
+    );
+
+    // Nothing of the kind in an Objective-C or a C Mach-O, or an ELF.
+    assert!(Image::open(&fixtures.join("sample_objc"))
+        .expect("loads")
+        .swift()
+        .is_none());
+    assert!(Image::open(&fixtures.join("sample.macho"))
+        .expect("loads")
+        .swift()
+        .is_none());
+    let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    assert!(Image::open(&elf).expect("loads").swift().is_none());
+}
+
+#[test]
 fn a_category_on_a_class_of_another_image_names_the_class_unknown() {
     use ag_engine::image::Image;
     use object::{Object, ObjectSection};

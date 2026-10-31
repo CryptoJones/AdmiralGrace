@@ -115,6 +115,17 @@ pseudocode, where a name stands in code, uses the scope and the name alone: `geo
 3)`. `--filter` is a regular expression, so the brackets and question marks of a signature or a
 Microsoft name want escaping: `--filter 'area\(int'`.
 
+A Swift Mach-O describes its types in its `__swift5_*` sections, for the runtime and for
+reflection: `ag image FILE swift` prints them — each class, struct and enum with its module,
+its superclass, its fields or cases with their types, the protocols it conforms to and, for a
+class, the methods its vtable dispatches with each implementation's address — and each
+protocol. Swift names are demangled everywhere like C++ ones (`sample.Derived.greet(times:
+Swift.Int) -> Swift.Int` for `$s6sample7DerivedC5greet5timesS2i_tF`), the mangled name kept
+beside; a vtable entry no symbol names is a function under `Type.<kind>#N` — `sample.Base.getter#0`,
+`sample.Base.method#4`. The types inside
+the records are decoded the same way, symbolic references followed to the descriptor they
+name.
+
 `ag image FILE objc --header` writes the same as an Objective-C header — the quickest
 overview of such a binary: every protocol, class and category declared, with its properties,
 instance variables and methods under the types the runtime's encodings say (`i20@0:8i16` is
@@ -178,6 +189,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 
 | Subcommand | What it prints |
 |---|---|
+| `swift` | The Swift a Mach-O describes: each type with its kind, module, superclass, fields or cases (with their types), conformances and vtable methods (with the implementation's address), and each protocol; `--json` gives the same as JSON. |
 | `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
@@ -193,7 +205,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
 | `data [TARGET]` | The data of the image: the address, the section, the name, and the functions that use it. With a function, the data that function refers to. With a piece of data, the functions that use it. |
-| `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, `objc.json` and `objc.h` when the image has Objective-C, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
+| `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, `objc.json` and `objc.h` when the image has Objective-C, `swift.json` when it has Swift, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
 | `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
 | `export DIR --force` | Write into a directory that is not empty. |
 | `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |

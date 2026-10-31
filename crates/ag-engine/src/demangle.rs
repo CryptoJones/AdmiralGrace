@@ -4,10 +4,11 @@
 //! signature into one symbol — `_ZN8geometry4areaEii`, `?area@geometry@@YAHHH@Z`,
 //! `_ZN4core3fmt5write17h…E` — so that overloads and generics each have a
 //! name of their own. The listing is unreadable in that form. [`demangle`]
-//! reads the three schemes back: Itanium C++ (ELF, Mach-O), Microsoft C++
-//! (PE) and Rust (legacy and v0), and leaves every other name as it is — a C
-//! symbol, an Objective-C method's `-[Class sel]`, a name of the loader's.
-//! The signature is kept, since it is what tells two overloads apart.
+//! reads the four schemes back: Itanium C++ (ELF, Mach-O), Microsoft C++
+//! (PE), Rust (legacy and v0) and Swift (see [`crate::swift_demangle`]),
+//! and leaves every other name as it is — a C symbol, an Objective-C
+//! method's `-[Class sel]`, a name of the loader's. The signature is kept,
+//! since it is what tells two overloads apart.
 
 use cpp_demangle::{DemangleOptions, Symbol};
 use msvc_demangler::DemangleFlags;
@@ -34,6 +35,14 @@ pub fn demangle_short(mangled: &str) -> Option<String> {
 fn read(mangled: &str, short: bool) -> Option<String> {
     if mangled.len() > LONGEST_NAME {
         return None;
+    }
+    // Swift: a `$s` prefix, under a Mach-O's underscore or not.
+    if crate::swift_demangle::is_swift(mangled) {
+        return if short {
+            crate::swift_demangle::demangle_short(mangled)
+        } else {
+            crate::swift_demangle::demangle(mangled)
+        };
     }
     // Microsoft C++: a leading `?` belongs to no other scheme. The access,
     // the calling convention and the storage class are dropped; the scope,
@@ -225,6 +234,22 @@ mod tests {
         assert_eq!(demangle(&long), None);
         let long = format!("_Z{}", "N".repeat(10_000));
         assert_eq!(demangle(&long), None);
+    }
+
+    #[test]
+    fn swift_names_read_back_too() {
+        assert_eq!(
+            demangle("_$s6sample7DerivedC5greet5timesS2i_tF").as_deref(),
+            Some("sample.Derived.greet(times: Swift.Int) -> Swift.Int")
+        );
+        assert_eq!(
+            super::demangle_short("_$s6sample7DerivedC5greet5timesS2i_tF").as_deref(),
+            Some("sample.Derived.greet")
+        );
+        assert_eq!(
+            demangle("$s6sample4BaseCMa").as_deref(),
+            Some("type metadata accessor for sample.Base")
+        );
     }
 
     #[test]

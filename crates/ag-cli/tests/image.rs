@@ -856,6 +856,16 @@ fn an_export_of_an_objective_c_image_writes_its_header_and_the_rest_do_not() {
         !files.iter().any(|file| file.starts_with("objc.")),
         "{files:?}"
     );
+    assert!(!files.contains(&"swift.json".to_string()), "{files:?}");
+
+    let dir = ExportDir::new("swift");
+    let (ok, _, stderr) = export("sample_swift_x86", &dir, &[]);
+    assert!(ok, "{stderr}");
+    assert!(dir.files().contains(&"swift.json".to_string()));
+    assert_eq!(
+        dir.json("swift.json")["types"][0]["name"],
+        serde_json::json!("sample.Point")
+    );
 }
 
 #[test]
@@ -1411,6 +1421,99 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
     let (ok, _, stderr) = image_result("sample_fat.macho", &["--slice", "ppc", "info"]);
     assert!(!ok);
     assert!(stderr.contains("has no slice"), "{stderr}");
+}
+
+#[test]
+fn a_swift_image_is_described_and_its_names_demangled() {
+    let report = image("sample_swift_x86", &["swift"]);
+    assert!(report.contains("types: 4"), "{report}");
+    assert!(report.contains("  struct sample.Point  0x"), "{report}");
+    assert!(report.contains("    var x: Swift.Int"), "{report}");
+    assert!(
+        report.contains("    case circle: (radius: Swift.Int)"),
+        "{report}"
+    );
+    assert!(report.contains("    case empty\n"), "{report}");
+    assert!(
+        report.contains("  class sample.Derived : sample.Base <sample.Greeting>  0x"),
+        "{report}"
+    );
+    assert!(
+        report.contains("    method #4  0x")
+            && report.contains("  sample.Base.twice(Swift.Int) -> Swift.Int"),
+        "{report}"
+    );
+    assert!(report.contains("protocols: 1"), "{report}");
+    assert!(report.contains("  sample.Greeting  0x"), "{report}");
+    let json = image_json("sample_swift_x86", &["swift"]);
+    assert_eq!(
+        json["types"][3]["superclass"],
+        serde_json::json!("sample.Base")
+    );
+    assert_eq!(
+        json["types"][3]["protocols"][0],
+        serde_json::json!("sample.Greeting")
+    );
+    assert_eq!(
+        json["types"][1]["fields"][0]["type"],
+        serde_json::json!("(radius: Swift.Int)")
+    );
+    assert_eq!(
+        json["types"][2]["methods"][4]["kind"],
+        serde_json::json!("method")
+    );
+    assert_eq!(json["protocols"][0]["requirements"], serde_json::json!(1));
+
+    // The names are demangled everywhere, the mangled one kept.
+    let report = image("sample_swift_x86", &["symbols"]);
+    assert!(
+        report.contains(" sample.Derived.area(of: sample.Shape) -> Swift.Int\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains(" static sample.Base.answer() -> Swift.Int\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains(" protocol witness for sample.Greeting.greet(times: Swift.Int) -> Swift.Int in conformance sample.Derived : sample.Greeting in sample\n"),
+        "{report}"
+    );
+    // The one name left mangled is a function signature specialization,
+    // past the demangler's grammar.
+    assert!(
+        report
+            .lines()
+            .filter(|line| line.contains("$s6sample"))
+            .all(|line| line.contains("Tf")),
+        "{report}"
+    );
+    let json = image_json("sample_swift_x86", &["symbols"]);
+    assert!(json["functions"]
+        .as_array()
+        .expect("functions")
+        .iter()
+        .any(|function| function["mangled"] == "_$s6sample7DerivedC4area2ofSiAA5ShapeO_tF"));
+    let report = image(
+        "sample_swift_x86",
+        &["disasm", "_$s6sample7DerivedC4area2ofSiAA5ShapeO_tF"],
+    );
+    assert!(report.contains("sample.Derived.area"), "{report}");
+    let report = image(
+        "sample_swift_x86",
+        &["cfg", "$s6sample7DerivedC4area2ofSiAA5ShapeO_tF"],
+    );
+    assert!(!report.trim().is_empty(), "{report}");
+
+    // Stripped, the vtable names what it points at.
+    let report = image("sample_swift_x86_stripped", &["symbols"]);
+    assert!(report.contains(" sample.Base.getter#0\n"), "{report}");
+    assert!(report.contains(" sample.Base.method#4\n"), "{report}");
+
+    // An image without Swift says so.
+    let report = image("sample_objc", &["swift"]);
+    assert!(report.contains("no Swift metadata"), "{report}");
+    let json = image_json("sample.elf", &["swift"]);
+    assert_eq!(json["types"].as_array().map(Vec::len), Some(0));
 }
 
 #[test]

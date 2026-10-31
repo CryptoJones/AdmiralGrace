@@ -65,6 +65,9 @@ pub use ag_engine::objc::{
 };
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
+pub use ag_engine::swift::{
+    SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
+};
 pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
 
@@ -386,6 +389,8 @@ pub struct Binary {
     slice: Option<Slice>,
     /// The Objective-C metadata the image carries, when it carries any.
     objc: Option<ObjcMetadata>,
+    /// The Swift metadata the image carries, when it carries any.
+    swift: Option<SwiftMetadata>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
@@ -560,12 +565,14 @@ impl Binary {
             let is_function = functions
                 .binary_search_by_key(&unbit(*address), |function| function.address)
                 .is_ok();
-            let key = if is_function { unbit(*address) } else { *address };
+            let key = if is_function {
+                unbit(*address)
+            } else {
+                *address
+            };
             mangled.entry(key).or_insert_with(|| name.mangled.clone());
             if is_function {
-                short_names
-                    .entry(key)
-                    .or_insert_with(|| name.short.clone());
+                short_names.entry(key).or_insert_with(|| name.short.clone());
             }
         }
 
@@ -618,10 +625,7 @@ impl Binary {
             if mangled.contains_key(&function.address) {
                 continue;
             }
-            if let Some([(raw, plain)]) = imports_by_short
-                .get(&function.name)
-                .map(Vec::as_slice)
-            {
+            if let Some([(raw, plain)]) = imports_by_short.get(&function.name).map(Vec::as_slice) {
                 mangled.insert(function.address, raw.clone());
                 short_names.insert(function.address, function.name.clone());
                 function.name = plain.clone();
@@ -661,6 +665,7 @@ impl Binary {
             slice_offset: image.slice().map_or(0, |slice| slice.offset),
             slice: image.slice().cloned(),
             objc: image.objc().cloned(),
+            swift: image.swift().cloned(),
             sections,
             functions,
             data,
@@ -756,6 +761,14 @@ impl Binary {
     /// without Objective-C.
     pub fn objc_header(&self) -> Option<String> {
         self.objc.as_ref().map(ObjcMetadata::header)
+    }
+
+    /// The Swift metadata the image carries — its types with their fields
+    /// and methods, its protocols — when it carries any. A vtable's methods
+    /// are already in the function list, under their symbols' names or
+    /// `Type.method#N`.
+    pub fn swift(&self) -> Option<&SwiftMetadata> {
+        self.swift.as_ref()
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
@@ -945,6 +958,9 @@ impl Binary {
         self.entry = self.entry.map(shift);
         if let Some(objc) = &mut self.objc {
             objc.shift(delta);
+        }
+        if let Some(swift) = &mut self.swift {
+            swift.shift(delta);
         }
     }
 
@@ -1404,9 +1420,7 @@ impl Binary {
             .iter()
             .find(|(_, mangled)| {
                 mangled.as_str() == name
-                    || mangled
-                        .strip_prefix('_')
-                        .is_some_and(|rest| rest == name)
+                    || mangled.strip_prefix('_').is_some_and(|rest| rest == name)
             })
             .map(|(address, _)| *address)
     }

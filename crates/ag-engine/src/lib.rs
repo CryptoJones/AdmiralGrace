@@ -16,6 +16,8 @@ pub mod pipeline;
 pub mod procedure;
 pub mod register;
 pub mod structure;
+pub mod swift;
+pub mod swift_demangle;
 
 pub use arch::Bitness;
 pub use ast::AstNode;
