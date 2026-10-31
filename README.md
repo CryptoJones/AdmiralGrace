@@ -133,6 +133,19 @@ cargo run --bin ag -- mcp ./sample.elf --project ./sample.agproj
 
 The tools are listed in [docs/cli.md](docs/cli.md#an-mcp-server-ag-mcp).
 
+## Scripting
+
+`ag run` runs a script against a program image, headless: the analysis runs, the command
+after `--` starts with the same tools `ag mcp` serves on its standard input and output, and
+`ag run` ends with the command's exit status. Any language that reads and writes lines of
+JSON is a scripting language here; `scripts/ag.py` is the conversation as Python calls.
+
+```bash
+cargo run --bin ag -- run ./sample.elf --project ./sample.agproj -- python3 my_script.py
+```
+
+See [docs/scripting.md](docs/scripting.md).
+
 ## Corpus format
 
 A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points. The leading `//` comment header of a body is dropped; the signature and the locals are kept.
@@ -158,7 +171,7 @@ ag docs cli
 ag install-skill --agent claude
 ```
 
-`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format and the workbench.
+`ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, scripting and the workbench.
 
 ## Desktop workbench
 

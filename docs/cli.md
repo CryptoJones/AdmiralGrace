@@ -595,6 +595,16 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `set_comment address text [above]` | Puts a comment on the address, inline or above; empty text clears it. |
 | `set_bookmark address [on]` | Bookmarks the function, or takes the bookmark off. |
 | `bookmarks` | The project's bookmarks. |
+| `set_label address name` | Names the address — a label on a branch target, a piece of data; an empty name clears it. |
+| `set_tags address [add] [remove] [on]` | Adds tags to and takes tags off the record at the address; `on` is `function`, `address` (the default) or `block`, as the workbench's prompt asks. |
+| `set_color address color [on]` | Highlights the record: a color name or `#rrggbb`; `none` clears it. |
+| `add_reference from to`, `remove_reference from to` | Records that the instruction at `from` reaches `to` — a computed call or jump the analysis cannot see — or takes the record off. |
+| `tags` | Every tag of the project with how many records carry it. |
+| `tagged tag` | The records that carry a tag. |
+
+The same tools drive a script: `ag run IMAGE [--project FILE] -- COMMAND ARGS…` starts the
+command with the server on its standard input and output and ends with the command's exit
+status — see `docs/scripting.md`, and the Python client in `scripts/ag.py`.
 
 Every write reads the project file again, changes the one record and saves the file whole —
 written beside itself and moved into place — so a change the analyst saved from the command
@@ -657,7 +667,7 @@ ag install-skill --agent claude
 `ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`,
 `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with
 `--project`). `ag docs` prints the manual: the command reference, the corpus format, the
-engine's options and the workbench.
+project file, the engine's options, scripting and the workbench.
 
 | Command | What it does |
 |---|---|
@@ -676,3 +686,4 @@ engine's options and the workbench.
 | 0 | The command ran, or the skill was installed or already current. |
 | 1 | A write failed, a differing skill copy was kept, a function was not lifted, or `catalog --check` found `docs/options.md` stale. |
 | 2 | A usage error: an unknown flag, an unknown topic, or no agent to install for. An unknown engine option or a bad value under `--option` is reported as an error, exit code 1, naming the row and what it takes. |
+| the command's | `ag run` ends with the exit status of the command it ran — 128 plus the signal, for one a signal ended — so a script's failure is the batch's; 1 is also `ag` failing to open the image or to start the command. |

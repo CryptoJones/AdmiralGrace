@@ -62,6 +62,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/options.md"),
     },
     Doc {
+        topic: "scripting",
+        summary: "Scripts against the image: ag run, the tool protocol, and the Python client.",
+        readme_sections: &["Scripting"],
+        body: include_str!("../../../docs/scripting.md"),
+    },
+    Doc {
         topic: "workbench",
         summary: "The panes of ag-ui, and the kuna JSON surfaces it reads.",
         readme_sections: &["Desktop workbench"],

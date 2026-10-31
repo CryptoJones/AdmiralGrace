@@ -12,6 +12,7 @@ mod export;
 mod image;
 mod mcp;
 mod project;
+mod run;
 mod skill;
 
 #[derive(Parser)]
@@ -93,6 +94,26 @@ enum Cmd {
         /// repeated; `ag catalog` lists the options.
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
+    },
+    /// Run a script against the image, headless: the command after `--`
+    /// gets the same tools `ag mcp` serves, on its standard input and
+    /// output, and `ag run` ends with the command's exit status.
+    Run {
+        /// The program image to analyze.
+        binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
+        /// The project file the script's changes go to; made from the
+        /// image when it is not there yet.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Set an engine option, such as `--option dead-code drop`. May be
+        /// repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// The command to run, and its arguments: `-- python3 script.py`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
     /// Assemble one instruction to its bytes, as it would sit at an address.
     Asm {
@@ -296,6 +317,20 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Project { binary, raw, cmd } => {
             project::run(binary, raw.spec()?, raw.slice.clone(), cmd)
         }
+        Cmd::Run {
+            binary,
+            raw,
+            project,
+            options,
+            command,
+        } => run::run(
+            &binary,
+            raw.spec()?,
+            raw.slice.clone(),
+            project.as_deref(),
+            options,
+            &command,
+        ),
         Cmd::Mcp {
             binary,
             raw,
