@@ -171,6 +171,7 @@ impl BinaryProvider {
             mnemonic: instruction.mnemonic.clone(),
             operands,
             call_target,
+            tail: instruction.call.as_ref().is_some_and(|call| call.tail),
             registers: instruction.registers.clone(),
             comment: instruction.comment.clone(),
         }

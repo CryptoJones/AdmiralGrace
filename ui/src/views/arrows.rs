@@ -8,20 +8,25 @@
 //!
 //! The arrows are the taken edges of the function's graph, the same ones
 //! the Graph tab draws: a block's last instruction jumps to the block the
-//! edge arrives at. A fall-through is no arrow. A jump out of the listing
-//! — a tail call, a jump into another function — is a stub leaving the
-//! margin to the left.
+//! edge arrives at. A fall-through is no arrow, and a branch to the very
+//! next block is a fall-through by that rule, so it is none either. A
+//! tail call — the `jmp` that leaves the function for another, or goes
+//! through an import slot — has no edge in the graph, so the listing's
+//! lines say which they are; it is a stub leaving the margin to the left,
+//! as is a branch whose target is not a row of the listing.
 //!
 //! Each arrow runs in a lane, the shortest arrows nearest the text; two
 //! arrows share a lane when their rows do not overlap. The margin is drawn
 //! a row at a time, as a small canvas beside each row, so it scrolls with
 //! the rows and needs no knowledge of their height.
 
+use std::collections::{HashMap, HashSet};
+
 use iced::widget::canvas;
 use iced::{mouse, Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
 use crate::app::Message;
-use crate::data::Graph;
+use crate::data::{Graph, GraphBlock, ListingLine};
 use crate::theme::color;
 
 /// One branch, drawn from its row to its target's.
@@ -52,11 +57,14 @@ impl Arrow {
     }
 }
 
-/// The arrows of a listing, and how many lanes they take.
+/// The arrows of a listing, how many lanes they take, and the part of
+/// each arrow on every row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Arrows {
     pub arrows: Vec<Arrow>,
     pub lanes: usize,
+    /// For every row, the arrows that touch it and the shape of each there.
+    rows: Vec<Vec<(usize, Shape)>>,
 }
 
 /// The width of a lane.
@@ -71,9 +79,20 @@ const HEAD: f32 = 5.0;
 impl Arrows {
     /// The arrows of a listing whose rows are `rows` — the address of the
     /// instruction on each, or none for a row of the analyst's comment —
-    /// drawn from the taken edges of `graph`.
-    pub fn of(rows: &[Option<u64>], graph: &Graph) -> Self {
-        let row_of = |address: u64| rows.iter().position(|row| *row == Some(address));
+    /// drawn from the taken edges of `graph`, and from the tail calls among
+    /// the `listing`'s lines.
+    pub fn of(rows: &[Option<u64>], graph: &Graph, listing: &[ListingLine]) -> Self {
+        let row_of: HashMap<u64, usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, address)| address.map(|address| (address, row)))
+            .collect();
+        let block_of: HashMap<u64, &GraphBlock> = graph
+            .blocks
+            .iter()
+            .map(|block| (block.from, block))
+            .collect();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
         let mut arrows: Vec<Arrow> = Vec::new();
         for edge in &graph.edges {
             if edge.kind != ag_image::EdgeKind::Taken {
@@ -81,27 +100,40 @@ impl Arrows {
             }
             // The branch is the last instruction of the block the edge
             // leaves.
-            let Some(block) = graph.blocks.iter().find(|block| block.from == edge.from) else {
+            let Some(block) = block_of.get(&edge.from) else {
                 continue;
             };
             let source = block
                 .instructions
                 .last()
                 .map_or(block.from, |line| line.address);
-            let Some(from) = row_of(source) else {
+            let Some(&from) = row_of.get(&source) else {
                 continue;
             };
-            if arrows
-                .iter()
-                .any(|arrow| arrow.source == source && arrow.target == edge.to)
-            {
+            if !seen.insert((source, edge.to)) {
                 continue;
             }
             arrows.push(Arrow {
                 source,
                 target: edge.to,
                 from,
-                to: row_of(edge.to),
+                to: row_of.get(&edge.to).copied(),
+                lane: 0,
+            });
+        }
+        for line in listing.iter().filter(|line| line.tail) {
+            let Some(&from) = row_of.get(&line.address) else {
+                continue;
+            };
+            let target = line.call_target.unwrap_or(0);
+            if !seen.insert((line.address, target)) {
+                continue;
+            }
+            arrows.push(Arrow {
+                source: line.address,
+                target,
+                from,
+                to: None,
                 lane: 0,
             });
         }
@@ -128,8 +160,33 @@ impl Arrows {
             taken[lane].push(span);
             arrow.lane = lane;
         }
-        let lanes = taken.len();
-        Self { arrows, lanes }
+        // Each arrow is cut into the part on every row it touches, once.
+        let mut by_row: Vec<Vec<(usize, Shape)>> = vec![Vec::new(); rows.len()];
+        for (index, arrow) in arrows.iter().enumerate() {
+            let (first, last) = arrow.span();
+            for (row, parts) in by_row.iter_mut().enumerate().take(last + 1).skip(first) {
+                let shape = match arrow.to {
+                    None => Shape::Out,
+                    Some(to) if to == arrow.from => Shape::Here,
+                    Some(to) => {
+                        let down = to > arrow.from;
+                        if row == arrow.from {
+                            Shape::Start { down }
+                        } else if row == to {
+                            Shape::End { down }
+                        } else {
+                            Shape::Through
+                        }
+                    }
+                };
+                parts.push((index, shape));
+            }
+        }
+        Self {
+            arrows,
+            lanes: taken.len(),
+            rows: by_row,
+        }
     }
 
     /// The width of the margin: room for every lane, and one lane's worth
@@ -142,40 +199,32 @@ impl Arrows {
     /// The margin beside row `row`: the pieces of every arrow that passes,
     /// starts or ends there, the ones to or from `selected` brightened.
     pub fn margin(&self, row: usize, selected: Option<u64>) -> Element<'static, Message> {
-        let mut pieces = Vec::new();
-        for arrow in &self.arrows {
-            let (first, last) = arrow.span();
-            if row < first || row > last {
-                continue;
-            }
-            let bright =
-                selected.is_some_and(|address| address == arrow.source || address == arrow.target);
-            let tint = match (bright, arrow.to, arrow.down()) {
-                (true, _, _) => color::CYAN,
-                (false, None, _) => color::MUTED,
-                (false, Some(_), true) => color::BLUE,
-                (false, Some(_), false) => color::AMBER,
-            };
-            let shape = match arrow.to {
-                None => Shape::Out,
-                Some(to) if to == arrow.from => Shape::Here,
-                Some(to) => {
-                    let down = to > arrow.from;
-                    if row == arrow.from {
-                        Shape::Start { down }
-                    } else if row == to {
-                        Shape::End { down }
-                    } else {
-                        Shape::Through
-                    }
-                }
-            };
-            pieces.push(Piece {
-                lane: arrow.lane,
-                shape,
-                tint,
-            });
-        }
+        let pieces = self
+            .rows
+            .get(row)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .map(|(index, shape)| {
+                        let arrow = &self.arrows[*index];
+                        let bright = selected.is_some_and(|address| {
+                            address == arrow.source || address == arrow.target
+                        });
+                        let tint = match (bright, arrow.to, arrow.down()) {
+                            (true, _, _) => color::CYAN,
+                            (false, None, _) => color::MUTED,
+                            (false, Some(_), true) => color::BLUE,
+                            (false, Some(_), false) => color::AMBER,
+                        };
+                        Piece {
+                            lane: arrow.lane,
+                            shape: *shape,
+                            tint,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         canvas(Margin {
             width: self.width(),
             pieces,
@@ -240,10 +289,10 @@ impl canvas::Program<Message> for Margin {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let height = bounds.height;
-        let mid = (height / 2.0).round() + 0.5;
+        let mid = height / 2.0;
         let right = self.width - 1.0;
         for piece in &self.pieces {
-            let x = self.lane_x(piece.lane).round() + 0.5;
+            let x = self.lane_x(piece.lane);
             let stroke = canvas::Stroke::default()
                 .with_color(piece.tint)
                 .with_width(1.5);
@@ -345,7 +394,6 @@ fn head(tip: Point, from: Point) -> canvas::Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{GraphBlock, ListingLine};
 
     fn line(address: u64) -> ListingLine {
         ListingLine {
@@ -354,6 +402,7 @@ mod tests {
             mnemonic: "nop".into(),
             operands: String::new(),
             call_target: None,
+            tail: false,
             registers: Vec::new(),
             comment: None,
         }
@@ -384,7 +433,7 @@ mod tests {
             block(0x1010, 0x1014, vec![]),
         ]);
         let rows: Vec<Option<u64>> = (0x1000..0x1014).step_by(4).map(Some).collect();
-        let arrows = Arrows::of(&rows, &graph);
+        let arrows = Arrows::of(&rows, &graph, &[]);
         let mut found: Vec<(u64, u64, usize, Option<usize>)> = arrows
             .arrows
             .iter()
@@ -432,7 +481,7 @@ mod tests {
             }
             rows.push(Some(address));
         }
-        let arrows = Arrows::of(&rows, &graph);
+        let arrows = Arrows::of(&rows, &graph, &[]);
         assert_eq!(arrows.arrows.len(), 2);
         assert_eq!(arrows.lanes, 1);
         let first = arrows
@@ -449,12 +498,32 @@ mod tests {
     fn a_jump_out_of_the_listing_is_a_stub_and_a_graph_without_branches_has_a_margin() {
         let graph = graph_of(vec![block(0x1000, 0x1008, vec![0x2000])]);
         let rows = vec![Some(0x1000), Some(0x1004)];
-        let arrows = Arrows::of(&rows, &graph);
+        let arrows = Arrows::of(&rows, &graph, &[]);
         assert_eq!(arrows.arrows.len(), 1);
         assert_eq!(arrows.arrows[0].to, None);
         assert_eq!(arrows.arrows[0].from, 1);
         assert!(!arrows.arrows[0].down());
-        let none = Arrows::of(&rows, &graph_of(vec![block(0x1000, 0x1008, vec![])]));
+        // A tail call has no edge in the graph: the line says what it is.
+        let mut tail = line(0x1004);
+        tail.tail = true;
+        tail.call_target = Some(0x3000);
+        let arrows = Arrows::of(
+            &rows,
+            &graph_of(vec![block(0x1000, 0x1008, vec![])]),
+            &[line(0x1000), tail],
+        );
+        assert_eq!(arrows.arrows.len(), 1);
+        assert_eq!(
+            (
+                arrows.arrows[0].source,
+                arrows.arrows[0].target,
+                arrows.arrows[0].to
+            ),
+            (0x1004, 0x3000, None)
+        );
+        assert_eq!(arrows.rows[1], [(0, Shape::Out)]);
+        assert!(arrows.rows[0].is_empty());
+        let none = Arrows::of(&rows, &graph_of(vec![block(0x1000, 0x1008, vec![])]), &[]);
         assert!(none.arrows.is_empty());
         assert_eq!(none.lanes, 0);
         assert_eq!(none.width(), TURN + LANE_WIDTH);
@@ -477,7 +546,7 @@ mod tests {
         blocks.push(block(rest_from, end, vec![]));
         let graph = graph_of(blocks);
         let rows: Vec<Option<u64>> = (0x1000..end).step_by(step).map(Some).collect();
-        let arrows = Arrows::of(&rows, &graph);
+        let arrows = Arrows::of(&rows, &graph, &[]);
         assert_eq!(arrows.arrows.len(), n);
         assert_eq!(arrows.lanes, MOST_LANES);
         assert!(arrows.arrows.iter().all(|arrow| arrow.lane < MOST_LANES));

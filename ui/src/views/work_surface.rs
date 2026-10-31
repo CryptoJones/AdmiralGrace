@@ -290,22 +290,14 @@ fn listing_content(app: &App) -> Element<'_, Message> {
 
     // The rows as they will stand, a comment's own row counted, so the
     // margin's arrows know which row a branch and its target are on.
-    let rows: Vec<Option<u64>> = app
-        .work
-        .listing
-        .iter()
-        .flat_map(|line| {
-            let above = renamed
-                .comment_for(line.address)
-                .is_some_and(|comment| comment.above);
-            above
-                .then_some(None)
-                .into_iter()
-                .chain(std::iter::once(Some(line.address)))
-        })
-        .collect();
-    let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph);
-    let selected = app.selection.address();
+    let rows = listing_rows(&app.work.listing, &renamed);
+    let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph, &app.work.listing);
+    // The arrows of the focused instruction are brightened: a selected
+    // function or range focuses no row, so it brightens none.
+    let selected = match app.selection {
+        Selection::Address(address) => Some(address),
+        _ => None,
+    };
     let mut row = 0;
 
     for line in &app.work.listing {
@@ -328,11 +320,34 @@ fn listing_content(app: &App) -> Element<'_, Message> {
         ));
         row += 1;
     }
+    debug_assert_eq!(row, rows.len(), "the rows drawn are the rows counted");
 
     scrollable(list)
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// The rows of the listing as they stand on screen: the address of the
+/// instruction on each, or none for the row an analyst's comment above an
+/// instruction takes. The margin's arrows and the view count rows by this
+/// one rule.
+pub(crate) fn listing_rows(
+    listing: &[ListingLine],
+    renamed: &crate::app::Renames,
+) -> Vec<Option<u64>> {
+    listing
+        .iter()
+        .flat_map(|line| {
+            let above = renamed
+                .comment_for(line.address)
+                .is_some_and(|comment| comment.above);
+            above
+                .then_some(None)
+                .into_iter()
+                .chain(std::iter::once(Some(line.address)))
+        })
+        .collect()
 }
 
 /// A row of the listing with the margin's arrows beside it. The margin

@@ -111,6 +111,11 @@ pub struct ListingLine {
     /// stands for. A call through a GOT slot names the slot, not a
     /// function, and carries none.
     pub call_target: Option<u64>,
+    /// Whether the line is a tail call: a jump to another function, which
+    /// returns to this function's caller — the `jmp` of a stub through its
+    /// import slot included. The listing's margin draws it as a jump out
+    /// of the function.
+    pub tail: bool,
     /// The registers the operands name, spelled as they are spelled in
     /// `operands`.
     ///
