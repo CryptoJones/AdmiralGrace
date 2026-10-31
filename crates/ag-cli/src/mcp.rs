@@ -743,7 +743,7 @@ impl Server {
                 let function = self
                     .image
                     .il(address, level, ssa)
-                    .map_err(|error| format!("{address:#x} was not lifted: {error}"))?;
+                    .map_err(|error| format!("{address:#x} was not lifted: {}", error.reason))?;
                 let mut answer = Answer::json(crate::image::il_json(&function));
                 answer.text = function.text();
                 Ok(answer)

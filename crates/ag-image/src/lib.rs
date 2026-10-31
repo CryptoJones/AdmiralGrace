@@ -1809,7 +1809,6 @@ impl Binary {
         built
     }
 
-    /// Lift the function at `address` and print it.
     /// The function at `address` at one level of the lift — the machine's
     /// instructions, the lifter's statements over temporaries, the
     /// statements over variables, or the structured body — in SSA form
@@ -1851,6 +1850,7 @@ impl Binary {
         Ok(il::to_ssa(&function, &stages.analysis, medium.as_ref()))
     }
 
+    /// Lift the function at `address` and print it.
     fn build_pseudocode(&self, address: u64) -> Result<Pseudocode, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),

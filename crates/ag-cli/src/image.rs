@@ -1644,11 +1644,11 @@ fn il(image: &Binary, target: &str, level: &str, ssa: bool, json: bool) -> Resul
                         "function": address,
                         "function_hex": format!("{address:#x}"),
                         "lifted": false,
-                        "reason": error.to_string(),
+                        "reason": error.reason,
                     }))?
                 );
             } else {
-                println!("// {target} at {address:#x}: not lifted yet: {error}");
+                println!("// {target} at {address:#x}: {error}");
             }
             Ok(1)
         }

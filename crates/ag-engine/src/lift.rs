@@ -513,40 +513,10 @@ pub fn lift_function(
     symbols: &dyn Symbols,
     options: &Options,
 ) -> Result<LiftedFunction, NotLifted> {
-    if bitness != Bitness::Bits64 {
-        return Err(NotLifted::new(format!("{bitness} code")));
-    }
-    let chains = chains(disasm, cfg, entry, symbols)?;
-    let mut lifter = Lifter::new(abi, symbols, *options);
-    if let Some(callee) = lifter.thunk(&chains)? {
-        return Ok(LiftedFunction {
-            name: name.to_string(),
-            address: entry,
-            return_type: "void".to_string(),
-            params: Vec::new(),
-            locals: Vec::new(),
-            body: Vec::new(),
-            frame: chains[0]
-                .instructions
-                .iter()
-                .map(|ins| ins.address)
-                .collect(),
-            thunk: Some(callee),
-            return_reason: None,
-        });
-    }
-    let successors: Vec<Vec<usize>> = chains.iter().map(|chain| chain.end.successors()).collect();
-    let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
-    let lifted = lifter.lift_chains(&chains, &analysis)?;
-    lifter.decide_return(entry, &lifted)?;
-    let nodes = lifter.resolve_all(&chains, lifted)?;
-    let body = structure::structure(&nodes, &analysis, 0, options);
-    lifter.finish(name, entry, &chains, body)
+    lift_stages(disasm, cfg, entry, name, bitness, abi, symbols, options)
+        .map(|stages| stages.function)
 }
 
-/// Lift a run of instructions as a function entered at `entry`: the graph
-/// is built from the instructions alone, stopping at a `jmp` to a function
-/// `symbols` names, as an image's walk does.
 /// The stages of a lift, kept for the intermediate languages: the chains
 /// the function was cut into, the statements over temporaries and slots
 /// before they were resolved (the low level), the nodes over variables
@@ -639,7 +609,7 @@ pub fn lift_stages(
         let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
         return Ok(Stages {
             chains: stage_chains,
-            low: vec![Vec::new()],
+            low: Vec::new(),
             medium: Vec::new(),
             high: Vec::new(),
             function,
@@ -648,10 +618,17 @@ pub fn lift_stages(
     }
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
     let lifted = lifter.lift_chains(&chains, &analysis)?;
+    let names = LowNames {
+        temps: &lifter.temps,
+        slots: options.stack_slot_names,
+    };
     let low: Vec<Vec<LowStatement>> = lifted
         .iter()
         .map(|(statements, terminator)| {
-            let mut rows: Vec<LowStatement> = statements.iter().map(Stmt::low).collect();
+            let mut rows: Vec<LowStatement> = statements
+                .iter()
+                .map(|statement| statement.low(&names))
+                .collect();
             if let Some(end) = low_terminator(terminator) {
                 rows.push(end);
             }
@@ -703,18 +680,41 @@ fn one_line(text: &str) -> String {
     text.trim_end().trim_end_matches(';').to_string()
 }
 
+/// The names the low level spells its values by: a stack slot by the
+/// variable the slot resolves to, a call's result by the temporary's
+/// variable — the names the expressions the lifter has already built read
+/// them by, so a read at the low level finds its write.
+struct LowNames<'a> {
+    temps: &'a [Temp],
+    slots: SlotNames,
+}
+
+impl LowNames<'_> {
+    fn slot(&self, offset: i64) -> String {
+        local_name(self.slots, offset)
+    }
+
+    fn temp(&self, index: usize) -> String {
+        self.temps
+            .get(index)
+            .map(|temp| temp.name.clone())
+            .unwrap_or_else(|| format!("t{index}"))
+    }
+}
+
 impl Sym {
     /// The symbolic value's text, and the name it reads when it is one
     /// thing read.
-    fn low_text(&self) -> (String, Vec<String>) {
+    fn low_text(&self, names: &LowNames) -> (String, Vec<String>) {
         match self {
             Sym::Node(node) => (
                 one_line(&crate::emit::emit_node(node)),
                 crate::il::names_in(node),
             ),
             Sym::Stack(offset) => {
-                let slot = slot_name(*offset);
-                (slot.clone(), vec![slot])
+                // The address of a slot.
+                let slot = names.slot(*offset);
+                (format!("&{slot}"), vec![slot])
             }
             Sym::Entry(index) => {
                 // The value a register held when the function was entered.
@@ -722,7 +722,7 @@ impl Sym {
                 (name.clone(), vec![name])
             }
             Sym::Temp(index) => {
-                let name = format!("t{index}");
+                let name = names.temp(*index);
                 (name.clone(), vec![name])
             }
             Sym::Dead(reason) => (format!("dead /* {reason} */"), Vec::new()),
@@ -731,43 +731,37 @@ impl Sym {
     }
 }
 
-/// A stack slot's name at the low level: `slot[-0x14]`.
-fn slot_name(offset: i64) -> String {
-    if offset < 0 {
-        format!("slot[-{:#x}]", -offset)
-    } else {
-        format!("slot[{offset:#x}]")
-    }
-}
-
 impl Value {
-    fn low_text(&self) -> (String, Vec<String>) {
-        self.sym.low_text()
+    fn low_text(&self, names: &LowNames) -> (String, Vec<String>) {
+        self.sym.low_text(names)
     }
 }
 
 impl Stmt {
     /// The statement at the low level.
-    fn low(&self) -> LowStatement {
+    fn low(&self, names: &LowNames) -> LowStatement {
         match self {
             Stmt::Call {
                 temp,
                 node,
                 addresses,
-            } => LowStatement {
-                text: format!("t{temp} = {}", one_line(&crate::emit::emit_node(node))),
-                addresses: addresses.clone(),
-                defines: vec![format!("t{temp}")],
-                uses: crate::il::names_in(node),
-            },
+            } => {
+                let temp = names.temp(*temp);
+                LowStatement {
+                    text: format!("{temp} = {}", one_line(&crate::emit::emit_node(node))),
+                    addresses: addresses.clone(),
+                    defines: vec![temp],
+                    uses: crate::il::names_in(node),
+                }
+            }
             Stmt::Store {
                 offset,
                 bits,
                 value,
                 addresses,
             } => {
-                let (text, uses) = value.low_text();
-                let slot = slot_name(*offset);
+                let (text, uses) = value.low_text(names);
+                let slot = names.slot(*offset);
                 LowStatement {
                     text: format!("{slot}:{bits} = {text}"),
                     addresses: addresses.clone(),
@@ -780,7 +774,7 @@ impl Stmt {
                 value,
                 addresses,
             } => {
-                let (text, uses) = value.low_text();
+                let (text, uses) = value.low_text(names);
                 let defines = match lhs {
                     AstNode::Var { .. } | AstNode::Register { .. } => crate::il::names_in(lhs),
                     _ => Vec::new(),
@@ -804,14 +798,14 @@ impl Stmt {
             } => {
                 let (text, uses) = match value {
                     Some(value) => {
-                        let (text, uses) = value.low_text();
+                        let (text, uses) = value.low_text(names);
                         (format!("return {text}"), uses)
                     }
                     None => match leftover {
-                        Some(temp) => (
-                            format!("return /* t{temp} left in rax */"),
-                            vec![format!("t{temp}")],
-                        ),
+                        Some(temp) => {
+                            let temp = names.temp(*temp);
+                            (format!("return /* {temp} left in rax */"), vec![temp])
+                        }
                         None => ("return".to_string(), Vec::new()),
                     },
                 };
@@ -828,8 +822,8 @@ impl Stmt {
                 rhs,
                 addresses,
             } => {
-                let (left, mut uses) = lhs.low_text();
-                let (right, more) = rhs.low_text();
+                let (left, mut uses) = lhs.low_text(names);
+                let (right, more) = rhs.low_text(names);
                 uses.extend(more);
                 LowStatement {
                     text: format!("flags = {name}({left}, {right})"),
@@ -842,6 +836,9 @@ impl Stmt {
     }
 }
 
+/// Lift a run of instructions as a function entered at `entry`: the graph
+/// is built from the instructions alone, stopping at a `jmp` to a function
+/// `symbols` names, as an image's walk does.
 pub fn lift_block(
     instructions: &[DecodedInsn],
     entry: u64,

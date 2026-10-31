@@ -27,9 +27,11 @@ pub use arch::Bitness;
 pub use ast::AstNode;
 pub use cfg::{BasicBlock, CfgLoop, HighLevelBlock, HighLevelProcedure, ProcedureCfg, TailCall};
 pub use emit::{Line, Pseudocode};
-pub use image::{Image, Section};
 pub use il::{IlBlock, IlFunction, IlItem, Level};
-pub use lift::{Abi, LiftedFunction, LowStatement, NotLifted, StageChain, Stages, Statement, StatementKind};
+pub use image::{Image, Section};
+pub use lift::{
+    Abi, LiftedFunction, LowStatement, NotLifted, StageChain, Stages, Statement, StatementKind,
+};
 pub use options::{OptionError, Options};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{Architecture, DecodedSection, LoadedImage, Loader, Manifest};

@@ -55,7 +55,7 @@ fn every_level_carries_the_addresses_it_came_from() {
     // The low level has the lifter's statements over slots; a branch at
     // the end of the chain that branches.
     assert_eq!(low.blocks.len(), 4);
-    assert!(low.text().contains("slot[-0x10]:64 = 0"), "{}", low.text());
+    assert!(low.text().contains("local_10:64 = 0"), "{}", low.text());
     assert!(
         low.text().contains("branch if local_14 <= a"),
         "{}",
@@ -158,7 +158,7 @@ fn the_ssa_forms_version_every_definition_and_put_a_phi_where_the_loop_closes() 
         "{condition:?} {phi_version:?}"
     );
 
-    // The high level takes the medium's versions.
+    // The high level takes the medium's versions, a header part by part.
     let high = image.il(SUM_TO, Level::High, true).expect("high ssa");
     assert!(high.ssa);
     assert!(
@@ -166,6 +166,36 @@ fn the_ssa_forms_version_every_definition_and_put_a_phi_where_the_loop_closes() 
         "{}",
         high.text()
     );
+    assert!(
+        high.text()
+            .contains("for (local_14#1 = 1; local_14#2 <= a#0; local_14#3 = local_14#2 + 1)"),
+        "{}",
+        high.text()
+    );
+
+    // At the low level every read finds its write: a use is a version some
+    // item defines, or the `#0` of a parameter or a register at entry.
+    for function in [SUM_TO, 0x1198] {
+        let low = image.il(function, Level::Low, true).expect("low ssa");
+        let defined: Vec<&String> = low.items.iter().flat_map(|item| &item.defines).collect();
+        for item in &low.items {
+            for use_ in &item.uses {
+                let (name, version) = use_.rsplit_once('#').unwrap();
+                assert!(
+                    defined.contains(&use_)
+                        || (version == "0"
+                            && (name == "a" || name == "b" || name.starts_with("entry"))),
+                    "{use_} in {item:?} of\n{}",
+                    low.text()
+                );
+            }
+        }
+        assert!(
+            low.text().contains("v1#1 = ") || function == SUM_TO,
+            "{}",
+            low.text()
+        );
+    }
     // The lifted level versions registers.
     let lifted = image.il(SUM_TO, Level::Lifted, true).expect("lifted ssa");
     assert!(lifted

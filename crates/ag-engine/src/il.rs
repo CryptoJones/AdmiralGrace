@@ -61,10 +61,10 @@ impl Level {
     /// The level a name spells.
     pub fn parse(text: &str) -> Option<Level> {
         match text.trim().to_ascii_lowercase().as_str() {
-            "lifted" | "lil" => Some(Level::Lifted),
-            "low" | "llil" => Some(Level::Low),
-            "medium" | "mlil" => Some(Level::Medium),
-            "high" | "hlil" => Some(Level::High),
+            "lifted" => Some(Level::Lifted),
+            "low" => Some(Level::Low),
+            "medium" => Some(Level::Medium),
+            "high" => Some(Level::High),
             _ => None,
         }
     }
@@ -327,7 +327,12 @@ pub fn build(
                         let name = register_name(use_.register);
                         match use_.access {
                             Access::Read => push_once(&mut uses, name),
-                            Access::Write => push_once(&mut defines, name),
+                            // A write of 32 bits or more replaces the whole
+                            // register; a narrower one keeps the rest of it,
+                            // so it reads the old version too.
+                            Access::Write if use_.register.bit_size >= 32 => {
+                                push_once(&mut defines, name)
+                            }
                             _ => {
                                 push_once(&mut uses, name.clone());
                                 push_once(&mut defines, name);
@@ -359,14 +364,17 @@ pub fn build(
             }
         }
         Level::Low => {
-            for (index, chain) in stages.chains.iter().enumerate() {
+            for (index, statements) in stages.low.iter().enumerate() {
+                let Some(chain) = stages.chains.get(index) else {
+                    break;
+                };
                 let mut block = IlBlock {
                     id: index,
                     address: chain.address,
                     successors: chain.successors.clone(),
                     items: Vec::new(),
                 };
-                for statement in stages.low.get(index).into_iter().flatten() {
+                for statement in statements {
                     push_item(
                         &mut function,
                         &mut block,
@@ -693,50 +701,69 @@ pub fn correspondence(from: &IlFunction, to: &IlFunction) -> Vec<(usize, Vec<usi
         .collect()
 }
 
-/// The function in SSA form: every definition a version, a φ where
-/// paths with different versions meet. `analysis` is the chain graph's —
-/// its dominators and predecessors — for the levels laid on it; the high
-/// level takes its versions from `medium`, the medium level in SSA form,
-/// by the statements the two share.
+/// The function in static single assignment form: every definition
+/// versioned, a φ item at the start of each block where paths carrying
+/// different versions meet, by the dominance frontiers of the block graph.
+/// A name read before any definition is version `#0`. The high level has no
+/// graph of its own: it takes the versions of the medium level it was
+/// built from, by the statements the two share, and keeps `ssa: false`
+/// when none is given. A block the entry does not reach keeps its names
+/// plain. The φ items are appended after the function's own, so their ids
+/// follow the last item's rather than their block's.
 pub fn to_ssa(
     function: &IlFunction,
     analysis: &Analysis,
     medium: Option<&IlFunction>,
 ) -> IlFunction {
     let mut out = function.clone();
-    out.ssa = true;
     if function.level == Level::High {
         if let Some(medium) = medium {
             project_versions(&mut out, medium);
+            out.ssa = true;
         }
         return out;
     }
+    out.ssa = true;
     let count = out.blocks.len();
     if count == 0 || analysis.idom.len() < count || analysis.preds.len() < count {
         return out;
     }
+    let reachable =
+        |block: usize| analysis.order.get(block).copied().unwrap_or(usize::MAX) != usize::MAX;
+    // The entry: its own immediate dominator. A virtual start block stands
+    // above it, so an entry that is also a loop header is a join of the way
+    // in and the way back.
+    let Some(entry) = (0..count).find(|block| analysis.idom.get(*block) == Some(&Some(*block)))
+    else {
+        return out;
+    };
     // The dominance frontiers.
     let mut frontiers: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
     for block in 0..count {
-        if analysis.order.get(block).copied().unwrap_or(usize::MAX) == usize::MAX {
+        if !reachable(block) {
             continue;
         }
-        let preds: Vec<usize> = analysis.preds[block]
+        let preds: BTreeSet<usize> = analysis.preds[block]
             .iter()
             .copied()
-            .filter(|pred| analysis.order.get(*pred).copied().unwrap_or(usize::MAX) != usize::MAX)
+            .filter(|pred| reachable(*pred))
             .collect();
-        if preds.len() < 2 {
+        if preds.len() + usize::from(block == entry) < 2 {
             continue;
         }
-        let Some(Some(idom)) = analysis.idom.get(block) else {
-            continue;
-        };
+        // The walk from a predecessor stops under the block's dominator;
+        // for the entry that is the virtual start, above everything.
+        let stop = (block != entry)
+            .then(|| analysis.idom.get(block).copied().flatten())
+            .flatten();
         for pred in preds {
             let mut runner = pred;
             let mut steps = 0;
-            while runner != *idom && steps <= count {
+            while Some(runner) != stop && steps <= count {
                 frontiers[runner].insert(block);
+                if runner == entry {
+                    break;
+                }
                 match analysis.idom.get(runner) {
                     Some(Some(next)) if *next != runner => runner = *next,
                     _ => break,
@@ -773,8 +800,9 @@ pub fn to_ssa(
     }
     // The φ items, at the start of their blocks, their operands filled as
     // the renaming reaches each predecessor.
-    let mut phi_items: BTreeMap<(usize, String), usize> = BTreeMap::new();
+    let mut phi_items: Vec<Vec<(String, usize)>> = vec![Vec::new(); count];
     for (block, names) in &phis {
+        let mut ids = Vec::new();
         for name in names {
             let id = out.items.len();
             let address = out.blocks[*block].address;
@@ -788,31 +816,31 @@ pub fn to_ssa(
                 uses: Vec::new(),
                 phi: true,
             });
-            phi_items.insert((*block, name.clone()), id);
+            phi_items[*block].push((name.clone(), id));
+            ids.push(id);
         }
-        let mut ids: Vec<usize> = names
-            .iter()
-            .map(|name| phi_items[&(*block, name.clone())])
-            .collect();
         ids.append(&mut out.blocks[*block].items);
         out.blocks[*block].items = ids;
     }
-    // Renaming, down the dominator tree.
+    // Renaming, down the dominator tree. A φ at the entry has the version
+    // that came in from outside the function.
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); count];
-    let mut entry = None;
     for block in 0..count {
-        match analysis.idom.get(block) {
-            Some(Some(idom)) if *idom != block => children[*idom].push(block),
-            Some(Some(_)) => entry = Some(block),
-            _ => {}
+        if let Some(Some(idom)) = analysis.idom.get(block) {
+            if *idom != block {
+                children[*idom].push(block);
+            }
         }
     }
-    let Some(entry) = entry else {
-        return out;
-    };
     let mut counters: BTreeMap<String, usize> = BTreeMap::new();
     let mut stacks: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut phi_operands: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
+    let mut phi_operands: BTreeMap<usize, Vec<(Option<usize>, String)>> = BTreeMap::new();
+    for (name, id) in &phi_items[entry] {
+        phi_operands
+            .entry(*id)
+            .or_default()
+            .push((None, format!("{name}#0")));
+    }
     rename(
         entry,
         &children,
@@ -823,14 +851,8 @@ pub fn to_ssa(
         &mut phi_operands,
         0,
     );
-    for (id, operands) in phi_operands {
-        let name = out.items[id].defines[0]
-            .split('#')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let mut operands = operands;
-        operands.sort_by_key(|(block, _)| *block);
+    for (id, mut operands) in phi_operands {
+        operands.sort_by_key(|(block, _)| block.map_or(0, |block| block + 1));
         out.items[id].uses = operands
             .iter()
             .map(|(_, version)| version.clone())
@@ -840,14 +862,13 @@ pub fn to_ssa(
             out.items[id].defines[0],
             operands
                 .iter()
-                .map(|(block, version)| format!(
-                    "{version} from block_{:x}",
-                    out.blocks[*block].address
-                ))
+                .map(|(block, version)| match block {
+                    Some(block) => format!("{version} from block_{:x}", out.blocks[*block].address),
+                    None => format!("{version} from entry"),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let _ = name;
     }
     out
 }
@@ -857,10 +878,10 @@ fn rename(
     block: usize,
     children: &[Vec<usize>],
     function: &mut IlFunction,
-    phi_items: &BTreeMap<(usize, String), usize>,
+    phi_items: &[Vec<(String, usize)>],
     counters: &mut BTreeMap<String, usize>,
     stacks: &mut BTreeMap<String, Vec<usize>>,
-    phi_operands: &mut BTreeMap<usize, Vec<(usize, String)>>,
+    phi_operands: &mut BTreeMap<usize, Vec<(Option<usize>, String)>>,
     depth: usize,
 ) {
     if depth > function.blocks.len() + 1 {
@@ -899,21 +920,19 @@ fn rename(
             item.text = versioned_text(&item.text, &item.defines, &item.uses);
         }
     }
-    // The φs of the successors take this block's versions.
-    let successors = function.blocks[block].successors.clone();
+    // The φs of the successors take this block's versions, once per edge.
+    let successors: BTreeSet<usize> = function.blocks[block].successors.iter().copied().collect();
     for successor in successors {
-        for ((phi_block, name), id) in phi_items {
-            if *phi_block == successor {
-                let version = stacks
-                    .get(name)
-                    .and_then(|stack| stack.last())
-                    .copied()
-                    .unwrap_or(0);
-                phi_operands
-                    .entry(*id)
-                    .or_default()
-                    .push((block, format!("{name}#{version}")));
-            }
+        for (name, id) in phi_items.get(successor).into_iter().flatten() {
+            let version = stacks
+                .get(name)
+                .and_then(|stack| stack.last())
+                .copied()
+                .unwrap_or(0);
+            phi_operands
+                .entry(*id)
+                .or_default()
+                .push((Some(block), format!("{name}#{version}")));
         }
     }
     for child in &children[block] {
@@ -957,6 +976,9 @@ fn versioned_text(text: &str, defines: &[String], uses: &[String]) -> String {
             }
             return right;
         }
+        if text.contains("  ; ") {
+            return format!("{text}, writes {}", defines.join(", "));
+        }
         return format!("{text}  ; writes {}", defines.join(", "));
     };
     let (left, right) = (left.to_string(), right.to_string());
@@ -975,64 +997,240 @@ fn versioned_text(text: &str, defines: &[String], uses: &[String]) -> String {
     format!("{left} = {right}")
 }
 
-/// `text` with every whole-word `word` replaced by `with`.
+/// `text` with every whole-word `word` replaced by `with`, outside string
+/// literals; a field (`.a`, `->a`) is not the variable of that name.
 fn replace_word(text: &str, word: &str, with: &str) -> String {
     if word.is_empty() {
         return text.to_string();
     }
     let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '#';
     let mut out = String::new();
-    let mut rest = text;
-    while let Some(at) = rest.find(word) {
-        // The character before the match may have been written already.
-        let before = rest[..at]
-            .chars()
-            .next_back()
-            .or_else(|| out.chars().next_back());
-        let after = rest[at + word.len()..].chars().next();
-        let whole = !before.is_some_and(is_ident)
-            && !after.is_some_and(|c| is_ident(c) && c != '#')
-            && after != Some('#');
-        out.push_str(&rest[..at]);
-        if whole {
-            out.push_str(with);
-        } else {
-            out.push_str(word);
+    for (quoted, span) in spans(text) {
+        if quoted {
+            out.push_str(span);
+            continue;
         }
-        rest = &rest[at + word.len()..];
+        let mut rest = span;
+        while let Some(at) = rest.find(word) {
+            // The character before the match may have been written already.
+            let before = rest[..at]
+                .chars()
+                .next_back()
+                .or_else(|| out.chars().next_back());
+            let field = before == Some('.')
+                || (before == Some('>') && {
+                    let written = format!("{out}{}", &rest[..at]);
+                    written.ends_with("->")
+                });
+            let after = rest[at + word.len()..].chars().next();
+            let whole = !before.is_some_and(is_ident)
+                && !field
+                && !after.is_some_and(|c| is_ident(c) && c != '#')
+                && after != Some('#');
+            out.push_str(&rest[..at]);
+            if whole {
+                out.push_str(with);
+            } else {
+                out.push_str(word);
+            }
+            rest = &rest[at + word.len()..];
+        }
+        out.push_str(rest);
     }
-    out.push_str(rest);
+    out
+}
+
+/// The text cut into the spans inside string literals and the spans
+/// outside them, in order, each flagged.
+fn spans(text: &str) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (at, c) in text.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                out.push((true, &text[start..at + 1]));
+                start = at + 1;
+                quoted = false;
+            }
+        } else if c == '"' {
+            if at > start {
+                out.push((false, &text[start..at]));
+            }
+            start = at;
+            quoted = true;
+        }
+    }
+    if start < text.len() {
+        out.push((quoted, &text[start..]));
+    }
     out
 }
 
 /// Give the high level the versions of the medium level: an item takes
-/// the names of the medium item with the same addresses and text.
+/// the names of the medium item with the same addresses and text, and a
+/// control header — `if (…)`, `while (…)`, `switch (…)`, `for (…; …; …)`,
+/// whose text the medium level never has whole — takes them part by part
+/// from the medium items that share its addresses: an assignment from the
+/// statement it is, a condition from the branch that tests it.
 fn project_versions(high: &mut IlFunction, medium: &IlFunction) {
+    let stripped: Vec<String> = medium
+        .items
+        .iter()
+        .map(|item| strip_versions(&item.text))
+        .collect();
     for item in &mut high.items {
-        let found = medium.items.iter().find(|candidate| {
-            !candidate.phi
-                && candidate.addresses == item.addresses
-                && strip_versions(&candidate.text) == item.text
+        let found = medium.items.iter().enumerate().find(|(index, candidate)| {
+            !candidate.phi && candidate.addresses == item.addresses && stripped[*index] == item.text
         });
-        if let Some(found) = found {
+        if let Some((_, found)) = found {
             item.defines = found.defines.clone();
             item.uses = found.uses.clone();
             item.text = found.text.clone();
+            continue;
+        }
+        // A header: its parts inside the parentheses.
+        let Some((keyword, parts)) = header_parts(&item.text) else {
+            continue;
+        };
+        let shared: Vec<(usize, &IlItem)> = medium
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                !candidate.phi
+                    && candidate
+                        .addresses
+                        .iter()
+                        .any(|address| item.addresses.contains(address))
+            })
+            .collect();
+        if shared.is_empty() {
+            continue;
+        }
+        let mut defines = Vec::new();
+        let mut uses = Vec::new();
+        let mut versioned = Vec::new();
+        for part in &parts {
+            // The statement the part is, versions and all.
+            if let Some((_, found)) = shared.iter().find(|(index, _)| stripped[*index] == *part) {
+                for name in &found.defines {
+                    push_once(&mut defines, name.clone());
+                }
+                for name in &found.uses {
+                    push_once(&mut uses, name.clone());
+                }
+                versioned.push(found.text.clone());
+                continue;
+            }
+            // A condition: the branch that tests it names what it reads.
+            let names = names_of(part);
+            let tester = shared.iter().find(|(_, candidate)| {
+                candidate.defines.is_empty()
+                    && (candidate.text.starts_with("if (")
+                        || candidate.text.starts_with("switch ("))
+                    && names
+                        .iter()
+                        .all(|name| candidate.uses.iter().any(|use_| base(use_) == name))
+            });
+            match tester {
+                Some((_, found)) => {
+                    for name in &found.uses {
+                        if names.contains(&base(name).to_string()) {
+                            push_once(&mut uses, name.clone());
+                        }
+                    }
+                    versioned.push(versioned_text(part, &[], &found.uses));
+                }
+                None => versioned.push(part.to_string()),
+            }
+        }
+        if versioned.iter().any(|part| part.contains('#')) {
+            item.text = format!("{keyword} ({})", versioned.join("; "));
+            item.defines = defines;
+            item.uses = uses;
         }
     }
+}
+
+/// A header's keyword and the parts inside its parentheses: one for
+/// `if`, `while` and `switch`, three for `for`.
+fn header_parts(text: &str) -> Option<(&str, Vec<&str>)> {
+    let keyword = ["if", "while", "switch", "for"]
+        .into_iter()
+        .find(|keyword| text.starts_with(&format!("{keyword} (")))?;
+    let inside = text
+        .strip_prefix(keyword)?
+        .strip_prefix(" (")?
+        .strip_suffix(')')?;
+    Some(if keyword == "for" {
+        (keyword, inside.split("; ").collect())
+    } else {
+        (keyword, vec![inside])
+    })
+}
+
+/// The identifiers in a piece of text, outside its string literals.
+fn names_of(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (quoted, span) in spans(text) {
+        if quoted {
+            continue;
+        }
+        // A field is not a name, whichever way it is reached.
+        let span = span.replace("->", "..");
+        let mut word = String::new();
+        let mut previous = None;
+        for c in span.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                word.push(c);
+            } else {
+                if !word.is_empty()
+                    && !word.starts_with(|c: char| c.is_ascii_digit())
+                    && previous != Some('.')
+                {
+                    push_once(&mut names, std::mem::take(&mut word));
+                }
+                word.clear();
+                previous = Some(c);
+            }
+        }
+        if !word.is_empty() && !word.starts_with(|c: char| c.is_ascii_digit()) {
+            push_once(&mut names, word);
+        }
+    }
+    names
+}
+
+/// A versioned name's name: `x` of `x#2`.
+fn base(versioned: &str) -> &str {
+    versioned
+        .rsplit_once('#')
+        .map_or(versioned, |(name, _)| name)
 }
 
 /// Text with the versions taken off: `x#2` is `x`.
 fn strip_versions(text: &str) -> String {
     let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '#' && chars.peek().is_some_and(|d| d.is_ascii_digit()) {
-            while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
-                chars.next();
+    for (quoted, span) in spans(text) {
+        if quoted {
+            out.push_str(span);
+            continue;
+        }
+        let mut chars = span.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '#' && chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    chars.next();
+                }
+            } else {
+                out.push(c);
             }
-        } else {
-            out.push(c);
         }
     }
     out
@@ -1073,7 +1271,243 @@ mod tests {
             "mov rbp,rsp  ; writes r1_5#2"
         );
         assert_eq!(strip_versions("x#12 = y#3 + 1"), "x = y + 1");
-        assert_eq!(Level::parse("MLIL"), Some(Level::Medium));
+        assert_eq!(Level::parse("Medium"), Some(Level::Medium));
+        assert_eq!(Level::parse("mlil"), None);
         assert_eq!(Level::parse("nope"), None);
+        assert_eq!(
+            versioned_text("ret  ; return", &["r1_4#3".to_string()], &[]),
+            "ret  ; return, writes r1_4#3"
+        );
+    }
+
+    #[test]
+    fn string_literals_and_fields_are_left_alone() {
+        assert_eq!(
+            replace_word("printf(\"a = %d\\n\", a)", "a", "a#0"),
+            "printf(\"a = %d\\n\", a#0)"
+        );
+        assert_eq!(
+            replace_word("f(\"\\\"a\", a) + a", "a", "a#2"),
+            "f(\"\\\"a\", a#2) + a#2"
+        );
+        assert_eq!(
+            replace_word("p->a + s.a + a", "a", "a#1"),
+            "p->a + s.a + a#1"
+        );
+        assert_eq!(replace_word("b > a", "a", "a#1"), "b > a#1");
+        assert_eq!(strip_versions("f(\"#1\", x#1)"), "f(\"#1\", x)");
+        assert_eq!(names_of("p->a + s.a + a * 10 + \"b\""), vec!["p", "s", "a"]);
+    }
+
+    /// A statement for a test: its text, what it defines, what it uses.
+    type Statement<'a> = (&'a str, &'a [&'a str], &'a [&'a str]);
+
+    /// A function over a block graph: each block its statements and its
+    /// successors.
+    fn function_over(blocks: &[(&[Statement], &[usize])]) -> (IlFunction, Analysis) {
+        let mut function = IlFunction {
+            name: "f".to_string(),
+            address: 0x1000,
+            level: Level::Medium,
+            ssa: false,
+            blocks: Vec::new(),
+            items: Vec::new(),
+        };
+        for (index, (statements, successors)) in blocks.iter().enumerate() {
+            let mut block = IlBlock {
+                id: index,
+                address: 0x1000 + index as u64 * 0x10,
+                successors: successors.to_vec(),
+                items: Vec::new(),
+            };
+            let base = block.address;
+            for (at, (text, defines, uses)) in statements.iter().enumerate() {
+                push_item(
+                    &mut function,
+                    &mut block,
+                    IlItem {
+                        id: 0,
+                        block: index,
+                        depth: 0,
+                        addresses: vec![base + at as u64],
+                        text: text.to_string(),
+                        defines: defines.iter().map(|d| d.to_string()).collect(),
+                        uses: uses.iter().map(|u| u.to_string()).collect(),
+                        phi: false,
+                    },
+                );
+            }
+            function.blocks.push(block);
+        }
+        let successors: Vec<Vec<usize>> = blocks.iter().map(|(_, s)| s.to_vec()).collect();
+        let analysis =
+            crate::structure::analyze(&successors, 0, |node| 0x1000 + node as u64 * 0x10)
+                .expect("reducible");
+        (function, analysis)
+    }
+
+    #[test]
+    fn a_diamond_meets_in_one_phi_with_an_operand_per_path() {
+        let (function, analysis) = function_over(&[
+            (&[("x = 1", &["x"], &[])], &[1, 2]),
+            (&[("x = 2", &["x"], &[])], &[3]),
+            (&[("x = 3", &["x"], &[])], &[3]),
+            (&[("y = x", &["y"], &["x"])], &[]),
+        ]);
+        let ssa = to_ssa(&function, &analysis, None);
+        let text = ssa.text();
+        assert!(text.contains("x#1 = 1"), "{text}");
+        assert!(text.contains("x#2 = 2"), "{text}");
+        assert!(text.contains("x#3 = 3"), "{text}");
+        assert!(
+            text.contains("x#4 = φ(x#2 from block_1010, x#3 from block_1020)"),
+            "{text}"
+        );
+        assert!(text.contains("y#1 = x#4"), "{text}");
+        let phis: Vec<&IlItem> = ssa.items.iter().filter(|item| item.phi).collect();
+        assert_eq!(phis.len(), 1);
+        assert_eq!(phis[0].block, 3);
+        assert_eq!(ssa.blocks[3].items[0], phis[0].id);
+        // The φ item's id follows the function's own items.
+        assert_eq!(phis[0].id, 4);
+    }
+
+    #[test]
+    fn an_entry_that_is_a_loop_header_gets_a_phi_with_the_way_in() {
+        let (function, analysis) = function_over(&[
+            (&[("x = x + 1", &["x"], &["x"])], &[0, 1]),
+            (&[("return x", &[], &["x"])], &[]),
+        ]);
+        let ssa = to_ssa(&function, &analysis, None);
+        let text = ssa.text();
+        assert!(
+            text.contains("x#1 = φ(x#0 from entry, x#2 from block_1000)"),
+            "{text}"
+        );
+        assert!(text.contains("x#2 = x#1 + 1"), "{text}");
+        assert!(text.contains("return x#2"), "{text}");
+        // A branch to one block by two edges gives the φ one operand.
+        let (function, analysis) = function_over(&[
+            (&[("x = 1", &["x"], &[])], &[1, 1]),
+            (&[("x = 2", &["x"], &[])], &[1, 2]),
+            (&[("return x", &[], &["x"])], &[]),
+        ]);
+        let ssa = to_ssa(&function, &analysis, None);
+        let text = ssa.text();
+        assert!(
+            text.contains("x#2 = φ(x#1 from block_1000, x#3 from block_1010)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn high_level_headers_take_their_versions_from_the_medium_level() {
+        let mut medium = IlFunction {
+            name: "f".to_string(),
+            address: 0x10,
+            level: Level::Medium,
+            ssa: true,
+            blocks: Vec::new(),
+            items: Vec::new(),
+        };
+        let mut block = IlBlock {
+            id: 0,
+            address: 0x10,
+            successors: Vec::new(),
+            items: Vec::new(),
+        };
+        let item = |addresses: &[u64], text: &str, defines: &[&str], uses: &[&str]| IlItem {
+            id: 0,
+            block: 0,
+            depth: 0,
+            addresses: addresses.to_vec(),
+            text: text.to_string(),
+            defines: defines.iter().map(|d| d.to_string()).collect(),
+            uses: uses.iter().map(|u| u.to_string()).collect(),
+            phi: false,
+        };
+        push_item(
+            &mut medium,
+            &mut block,
+            item(&[0x10], "x#1 = 1", &["x#1"], &[]),
+        );
+        push_item(
+            &mut medium,
+            &mut block,
+            item(
+                &[0x14],
+                "if (x#2 <= a#0) goto block_20 else goto block_30",
+                &[],
+                &["x#2", "a#0"],
+            ),
+        );
+        push_item(
+            &mut medium,
+            &mut block,
+            item(&[0x18], "x#3 = x#2 + 1", &["x#3"], &["x#2"]),
+        );
+        push_item(
+            &mut medium,
+            &mut block,
+            item(
+                &[0x20],
+                "if (y#0 == 0) goto block_30 else goto block_40",
+                &[],
+                &["y#0"],
+            ),
+        );
+        push_item(
+            &mut medium,
+            &mut block,
+            item(&[0x30], "printf(\"x = %d\\n\", x#2)", &[], &["x#2"]),
+        );
+        medium.blocks.push(block);
+        let mut high = medium.clone();
+        high.level = Level::High;
+        high.ssa = false;
+        high.items.clear();
+        high.blocks[0].items.clear();
+        let mut block = high.blocks.remove(0);
+        push_item(
+            &mut high,
+            &mut block,
+            item(
+                &[0x10, 0x14, 0x18],
+                "for (x = 1; x <= a; x = x + 1)",
+                &["x"],
+                &["x", "a"],
+            ),
+        );
+        push_item(
+            &mut high,
+            &mut block,
+            item(&[0x20], "if (y != 0)", &[], &["y"]),
+        );
+        push_item(
+            &mut high,
+            &mut block,
+            item(&[0x30], "printf(\"x = %d\\n\", x)", &[], &["x"]),
+        );
+        push_item(
+            &mut high,
+            &mut block,
+            item(&[0x40], "while (z)", &[], &["z"]),
+        );
+        high.blocks.push(block);
+        let ssa = to_ssa(&high, &Analysis::default(), Some(&medium));
+        assert!(ssa.ssa);
+        let texts: Vec<&str> = ssa.items.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts[0], "for (x#1 = 1; x#2 <= a#0; x#3 = x#2 + 1)");
+        assert_eq!(ssa.items[0].defines, vec!["x#1", "x#3"]);
+        assert_eq!(ssa.items[0].uses, vec!["x#2", "a#0"]);
+        // A condition the structurer turned round still finds its branch.
+        assert_eq!(texts[1], "if (y#0 != 0)");
+        assert_eq!(ssa.items[1].uses, vec!["y#0"]);
+        // The literal is not a variable.
+        assert_eq!(texts[2], "printf(\"x = %d\\n\", x#2)");
+        // A header with no medium statement at its addresses keeps its names.
+        assert_eq!(texts[3], "while (z)");
+        // Without the medium level there is no SSA form of the high.
+        assert!(!to_ssa(&high, &Analysis::default(), None).ssa);
     }
 }

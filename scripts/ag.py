@@ -208,6 +208,10 @@ class Session:
     def tagged(self, tag):
         return self.call("tagged", tag=tag)
 
+    def il(self, target, level="medium", ssa=False):
+        """The function at one level of the lift: lifted, low, medium or high."""
+        return self.call("il", target=target, level=level, ssa=ssa)
+
 
 def _given(**arguments):
     """The arguments that were given: a tool's schema has no place for None."""

@@ -613,6 +613,7 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `disassemble target` | The listing of one function, as `ag image disasm` prints it. A target is an address, such as `0x1198`, or a name — exact first, then a substring, a mangled name too. |
 | `decompile target` | The pseudocode of one function; a function the lifter refuses is a tool error with the reason. |
 | `control_flow target` | The blocks, edges and jump tables of one function, as `ag image cfg --json` reports them. |
+| `il target [level] [ssa]` | The function at one level of the lift — `lifted`, `low`, `medium` (the default) or `high` — in SSA form when `ssa` is true, as `ag image il --json` reports it (`docs/il.md`). |
 | `callers target`, `callees target` | Who calls the function; the calls it makes, tail calls marked. |
 | `cross_references target` | For a function: the data and strings it refers to, its callers and callees. For a piece of data or a string: the functions that refer to it. Both with the references the analyst recorded in the project, to and from the address. |
 | `strings [filter] [limit]` | The strings of the image with the functions that use them. |

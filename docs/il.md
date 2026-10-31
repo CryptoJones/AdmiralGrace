@@ -16,7 +16,7 @@ cargo run --bin ag -- image ./sample.elf il sum_to --level high --ssa --json
 | Level | What an item is |
 |---|---|
 | `lifted` | One machine instruction, as the listing spells it, with the registers it reads and writes named and a note of where its flow goes (`; jump 0x118a`, `; return`). One block per chain of the lift. |
-| `low` | One of the lifter's own statements, before its temporaries are resolved: a store to a stack slot (`slot[-0x10]:64 = 0`), a call into a temporary (`t3 = f(…)`), a compare into the flags, a `return`; a `branch if …` or `switch on …` at the end of a chain that branches. The names are temporaries (`t0`), slots, the values registers held at entry (`entry5`), variables once they are known. |
+| `low` | One of the lifter's own statements, before its temporaries are resolved: a store to a stack slot, with its width (`local_10:64 = 0`), a call into a temporary (`v1 = f(…)`), a compare into the flags, a `return`; a `branch if …` or `switch on …` at the end of a chain that branches. A slot is named by the variable it becomes (`local_10`, `&local_10` for its address), a call's result by its temporary (`v1`), a register's value at entry `entry5`, so a read at this level names the write it reads. |
 | `medium` | One statement over variables and parameters, calls resolved with their arguments, laid on the chain graph: each block ends in `goto block_…`, `if (…) goto … else goto …` or `switch (…) …`. |
 | `high` | One statement of the structured body — `if (…)`, `else`, `while (…)`, `do` / `while`, `for (…; …; …)`, `switch (…)` and its `case` labels, `return` — each at its depth in the tree, as the pseudocode prints them. |
 
@@ -41,11 +41,21 @@ block_118a:  ; -> 0x117d, 0x1192
   00001169+  if (local_14#2 <= a#0) goto block_117d else goto block_1192
 ```
 
-A name read before any definition is version `#0` — a parameter, a register at entry. At the
-lifted level the names are the registers (`r1_0` for the first general register, as the
-emitter spells them), and an instruction's text is kept whole with what it writes noted
-beside it. The high level takes its versions from the medium level's statements, which it is
-a rearrangement of; a statement folded into a `for` header keeps its plain names.
+A name read before any definition is version `#0` — a parameter, a register at entry. When
+the entry block is itself a loop header, its φ has an operand `from entry` for the way in.
+Two edges from one block to another are one operand. A block the entry does not reach keeps
+its plain names. The φ items are appended after the function's own, so their ids follow the
+last item's rather than their block's; a block's `items` list them first all the same.
+
+At the lifted level the names are the registers (`r1_0` for the first general register, as
+the emitter spells them). An instruction's text is kept whole, with what it writes noted
+beside it; the versions of what it reads are in its `uses` alone. A register and its parts
+share one name: a write of 32 bits or more is a new version, a narrower write (`mov al, …`)
+reads the old version too. The flags are not a register the level tracks, so a `cmp` defines
+nothing here; the low level's `flags = …` does. The high level takes its versions from the
+medium level's statements, which it is a rearrangement of — a header (`if`, `while`,
+`switch`, `for`) part by part, from the statements and the branch at its addresses — and
+has no SSA form without the medium's.
 
 ## The output
 
