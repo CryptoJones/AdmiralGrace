@@ -156,11 +156,12 @@ the function it calls, when that function has one.
 
 `info` and `symbols` read any format the loader reads. `disasm` decodes x86, 32-bit and
 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), and
-32-bit little-endian ARM (`ARM:LE:32:...`) in both its instruction sets, ARM and Thumb — the
+little-endian ARM: 32-bit (`ARM:LE:32:...`) in both its instruction sets, ARM and Thumb — the
 mode of each address comes from the image's symbols (a Thumb function's symbol has its low
 bit set), from the analyst's `mode` marks in a project file, and from the instructions
-themselves — so it refuses an image of another architecture rather than printing nonsense.
-ARM is decoded, walked and listed; it is not lifted to pseudocode yet. In 32-bit code
+themselves — and AArch64 (`AARCH64:LE:64:...`), which has one instruction set; so it refuses an
+image of another architecture rather than printing nonsense. ARM and AArch64 are decoded,
+walked and listed; they are not lifted to pseudocode yet. In 32-bit code
 there is no `rip`, so the strings and the data a function refers to are found through the
 absolute memory operands it names them with.
 

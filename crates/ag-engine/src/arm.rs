@@ -1,14 +1,15 @@
-//! 32-bit ARM and Thumb, decoded through SLEIGH.
+//! ARM — 32-bit ARM and Thumb, and AArch64 — decoded through SLEIGH.
 //!
-//! The decoder reads Ghidra's ARM processor specification, compiled to the
-//! `.sla` files under `specs/arm` and carried inside the binary, through the
-//! SLEIGH runtime kuna ports. One specification covers both instruction sets:
-//! the `TMode` context bit says which one an address decodes in, so the mode
-//! is a property of the address — set from what the image says (a Thumb
-//! function's symbol has its low bit set, and the assembler's `$a`/`$t`
-//! mapping symbols say outright), from the analyst's own marks, and by the
-//! instructions themselves (`blx` to an address switches it). A mark the
-//! analyst or the image made stands above what an instruction says.
+//! The decoder reads Ghidra's processor specifications, compiled to the
+//! `.sla` files under `specs/arm` and `specs/aarch64` and carried inside the
+//! binary, through the SLEIGH runtime kuna ports. The 32-bit specification
+//! covers both of its instruction sets: the `TMode` context bit says which
+//! one an address decodes in, so the mode is a property of the address — set
+//! from what the image says (a Thumb function's symbol has its low bit set,
+//! and the assembler's `$a`/`$t` mapping symbols say outright), from the
+//! analyst's own marks, and by the instructions themselves (`blx` to an
+//! address switches it). A mark the analyst made stands above what an
+//! instruction says. AArch64 has one instruction set, and no modes.
 //!
 //! What comes out is the engine's own [`DecodedInsn`]: the length, the flow
 //! read from the p-code the instruction lifts to, the address a literal-pool
@@ -40,6 +41,19 @@ const ARM7_LE: &[u8] = include_bytes!("../specs/arm/ARM7_le.sla");
 /// The compiled specification of ARMv8's 32-bit state, what an image that
 /// names no older version decodes under.
 const ARM8_LE: &[u8] = include_bytes!("../specs/arm/ARM8_le.sla");
+/// The compiled specification of AArch64, the 64-bit state.
+const AARCH64: &[u8] = include_bytes!("../specs/aarch64/AARCH64.sla");
+
+/// Which compiled specification an image decodes under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Spec {
+    /// ARMv7 and older, 32-bit, little-endian.
+    Arm7Le,
+    /// ARMv8's 32-bit state, little-endian.
+    Arm8Le,
+    /// AArch64, little-endian.
+    Aarch64,
+}
 
 /// The mnemonic number of an ARM instruction: not one of the x86 decoder's,
 /// so nothing that reads a mnemonic by number takes an ARM instruction for
@@ -109,38 +123,59 @@ impl Mode {
 /// unless something says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArmVariant {
-    /// Whether the image is ARMv8's 32-bit state; otherwise ARMv7 and older.
-    v8: bool,
+    /// The specification.
+    spec: Spec,
     /// The mode the image's code is in unless an address says otherwise: a
-    /// Cortex-M image is Thumb throughout, everything else starts as ARM.
+    /// Cortex-M image is Thumb throughout, everything else 32-bit starts as
+    /// ARM. AArch64 has no other mode, and this says ARM.
     pub default_mode: Mode,
 }
 
 impl ArmVariant {
-    /// The variant a language id names, when it names 32-bit little-endian
-    /// ARM: `ARM:LE:32:v8`, `ARM:LE:32:v7`, `ARM:LE:32:Cortex`. Big-endian
-    /// ARM and the 64-bit state are not read here.
+    /// The variant a language id names, when it names little-endian ARM:
+    /// `ARM:LE:32:v8`, `ARM:LE:32:v7`, `ARM:LE:32:Cortex`, or
+    /// `AARCH64:LE:64:v8A`. Big-endian ARM is not read here.
     pub fn of_language(language: &str) -> Option<ArmVariant> {
         let mut fields = language.split(':');
-        if fields.next()? != "ARM" || fields.next()? != "LE" || fields.next()? != "32" {
+        let architecture = fields.next()?;
+        if fields.next()? != "LE" {
             return None;
         }
+        let width = fields.next()?;
         let version = fields.next().unwrap_or("");
-        let v8 = version.starts_with("v8");
-        let default_mode = if version.contains("Cortex") || version.ends_with('T') {
-            Mode::Thumb
-        } else {
-            Mode::Arm
-        };
-        Some(ArmVariant { v8, default_mode })
+        match (architecture, width) {
+            ("AARCH64", "64") => Some(ArmVariant {
+                spec: Spec::Aarch64,
+                default_mode: Mode::Arm,
+            }),
+            ("ARM", "32") => Some(ArmVariant {
+                spec: if version.starts_with("v8") {
+                    Spec::Arm8Le
+                } else {
+                    Spec::Arm7Le
+                },
+                default_mode: if version.contains("Cortex") || version.ends_with('T') {
+                    Mode::Thumb
+                } else {
+                    Mode::Arm
+                },
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether the variant has two instruction sets an address may be in:
+    /// 32-bit ARM does, AArch64 does not.
+    pub fn has_modes(self) -> bool {
+        self.spec != Spec::Aarch64
     }
 
     /// The compiled specification the variant decodes under.
-    fn spec(self) -> &'static [u8] {
-        if self.v8 {
-            ARM8_LE
-        } else {
-            ARM7_LE
+    fn bytes(self) -> &'static [u8] {
+        match self.spec {
+            Spec::Arm7Le => ARM7_LE,
+            Spec::Arm8Le => ARM8_LE,
+            Spec::Aarch64 => AARCH64,
         }
     }
 }
@@ -233,7 +268,7 @@ thread_local! {
     /// specification is the cost of a decode, and the engine holds nothing
     /// that may cross a thread, so it is kept where it was made and told a
     /// new section's bytes each time.
-    static ENGINES: RefCell<HashMap<bool, Sleigh>> = RefCell::new(HashMap::new());
+    static ENGINES: RefCell<HashMap<Spec, Sleigh>> = RefCell::new(HashMap::new());
 }
 
 /// Decode the `bytes` of a section that starts at `base`, under `variant`,
@@ -256,7 +291,7 @@ pub fn decode_section(
 ) -> Result<ArmDecoded> {
     ENGINES.with(|engines| {
         let mut engines = engines.borrow_mut();
-        let sleigh = match engines.entry(variant.v8) {
+        let sleigh = match engines.entry(variant.spec) {
             std::collections::hash_map::Entry::Occupied(engine) => engine.into_mut(),
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let mut sleigh = Sleigh::new(
@@ -267,7 +302,7 @@ pub fn decode_section(
                     Box::new(ContextInternal::new()),
                 );
                 sleigh
-                    .initialize_from_sla(variant.spec())
+                    .initialize_from_sla(variant.bytes())
                     .map_err(|error| {
                         anyhow::anyhow!("reading the ARM specification: {}", error.explain())
                     })?;
@@ -302,7 +337,12 @@ fn decode_with(
         base,
         bytes: bytes.to_vec(),
     }));
-    sleigh.set_context_default(TMODE_NAME, variant.default_mode.tmode());
+    // The mode machinery is the 32-bit specification's: AArch64 has one
+    // instruction set, and its context knows no `TMode`.
+    let has_modes = variant.has_modes();
+    if has_modes {
+        sleigh.set_context_default(TMODE_NAME, variant.default_mode.tmode());
+    }
     let ram = Rc::clone(
         sleigh
             .base()
@@ -346,9 +386,12 @@ fn decode_with(
         for (word, value) in defaults.iter().enumerate() {
             db.set_context_region(&at(base), &at(end), word as i32, u32::MAX, *value);
         }
-        let _ = db.set_variable_region(TMODE, &at(base), &at(end), variant.default_mode.tmode());
-        for &(start, stop, mode, _) in &ranges {
-            let _ = db.set_variable_region(TMODE, &at(start), &at(stop), mode.tmode());
+        if has_modes {
+            let _ =
+                db.set_variable_region(TMODE, &at(base), &at(end), variant.default_mode.tmode());
+            for &(start, stop, mode, _) in &ranges {
+                let _ = db.set_variable_region(TMODE, &at(start), &at(stop), mode.tmode());
+            }
         }
     });
     // An instruction that reaches `target` may have switched the mode
@@ -376,6 +419,22 @@ fn decode_with(
                 let length = length as usize;
                 let next = cursor.saturating_add(length as u64);
                 let (flow, absolute_address) = read_ops(&ops.0, next, &ram);
+                // SLEIGH prints a computed address as a signed number, so a
+                // target in the high half of the space — a kernel's — reads
+                // as a negative; the address the flow names is the spelling.
+                let mut operands = printed.operands;
+                let named = match flow {
+                    Flow::Call(target)
+                    | Flow::UnconditionalBranch(target)
+                    | Flow::ConditionalBranch(target) => Some(target),
+                    _ => absolute_address,
+                };
+                if let Some(target) = named.filter(|target| (*target as i64) < 0) {
+                    let negative = format!("-{:#x}", (target as i64).wrapping_neg());
+                    if operands.contains(&negative) {
+                        operands = operands.replace(&negative, &format!("{target:#x}"));
+                    }
+                }
                 match flow {
                     Flow::Call(target)
                     | Flow::UnconditionalBranch(target)
@@ -393,16 +452,18 @@ fn decode_with(
                     absolute_address,
                     switch_indices: false,
                 });
-                decoded
-                    .text
-                    .insert(cursor, (printed.mnemonic, printed.operands));
+                decoded.text.insert(cursor, (printed.mnemonic, operands));
                 cursor = next;
             }
             Ok(_) | Err(_) => {
                 // Not an instruction in this mode: data, or the other mode.
                 // Shown as the word it is, aligned as the mode here is —
                 // read from the context, where a `blx` may have set it.
-                let mode = mode_in_context(sleigh, &at(cursor)).unwrap_or(variant.default_mode);
+                let mode = if has_modes {
+                    mode_in_context(sleigh, &at(cursor)).unwrap_or(variant.default_mode)
+                } else {
+                    Mode::Arm
+                };
                 let step = mode.alignment().min((end - cursor) as usize).max(1);
                 let word: Vec<u8> = (0..step)
                     .map(|index| {
@@ -654,14 +715,18 @@ mod tests {
     #[test]
     fn the_language_names_the_variant_and_the_mode_names_itself() {
         let v8 = ArmVariant::of_language("ARM:LE:32:v8:default").expect("v8");
-        assert!(v8.v8);
+        assert_eq!(v8.spec, Spec::Arm8Le);
         assert_eq!(v8.default_mode, Mode::Arm);
+        assert!(v8.has_modes());
         let v7 = ArmVariant::of_language("ARM:LE:32:v7").expect("v7");
-        assert!(!v7.v8);
+        assert_eq!(v7.spec, Spec::Arm7Le);
         let cortex = ArmVariant::of_language("ARM:LE:32:Cortex").expect("Cortex");
         assert_eq!(cortex.default_mode, Mode::Thumb);
+        let aarch64 = ArmVariant::of_language("AARCH64:LE:64:v8A:default").expect("AArch64");
+        assert_eq!(aarch64.spec, Spec::Aarch64);
+        assert!(!aarch64.has_modes());
         assert!(ArmVariant::of_language("ARM:BE:32:v8").is_none());
-        assert!(ArmVariant::of_language("AARCH64:LE:64:v8A").is_none());
+        assert!(ArmVariant::of_language("AARCH64:BE:64:v8A").is_none());
         assert!(ArmVariant::of_language("x86:LE:64:default:gcc").is_none());
         assert_eq!(Mode::parse("Thumb"), Some(Mode::Thumb));
         assert_eq!(Mode::parse("arm"), Some(Mode::Arm));
@@ -926,5 +991,73 @@ mod tests {
         let second =
             decode_section(variant, &jump, 0x2000, &arm, &BTreeMap::new()).expect("decodes");
         assert_eq!(second.disasm.instructions[1].flow, Flow::IndirectBranch);
+    }
+
+    #[test]
+    fn aarch64_decodes_with_its_flows_and_has_no_modes() {
+        // Built from the same source for AArch64: one instruction set, four
+        // bytes an instruction, `sum` calling `add` in a loop.
+        let image = fixture("arm64.elf");
+        let variant = ArmVariant::of_language(&image.language()).expect("AArch64");
+        assert!(!variant.has_modes());
+        let (bytes, base, hints) = code_of(&image);
+        assert!(hints.is_empty(), "{hints:?}");
+        let decoded =
+            decode_section(variant, &bytes, base, &hints, &BTreeMap::new()).expect("decodes");
+        assert!(decoded
+            .disasm
+            .instructions
+            .iter()
+            .all(|ins| ins.length == 4));
+        let add = symbol(&image, "add");
+        assert_eq!(decoded.text[&add].0, "add");
+        assert_eq!(decoded.disasm.instructions[1].flow, Flow::Return);
+        assert_eq!(
+            decoded.text[&decoded.disasm.instructions[1].address].0,
+            "ret"
+        );
+        let flows: Vec<Flow> = decoded
+            .disasm
+            .instructions
+            .iter()
+            .map(|ins| ins.flow)
+            .collect();
+        assert!(flows.contains(&Flow::Call(add)), "{flows:?}");
+        assert!(
+            flows
+                .iter()
+                .any(|flow| matches!(flow, Flow::ConditionalBranch(_))),
+            "{flows:?}"
+        );
+        // Loaded in the high half of the space, as a kernel is, the text
+        // names the addresses the flows do, not negative numbers.
+        let high = 0xffff_ff80_0008_0000_u64;
+        let decoded_high =
+            decode_section(variant, &bytes, high, &BTreeMap::new(), &BTreeMap::new())
+                .expect("decodes");
+        for ins in &decoded_high.disasm.instructions {
+            if let Flow::Call(target) | Flow::ConditionalBranch(target) = ins.flow {
+                assert!(
+                    decoded_high.text[&ins.address]
+                        .1
+                        .contains(&format!("{target:#x}")),
+                    "{:?}",
+                    decoded_high.text[&ins.address]
+                );
+            }
+        }
+        assert!(decoded_high
+            .disasm
+            .instructions
+            .iter()
+            .any(|ins| matches!(ins.flow, Flow::Call(target) if target == high + (add - base))));
+
+        // A select — `csinv` — branches within itself and nowhere in the
+        // program.
+        assert!(decoded
+            .disasm
+            .instructions
+            .iter()
+            .any(|ins| decoded.text[&ins.address].0 == "csinv" && ins.flow == Flow::Next));
     }
 }

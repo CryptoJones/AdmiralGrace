@@ -1319,3 +1319,18 @@ fn an_arm_object_is_decoded_in_thumb_and_arm_and_the_project_switches_the_mode()
     let (ok, stdout, stderr) = image_result("arm_thumb.elf", &["pseudocode", "add"]);
     assert!(!ok || stdout.contains("ARM"), "{stdout}{stderr}");
 }
+
+#[test]
+fn an_aarch64_executable_is_decoded_walked_and_listed() {
+    let report = image("arm64.elf", &["info"]);
+    assert!(report.contains("language: AARCH64:LE:64"), "{report}");
+    let report = image("arm64.elf", &["disasm", "add"]);
+    assert!(report.contains("add w0, w1, w0"), "{report}");
+    assert!(report.contains("ret"), "{report}");
+    let report = image("arm64.elf", &["cfg", "sum"]);
+    assert!(report.lines().filter(|line| line.contains("->")).count() >= 2, "sum loops: {report}");
+    let report = image("arm64.elf", &["calls"]);
+    assert!(report.contains("add"), "{report}");
+    let (ok, stdout, stderr) = image_result("arm64.elf", &["pseudocode", "add"]);
+    assert!(!ok || stdout.contains("AARCH64"), "{stdout}{stderr}");
+}

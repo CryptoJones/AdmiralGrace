@@ -571,13 +571,17 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         // The analyst's patches are the bytes the image is read with, and
         // the modes the instruction sets they are read in.
         image.set_patches(project.patches());
-        image.set_modes(
-            project
-                .modes()
-                .into_iter()
-                .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
-                .collect(),
-        );
+        let modes: std::collections::BTreeMap<u64, ag_image::ArmMode> = project
+            .modes()
+            .into_iter()
+            .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
+            .collect();
+        if !modes.is_empty() && !image.set_modes(modes) {
+            eprintln!(
+                "note: the project's mode marks mean nothing to {}: it has one instruction set",
+                image.language()
+            );
+        }
         let notes = project.jump_tables();
         let hints = notes
             .into_iter()
