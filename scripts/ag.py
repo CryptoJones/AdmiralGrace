@@ -163,6 +163,16 @@ class Session:
         """
         return self.call("il", target=str(target), level=level, ssa=ssa, **options)
 
+    def emulate(self, target, *args, steps=None, depth=None):
+        """Run the function on its medium level with the arguments given:
+        the steps, the stop, what it returned, and the variables at the end."""
+        return self.call(
+            "emulate",
+            target=str(target),
+            args=[str(arg) if isinstance(arg, str) else arg for arg in args],
+            **_given(steps=steps, depth=depth),
+        )
+
     def callers(self, target):
         return self.call("callers", target=str(target))
 

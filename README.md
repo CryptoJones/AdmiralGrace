@@ -158,7 +158,11 @@ adds each item's opcode, flag use, stack pointer and types, and makes the casts 
 
 ```bash
 cargo run --bin ag -- image ./sample.elf il sum_to --level medium --ssa
+cargo run --bin ag -- image ./sample.elf emulate sum_to --arg 5
 ```
+
+The medium level also runs: `emulate` executes a function's statements against the image's
+memory, following calls into the image, and reports what it returned and why it stopped.
 
 See [docs/il.md](docs/il.md).
 

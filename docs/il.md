@@ -35,6 +35,42 @@ may have more or fewer blocks than the chains, or other edges, so a block's id a
 is no longer its id at another — the addresses still map the levels onto each other — and
 its SSA form is built on its own graph. A thunk passes no rewriter.
 
+## Emulating a function
+
+The medium level runs. `ag image X emulate FUNCTION --arg N…` runs the function's statements
+over variables on its block graph, against the image's memory, without a debugger: the
+arguments are its parameters in order, a global the lift names is read from the image at its
+symbol's width and written to a memory of the run's own, a load through a pointer reads the
+image's bytes under what the run has written, and a call to a function of the image is run in
+turn (`--depth` calls deep, 8 unless said) while any other call — an import, a function the
+lifter refuses — leaves its result unknown. The run stops when the function returns, after
+`--steps` statements (10000 unless said), or when a branch, a switch, a return or an address
+depends on a value the run does not know, and says why:
+
+```
+; sum_to at 0x1161: emulated
+  0000116c  local_10 = 0  ; local_10 = 0
+  00001174  local_14 = 1  ; local_14 = 1
+  0000117d  local_10 = local_10 + (long)local_14  ; local_10 = 1
+  00001186  local_14 = local_14 + 1  ; local_14 = 2
+  …
+  00001192  return local_10
+; returned 15 (0xf)
+;   a = 5
+;   local_10 = 15 (0xf)
+;   local_14 = 6
+```
+
+Every step carries the address it came from, the statement, what it wrote and a note when a
+call was not followed or a store went to memory. `--json` gives the steps, the `stop`, the
+value `returned` (its bits, its signed reading, its hex and its width), the `variables` and
+the `memory` written. The MCP tool `emulate` and `scripts/ag.py`'s `emulate(target, *args)`
+answer the same; in Rust, `Binary::emulate(address, args, limits)` runs
+`ag_engine::emulate::run` over the function's `Stages`, with the image as the emulator's
+`World` — any `World` will do for a run outside an image. Values are the machine's words with
+the width and signedness their C type gives them; a comparison is a byte that is 1 or 0. A
+plugin's rewriter has already had the graph, as has an architecture that lifts its own.
+
 ## How the lifter reads the flags
 
 The machine's flags are read back as the relations they stand for, by who wrote them. Each

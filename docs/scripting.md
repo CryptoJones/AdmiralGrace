@@ -37,8 +37,8 @@ error saying so.
 
 The script calls the tools `ag mcp` serves; `docs/cli.md` lists them under *An MCP server*.
 In short: `image_info`, `list_functions`, `search`, `disassemble`, `decompile`,
-`control_flow`, `il`, `callers`, `callees`, `cross_references`, `strings` and `read_bytes`
-read the image; `annotations`, `set_name`, `set_label`, `set_comment`, `set_bookmark`,
+`control_flow`, `il`, `emulate`, `callers`, `callees`, `cross_references`, `strings` and
+`read_bytes` read the image; `annotations`, `set_name`, `set_label`, `set_comment`, `set_bookmark`,
 `bookmarks`, `set_tags`, `set_color`, `add_reference`, `remove_reference`, `tags` and
 `tagged` read and write the project file. A function is named by its address or its name;
 an address is hex, such as `0x1198`. `set_tags` and `set_color` take `on` — `function`,
@@ -77,7 +77,7 @@ users = ag.cross_references("0x4010")["used_by"] # a record, as a dict
 ```
 
 `Session.call(tool, **arguments)` is every tool; the methods on it are the tools by name
-(`info`, `functions`, `search`, `disassemble`, `decompile`, `control_flow`, `il`, `callers`,
+(`info`, `functions`, `search`, `disassemble`, `decompile`, `control_flow`, `il`, `emulate`, `callers`,
 `callees`, `cross_references`, `strings`, `read_bytes`, `annotations`, `set_name`,
 `set_label`, `set_comment`, `set_bookmark`, `bookmarks`, `set_tags`, `set_color`,
 `add_reference`, `remove_reference`, `tags`, `tagged`), each returning the structured answer

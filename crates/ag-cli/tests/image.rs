@@ -1856,3 +1856,32 @@ fn the_levels_render_options_decorate_the_text_and_the_json_has_the_fields() {
     assert_eq!(item["types"], serde_json::json!([["local_14", "int"]]));
     assert_eq!(item["flags_read"], serde_json::json!([]));
 }
+
+#[test]
+fn a_function_is_emulated_with_its_arguments_and_the_run_is_reported() {
+    let text = image("sample.elf", &["emulate", "sum_to", "--arg", "5"]);
+    assert!(text.contains("; sum_to at 0x1161: emulated"), "{text}");
+    assert!(text.contains("; returned 15 (0xf)"), "{text}");
+    assert!(text.contains(";   local_14 = 6"), "{text}");
+    let report = image_json(
+        "sample.elf",
+        &["emulate", "main", "--arg", "0x1", "--arg", "0"],
+    );
+    assert_eq!(report["returned"]["value"], 10);
+    assert_eq!(report["stop"], "returned 10 (0xa)");
+    assert!(report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("not followed"))));
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["emulate", "sum_to", "--arg", "five"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("is a number"));
+}
