@@ -8,17 +8,27 @@
 //! or `+[Class sel]`, symbols or none, and what an analyst reads a class's
 //! shape from.
 //!
-//! The reading of classes is kuna's (`analyzers::objc`), the same walk its
-//! decompiler takes; method lists, categories and protocols are walked here
-//! by the runtime's own layouts, since a protocol's methods have no code and
-//! kuna's walk keeps only methods with some. The pointers are read as the
-//! file holds them, so an image whose pointers are chained fixups — arm64e —
-//! reads nothing here yet.
+//! The image is read through kuna's view of a Mach-O (`analyzers::objc`),
+//! with its chained fixups resolved first — every Mach-O linked for macOS 12
+//! or iOS 15 and later holds its pointers as packed fixup chains, not
+//! addresses, and so did arm64e before that — so each slot dereferences to
+//! the address it will hold once loaded. The records themselves are walked
+//! here by the runtime's own layouts, since a protocol's methods have no
+//! code and kuna's walk keeps only methods with some. A slot bound to
+//! another image at load — a superclass or a category's class in a
+//! framework — resolves to nothing, and the thing it names is left unnamed.
+//!
+//! Every count and every string is bounded, since the records are read from
+//! an untrusted file: no list is read past [`ObjcMetadata::MOST_IN_A_LIST`]
+//! entries, no image past [`ObjcMetadata::MOST_METHODS`] methods, and no
+//! name past [`ObjcMetadata::LONGEST_NAME`] bytes.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use kuna_analysis::analyzers::objc::classt;
 use kuna_analysis::analyzers::objc::sections::MachoImage;
+use kuna_analysis::loader::format::macho::resolve_chained_fixups;
 use object::read::{Object, ObjectSection};
 
 /// One method of a class, a category or a protocol.
@@ -155,14 +165,58 @@ impl ObjcMetadata {
             .map(|class| (class.address, format!("OBJC_CLASS_$_{}", class.name)))
             .collect()
     }
+
+    /// Move every address — the class objects, the categories, the protocols
+    /// and the methods' implementations — by `delta`, as when the image is
+    /// read at another base.
+    pub fn shift(&mut self, delta: u64) {
+        let shift = |address: &mut u64| *address = address.wrapping_add(delta);
+        let shift_methods = |methods: &mut Vec<ObjcMethod>| {
+            for method in methods {
+                if let Some(imp) = &mut method.imp {
+                    shift(imp);
+                }
+            }
+        };
+        for class in &mut self.classes {
+            shift(&mut class.address);
+            shift_methods(&mut class.instance_methods);
+            shift_methods(&mut class.class_methods);
+        }
+        for category in &mut self.categories {
+            shift(&mut category.address);
+            shift_methods(&mut category.instance_methods);
+            shift_methods(&mut category.class_methods);
+        }
+        for protocol in &mut self.protocols {
+            shift(&mut protocol.address);
+            shift_methods(&mut protocol.instance_methods);
+            shift_methods(&mut protocol.class_methods);
+            shift_methods(&mut protocol.optional_instance_methods);
+            shift_methods(&mut protocol.optional_class_methods);
+        }
+    }
+
+    /// The size of a class object (`class_t`) in a 64-bit image: the extent
+    /// of the data symbol `OBJC_CLASS_$_Name`.
+    pub const CLASS_OBJECT_SIZE: u64 = 0x28;
+    /// No real list is longer: a bound on a corrupt count.
+    pub const MOST_IN_A_LIST: u64 = 4096;
+    /// No real image holds more methods: a bound on the lists of a crafted
+    /// one, across every class, category and protocol.
+    pub const MOST_METHODS: usize = 1 << 20;
+    /// No real name — a class, a selector, a type encoding — is longer: a
+    /// bound on a pointer into a crafted string section.
+    pub const LONGEST_NAME: usize = 4096;
 }
 
-/// The layouts of the runtime's records the kuna walk does not reach, for a
-/// 64-bit image: byte offsets of the fields read.
+/// The layouts of the runtime's records, for a 64-bit image: byte offsets
+/// of the fields read.
 mod layout {
     /// `class_t.superclass`.
     pub const CLASS_SUPERCLASS: u64 = 0x08;
-    /// `class_ro_t.baseProtocols`.
+    /// `class_ro_t`: name, baseProtocols.
+    pub const RO_NAME: u64 = 0x18;
     pub const RO_BASE_PROTOCOLS: u64 = 0x28;
     /// `category_t`: name, cls, instanceMethods, classMethods, protocols.
     pub const CATEGORY_NAME: u64 = 0x00;
@@ -178,68 +232,212 @@ mod layout {
     pub const PROTOCOL_CLASS_METHODS: u64 = 0x20;
     pub const PROTOCOL_OPTIONAL_INSTANCE_METHODS: u64 = 0x28;
     pub const PROTOCOL_OPTIONAL_CLASS_METHODS: u64 = 0x30;
-    /// No real list is longer: a bound on a corrupt count.
-    pub const MOST_IN_A_LIST: u64 = 4096;
-    /// `method_list_t`: entsize and flags, count, then the entries.
-    pub const METHOD_LIST_ENTSIZE_AND_FLAGS: u64 = 0x00;
-    pub const METHOD_LIST_COUNT: u64 = 0x04;
-    pub const METHOD_LIST_FIRST: u64 = 0x08;
-    /// The flag that says the entries are relative offsets, not pointers.
+    /// `method_list_t` and `ivar_list_t`: entsize and flags, count, then the
+    /// entries.
+    pub const LIST_ENTSIZE_AND_FLAGS: u64 = 0x00;
+    pub const LIST_COUNT: u64 = 0x04;
+    pub const LIST_FIRST: u64 = 0x08;
+    /// The runtime's mask of the entsize word: the low two bits and the high
+    /// sixteen are flags.
+    pub const LIST_ENTSIZE_MASK: u32 = !0xffff_0003;
+    /// The flag that says a method list's entries are relative offsets, not
+    /// pointers.
     pub const METHOD_LIST_RELATIVE: u32 = 0x8000_0000;
+    /// The least entsize of a method: three pointers, or three offsets.
+    pub const METHOD_SIZE: u64 = 24;
+    pub const RELATIVE_METHOD_SIZE: u64 = 12;
+    /// `ivar_t`: a pointer to the offset, the name, the type, then the
+    /// alignment and the size.
+    pub const IVAR_OFFSET: u64 = 0x00;
+    pub const IVAR_NAME: u64 = 0x08;
+    pub const IVAR_TYPE: u64 = 0x10;
+    pub const IVAR_SIZE: u64 = 32;
 }
 
-/// The methods of a `method_list_t` at `list`: each entry a selector, a
-/// type encoding and an implementation, as three pointers in the classic
-/// layout, or as three offsets from each field's own address in the
-/// relative one — where the selector offset reaches a selector reference,
-/// a pointer to the string. A protocol's entries have no implementation.
-fn method_list(img: &MachoImage, list: u64) -> Vec<ObjcMethod> {
-    let mut methods = Vec::new();
-    if list == 0 {
-        return methods;
+/// The image under the walk: kuna's view of its sections with the chained
+/// fixups resolved, and the count of methods read so far, against the bound.
+struct Walk<'a> {
+    img: MachoImage<'a>,
+    methods: Cell<usize>,
+}
+
+impl Walk<'_> {
+    /// The pointer-sized word at `at`, when it is mapped and not null.
+    fn pointer(&self, at: u64) -> Option<u64> {
+        self.img.read_ptr(at).filter(|pointer| *pointer != 0)
     }
-    let (Some(ent), Some(count)) = (
-        img.read_u32(list.wrapping_add(layout::METHOD_LIST_ENTSIZE_AND_FLAGS)),
-        img.read_u32(list.wrapping_add(layout::METHOD_LIST_COUNT)),
-    ) else {
-        return methods;
-    };
-    let relative = ent & layout::METHOD_LIST_RELATIVE != 0;
-    let entsize = u64::from(ent & 0xffff);
-    if entsize == 0 {
-        return methods;
-    }
-    let cstr = |pointer: u64| (pointer != 0).then(|| img.read_cstr(pointer)).flatten();
-    for index in 0..u64::from(count).min(layout::MOST_IN_A_LIST) {
-        let entry = list.wrapping_add(layout::METHOD_LIST_FIRST + index * entsize);
-        let (selector, types, imp) = if relative {
-            let field = |offset: u64| -> Option<u64> {
-                let at = entry.wrapping_add(offset);
-                let delta = img.read_i32(at)?;
-                (delta != 0).then(|| at.wrapping_add(delta as i64 as u64))
-            };
-            (
-                field(0)
-                    .and_then(|selref| img.read_ptr(selref))
-                    .and_then(cstr),
-                field(4).and_then(cstr),
-                field(8),
-            )
-        } else {
-            (
-                img.read_ptr(entry).and_then(cstr),
-                img.read_ptr(entry.wrapping_add(8)).and_then(cstr),
-                img.read_ptr(entry.wrapping_add(16)).filter(|imp| *imp != 0),
-            )
+
+    /// The NUL-terminated string at `pointer`, when it is mapped, ends within
+    /// [`ObjcMetadata::LONGEST_NAME`] bytes and is UTF-8. Read in one piece
+    /// where the section has that many bytes left, byte by byte near its end.
+    fn name_at(&self, pointer: u64) -> Option<String> {
+        if pointer == 0 {
+            return None;
+        }
+        let text = match self.img.read(pointer, ObjcMetadata::LONGEST_NAME) {
+            Some(bytes) => {
+                let end = bytes.iter().position(|byte| *byte == 0)?;
+                std::str::from_utf8(&bytes[..end]).ok()?.to_string()
+            }
+            None => {
+                let mut bytes = Vec::new();
+                loop {
+                    if bytes.len() >= ObjcMetadata::LONGEST_NAME {
+                        return None;
+                    }
+                    let at = pointer.wrapping_add(bytes.len() as u64);
+                    match self.img.read(at, 1)?[0] {
+                        0 => break,
+                        byte => bytes.push(byte),
+                    }
+                }
+                String::from_utf8(bytes).ok()?
+            }
         };
-        let Some(selector) = selector else { continue };
-        methods.push(ObjcMethod {
-            selector,
-            types,
-            imp,
-        });
+        Some(text)
     }
-    methods
+
+    /// The header of a `method_list_t` or `ivar_list_t` at `list`: the
+    /// entsize, and the count bounded by [`ObjcMetadata::MOST_IN_A_LIST`].
+    fn list_header(&self, list: u64) -> Option<(u32, u64)> {
+        let ent = self
+            .img
+            .read_u32(list.wrapping_add(layout::LIST_ENTSIZE_AND_FLAGS))?;
+        let count = self.img.read_u32(list.wrapping_add(layout::LIST_COUNT))?;
+        Some((ent, u64::from(count).min(ObjcMetadata::MOST_IN_A_LIST)))
+    }
+
+    /// The methods of a `method_list_t` at `list`: each entry a selector, a
+    /// type encoding and an implementation, as three pointers in the classic
+    /// layout, or as three offsets from each field's own address in the
+    /// relative one — where the selector offset reaches a selector reference,
+    /// a pointer to the string. A protocol's entries have no implementation.
+    /// Nothing is read once the image's methods pass the bound.
+    fn method_list(&self, list: u64) -> Vec<ObjcMethod> {
+        let mut methods = Vec::new();
+        if list == 0 {
+            return methods;
+        }
+        let Some((ent, count)) = self.list_header(list) else {
+            return methods;
+        };
+        let relative = ent & layout::METHOD_LIST_RELATIVE != 0;
+        let entsize = u64::from(ent & layout::LIST_ENTSIZE_MASK);
+        let least = if relative {
+            layout::RELATIVE_METHOD_SIZE
+        } else {
+            layout::METHOD_SIZE
+        };
+        if entsize < least {
+            return methods;
+        }
+        for index in 0..count {
+            if self.methods.get() >= ObjcMetadata::MOST_METHODS {
+                break;
+            }
+            self.methods.set(self.methods.get() + 1);
+            let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
+            let (selector, types, imp) = if relative {
+                let field = |offset: u64| -> Option<u64> {
+                    let at = entry.wrapping_add(offset);
+                    let delta = self.img.read_i32(at)?;
+                    (delta != 0).then(|| at.wrapping_add(delta as i64 as u64))
+                };
+                (
+                    field(0)
+                        .and_then(|selref| self.pointer(selref))
+                        .and_then(|name| self.name_at(name)),
+                    field(4).and_then(|types| self.name_at(types)),
+                    field(8),
+                )
+            } else {
+                (
+                    self.pointer(entry).and_then(|name| self.name_at(name)),
+                    self.pointer(entry.wrapping_add(8))
+                        .and_then(|types| self.name_at(types)),
+                    self.pointer(entry.wrapping_add(16)),
+                )
+            };
+            let Some(selector) = selector else { continue };
+            methods.push(ObjcMethod {
+                selector,
+                types,
+                imp,
+            });
+        }
+        methods
+    }
+
+    /// The instance variables of an `ivar_list_t` at `list`: each a pointer
+    /// to the offset the runtime keeps, a name and a type encoding.
+    fn ivar_list(&self, list: u64) -> Vec<ObjcIvar> {
+        let mut ivars = Vec::new();
+        if list == 0 {
+            return ivars;
+        }
+        let Some((ent, count)) = self.list_header(list) else {
+            return ivars;
+        };
+        let entsize = u64::from(ent & layout::LIST_ENTSIZE_MASK);
+        if entsize < layout::IVAR_SIZE {
+            return ivars;
+        }
+        for index in 0..count {
+            let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
+            let Some(name) = self
+                .pointer(entry.wrapping_add(layout::IVAR_NAME))
+                .and_then(|name| self.name_at(name))
+            else {
+                continue;
+            };
+            ivars.push(ObjcIvar {
+                name,
+                types: self
+                    .pointer(entry.wrapping_add(layout::IVAR_TYPE))
+                    .and_then(|types| self.name_at(types)),
+                offset: self
+                    .pointer(entry.wrapping_add(layout::IVAR_OFFSET))
+                    .and_then(|offset| self.img.read_u32(offset)),
+            });
+        }
+        ivars
+    }
+
+    /// The name of the class object at `class`, when the image holds it: a
+    /// class of another image is bound at load, and its slot reads as
+    /// nothing here.
+    fn class_name_at(&self, class: u64) -> Option<String> {
+        if class == 0 {
+            return None;
+        }
+        let class = classt::read_class_t(&self.img, class)?;
+        self.pointer(class.ro.wrapping_add(layout::RO_NAME))
+            .and_then(|name| self.name_at(name))
+    }
+
+    /// The name of the protocol at `protocol`.
+    fn protocol_name_at(&self, protocol: u64) -> Option<String> {
+        if protocol == 0 {
+            return None;
+        }
+        self.pointer(protocol.wrapping_add(layout::PROTOCOL_NAME))
+            .and_then(|name| self.name_at(name))
+    }
+
+    /// The names of a `protocol_list_t` at `list`: a count, then that many
+    /// `protocol_t*`.
+    fn protocol_names_at(&self, list: u64) -> Vec<String> {
+        if list == 0 {
+            return Vec::new();
+        }
+        let Some(count) = self.img.read_ptr(list) else {
+            return Vec::new();
+        };
+        (0..count.min(ObjcMetadata::MOST_IN_A_LIST))
+            .filter_map(|index| self.pointer(list.wrapping_add(8 + index * 8)))
+            .filter_map(|protocol| self.protocol_name_at(protocol))
+            .collect()
+    }
 }
 
 /// Read the Objective-C metadata of the Mach-O `bytes` are, when they are
@@ -250,9 +448,14 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
     if file.format() != object::BinaryFormat::MachO || !file.is_64() {
         return None;
     }
-    let img = MachoImage::new(&file);
+    let walk = Walk {
+        img: MachoImage::with_fixups(&file, resolve_chained_fixups(&file, bytes)),
+        methods: Cell::new(0),
+    };
     let mut metadata = ObjcMetadata::default();
 
+    // The pointers a `__objc_*list` section holds, each read through the
+    // fixups, as many as the file has bytes for.
     let pointers = |section: &str| -> Vec<u64> {
         let Some(section) = file.section_by_name(section) else {
             return Vec::new();
@@ -260,79 +463,35 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
         let Ok(data) = section.data() else {
             return Vec::new();
         };
-        data.as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .filter(|pointer| *pointer != 0)
-            .collect()
-    };
-    let methods_at = |list: u64| -> Vec<ObjcMethod> { method_list(&img, list) };
-    let class_name_at = |class: u64| -> Option<String> {
-        if class == 0 {
-            return None;
-        }
-        let class = classt::read_class_t(&img, class)?;
-        classt::class_name(&img, class.ro)
-    };
-    let protocol_name_at = |protocol: u64| -> Option<String> {
-        if protocol == 0 {
-            return None;
-        }
-        let name = img.read_ptr(protocol.wrapping_add(layout::PROTOCOL_NAME))?;
-        if name == 0 {
-            return None;
-        }
-        img.read_cstr(name)
-    };
-    // A `protocol_list_t`: a count, then that many `protocol_t*`.
-    let protocol_names_at = |list: u64| -> Vec<String> {
-        if list == 0 {
-            return Vec::new();
-        }
-        let Some(count) = img.read_ptr(list) else {
-            return Vec::new();
-        };
-        (0..count.min(layout::MOST_IN_A_LIST))
-            .filter_map(|index| img.read_ptr(list.wrapping_add(8 + index * 8)))
-            .filter_map(protocol_name_at)
+        let start = section.address();
+        (0..data.len() as u64 / 8)
+            .filter_map(|index| walk.pointer(start.wrapping_add(index * 8)))
             .collect()
     };
 
     for class_ptr in pointers("__objc_classlist") {
-        let Some(class) = classt::read_class_t(&img, class_ptr) else {
+        let Some(class) = classt::read_class_t(&walk.img, class_ptr) else {
             continue;
         };
-        let Some(name) = classt::class_name(&img, class.ro) else {
+        let Some(name) = walk.class_name_at(class_ptr) else {
             continue;
         };
-        let superclass = img
-            .read_ptr(class.addr.wrapping_add(layout::CLASS_SUPERCLASS))
-            .and_then(class_name_at);
-        let protocols = img
-            .read_ptr(class.ro.wrapping_add(layout::RO_BASE_PROTOCOLS))
-            .map(protocol_names_at)
+        let superclass = walk
+            .pointer(class.addr.wrapping_add(layout::CLASS_SUPERCLASS))
+            .and_then(|superclass| walk.class_name_at(superclass));
+        let protocols = walk
+            .pointer(class.ro.wrapping_add(layout::RO_BASE_PROTOCOLS))
+            .map(|list| walk.protocol_names_at(list))
             .unwrap_or_default();
-        let instance_methods = classt::base_methods(&img, class.ro)
-            .map(methods_at)
+        let instance_methods = classt::base_methods(&walk.img, class.ro)
+            .map(|list| walk.method_list(list))
             .unwrap_or_default();
-        let class_methods = classt::metaclass_ro(&img, class.isa)
-            .and_then(|meta_ro| classt::base_methods(&img, meta_ro))
-            .map(methods_at)
+        let class_methods = classt::metaclass_ro(&walk.img, class.isa)
+            .and_then(|meta_ro| classt::base_methods(&walk.img, meta_ro))
+            .map(|list| walk.method_list(list))
             .unwrap_or_default();
-        let ivars = classt::base_ivars(&img, class.ro)
-            .map(|list| {
-                classt::walk_ivar_list(&img, list)
-                    .into_iter()
-                    .map(|ivar| ObjcIvar {
-                        name: ivar.name,
-                        types: ivar.types,
-                        offset: (ivar.offset_va != 0)
-                            .then(|| img.read_u32(ivar.offset_va))
-                            .flatten(),
-                    })
-                    .collect()
-            })
+        let ivars = classt::base_ivars(&walk.img, class.ro)
+            .map(|list| walk.ivar_list(list))
             .unwrap_or_default();
         metadata.classes.push(ObjcClass {
             address: class.addr,
@@ -346,42 +505,35 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
     }
 
     for category in pointers("__objc_catlist") {
-        let Some(name) = img
-            .read_ptr(category.wrapping_add(layout::CATEGORY_NAME))
-            .filter(|name| *name != 0)
-            .and_then(|name| img.read_cstr(name))
-        else {
+        let field = |offset: u64| walk.pointer(category.wrapping_add(offset)).unwrap_or(0);
+        let Some(name) = walk.name_at(field(layout::CATEGORY_NAME)) else {
             continue;
         };
-        let class = img
-            .read_ptr(category.wrapping_add(layout::CATEGORY_CLASS))
-            .and_then(class_name_at);
-        let field = |offset: u64| img.read_ptr(category.wrapping_add(offset)).unwrap_or(0);
         metadata.categories.push(ObjcCategory {
             address: category,
             name,
-            class,
-            protocols: protocol_names_at(field(layout::CATEGORY_PROTOCOLS)),
-            instance_methods: methods_at(field(layout::CATEGORY_INSTANCE_METHODS)),
-            class_methods: methods_at(field(layout::CATEGORY_CLASS_METHODS)),
+            class: walk.class_name_at(field(layout::CATEGORY_CLASS)),
+            protocols: walk.protocol_names_at(field(layout::CATEGORY_PROTOCOLS)),
+            instance_methods: walk.method_list(field(layout::CATEGORY_INSTANCE_METHODS)),
+            class_methods: walk.method_list(field(layout::CATEGORY_CLASS_METHODS)),
         });
     }
 
     for protocol in pointers("__objc_protolist") {
-        let Some(name) = protocol_name_at(protocol) else {
+        let Some(name) = walk.protocol_name_at(protocol) else {
             continue;
         };
-        let field = |offset: u64| img.read_ptr(protocol.wrapping_add(offset)).unwrap_or(0);
+        let field = |offset: u64| walk.pointer(protocol.wrapping_add(offset)).unwrap_or(0);
         metadata.protocols.push(ObjcProtocol {
             address: protocol,
             name,
-            protocols: protocol_names_at(field(layout::PROTOCOL_PROTOCOLS)),
-            instance_methods: methods_at(field(layout::PROTOCOL_INSTANCE_METHODS)),
-            class_methods: methods_at(field(layout::PROTOCOL_CLASS_METHODS)),
-            optional_instance_methods: methods_at(field(
-                layout::PROTOCOL_OPTIONAL_INSTANCE_METHODS,
-            )),
-            optional_class_methods: methods_at(field(layout::PROTOCOL_OPTIONAL_CLASS_METHODS)),
+            protocols: walk.protocol_names_at(field(layout::PROTOCOL_PROTOCOLS)),
+            instance_methods: walk.method_list(field(layout::PROTOCOL_INSTANCE_METHODS)),
+            class_methods: walk.method_list(field(layout::PROTOCOL_CLASS_METHODS)),
+            optional_instance_methods: walk
+                .method_list(field(layout::PROTOCOL_OPTIONAL_INSTANCE_METHODS)),
+            optional_class_methods: walk
+                .method_list(field(layout::PROTOCOL_OPTIONAL_CLASS_METHODS)),
         });
     }
 

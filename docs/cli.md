@@ -97,12 +97,13 @@ command that reads the project reads the target that way after, flags or not.
 An Objective-C Mach-O describes its classes, categories and protocols in its `__objc_*`
 sections, for the runtime to register at load; `ag image FILE objc` prints them, and every
 method's implementation is a function under its runtime name — `-[Class sel]`, `+[Class
-sel]`, `-[Class(Category) sel]` — in every report, symbols or none; an instance method's name
+sel]`, `-[Class(Category) sel]` — in every report, symbols or none. An instance method's name
 starts with `-`, so `--` goes before it on the command line: `ag image app disasm -- '-[Foo
-bar:]'`. A category on a class of another image names the class `?`, since the class is bound
-at load. Pointers are read as the
-file holds them, so an arm64e image with chained fixups reads nothing here yet. (The external
-method map `ag corpus … --methods` takes is for a corpus; an image needs none.)
+bar:]'`. The pointers of an image linked for macOS 12 or iOS 15 and later are chained
+fixups, and are resolved before they are followed; a class of another image — a superclass,
+or the class a category extends — is bound at load, so a category on one names the class
+`?`. (The external method map `ag corpus … --methods` takes is for a corpus; an image needs
+none.)
 
 A universal (fat) Mach-O holds several images, one per architecture. `ag image FILE slices`
 lists them, and `--slice ARCH` (or the slice's position, from 0) before the subcommand says

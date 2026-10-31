@@ -866,6 +866,9 @@ impl Binary {
             .map(|(slot, name)| (shift(slot), name))
             .collect();
         self.entry = self.entry.map(shift);
+        if let Some(objc) = &mut self.objc {
+            objc.shift(delta);
+        }
     }
 
     /// Add the segment `name` at `vma`, `size` bytes long, holding the

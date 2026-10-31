@@ -354,11 +354,7 @@ impl Image {
     /// and protocols — when it is a Mach-O with any.
     pub fn objc(&self) -> Option<&crate::objc::ObjcMetadata> {
         self.objc
-            .get_or_init(|| {
-                self.object()
-                    .map(|_| crate::objc::read(&self.bytes))
-                    .unwrap_or(None)
-            })
+            .get_or_init(|| self.object().and_then(|_| crate::objc::read(&self.bytes)))
             .as_ref()
     }
 
@@ -528,9 +524,22 @@ impl Image {
             .unwrap_or_default();
         // An Objective-C method's implementation is named by the metadata —
         // `-[Class sel]` — where no symbol names it, as in a stripped image.
+        // Only an implementation in code is a function: a crafted record
+        // pointing into data or off the map names nothing.
         if let Some(objc) = self.objc() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _)| *address).collect();
+            let code: Vec<(u64, u64)> = self
+                .sections()
+                .into_iter()
+                .filter(|section| section.executable)
+                .map(|section| (section.vma, section.vma.saturating_add(section.size)))
+                .collect();
             for (imp, name) in objc.method_names() {
-                if !symbols.iter().any(|(address, _)| *address == imp) {
+                let in_code = code
+                    .iter()
+                    .any(|(start, end)| (*start..*end).contains(&imp));
+                if in_code && !named.contains(&imp) {
                     symbols.push((imp, name));
                 }
             }
@@ -547,9 +556,11 @@ impl Image {
             .unwrap_or_default();
         // A class object is data the loader registers, named by its class.
         if let Some(objc) = self.objc() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _, _)| *address).collect();
             for (address, name) in objc.class_symbols() {
-                if !symbols.iter().any(|(found, _, _)| *found == address) {
-                    symbols.push((address, name, 0x28));
+                if !named.contains(&address) {
+                    symbols.push((address, name, crate::objc::ObjcMetadata::CLASS_OBJECT_SIZE));
                 }
             }
             symbols.sort_by_key(|(address, _, _)| *address);

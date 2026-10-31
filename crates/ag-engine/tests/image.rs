@@ -435,6 +435,13 @@ fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
         .iter()
         .any(|(_, name, _)| name == "OBJC_CLASS_$_Derived"));
 
+    // The stripped twin's symbol table names nothing: `_main` is gone, and
+    // the method names can only have come from the metadata.
+    assert!(
+        !stripped_names.iter().any(|line| line.ends_with(" _main")),
+        "{stripped_names:?}"
+    );
+
     // Nothing of the kind in an ELF, or a Mach-O without Objective-C.
     let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
     assert!(Image::open(&elf).expect("loads").objc().is_none());
@@ -442,4 +449,116 @@ fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
         .expect("loads")
         .objc()
         .is_none());
+}
+
+#[test]
+fn an_image_with_chained_fixups_reads_the_same_objective_c() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    // Linked for macOS 12, every pointer slot of the metadata is a packed
+    // fixup: read raw, the lists would come out empty or wrong.
+    let chained = Image::open(&fixtures.join("sample_objc_chained")).expect("loads");
+    let objc = chained.objc().expect("Objective-C metadata");
+    let classic = Image::open(&fixtures.join("sample_objc")).expect("loads");
+    let expected = classic.objc().expect("Objective-C metadata");
+
+    let shape = |objc: &ag_engine::objc::ObjcMetadata| {
+        let methods =
+            |methods: &[ag_engine::objc::ObjcMethod]| -> Vec<(String, Option<String>, bool)> {
+                methods
+                    .iter()
+                    .map(|method| {
+                        (
+                            method.selector.clone(),
+                            method.types.clone(),
+                            method.imp.is_some(),
+                        )
+                    })
+                    .collect()
+            };
+        let classes: Vec<_> = objc
+            .classes
+            .iter()
+            .map(|class| {
+                (
+                    class.name.clone(),
+                    class.superclass.clone(),
+                    class.protocols.clone(),
+                    methods(&class.instance_methods),
+                    methods(&class.class_methods),
+                    class
+                        .ivars
+                        .iter()
+                        .map(|ivar| ivar.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let categories: Vec<_> = objc
+            .categories
+            .iter()
+            .map(|category| {
+                (
+                    category.name.clone(),
+                    category.class.clone(),
+                    methods(&category.instance_methods),
+                )
+            })
+            .collect();
+        let protocols: Vec<_> = objc
+            .protocols
+            .iter()
+            .map(|protocol| (protocol.name.clone(), methods(&protocol.instance_methods)))
+            .collect();
+        (classes, categories, protocols)
+    };
+    assert_eq!(shape(objc), shape(expected));
+    assert_eq!(objc.classes.len(), 2);
+    assert!(chained
+        .function_symbols()
+        .iter()
+        .any(|(_, name)| name == "-[Derived greet:]"));
+}
+
+#[test]
+fn a_category_on_a_class_of_another_image_names_the_class_unknown() {
+    use ag_engine::image::Image;
+    use object::{Object, ObjectSection};
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    let mut bytes = std::fs::read(fixtures.join("sample_objc_stripped")).expect("reads");
+    let category = Image::open(&fixtures.join("sample_objc_stripped"))
+        .expect("loads")
+        .objc()
+        .expect("Objective-C")
+        .categories[0]
+        .address;
+    // Zero the category's class slot in a copy, as a class bound at load
+    // reads: the slot is `category_t.cls`, 8 bytes in.
+    let slot = category + 8;
+    let file = object::File::parse(bytes.as_slice()).expect("parses");
+    let section = file
+        .sections()
+        .find(|section| (section.address()..section.address() + section.size()).contains(&slot))
+        .expect("the category is in a section");
+    let (offset, _) = section.file_range().expect("in the file");
+    let at = (offset + (slot - section.address())) as usize;
+    drop(file);
+    bytes[at..at + 8].fill(0);
+    let dir = std::env::temp_dir().join(format!("ag-objc-external-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sample_objc_external");
+    std::fs::write(&path, &bytes).expect("writes");
+
+    let image = Image::open(&path).expect("loads");
+    let objc = image.objc().expect("Objective-C");
+    assert_eq!(objc.categories[0].class, None);
+    assert!(image
+        .function_symbols()
+        .iter()
+        .any(|(_, name)| name == "-[?(Extra) thrice:]"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

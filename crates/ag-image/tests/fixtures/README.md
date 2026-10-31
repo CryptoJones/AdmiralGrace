@@ -19,6 +19,7 @@ The images the image tests read, and how they were made.
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass, a category and a protocol, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
+| `sample_objc_chained` | The same source linked for macOS 12 with chained fixups (`LC_DYLD_CHAINED_FIXUPS`): every pointer slot of the metadata holds a packed fixup, not an address, as every Mach-O linked for macOS 12 or iOS 15 and later does. |
 | `sample.m` | The Objective-C source of the two. |
 | `strip_symtab.py` | Empties a Mach-O's symbol table in place, for hosts without `strip` for Mach-O. |
 
@@ -183,4 +184,7 @@ clang --target=x86_64-apple-macos11 -x objective-c -fno-objc-arc -fobjc-runtime=
       -O1 -nostdlib -fuse-ld=lld -Wl,-e,_main -Wl,-platform_version,macos,11.0,11.0 \
       -Wl,-undefined,dynamic_lookup sample.m -o sample_objc
 python3 strip_symtab.py sample_objc sample_objc_stripped
+clang --target=x86_64-apple-macos12 -x objective-c -fno-objc-arc -fobjc-runtime=macosx-12.0 \
+      -O1 -nostdlib -fuse-ld=lld -Wl,-e,_main -Wl,-platform_version,macos,12.0,12.0 \
+      -Wl,-fixup_chains -Wl,-undefined,dynamic_lookup sample.m -o sample_objc_chained
 ```
