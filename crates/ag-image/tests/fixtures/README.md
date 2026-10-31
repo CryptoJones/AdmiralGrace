@@ -14,6 +14,7 @@ The images the image tests read, and how they were made.
 | `arm_flows.elf` | A hand-written ARM executable: a call and a return under a condition, a Thumb `blx` into ARM code no symbol names, a literal-pool load. |
 | `arm_flows_stripped.elf` | The same with every symbol removed: only the entry point's low bit says the mode. |
 | `arm_flows.s` | The source of the two. |
+| `arm64.elf` | An AArch64 ELF executable built from `arm_sample.c`, statically linked with no C library. |
 
 The 64-bit ELF the tests read is in `crates/ag-engine/tests/fixtures/sample.elf`; the
 engine's own tests read it, and the image tests read it from there.
@@ -139,6 +140,9 @@ clang --target=armv7a-none-eabi -mthumb -O1 -nostdlib -static -fuse-ld=lld -Wl,-
 clang --target=armv7a-none-eabi -marm   -O1 -nostdlib -static -fuse-ld=lld -Wl,-e,sum \
       -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 \
       arm_sample.c -o arm_arm.elf
+clang --target=aarch64-none-elf -O1 -nostdlib -static -fuse-ld=lld -Wl,-e,sum \
+      -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code \
+      -Wl,--image-base=0x10000 -Wl,-Ttext=0x20000 arm_sample.c -o arm64.elf
 clang --target=armv7a-none-eabi -c arm_flows.s -o arm_flows.o
 clang --target=armv7a-none-eabi -nostdlib -static -fuse-ld=lld -Wl,-e,_start \
       -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 arm_flows.o -o arm_flows.elf

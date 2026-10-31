@@ -364,8 +364,8 @@ pub struct Binary {
     language: String,
     /// The width of the program, when the native decoder reads its language.
     bitness: Option<Bitness>,
-    /// Which ARM specification the image decodes under, when it is 32-bit
-    /// ARM: the x86 decoder does not read it, this does.
+    /// Which ARM specification the image decodes under, when it is ARM —
+    /// 32-bit, or AArch64: the x86 decoder does not read it, SLEIGH does.
     arm: Option<ArmVariant>,
     /// The instruction set each function's address starts in, as the
     /// image's symbols say: a Thumb function's symbol has its low bit set.
@@ -455,10 +455,17 @@ impl Binary {
         // function's symbol carries its mode in its low bit, which is not
         // part of its address.
         let arm = ArmVariant::of_language(&language);
-        let unbit = |address: u64| if arm.is_some() { address & !1 } else { address };
+        let unbit = |address: u64| {
+            if arm.is_some_and(|arm| arm.has_modes()) {
+                address & !1
+            } else {
+                address
+            }
+        };
         // The entry's low bit, the `$a`/`$t` mapping symbols, and the
-        // function symbols with their low bit set.
-        let symbol_modes: BTreeMap<u64, ArmMode> = if arm.is_some() {
+        // function symbols with their low bit set: 32-bit ARM's, the one
+        // ARM with two instruction sets.
+        let symbol_modes: BTreeMap<u64, ArmMode> = if arm.is_some_and(|arm| arm.has_modes()) {
             image
                 .arm_mode_hints()
                 .into_iter()
@@ -627,9 +634,10 @@ impl Binary {
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
-    /// addresses decode in one of two instruction sets.
+    /// addresses decode in one of two instruction sets. AArch64 is read by
+    /// the same decoder, but has one instruction set and no modes.
     pub fn is_arm(&self) -> bool {
-        self.arm.is_some()
+        self.arm.is_some_and(|arm| arm.has_modes())
     }
 
     /// Say which instruction set each of `modes`' addresses onward decodes
@@ -638,7 +646,7 @@ impl Binary {
     /// have read the bytes in the other mode. An image that is not ARM has
     /// no modes to tell.
     pub fn set_modes(&self, modes: BTreeMap<u64, ArmMode>) -> bool {
-        if self.arm.is_none() {
+        if !self.is_arm() {
             return false;
         }
         if let Ok(mut held) = self.modes.lock() {
@@ -656,7 +664,7 @@ impl Binary {
     /// analyst's where the two meet — else the image's own default. What
     /// the decoder reads the section under.
     pub fn mode_at(&self, address: u64) -> Option<ArmMode> {
-        let variant = self.arm?;
+        let variant = self.arm.filter(|arm| arm.has_modes())?;
         Some(
             self.merged_modes()
                 .range(..=address)
@@ -1471,9 +1479,9 @@ impl Binary {
     /// Whether a decoder reads this image.
     ///
     /// The native decoder is x86, 32-bit or 64-bit as the language says, and
-    /// the SLEIGH decoder reads 32-bit little-endian ARM, in ARM and Thumb;
-    /// an image of another architecture is read and reported, but not
-    /// disassembled.
+    /// the SLEIGH decoder reads little-endian ARM — 32-bit, in ARM and Thumb,
+    /// and AArch64; an image of another architecture is read and reported,
+    /// but not disassembled.
     pub fn supports_disassembly(&self) -> bool {
         self.bitness.is_some() || self.arm.is_some()
     }

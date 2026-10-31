@@ -3400,7 +3400,8 @@ impl App {
                     return Task::none();
                 };
                 let Some(current) = self.provider.mode_at(address) else {
-                    self.notice = Some("Choosing the instruction set needs an ARM image".into());
+                    self.notice =
+                        Some("Choosing the instruction set needs a 32-bit ARM image".into());
                     return Task::none();
                 };
                 let key = self.annotation_key(address);
@@ -7010,7 +7011,7 @@ mod tests {
         let _ = x86.update(Message::EditMode);
         assert_eq!(
             x86.notice.as_deref(),
-            Some("Choosing the instruction set needs an ARM image")
+            Some("Choosing the instruction set needs a 32-bit ARM image")
         );
     }
 

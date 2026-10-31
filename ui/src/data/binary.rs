@@ -280,15 +280,17 @@ impl Provider for BinaryProvider {
 
         let summary = match section {
             Some(section) if section.executable => {
-                let width = self
-                    .binary
-                    .bitness()
-                    .map(|bitness| format!("{bitness} "))
-                    .unwrap_or_default();
-                format!(
-                    "Decoded from {} by the native {width}x86 decoder.",
-                    section.name
-                )
+                match self.binary.bitness() {
+                    Some(width) => format!(
+                        "Decoded from {} by the native {width} x86 decoder.",
+                        section.name
+                    ),
+                    None => format!(
+                        "Decoded from {} by the SLEIGH decoder, as {}.",
+                        section.name,
+                        self.binary.language()
+                    ),
+                }
             }
             Some(section) => format!("The symbol lives in {}.", section.name),
             None => "The symbol lives outside every section.".to_string(),

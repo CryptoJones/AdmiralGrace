@@ -1723,3 +1723,42 @@ fn an_arm_image_decodes_in_thumb_and_arm_by_its_symbols_and_the_analysts_marks()
     assert_eq!(sample().mode_at(0x1149), None);
     assert!(!sample().set_modes(BTreeMap::from([(0x1149_u64, ArmMode::Thumb)])));
 }
+
+#[test]
+fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
+    use ag_image::ArmMode;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/arm64.elf");
+    let binary = Binary::open(&path).expect("the AArch64 fixture loads");
+    assert!(binary.language().starts_with("AARCH64:LE:64"), "{}", binary.language());
+    assert!(binary.supports_disassembly());
+    assert!(!binary.supports_pseudocode());
+    assert!(!binary.is_arm(), "one instruction set: nothing to mark");
+    assert_eq!(binary.mode_at(0x2_0000), None);
+    assert!(!binary.set_modes(BTreeMap::from([(0x2_0000_u64, ArmMode::Thumb)])));
+
+    let add = binary.disassembly(0x2_0000).expect("add is decoded");
+    let lines: Vec<&Instruction> = add
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    assert_eq!(lines[0].mnemonic, "add");
+    assert_eq!(lines[1].mnemonic, "ret");
+    assert!(lines.iter().all(|line| line.bytes.len() == 4));
+    let sum = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "sum")
+        .expect("sum")
+        .address;
+    let sum = binary.disassembly(sum).expect("sum is decoded");
+    assert!(sum.blocks.len() > 1, "sum loops");
+    assert!(sum
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|line| line.mnemonic == "bl" && line.call.is_some()));
+    let refused = binary.pseudocode(0x2_0000).expect_err("not lifted");
+    assert!(refused.reason.contains("AARCH64"), "{}", refused.reason);
+}
