@@ -227,6 +227,9 @@ impl IlFunction {
             self.level.name(),
             if self.ssa { ", SSA form" } else { "" }
         );
+        if self.blocks.is_empty() {
+            out.push_str("; no blocks at this level\n");
+        }
         for block in &self.blocks {
             if self.level != Level::High {
                 let successors: Vec<String> = block

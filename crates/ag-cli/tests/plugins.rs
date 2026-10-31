@@ -128,6 +128,9 @@ while work:
     blocks.append({"from": start, "to": a if a is not None else end, "successors": succ})
     work.extend(succ)
 blocks.sort(key=lambda b: b["from"])
+import os
+if os.environ.get("AG_TOY_BAD_BLOCKS"):
+    blocks = [{"from": 0x100, "to": 0x106, "successors": []}, {"from": 0x102, "to": 0x106, "successors": []}]
 json.dump({"blocks": blocks}, sys.stdout)
 "#,
     )
@@ -271,6 +274,36 @@ fn a_manifests_architecture_recovers_the_blocks_and_lifts_the_toy_function() {
     let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
     assert_eq!(report["architectures"][0]["lifts"], true);
+    // Blocks that overlap are refused, with a warning, and the engine walks.
+    let output = ag(&dir.0)
+        .env("AG_TOY_BAD_BLOCKS", "1")
+        .arg("image")
+        .arg(&toy)
+        .args(["cfg", "start", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("answered badly") && stderr.contains("into the one at 0x102"),
+        "{stderr}"
+    );
+    let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(graph["blocks"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        stderr.matches("answered badly").count(),
+        1,
+        "the walk is asked once"
+    );
+    // The low level says it has nothing.
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&toy)
+        .args(["il", "start", "--level", "low"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("; no blocks at this level"));
 }
 
 #[test]

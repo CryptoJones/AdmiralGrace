@@ -128,8 +128,10 @@ pub trait Architecture: Send + Sync {
     /// does not have, to the medium level: blocks of statements over
     /// variables, each ending in a return, a goto, a branch or a switch.
     /// The engine structures the graph into pseudocode and gives it its
-    /// levels, after the registered rewriters. `None` leaves the function
-    /// to the engine's lifter; `Err` refuses it with the reason.
+    /// levels, after the registered rewriters. `None` from an architecture
+    /// that `lifts` the language refuses the function — the engine's lifter
+    /// reads x86-64 alone and is not asked for another language's code;
+    /// `Err` refuses it with the reason.
     fn lift(&self, _function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
         None
     }
@@ -145,8 +147,17 @@ pub struct RecoveredBlock {
     /// The addresses of the blocks control can go on to; none for a block
     /// that returns or ends the procedure.
     pub successors: Vec<u64>,
-    /// The functions the block calls, by address.
-    pub calls: Vec<u64>,
+    /// The calls the block makes that its instructions' flows do not say —
+    /// a bytecode's call, say — each the instruction that calls and the
+    /// function called.
+    pub calls: Vec<RecoveredCall>,
+}
+
+/// A call an architecture recovered: where it is made, and to where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredCall {
+    pub site: u64,
+    pub target: u64,
 }
 
 /// A function an architecture lifted itself, at the medium level.
@@ -517,6 +528,14 @@ impl Rewrite {
                     return Err(format!(
                         "block {index} leading to block {target}, of {count}"
                     ));
+                }
+            }
+            if let Terminator::Switch { cases, .. } = &node.terminator {
+                if cases.is_empty() {
+                    return Err(format!("block {index} switching to no case"));
+                }
+                if cases.iter().any(|(values, _)| values.is_empty()) {
+                    return Err(format!("block {index} switching on a case with no value"));
                 }
             }
             if let Some(other) = self.nodes[..index]
@@ -1094,6 +1113,15 @@ pub fn graph_of(answer: &serde_json::Value) -> Result<LiftedGraph, String> {
         .get("blocks")
         .and_then(serde_json::Value::as_array)
         .ok_or("the lifted function lists `blocks`")?;
+    if blocks.is_empty() {
+        return Err("the lifted function has no blocks".to_string());
+    }
+    let entry = match object.get("entry") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(value) => number(value)
+            .map(|entry| entry as usize)
+            .ok_or("the entry is the number of a block")?,
+    };
     let mut nodes = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
         let address = block
@@ -1150,36 +1178,51 @@ pub fn graph_of(answer: &serde_json::Value) -> Result<LiftedGraph, String> {
                 next: target_of("next")?,
                 addresses,
             },
-            "switch" => Terminator::Switch {
-                index: expression(
-                    terminator
-                        .get("index")
-                        .ok_or_else(|| format!("block {index}'s switch has an `index`"))?,
-                )
-                .map_err(|error| format!("block {index}'s switch: {error}"))?,
-                cases: terminator
+            "switch" => {
+                let cases = terminator
                     .get("cases")
                     .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
+                    .filter(|cases| !cases.is_empty())
+                    .ok_or_else(|| format!("block {index}'s switch has at least one case"))?;
+                let cases = cases
+                    .iter()
                     .map(|case| {
-                        let values: Vec<i64> = case
+                        let values = case
                             .get("values")
                             .and_then(serde_json::Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|value| {
-                                value.as_i64().or_else(|| number(value).map(|v| v as i64))
+                            .filter(|values| !values.is_empty())
+                            .ok_or_else(|| {
+                                format!("a case of block {index}'s switch has at least one value")
+                            })?
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .as_i64()
+                                    .or_else(|| number(value).map(|v| v as i64))
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "a case value of block {index}'s switch is a number, not {value}"
+                                        )
+                                    })
                             })
-                            .collect();
+                            .collect::<Result<Vec<i64>, String>>()?;
                         let target = case.get("target").and_then(number).ok_or_else(|| {
                             format!("a case of block {index}'s switch names its target")
                         })?;
                         Ok((values, target as usize))
                     })
-                    .collect::<Result<Vec<_>, String>>()?,
-                addresses,
-            },
+                    .collect::<Result<Vec<_>, String>>()?;
+                Terminator::Switch {
+                    index: expression(
+                        terminator
+                            .get("index")
+                            .ok_or_else(|| format!("block {index}'s switch has an `index`"))?,
+                    )
+                    .map_err(|error| format!("block {index}'s switch: {error}"))?,
+                    cases,
+                    addresses,
+                }
+            }
             other => {
                 return Err(format!(
                     "block {index}'s terminator is return, goto, branch or switch, not {other:?}"
@@ -1200,10 +1243,7 @@ pub fn graph_of(answer: &serde_json::Value) -> Result<LiftedGraph, String> {
             .to_string(),
         params: variables("params")?,
         locals: variables("locals")?,
-        entry: object
-            .get("entry")
-            .and_then(number)
-            .map_or(0, |entry| entry as usize),
+        entry,
         nodes,
         frame: numbers(object.get("frame")),
     };
@@ -1226,6 +1266,7 @@ pub fn expression(value: &serde_json::Value) -> Result<AstNode, String> {
     use crate::ast::BinaryOp;
     match value {
         serde_json::Value::Number(_) => number(value)
+            .or_else(|| value.as_i64().map(|v| v as u64))
             .map(|value| AstNode::constant(value, 8))
             .ok_or_else(|| "a constant is a whole number".to_string()),
         serde_json::Value::String(name) => Ok(AstNode::var(name.clone())),
@@ -1257,8 +1298,11 @@ pub fn expression(value: &serde_json::Value) -> Result<AstNode, String> {
                     .map(|value| AstNode::constant(value, width))
                     .ok_or_else(|| "a constant is a whole number".to_string());
             }
-            if let Some(name) = object.get("var").and_then(serde_json::Value::as_str) {
-                return Ok(AstNode::var(name));
+            if let Some(name) = object.get("var") {
+                return name
+                    .as_str()
+                    .map(AstNode::var)
+                    .ok_or_else(|| format!("`var` takes a name, not {name}"));
             }
             if let Some(text) = object.get("string").and_then(serde_json::Value::as_str) {
                 return Ok(AstNode::StringLiteral {
@@ -1956,11 +2000,28 @@ impl Architecture for ExternalArchitecture {
                     let to = row.get("to").and_then(number).ok_or_else(|| {
                         format!("{}: a block names where it runs `to`", self.name)
                     })?;
+                    let calls = row
+                        .get("calls")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|call| {
+                            let site = call.get("site").and_then(number);
+                            let target = call.get("target").and_then(number);
+                            match (site, target) {
+                                (Some(site), Some(target)) => Ok(RecoveredCall { site, target }),
+                                _ => Err(format!(
+                                    "{}: a call names its site and its target",
+                                    self.name
+                                )),
+                            }
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
                     Ok(RecoveredBlock {
                         from,
                         to,
                         successors: numbers(row.get("successors")),
-                        calls: numbers(row.get("calls")),
+                        calls,
                     })
                 })
                 .collect()
@@ -1986,9 +2047,10 @@ impl Architecture for ExternalArchitecture {
                 "successors": block.successor_addresses,
             })).collect::<Vec<_>>(),
         });
-        Some(self.ask(command, &request).and_then(|answer| {
-            graph_of(&answer).map_err(|error| format!("{}: {error}", self.name))
-        }))
+        Some(
+            self.ask(command, &request)
+                .and_then(|answer| graph_of(&answer)),
+        )
     }
 
     fn languages(&self) -> Vec<String> {
@@ -2488,6 +2550,37 @@ mod tests {
             &serde_json::json!({ "blocks": [{ "address": 1, "terminator": { "kind": "fly" } }] })
         )
         .is_err());
+        // A bare negative number is a constant; `var` takes a name.
+        assert!(matches!(
+            expression(&serde_json::json!(-1)).unwrap(),
+            AstNode::Constant { .. }
+        ));
+        assert!(expression(&serde_json::json!({ "var": 5 }))
+            .unwrap_err()
+            .contains("takes a name"));
+        // A switch has cases with values that are numbers; an entry is a number.
+        let switch = |cases: serde_json::Value| {
+            graph_of(&serde_json::json!({ "blocks": [
+                { "address": 1, "terminator": { "kind": "switch", "index": "i", "cases": cases } },
+                { "address": 2, "terminator": { "kind": "return" } }
+            ] }))
+        };
+        assert!(switch(serde_json::json!([]))
+            .unwrap_err()
+            .contains("at least one case"));
+        assert!(switch(serde_json::json!([{ "values": [], "target": 1 }]))
+            .unwrap_err()
+            .contains("at least one value"));
+        assert!(
+            switch(serde_json::json!([{ "values": ["x"], "target": 1 }]))
+                .unwrap_err()
+                .contains("is a number")
+        );
+        assert!(switch(serde_json::json!([{ "values": [1, "0x2"], "target": 1 }])).is_ok());
+        assert!(graph_of(&serde_json::json!({ "entry": "x", "blocks": [{ "address": 1, "terminator": { "kind": "return" } }] })).unwrap_err().contains("entry"));
+        assert!(graph_of(&serde_json::json!({ "blocks": [] }))
+            .unwrap_err()
+            .contains("no blocks"));
         assert_eq!(hex_text(&[0x54, 0x4f, 0x01]), "544f01");
         assert_eq!(
             flow_name(&Flow::ConditionalBranch(0x104)),

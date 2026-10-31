@@ -629,6 +629,23 @@ pub fn lift_graph(
             nodes.len()
         )));
     }
+    // A function that returns a value returns it in a statement: a block
+    // that returns without one would fall off the end of the pseudocode.
+    if return_type != "void" {
+        for (index, node) in nodes.iter().enumerate() {
+            if matches!(node.terminator, Terminator::Return)
+                && !matches!(
+                    node.statements.last().map(|statement| &statement.node),
+                    Some(AstNode::Return { value: Some(_) })
+                )
+            {
+                return Err(NotLifted::new(format!(
+                    "block {index} at {:#x} returns no value in a function returning {return_type}",
+                    node.address
+                )));
+            }
+        }
+    }
     let successors = |nodes: &[Node]| -> Vec<Vec<usize>> {
         nodes
             .iter()
@@ -644,6 +661,7 @@ pub fn lift_graph(
                 .blocks
                 .iter()
                 .find(|block| block.from == node.address)
+                .or_else(|| cfg.block_containing(node.address))
                 .map(|block| {
                     disasm
                         .instructions
@@ -4703,6 +4721,46 @@ mod tests {
             refused(&[0x50, 0x89, 0x3c, 0x24, 0x58, 0xc3]),
             "not lifted yet: the 64 bits at local_8 were written in parts"
         );
+    }
+
+    #[test]
+    fn an_architectures_graph_returning_no_value_in_a_valued_function_is_refused() {
+        let node = |terminator: Terminator| Node {
+            address: 0x100,
+            statements: Vec::new(),
+            terminator,
+        };
+        let graph = |return_type: &str| crate::plugin::LiftedGraph {
+            return_type: return_type.to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            entry: 0,
+            nodes: vec![node(Terminator::Return)],
+            frame: Vec::new(),
+        };
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: Vec::new(),
+        };
+        let cfg = ProcedureCfg::default();
+        let options = Options::default();
+        let error = match lift_graph(graph("int"), &disasm, &cfg, 0x100, "f", &options) {
+            Err(error) => error,
+            Ok(_) => panic!("a function returning int with no return value lifted"),
+        };
+        assert!(
+            error
+                .reason
+                .contains("returns no value in a function returning int"),
+            "{error:?}"
+        );
+        let stages = match lift_graph(graph("void"), &disasm, &cfg, 0x100, "f", &options) {
+            Ok(stages) => stages,
+            Err(error) => panic!("the void function lifts: {error}"),
+        };
+        assert_eq!(stages.function.return_type, "void");
+        assert!(stages.low.is_empty());
+        assert_eq!(stages.chains.len(), 1);
     }
 
     #[test]

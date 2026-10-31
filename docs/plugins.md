@@ -113,9 +113,13 @@ basic blocks where the flows alone cannot — delay slots, hardware loops, a byt
 jumps the decoder cannot read. It is given `{"language": "…", "entry": 256, "instructions":
 [ {"address": 256, "length": 2, "flow": "branch", "target": 260}, … ]}` (each number with a
 `_hex` twin beside it) and answers `{"blocks": [ {"from": 256, "to": 259, "successors": [260,
-259], "calls": []}, … ]}`: the blocks in address order, each ending where the next begins or
-the code does, with the blocks control goes on to and the functions it calls. Without the
-command, or when it fails (reported on standard error), the engine walks the flows.
+259], "calls": [ {"site": 258, "target": 266} ]}, … ]}`: the blocks in address order, each
+ending where the next begins or the code does, with the blocks control goes on to and the
+calls its instructions' flows do not say, each the instruction that calls and the function
+called — they reach the listing, the call graph and the cross references as any call does.
+The answer is checked: every block runs forward, no two overlap, the entry starts one, and
+every successor starts one. Without the command, when it fails, or when its answer does not
+pass (reported on standard error, once per function), the engine walks the flows.
 
 **An architecture's `lift` command**, when the manifest gives one, lifts a whole function at
 once, with the context one instruction does not have, to the medium level (`docs/il.md`): it
@@ -134,8 +138,12 @@ is given the function — `{"language": "…", "function": 256, "name": "start",
 ```
 
 A block's `terminator` is `return`, `goto` (a `target` block), `branch` (a `cond`, the block
-`taken` when it holds, the `next` otherwise) or `switch` (an `index` and `cases`, each its
-`values` and `target`), with the `addresses` it came from. A statement's `expr`, a branch's
+`taken` when it holds, the `next` otherwise) or `switch` (an `index` and `cases`, at least
+one, each its `values`, at least one, and `target`), with the `addresses` it came from. The
+`entry` is block 0 unless said; a variable's `type` is `long` unless said; `frame` lists the
+instructions no statement came from, which the signature line stands for in the listing. A
+function whose `return_type` is not `void` returns its value in a statement — a block that
+ends in `return` ends with `{"return": …}` — or is refused. A statement's `expr`, a branch's
 `cond` and a switch's `index` are expression trees:
 
 | Tree | Expression |
@@ -154,9 +162,12 @@ A block's `terminator` is `return`, `goto` (a `target` block), `branch` (a `cond
 
 The engine runs the registered rewriters over the graph, analyzes and structures it into the
 pseudocode as it does its own lift's, and gives the function its levels: the lifted level by
-the function's blocks, the medium and high levels from the graph, and no low level. An answer
-that is not such a graph, a block pointing outside the function, a command that fails or runs
-out of time, refuses the function with the architecture's name.
+the function's blocks, the medium and high levels from the graph, and no low level (the level
+prints `; no blocks at this level`). An answer that is not such a graph, a block pointing
+outside the function, a command that fails or runs out of time, refuses the function with the
+architecture's name; so does an architecture that lifts the language and answers nothing for
+a function, since the engine's lifter reads x86-64 alone. The `blocks` and `lift` commands
+are each run once per function and remembered with the image.
 
 **A tool** is given `{"tool": "…", "image": "<path>", "project": "<path or null>",
 "arguments": {…}}` — the image's path and the project file's, so it can open them itself
@@ -251,10 +262,11 @@ plugin::register_loader(Arc::new(Toy));
   `register_architecture`; an image whose language no built-in decoder reads is decoded by
   the registered architecture that names it. Three more have defaults: `lifts(language)`
   (false), `blocks(language, disasm, entry) -> Option<Result<Vec<RecoveredBlock>>>` (the
-  function's blocks recovered by the architecture; `None` leaves the walk to the engine) and
+  function's blocks recovered by the architecture, each with its `successors` and the
+  `calls` its flows do not say; `None` leaves the walk to the engine) and
   `lift(&FunctionCode) -> Option<Result<LiftedGraph>>` (a whole function lifted at once to
   `Node`s over `AstNode`s, with its `params`, `locals`, `return_type`, `entry` and
-  `frame`; `None` leaves it to the engine's lifter). `Rewrite::statement(node, addresses)`
+  `frame`; `None` from an architecture that `lifts` refuses the function). `Rewrite::statement(node, addresses)`
   makes a statement; the engine structures the graph and gives it its levels.
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the

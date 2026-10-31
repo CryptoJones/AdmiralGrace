@@ -682,9 +682,12 @@ impl Provider for BinaryProvider {
             Err(error) => vec![Problem {
                 message: format!("No pseudocode: {error}."),
                 address: Some(address),
-                action: Some(
-                    "The lifter reads x86-64 code with the instructions it knows; the reason names what stopped it".into(),
-                ),
+                action: Some(match self.binary.plugin_architecture() {
+                    Some(arch) => format!(
+                        "{arch} lifts this image's functions; the reason names what stopped it"
+                    ),
+                    None => "The lifter reads x86-64 code with the instructions it knows; the reason names what stopped it".into(),
+                }),
             }],
         }
     }
