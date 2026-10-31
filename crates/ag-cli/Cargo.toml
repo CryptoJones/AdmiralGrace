@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 ag-corpus = { path = "../ag-corpus" }
+ag-debug = { path = "../ag-debug" }
 ag-image = { path = "../ag-image" }
 anyhow.workspace = true
 clap.workspace = true

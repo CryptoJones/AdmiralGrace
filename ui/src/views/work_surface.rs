@@ -69,15 +69,18 @@ pub enum LowerTab {
     References,
     /// Diagnostics.
     Problems,
+    /// The debugger: the program under it, its registers, stack and memory.
+    Debug,
 }
 
 impl LowerTab {
     /// Every tab, in display order.
-    pub const ALL: [LowerTab; 4] = [
+    pub const ALL: [LowerTab; 5] = [
         LowerTab::Bytes,
         LowerTab::Strings,
         LowerTab::References,
         LowerTab::Problems,
+        LowerTab::Debug,
     ];
 
     /// The tab label.
@@ -87,6 +90,7 @@ impl LowerTab {
             LowerTab::Strings => "Strings",
             LowerTab::References => "References",
             LowerTab::Problems => "Problems",
+            LowerTab::Debug => "Debug",
         }
     }
 }
@@ -309,13 +313,19 @@ fn listing_content(app: &App) -> Element<'_, Message> {
             .filter(|comment| comment.above)
         {
             list = list.push(with_margin(
-                arrows.margin(row, selected),
+                arrows.margin(row, selected, crate::views::arrows::Marks::default()),
                 comment_row(&comment.text),
             ));
             row += 1;
         }
+        // The debugger's marks on the instruction's row.
+        let marks = crate::views::arrows::Marks {
+            address: Some(line.address),
+            breakpoint: app.debug.breakpoints.contains(&line.address),
+            at_pc: app.debug.pc == Some(line.address),
+        };
         list = list.push(with_margin(
-            arrows.margin(row, selected),
+            arrows.margin(row, selected, marks),
             listing_row(app, line, &renamed),
         ));
         row += 1;
@@ -800,6 +810,7 @@ fn lower_content(app: &App) -> Element<'_, Message> {
                 reference_table(app)
             }
         }
+        LowerTab::Debug => debug_panel(app),
         LowerTab::Problems => {
             let problems = app.bottom.problems.clone();
             if problems.is_empty() {
@@ -1223,4 +1234,146 @@ fn pin_button(app: &App) -> Element<'_, Message> {
         ..button::Style::default()
     })
     .into()
+}
+
+/// The Debug panel: the program under the debugger, the controls, and
+/// what it showed when it last stopped.
+fn debug_panel(app: &App) -> Element<'_, Message> {
+    use crate::debug::Status;
+    let debug = &app.debug;
+    let stopped = debug.is_stopped();
+    let running = debug.is_running();
+    let off = debug.session.is_none();
+    let control =
+        |label: &'static str, message: Message, enabled: bool| -> Element<'static, Message> {
+            let mut button = button(Text::new(label).size(12)).padding([4, 10]);
+            if enabled {
+                button = button.on_press(message);
+            }
+            button.into()
+        };
+    let controls = Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(control(
+            "Start",
+            Message::DebugStart,
+            off || matches!(debug.status, Status::Exited(_)),
+        ))
+        .push(control(
+            "Attach…",
+            Message::DebugAttach,
+            off || matches!(debug.status, Status::Exited(_)),
+        ))
+        .push(control("Continue", Message::DebugContinue, stopped))
+        .push(control("Step into", Message::DebugStep, stopped))
+        .push(control("Step over", Message::DebugNext, stopped))
+        .push(control("Finish", Message::DebugFinish, stopped))
+        .push(control("Interrupt", Message::DebugInterrupt, running))
+        .push(control("Stop", Message::DebugStop, !off))
+        .push(control(
+            "Breakpoint",
+            Message::DebugToggleBreakpoint(None),
+            app.selection.address().is_some() || app.work.listing_of.is_some(),
+        ));
+    let status = match debug.status {
+        Status::Off => "No debugger is running. Start runs the program under the debugger, stopped at its first instruction; a click in the listing's margin sets a breakpoint.".to_string(),
+        Status::Running => "Running…".to_string(),
+        Status::Stopped => match debug.pc {
+            Some(pc) => format!(
+                "Stopped at {pc:#x}{}",
+                app.provider
+                    .functions()
+                    .iter()
+                    .filter(|row| row.address <= pc)
+                    .max_by_key(|row| row.address)
+                    .filter(|row| {
+                        row.size
+                            .is_none_or(|size| pc < row.address.saturating_add(size))
+                    })
+                    .map(|row| format!(" ({}+{:#x})", row.name, pc - row.address))
+                    .unwrap_or_default()
+            ),
+            None => "Stopped outside the image".to_string(),
+        },
+        Status::Exited(Some(code)) => format!("The program exited with code {code}."),
+        Status::Exited(None) => "The program ended.".to_string(),
+    };
+    let mut column = Column::new()
+        .spacing(8)
+        .padding(8)
+        .push(controls)
+        .push(Text::new(status).size(12).color(color::TEXT));
+    if !debug.breakpoints.is_empty() {
+        let list: Vec<String> = debug
+            .breakpoints
+            .iter()
+            .map(|a| format!("{a:#x}"))
+            .collect();
+        column = column.push(
+            Text::new(format!("Breakpoints: {}", list.join(", ")))
+                .size(12)
+                .color(color::MUTED)
+                .font(MONO),
+        );
+    }
+    if !debug.registers.is_empty() {
+        let mut grid = Column::new().spacing(2);
+        for chunk in debug.registers.chunks(4) {
+            let mut row = Row::new().spacing(14);
+            for (name, value) in chunk {
+                row = row.push(
+                    Text::new(format!("{name:>6} {value:#018x}"))
+                        .size(12)
+                        .font(MONO)
+                        .color(color::TEXT),
+                );
+            }
+            grid = grid.push(row);
+        }
+        column = column.push(subtle("REGISTERS")).push(grid);
+    }
+    if !debug.frames.is_empty() {
+        let mut stack = Column::new().spacing(2);
+        for frame in &debug.frames {
+            let label = format!(
+                "#{} {:#x}{}",
+                frame.level,
+                frame.pc,
+                frame
+                    .function
+                    .as_deref()
+                    .map(|name| format!(" {name}"))
+                    .unwrap_or_default()
+            );
+            // A frame in a library is outside the image: nowhere to go.
+            let mut row = button(Text::new(label).size(12).font(MONO)).padding([2, 6]);
+            if app.provider.contains_address(frame.pc) {
+                row = row.on_press(Message::AddressSelected(frame.pc));
+            }
+            stack = stack.push(row);
+        }
+        column = column.push(subtle("STACK")).push(stack);
+    }
+    if debug.memory_at.is_some() && !debug.memory_rows.is_empty() {
+        column = column
+            .push(subtle("MEMORY AT THE PROGRAM COUNTER"))
+            .push(hex_dump(app, &debug.memory_rows));
+    }
+    if !debug.log.is_empty() {
+        let mut log = Column::new().spacing(1);
+        for line in debug.log.iter().rev().take(8).rev() {
+            log = log.push(
+                Text::new(line.clone())
+                    .size(11)
+                    .font(MONO)
+                    .color(color::DIM),
+            );
+        }
+        column = column.push(subtle("LOG")).push(log);
+    }
+    scrollable(column)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }

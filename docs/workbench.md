@@ -193,6 +193,45 @@ The decoder is x86, and reads the width of the code — 32-bit or 64-bit — fro
 language. An image of another architecture opens with its symbols and its sections, but
 with the listing off, and the Problems panel says why.
 
+## Debugging
+
+Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or
+LLDB through `lldb-mi`, whichever is on the machine — and the static listing follows the
+program. **Debug ▸ Start under debugger** (F6) runs the open program under it,
+stopped at its first instruction; **Attach to process…** asks for a process id instead. A
+click in the listing's margin puts a **breakpoint** on that instruction (a red dot) or takes
+it off, as does F9 on the selection; breakpoints are kept across sessions and set in the
+debugger when one starts. **Continue** (F8), **Step into** (F11), **Step over** (F10) and
+**Finish function** (Shift+F11) run the stopped program; **Interrupt** stops a running one;
+**Stop** ends the session.
+
+When the program stops, the listing moves to the instruction it stopped at — the function
+is selected and the instruction marked with an amber wedge in the margin — in the image's
+addresses: a position-independent program runs under a slide the session learns from the
+process's mappings, and every address the debugger reports is read back through it. The
+**Debug** panel at the bottom holds the controls, where the program is, the registers, the
+stack (a frame is a button that moves the listing there), the bytes at the program counter
+and the debugger's log. The lifter and the listing are the image's; what runs is the
+program's, so a patch the project holds is not in the running program unless a patched copy
+is run.
+
+The same session runs headless as `ag debug IMAGE --break TARGET…`: the program runs to each
+breakpoint, the registers and the stack are printed there, and the command ends with the
+program's exit code.
+
+What to expect of the debuggers: GDB on Linux is the supported path. The slide is learned from
+the process's mappings, which GDB prints on Linux; without them a position-independent
+program's breakpoints wait, and the log says so. LLDB through `lldb-mi` speaks the same
+interface but is untested here — `lldb-mi` is rarely installed, has no `starti` (the program
+is started at `main` instead) and no mappings. Attaching needs permission to trace the
+process: on Linux, `/proc/sys/kernel/yama/ptrace_scope` at 1 (the usual default) refuses a
+process that is not the debugger's own child unless the debugger runs with the right. The
+program's own terminal is nowhere (`/dev/null`): what it reads and prints is not shown, and
+cannot be mistaken for the debugger's words. Interrupt relies on the interface's asynchronous
+mode, which every modern GDB has. The debugger is driven on the window's thread: a command
+that reads the program's state is given three seconds, one that starts or moves it twenty,
+and the window waits meanwhile.
+
 ## Reading the panes
 
 The selection is shared: a function picked in the navigator, an address picked in the

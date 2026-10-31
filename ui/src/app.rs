@@ -75,6 +75,26 @@ pub enum Message {
     FileWritePatched,
     /// Write the graph of the function on screen as an SVG or PDF picture.
     FileExportGraph,
+    /// Run the program under the debugger, stopped at its first instruction.
+    DebugStart,
+    /// Ask for a process to attach the debugger to.
+    DebugAttach,
+    /// Let the stopped program run on.
+    DebugContinue,
+    /// Run one instruction, into a call.
+    DebugStep,
+    /// Run one instruction, over a call.
+    DebugNext,
+    /// Run until the current function returns.
+    DebugFinish,
+    /// Stop the running program where it is.
+    DebugInterrupt,
+    /// End the program and the debugger.
+    DebugStop,
+    /// Put a breakpoint at the address, or at the selection, or take it off.
+    DebugToggleBreakpoint(Option<u64>),
+    /// Look at what the debugger said since the last look.
+    DebugPoll,
     /// Open a file as raw bytes, loaded where the analyst says.
     FileOpenRaw,
     /// Say which instruction set the code from the selection onward is in.
@@ -290,6 +310,8 @@ pub enum PromptKind {
     /// How far from the selection to fill with the no-op: an address to
     /// stop before, or `+N` bytes.
     Nop,
+    /// The id of the process the debugger attaches to.
+    AttachPid,
     /// The bytes at the selection, as hex pairs.
     Bytes,
 }
@@ -607,6 +629,9 @@ pub struct App {
     pub corpus_root: Option<PathBuf>,
     /// The kuna export directory currently open.
     pub kuna_root: Option<PathBuf>,
+    /// The debugger: its session, the breakpoints, and what the program
+    /// showed when it last stopped.
+    pub debug: crate::debug::DebugState,
     /// The program image currently open.
     pub binary_path: Option<PathBuf>,
     /// How the program is read as raw bytes, when it is: a file with no
@@ -712,6 +737,7 @@ impl App {
             prompt: None,
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
+            debug: crate::debug::DebugState::default(),
             binary_path: config.binary.clone(),
             raw: None,
             slice: None,
@@ -1400,6 +1426,170 @@ impl App {
             value: current,
         });
         Task::none()
+    }
+
+    /// Start the program under the debugger — or the session a test put in
+    /// place, not yet started — stopped at its first instruction, with the
+    /// breakpoints set.
+    fn debug_start(&mut self) -> Task<Message> {
+        let Some(binary) = self.binary_path.clone() else {
+            self.notice = Some("Running under the debugger needs a program image".into());
+            return Task::none();
+        };
+        let mut session = match self.debug.session.take() {
+            Some(session) if matches!(session.state(), ag_debug::State::Idle) => session,
+            Some(session) if !matches!(session.state(), ag_debug::State::Exited { .. }) => {
+                self.debug.session = Some(session);
+                self.notice = Some("The program is already under the debugger".into());
+                return Task::none();
+            }
+            _ => {
+                let debugger = self.debug.debugger();
+                if !debugger.available() {
+                    self.notice = Some(format!(
+                        "{} is not on this machine: install it, or choose the other debugger",
+                        debugger.command()[0]
+                    ));
+                    return Task::none();
+                }
+                match ag_debug::Session::launch(
+                    debugger,
+                    &binary,
+                    self.provider.image_base().unwrap_or(0),
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        self.notice = Some(format!("Could not start the debugger: {error:#}"));
+                        return Task::none();
+                    }
+                }
+            }
+        };
+        for address in self.debug.breakpoints.clone() {
+            if let Err(error) = session.add_breakpoint(address) {
+                self.debug
+                    .note(format!("breakpoint at {address:#x}: {error:#}"));
+            }
+        }
+        if let Err(error) = session.start(&[]) {
+            self.notice = Some(format!("Could not start the program: {error:#}"));
+            return Task::none();
+        }
+        self.debug.note(format!(
+            "started {}{}",
+            binary.display(),
+            session
+                .slide()
+                .map(|slide| format!(" with a slide of {slide:#x}"))
+                .unwrap_or_default()
+        ));
+        self.debug.session = Some(session);
+        self.debug.status = crate::debug::Status::Stopped;
+        self.debug
+            .refresh(&|address| self.provider.contains_address(address));
+        self.work.lower = LowerTab::Debug;
+        if let Some(pc) = self.debug.pc {
+            self.follow_pc(pc);
+        }
+        self.notice = Some("Stopped at the first instruction".into());
+        Task::none()
+    }
+
+    /// Attach the debugger to the process `pid`.
+    fn debug_attach(&mut self, pid: u64) -> Task<Message> {
+        let Some(binary) = self.binary_path.clone() else {
+            self.notice = Some("Attaching the debugger needs a program image".into());
+            return Task::none();
+        };
+        let debugger = self.debug.debugger();
+        if !debugger.available() {
+            self.notice = Some(format!("{} is not on this machine", debugger.command()[0]));
+            return Task::none();
+        }
+        let mut session = match ag_debug::Session::launch(
+            debugger,
+            &binary,
+            self.provider.image_base().unwrap_or(0),
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                self.notice = Some(format!("Could not start the debugger: {error:#}"));
+                return Task::none();
+            }
+        };
+        for address in self.debug.breakpoints.clone() {
+            let _ = session.add_breakpoint(address);
+        }
+        if let Err(error) = session.attach(pid) {
+            self.notice = Some(format!("Could not attach to {pid}: {error:#}"));
+            return Task::none();
+        }
+        self.debug.note(format!("attached to process {pid}"));
+        self.debug.session = Some(session);
+        self.debug.status = crate::debug::Status::Stopped;
+        self.debug
+            .refresh(&|address| self.provider.contains_address(address));
+        self.work.lower = LowerTab::Debug;
+        if let Some(pc) = self.debug.pc {
+            self.follow_pc(pc);
+        }
+        self.notice = Some(format!("Attached to process {pid}"));
+        Task::none()
+    }
+
+    /// Let the stopped program run by `command`, and look for its stop.
+    fn debug_run(
+        &mut self,
+        command: impl FnOnce(&mut ag_debug::Session) -> anyhow::Result<()>,
+        what: &str,
+    ) -> Task<Message> {
+        if !self.debug.is_stopped() {
+            self.notice = Some("The program is not stopped under the debugger".into());
+            return Task::none();
+        }
+        let Some(session) = self.debug.session.as_mut() else {
+            return Task::none();
+        };
+        if let Err(error) = command(session) {
+            self.notice = Some(format!("{what} failed: {error:#}"));
+            return Task::none();
+        }
+        self.debug.status = crate::debug::Status::Running;
+        self.debug.pc = None;
+        self.notice = Some(format!("{what}…"));
+        Self::debug_poll_later()
+    }
+
+    /// A look at the debugger a moment from now.
+    fn debug_poll_later() -> Task<Message> {
+        Task::perform(
+            async { std::thread::sleep(std::time::Duration::from_millis(120)) },
+            |_| Message::DebugPoll,
+        )
+    }
+
+    /// Bring the listing to `pc`: the function it is in, and the
+    /// instruction. A stop adds nothing to the history, so Back after a
+    /// run of steps goes where the analyst was, not through every step.
+    fn follow_pc(&mut self, pc: u64) {
+        let function = self
+            .provider
+            .functions()
+            .into_iter()
+            .filter(|row| row.address <= pc)
+            .max_by_key(|row| row.address)
+            .filter(|row| {
+                row.size
+                    .is_none_or(|size| pc < row.address.saturating_add(size))
+            })
+            .map(|row| row.address);
+        if let Some(function) = function {
+            if self.work.listing_of != Some(function) {
+                let _ = self.select_function(function, false);
+            }
+        }
+        self.selection = Selection::Address(pc);
+        self.refresh_bytes();
     }
 
     /// Write the graph on screen — the blocks as the tab draws them,
@@ -3247,6 +3437,16 @@ impl App {
                     PromptKind::ExportGraph => {
                         self.export_graph_to(&path);
                     }
+                    PromptKind::AttachPid => {
+                        return match prompt.value.trim().parse::<u64>() {
+                            Ok(pid) => self.debug_attach(pid),
+                            Err(_) => {
+                                self.notice =
+                                    Some(format!("{:?} is not a process id", prompt.value.trim()));
+                                Task::none()
+                            }
+                        };
+                    }
                     PromptKind::Mode => {
                         let text = prompt.value.trim().to_ascii_lowercase();
                         if let Some(address) = self.selection.address() {
@@ -3927,6 +4127,114 @@ impl App {
                     title: "Write the patched program to",
                     value: format!("{}.patched", binary.display()),
                 });
+            }
+
+            Message::DebugStart => return self.debug_start(),
+            Message::DebugAttach => {
+                if self.binary_path.is_none() {
+                    self.notice = Some("Attaching the debugger needs a program image".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::AttachPid,
+                    title: "Attach the debugger to the process with id",
+                    value: String::new(),
+                });
+            }
+            Message::DebugContinue => {
+                return self.debug_run(|session| session.resume(), "Continuing")
+            }
+            Message::DebugStep => {
+                return self.debug_run(|session| session.step_instruction(), "Stepping into")
+            }
+            Message::DebugNext => {
+                return self.debug_run(|session| session.next_instruction(), "Stepping over")
+            }
+            Message::DebugFinish => return self.debug_run(|session| session.finish(), "Finishing"),
+            Message::DebugInterrupt => {
+                if !self.debug.is_running() {
+                    self.notice = Some("The program is not running".into());
+                    return Task::none();
+                }
+                if let Some(session) = self.debug.session.as_mut() {
+                    if let Err(error) = session.interrupt() {
+                        self.notice = Some(format!("Could not interrupt: {error:#}"));
+                        return Task::none();
+                    }
+                }
+                self.debug.note("interrupting");
+                return Self::debug_poll_later();
+            }
+            Message::DebugStop => {
+                if self.debug.session.is_none() {
+                    self.notice = Some("No debugger is running".into());
+                    return Task::none();
+                }
+                self.debug.stop();
+                self.debug.note("the debugger was stopped");
+                self.notice = Some("Debugger stopped".into());
+            }
+            Message::DebugToggleBreakpoint(address) => {
+                let Some(address) = address
+                    .or_else(|| self.selection.address())
+                    .or(self.work.listing_of)
+                else {
+                    self.notice = Some("Select an instruction to set a breakpoint on".into());
+                    return Task::none();
+                };
+                if self.debug.breakpoints.remove(&address) {
+                    if let Some(session) = self.debug.session.as_mut() {
+                        if let Err(error) = session.remove_breakpoint(address) {
+                            self.notice =
+                                Some(format!("Could not remove the breakpoint: {error:#}"));
+                            return Task::none();
+                        }
+                    }
+                    self.notice = Some(format!("Breakpoint at {address:#x} removed"));
+                } else {
+                    if let Some(session) = self.debug.session.as_mut() {
+                        if let Err(error) = session.add_breakpoint(address) {
+                            self.notice = Some(format!("Could not set the breakpoint: {error:#}"));
+                            return Task::none();
+                        }
+                    }
+                    self.debug.breakpoints.insert(address);
+                    self.notice = Some(format!("Breakpoint at {address:#x}"));
+                }
+            }
+            Message::DebugPoll => {
+                if self.debug.session.is_none() {
+                    return Task::none();
+                }
+                let events = self
+                    .debug
+                    .poll(&|address| self.provider.contains_address(address));
+                let stopped = events
+                    .iter()
+                    .any(|event| matches!(event, ag_debug::Event::Stopped { .. }));
+                if stopped {
+                    if let Some(pc) = self.debug.pc {
+                        self.follow_pc(pc);
+                    }
+                    self.notice = Some(
+                        self.debug
+                            .log
+                            .iter()
+                            .rev()
+                            .find(|line| line.starts_with("stopped"))
+                            .cloned()
+                            .unwrap_or_else(|| "Stopped".into()),
+                    );
+                }
+                if let crate::debug::Status::Exited(code) = self.debug.status {
+                    self.notice = Some(match code {
+                        Some(code) => format!("The program exited with code {code}"),
+                        None => "The program ended".into(),
+                    });
+                }
+                if self.debug.is_running() {
+                    return Self::debug_poll_later();
+                }
             }
 
             Message::FileExportGraph => {
@@ -4850,6 +5158,15 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Named(keyboard::key::Named::F3), true, _) => Message::EditRenameRegister,
         (Key::Named(keyboard::key::Named::F3), false, _) => Message::EditRenameLabel,
         (Key::Named(keyboard::key::Named::F5), _, _) => Message::FileReload,
+        // The debugger: run, step, and a breakpoint on the selection.
+        (Key::Named(keyboard::key::Named::F8), false, false) => Message::DebugContinue,
+        (Key::Named(keyboard::key::Named::F9), false, false) => {
+            Message::DebugToggleBreakpoint(None)
+        }
+        (Key::Named(keyboard::key::Named::F10), false, false) => Message::DebugNext,
+        (Key::Named(keyboard::key::Named::F11), false, false) => Message::DebugStep,
+        (Key::Named(keyboard::key::Named::F11), false, true) => Message::DebugFinish,
+        (Key::Named(keyboard::key::Named::F6), false, false) => Message::DebugStart,
         (Key::Named(keyboard::key::Named::Escape), _, _) => Message::Dismiss,
         _ => Message::Ignore,
     }
@@ -6550,6 +6867,191 @@ mod tests {
         let own = renamed.address_color(inside).expect("the line's color");
         assert_eq!(renamed.line_color(inside, Some(from)), Some(own));
         assert_ne!(renamed.block_color(from), Some(own));
+    }
+
+    #[test]
+    fn breakpoints_are_toggled_at_the_selection_and_kept_without_a_debugger() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::AddressSelected(0x114d));
+        let _ = app.update(Message::DebugToggleBreakpoint(None));
+        assert!(app.debug.breakpoints.contains(&0x114d));
+        assert_eq!(app.notice.as_deref(), Some("Breakpoint at 0x114d"));
+        let _ = app.update(Message::DebugToggleBreakpoint(Some(0x1198)));
+        assert_eq!(app.debug.breakpoints.len(), 2);
+        let _ = app.update(Message::DebugToggleBreakpoint(None));
+        assert!(!app.debug.breakpoints.contains(&0x114d));
+        assert_eq!(app.debug.breakpoints.len(), 1);
+        // The controls that need a program under the debugger say so.
+        let _ = app.update(Message::DebugContinue);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("The program is not stopped under the debugger")
+        );
+        let _ = app.update(Message::DebugStop);
+        assert_eq!(app.notice.as_deref(), Some("No debugger is running"));
+        // The shortcuts.
+        let named = |key: keyboard::key::Named, modifiers: keyboard::Modifiers| {
+            keyboard::Event::KeyPressed {
+                key: Key::Named(key),
+                modified_key: Key::Named(key),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::F9),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            }
+        };
+        let none = keyboard::Modifiers::empty();
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F9, none)),
+            Message::DebugToggleBreakpoint(None)
+        ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F10, none)),
+            Message::DebugNext
+        ));
+        assert!(matches!(
+            shortcut(named(keyboard::key::Named::F11, keyboard::Modifiers::SHIFT)),
+            Message::DebugFinish
+        ));
+    }
+
+    #[test]
+    fn a_scripted_debugger_stops_at_a_breakpoint_and_the_listing_follows() {
+        use ag_debug::fake::Scripted;
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let _ = app.update(Message::DebugToggleBreakpoint(Some(0x1149)));
+
+        let scripted = Scripted::new();
+        let sent = scripted.sent();
+        scripted.answer("-gdb-set mi-async on", &["^done"]);
+        scripted.answer("-file-exec-and-symbols", &["^done"]);
+        scripted.answer(
+            "-interpreter-exec console \"starti\"",
+            &[
+                "^running",
+                "*running,thread-id=\"all\"",
+                "*stopped,reason=\"signal-received\",frame={addr=\"0x00007ffff7fe3340\",func=\"_start\"},thread-id=\"1\"",
+            ],
+        );
+        scripted.answer(
+            "-interpreter-exec console \"info proc mappings\"",
+            &[
+                "~\"0x0000555555554000 0x0000555555555000 0x1000             0x0                r--p  /x/sample.elf \\n\"",
+                "^done",
+            ],
+        );
+        scripted.answer(
+            "-break-insert *0x555555555149",
+            &["^done,bkpt={number=\"1\",addr=\"0x0000555555555149\"}"],
+        );
+        scripted.answer(
+            "-exec-continue",
+            &["^running", "*running,thread-id=\"all\""],
+        );
+        scripted.answer(
+            "-data-list-register-names",
+            &["^done,register-names=[\"rax\",\"rip\"]"],
+        );
+        scripted.answer(
+            "-data-list-register-values x",
+            &["^done,register-values=[{number=\"0\",value=\"0x2a\"},{number=\"1\",value=\"0x555555555149\"}]"],
+        );
+        scripted.answer(
+            "-stack-list-frames",
+            &["^done,stack=[frame={level=\"0\",addr=\"0x0000555555555149\",func=\"add\"},frame={level=\"1\",addr=\"0x00005555555551ba\",func=\"main\"}]"],
+        );
+        scripted.answer(
+            "-data-read-memory-bytes",
+            &["^done,memory=[{begin=\"0x0\",offset=\"0x0\",end=\"0x4\",contents=\"f30f1efa\"}]"],
+        );
+        scripted.answer("-exec-abort", &["^done"]);
+        let mut session =
+            ag_debug::Session::with_transport(Box::new(scripted.clone()), &sample_elf(), 0);
+        session.hello().expect("the scripted debugger says hello");
+        app.debug.session = Some(session);
+
+        // Start: the pending breakpoint is set under the slide, the program
+        // stands at its first instruction, outside the image.
+        let _ = app.update(Message::DebugStart);
+        assert_eq!(
+            app.debug.status,
+            crate::debug::Status::Stopped,
+            "{:?}",
+            app.notice
+        );
+        assert!(sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.ends_with("-break-insert *0x555555555149")));
+        assert_eq!(app.work.lower, LowerTab::Debug);
+        assert_eq!(app.debug.pc, None);
+
+        // Continue: running, until the breakpoint is hit.
+        let _ = app.update(Message::DebugContinue);
+        assert_eq!(app.debug.status, crate::debug::Status::Running);
+        scripted.push_line(
+            "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x0000555555555149\",func=\"add\"},thread-id=\"1\"",
+        );
+        let _ = app.update(Message::DebugPoll);
+        assert_eq!(app.debug.status, crate::debug::Status::Stopped);
+        assert_eq!(app.debug.pc, Some(0x1149));
+        // The listing followed: the function, and the instruction.
+        assert_eq!(app.work.listing_of, Some(0x1149));
+        assert_eq!(app.selection, Selection::Address(0x1149));
+        assert_eq!(
+            app.debug.registers,
+            [
+                ("rax".to_string(), 0x2a),
+                ("rip".to_string(), 0x555555555149)
+            ]
+        );
+        assert_eq!(app.debug.frames.len(), 2);
+        assert_eq!(app.debug.frames[1].pc, 0x11ba);
+        assert_eq!(app.debug.memory, [0xf3, 0x0f, 0x1e, 0xfa]);
+        assert_eq!(app.debug.memory_at, Some(0x1149));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("breakpoint-hit")));
+
+        // A breakpoint set while stopped reaches the debugger at once.
+        scripted.answer(
+            "-break-insert *0x5555555551a4",
+            &["^done,bkpt={number=\"2\",addr=\"0x00005555555551a4\"}"],
+        );
+        let _ = app.update(Message::DebugToggleBreakpoint(Some(0x11a4)));
+        assert!(sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.ends_with("-break-insert *0x5555555551a4")));
+
+        // The program ends.
+        let _ = app.update(Message::DebugContinue);
+        scripted.push_line("*stopped,reason=\"exited\",exit-code=\"012\"");
+        let _ = app.update(Message::DebugPoll);
+        assert_eq!(app.debug.status, crate::debug::Status::Exited(Some(10)));
+        assert_eq!(app.debug.pc, None);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("The program exited with code 10")
+        );
+        // The breakpoints outlive the session.
+        let _ = app.update(Message::DebugStop);
+        assert_eq!(app.debug.status, crate::debug::Status::Off);
+        assert_eq!(app.debug.breakpoints.len(), 2);
     }
 
     #[test]

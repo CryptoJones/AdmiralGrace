@@ -7,6 +7,7 @@ use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
 mod catalog;
+mod debug;
 mod docs;
 mod export;
 mod image;
@@ -115,6 +116,31 @@ enum Cmd {
         /// The command to run, and its arguments: `-- python3 script.py`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Run the program under a debugger, headless: stop at the breakpoints
+    /// named, print the registers and the stack there in the image's
+    /// addresses, and go on until it ends.
+    Debug {
+        /// The program image to run.
+        binary: PathBuf,
+        #[command(flatten)]
+        raw: project::RawArgs,
+        /// The project file whose names are used.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Set an engine option. May be repeated.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// A function to stop at: an address such as `0x1198`, or a name.
+        /// May be repeated.
+        #[arg(long = "break", value_name = "TARGET", action = clap::ArgAction::Append)]
+        breakpoints: Vec<String>,
+        /// The debugger: `gdb` (the default) or `lldb` (through lldb-mi).
+        #[arg(long, default_value = "gdb")]
+        debugger: String,
+        /// The program's own arguments: `-- ARG…`.
+        #[arg(last = true)]
+        arguments: Vec<String>,
     },
     /// The plugins: the loaders, architectures and tools registered, and
     /// the manifests they were read from.
@@ -352,6 +378,31 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         }
         Cmd::Project { binary, raw, cmd } => {
             project::run(binary, raw.spec()?, raw.slice.clone(), cmd)
+        }
+        Cmd::Debug {
+            binary,
+            raw,
+            project,
+            options,
+            breakpoints,
+            debugger,
+            arguments,
+        } => {
+            let debugger = match debugger.trim().to_ascii_lowercase().as_str() {
+                "gdb" => ag_debug::Debugger::Gdb,
+                "lldb" => ag_debug::Debugger::Lldb,
+                other => anyhow::bail!("the debugger is gdb or lldb, not {other:?}"),
+            };
+            debug::run(
+                &binary,
+                raw.spec()?,
+                raw.slice.clone(),
+                project.as_deref(),
+                options,
+                debugger,
+                &breakpoints,
+                &arguments,
+            )
         }
         Cmd::Plugins { json } => plugins::list(json),
         Cmd::Tool {

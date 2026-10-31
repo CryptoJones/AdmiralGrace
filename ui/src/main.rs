@@ -2,6 +2,7 @@
 
 mod app;
 mod data;
+mod debug;
 mod model;
 mod theme;
 mod views;

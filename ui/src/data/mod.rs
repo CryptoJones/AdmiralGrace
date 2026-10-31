@@ -475,6 +475,17 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// The address the image loads at, as the image has it, for a
+    /// debugger to tell the running program's addresses from.
+    fn image_base(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether `address` is in the image: in one of its sections.
+    fn contains_address(&self, _address: u64) -> bool {
+        false
+    }
+
     /// Write a copy of the program with the patches told to the provider
     /// in it to `out`, when the provider reads a program image: how many
     /// bytes were written, or why none were.

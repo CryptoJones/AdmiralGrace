@@ -198,7 +198,12 @@ impl Arrows {
 
     /// The margin beside row `row`: the pieces of every arrow that passes,
     /// starts or ends there, the ones to or from `selected` brightened.
-    pub fn margin(&self, row: usize, selected: Option<u64>) -> Element<'static, Message> {
+    pub fn margin(
+        &self,
+        row: usize,
+        selected: Option<u64>,
+        marks: Marks,
+    ) -> Element<'static, Message> {
         let pieces = self
             .rows
             .get(row)
@@ -228,6 +233,7 @@ impl Arrows {
         canvas(Margin {
             width: self.width(),
             pieces,
+            marks,
         })
         .width(Length::Fixed(self.width()))
         .height(Length::Fill)
@@ -262,11 +268,21 @@ struct Piece {
     tint: Color,
 }
 
+/// The debugger's marks on one row: the address the row is, whether a
+/// breakpoint is set there, and whether the program is stopped there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Marks {
+    pub address: Option<u64>,
+    pub breakpoint: bool,
+    pub at_pc: bool,
+}
+
 /// The margin beside one row.
 #[derive(Debug, Clone, PartialEq)]
 struct Margin {
     width: f32,
     pieces: Vec<Piece>,
+    marks: Marks,
 }
 
 impl Margin {
@@ -278,6 +294,40 @@ impl Margin {
 
 impl canvas::Program<Message> for Margin {
     type State = ();
+
+    /// A click in the margin of an instruction's row puts a breakpoint
+    /// there, or takes it off.
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        if let canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            if cursor.is_over(bounds) {
+                let address = self.marks.address?;
+                return Some(
+                    canvas::Action::publish(Message::DebugToggleBreakpoint(Some(address)))
+                        .and_capture(),
+                );
+            }
+        }
+        None
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &(),
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if self.marks.address.is_some() && cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::default()
+        }
+    }
 
     fn draw(
         &self,
@@ -364,6 +414,35 @@ impl canvas::Program<Message> for Margin {
                     );
                 }
             }
+        }
+        // The debugger's marks, in the room where an arrow turns in: a
+        // breakpoint is a dot, the program counter a wedge pointing at the
+        // instruction.
+        let spot = Point::new(self.width - TURN / 2.0 - 1.0, mid);
+        if self.marks.breakpoint {
+            // Beside the wedge when the program is stopped here, so both
+            // show.
+            let dot = if self.marks.at_pc {
+                Point::new(spot.x - 8.0, mid)
+            } else {
+                spot
+            };
+            frame.fill(&canvas::Path::circle(dot, 3.5), color::RED);
+        }
+        if self.marks.at_pc {
+            let wedge = canvas::Path::new(|builder| {
+                builder.move_to(Point::new(spot.x - 5.0, spot.y - 5.0));
+                builder.line_to(Point::new(spot.x + 3.0, spot.y));
+                builder.line_to(Point::new(spot.x - 5.0, spot.y + 5.0));
+                builder.close();
+            });
+            frame.fill(&wedge, color::AMBER);
+            frame.stroke(
+                &wedge,
+                canvas::Stroke::default()
+                    .with_color(color::TEXT)
+                    .with_width(1.0),
+            );
         }
         vec![frame.into_geometry()]
     }

@@ -550,6 +550,23 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
+## A program under the debugger: `ag debug`
+
+```bash
+cargo run --bin ag -- debug ./sample.elf --break main --break 0x1149 -- arg1 arg2
+```
+
+`ag debug IMAGE [--break TARGET]… [--debugger gdb|lldb] [--project FILE] [-- ARGS…]` runs the
+program under GDB (or LLDB through `lldb-mi`), stopped first at its first instruction, where
+the session learns the slide a position-independent program runs under; then it runs the
+program to each breakpoint — a function by address or name — and prints where it stopped in
+the image's addresses, the registers and the stack, lets it go on, and ends with the
+program's exit code (1 when a signal or a fault stopped it, with the reason). A `--break`
+target is a function by address or name, or any address in the image's code. GDB on Linux is
+the supported path; LLDB through `lldb-mi` is untested, and starts the program at `main`. The
+program's terminal is `/dev/null`. The workbench drives the same session with its panes; see
+`docs/workbench.md`, which also says what attaching needs.
+
 ## Plugins: `ag plugins` and `ag tool`
 
 `ag plugins` lists the plugin directories, the manifests read from them, and every loader,
@@ -695,4 +712,5 @@ project file, the engine's options, plugins, scripting and the workbench.
 | 0 | The command ran, or the skill was installed or already current. |
 | 1 | A write failed, a differing skill copy was kept, a function was not lifted, or `catalog --check` found `docs/options.md` stale. |
 | 2 | A usage error: an unknown flag, an unknown topic, or no agent to install for. An unknown engine option or a bad value under `--option` is reported as an error, exit code 1, naming the row and what it takes. |
+| the program's | `ag debug` ends with the exit code of the program it ran, or 1 when a signal or a fault stopped it. |
 | the command's | `ag run` ends with the exit status of the command it ran — 128 plus the signal, for one a signal ended — so a script's failure is the batch's; 1 is also `ag` failing to open the image or to start the command. |
