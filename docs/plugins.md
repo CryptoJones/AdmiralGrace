@@ -37,6 +37,9 @@ registered, as text or with `--json`.
   "tools": [
     { "name": "count_strings", "description": "How many strings match a pattern.", "command": ["python3", "/opt/toy/count.py"],
       "inputSchema": { "type": "object", "properties": { "pattern": { "type": "string" } } } }
+  ],
+  "rewriters": [
+    { "name": "unflatten", "command": ["python3", "/opt/toy/unflatten.py"] }
   ]
 }
 ```
@@ -47,7 +50,8 @@ is reported on standard error and the engine's own loaders read the file after a
 loader with a common magic cannot keep a program from opening. An architecture names the
 `languages` it decodes (the language ids a loader reports) and its `bitness` (16, 32 or 64).
 A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
-Schema of its arguments (an object). An entry without a `name` is named for the manifest,
+Schema of its arguments (an object). A rewriter needs only its command: every function lifted
+passes through it. An entry without a `name` is named for the manifest,
 the second and later with their place (`toy-1`); a name declared twice is reported, and the
 later declaration replaces the earlier. Every command is a list: the program and its
 arguments. A bare program name is found on `PATH`, as a shell finds it; a program that names
@@ -56,7 +60,7 @@ relative; the arguments are passed as they are, with `${dir}` in any element sta
 the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
 not answered by then is ended and its answer is an error.
 
-## The three conversations
+## The four conversations
 
 Each command is given its input on standard input and answers on standard output, in one
 go; its standard error is the terminal's. Numbers may be JSON numbers or hex text such as
@@ -109,6 +113,60 @@ lists every registered tool after the image's own and calls it the same way, its
 told as the tool's own (`isError`). A tool named like one of the image's own is not listed:
 the image's answers to the name.
 
+**A rewriter** is given a function's medium-level graph — the blocks of statements over
+variables the lifter built, before they are structured into pseudocode — and answers with
+the edits to make. It is run for every function lifted — or for the ones its manifest entry
+names under `functions`, by name or address, which spares the process for the rest — in the
+order the rewriters were registered; what it leaves is what the medium and high levels
+(`docs/il.md`) and the pseudocode show, while the lifted and low levels stay the machine's.
+A thunk, which has no graph, passes no rewriter. The graph, its numbers as JSON numbers with
+a `_hex` twin beside each address:
+
+```json
+{ "function": 4449, "function_hex": "0x1161", "name": "sum_to", "entry": 0,
+  "blocks": [
+    { "id": 0, "address": 4449, "address_hex": "0x1161",
+      "statements": [ { "index": 0, "text": "local_10 = 0", "addresses": [4460] }, { "index": 1, "text": "local_14 = 1", "addresses": [4468] } ],
+      "terminator": { "kind": "goto", "target": 1 } },
+    { "id": 1, "address": 4490, "address_hex": "0x118a", "statements": [],
+      "terminator": { "kind": "branch", "cond": "local_14 <= a", "taken": 2, "next": 3 } },
+    { "id": 2, "address": 4477, "address_hex": "0x117d",
+      "statements": [ { "index": 0, "text": "local_10 = local_10 + (long)local_14", "addresses": [4477, 4480, 4483] }, { "index": 1, "text": "local_14 = local_14 + 1", "addresses": [4486] } ],
+      "terminator": { "kind": "goto", "target": 1 } },
+    { "id": 3, "address": 4498, "address_hex": "0x1192", "statements": [ { "index": 0, "text": "return local_10", "addresses": [4498, 4499, 4500] } ],
+      "terminator": { "kind": "return" } }
+  ] }
+```
+
+A terminator is `return`, `goto` (a `target`), `branch` (a `cond`, the block `taken` when it
+holds, the `next` otherwise) or `switch` (an `index` and `cases`, each its `values` and
+`target`). The answer is `{"edits": […]}` — or nothing, or `{}`, for a function left alone —
+applied in order, each naming blocks and statements as they stand when it is applied:
+
+| Edit | What it does |
+|---|---|
+| `{"op": "remove", "block": B, "statement": I}` | Takes statement `I` out of block `B`. |
+| `{"op": "copy", "from": B, "statement": I, "to": B2, "at": I2}` | Puts a copy of the statement at `I2` of `B2` (its end without `at`). `move` does the same and takes the original out first — so `at` within the same block counts after the removal. |
+| `{"op": "add_block", "address": A, "statements": [{"from": B, "statement": I}, …], "terminator": T}` | Adds a block of copied statements; its id is the next number. `address` labels the block and is optional (one past the highest, a label rather than an instruction's address) but must be no other block's; `terminator` is required — `{"kind": "return"}`, `{"kind": "goto", "target": T}` or `{"kind": "branch", "cond_of": B, "taken": T1, "next": T2}`, the condition reused from block `B`'s branch. |
+| `{"op": "redirect", "block": B, "from": T1, "to": T2}` | Every way out of `B` that led to `T1` leads to `T2`. |
+| `{"op": "goto", "block": B, "target": T}` | `B` goes straight to `T`. |
+| `{"op": "return", "block": B}` | `B` returns. |
+| `{"op": "branch", "block": B, "cond_of": B2, "taken": T1, "next": T2}` | `B` branches on block `B2`'s condition. |
+| `{"op": "switch_case", "block": B, "from": T1, "to": T2}` | The cases of `B`'s switch that led to `T1` lead to `T2`. |
+| `{"op": "prune"}` | Drops the blocks the entry no longer reaches and renumbers the rest; until then a block cut off stays, so it can still be copied from. |
+
+A command cannot write expressions, only reuse the lifter's; a rewriter in Rust can (below).
+An edit that names a block or statement there is not, a terminator left pointing outside the
+graph, two blocks left at one address, an answer that is not JSON, or a command that fails or
+runs out of time, refuses the function: it is not lifted, and the reason names the rewriter —
+`not lifted yet: the rewriter unflatten: edit 2 (goto): no block 99: there are 4`. The
+instructions of a statement a rewriter removes belong to no statement afterwards, so the
+listing counts them with the frame. A command is a process started per function lifted, and a
+function is lifted again for each level, form and option asked of it: name the functions
+under `functions`, and keep the command quick. Control-flow unflattening is the kind of work
+a rewriter is for: find the dispatcher's switch, point each block at the block the state
+variable would have led to next, and remove the dispatcher.
+
 ## In Rust
 
 A crate that builds on the engine implements the traits and registers before an image is
@@ -141,6 +199,16 @@ plugin::register_loader(Arc::new(Toy));
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.
+- `ag_engine::plugin::Rewriter` — `name`, `wants(address, name)` (every function unless
+  said) and `rewrite(&mut Rewrite)`, over a function's medium-level graph before it is
+  structured: `Rewrite` holds the `nodes` (each a `Node` of `Statement`s over `AstNode`s
+  and a `Terminator`) and the `entry()`, which cannot move, and offers
+  `add_block`, `copy_statement`, `remove_statement`, `insert_statement`, `redirect`,
+  `set_goto`, `set_return`, `set_branch`, `set_terminator`, `fresh_address`,
+  `prune_unreachable` and `validate`; the nodes may also be edited directly — the graph is
+  analyzed again after every rewriter that ran. `Rewrite::statement(node, addresses)` makes a plain statement of an
+  expression the rewriter builds. An `Err` refuses the function with the rewriter's name.
+  Registered with `register_rewriter`; run for every function lifted, in order.
 
 The registry is one for the process, and a plugin registered under a name already taken
 replaces it. `ag_image::plugin::load_all` reads the manifests of the plugin directories and

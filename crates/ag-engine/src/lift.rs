@@ -530,14 +530,19 @@ pub struct Stages {
     pub chains: Vec<StageChain>,
     /// The low-level statements of each chain, in the chains' order.
     pub low: Vec<Vec<LowStatement>>,
-    /// The medium-level nodes, one per chain.
+    /// The medium-level nodes: one per chain as the lifter built them, or
+    /// as a plugin's rewriter left them — more, fewer, or pointed elsewhere.
     pub medium: Vec<Node>,
     /// The structured body.
     pub high: Vec<Statement>,
     /// The function the lift ended in.
     pub function: LiftedFunction,
-    /// The analysis of the chain graph: its order, dominators and loops.
+    /// The analysis of the chain graph — its order, dominators and loops —
+    /// which the lifted and low levels lie on.
     pub analysis: Analysis,
+    /// The analysis of the medium-level graph, which a plugin's rewriter may
+    /// have changed: the same as `analysis` when none did.
+    pub medium_analysis: Analysis,
     /// The stack pointer's offset from the entry's before each instruction,
     /// where the lifter knew it.
     pub stack_pointer: BTreeMap<u64, i64>,
@@ -646,6 +651,7 @@ fn lift_inner(
             medium: Vec::new(),
             high: Vec::new(),
             function,
+            medium_analysis: analysis.clone(),
             analysis,
             stack_pointer: BTreeMap::new(),
             types: BTreeMap::new(),
@@ -689,8 +695,22 @@ fn lift_inner(
     };
     lifter.decide_return(entry, &lifted)?;
     let nodes = lifter.resolve_all(&chains, lifted)?;
+    // The plugins' rewriters have the graph before it is structured. The
+    // graph they leave is analyzed again whenever one ran — a rewriter may
+    // edit the nodes directly — while the chains keep their own analysis
+    // for the lifted and low levels.
+    let (nodes, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
+    let medium_analysis = if rewritten {
+        let successors: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|node| node.terminator.successors())
+            .collect();
+        structure::analyze(&successors, 0, |node| nodes[node].address)?
+    } else {
+        analysis.clone()
+    };
     let medium = if keep { nodes.clone() } else { Vec::new() };
-    let body = structure::structure(&nodes, &analysis, 0, options);
+    let body = structure::structure(&nodes, &medium_analysis, 0, options);
     let high = if keep { body.clone() } else { Vec::new() };
     let stack_pointer = if keep {
         std::mem::take(&mut lifter.stack_pointers)
@@ -735,6 +755,7 @@ fn lift_inner(
         high,
         function,
         analysis,
+        medium_analysis,
         stack_pointer,
         types,
     })

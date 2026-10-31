@@ -785,9 +785,15 @@ pub fn build(
                     let addresses = if addresses.is_empty() {
                         stages
                             .chains
-                            .get(index)
+                            .iter()
+                            .find(|chain| chain.address == node.address)
                             .and_then(|chain| chain.instructions.last().copied())
                             .map(|address| vec![address])
+                            .or_else(|| {
+                                node.statements
+                                    .last()
+                                    .map(|statement| statement.addresses.clone())
+                            })
                             .unwrap_or_default()
                     } else {
                         addresses
@@ -1086,7 +1092,7 @@ pub fn to_ssa(
         for pred in preds {
             let mut runner = pred;
             let mut steps = 0;
-            while Some(runner) != stop && steps <= count {
+            while Some(runner) != stop && steps <= count && runner < count {
                 frontiers[runner].insert(block);
                 if runner == entry {
                     break;

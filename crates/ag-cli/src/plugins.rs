@@ -19,8 +19,8 @@ pub fn remember(manifests: Vec<Manifest>) {
     *remembered().lock().unwrap_or_else(PoisonError::into_inner) = manifests;
 }
 
-/// List the plugins: every loader, architecture and tool registered, and
-/// the manifests they were read from.
+/// List the plugins: every loader, architecture, tool and rewriter
+/// registered, and the manifests they were read from.
 pub fn list(json: bool) -> Result<i32> {
     let manifests = remembered()
         .lock()
@@ -38,6 +38,10 @@ pub fn list(json: bool) -> Result<i32> {
         .iter()
         .map(|tool| json!({ "name": tool.name(), "description": tool.description() }))
         .collect();
+    let rewriters: Vec<String> = ag_image::plugin::rewriters()
+        .iter()
+        .map(|rewriter| rewriter.name().to_string())
+        .collect();
     if json {
         let report = json!({
             "directories": ag_image::plugin::manifest_dirs(),
@@ -47,10 +51,12 @@ pub fn list(json: bool) -> Result<i32> {
                 "loaders": manifest.loaders.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
                 "architectures": manifest.architectures.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
                 "tools": manifest.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                "rewriters": manifest.rewriters.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
             })).collect::<Vec<Value>>(),
             "loaders": loaders,
             "architectures": architectures,
             "tools": tools,
+            "rewriters": rewriters,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
@@ -107,6 +113,7 @@ pub fn list(json: bool) -> Result<i32> {
             );
         }
     }
+    listed("rewriters", rewriters);
     Ok(0)
 }
 

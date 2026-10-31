@@ -572,11 +572,12 @@ program's terminal is `/dev/null`. The workbench drives the same session with it
 ## Plugins: `ag plugins` and `ag tool`
 
 `ag plugins` lists the plugin directories, the manifests read from them, and every loader,
-architecture and tool registered — as text, or as JSON with `--json`. `ag tool NAME IMAGE
+architecture, tool and rewriter registered — as text, or as JSON with `--json`. `ag tool NAME IMAGE
 [--project FILE] [--option N V]… [--arg name=value]…` runs a plugin's tool over the image and
 prints its answer: JSON pretty, or the text it is; a value that reads as JSON is given as
-JSON. A tool's own failure is exit code 1 with its message. The manifests, the three kinds of
-plugin and the conversations the commands speak are in `docs/plugins.md`.
+JSON. A tool's own failure is exit code 1 with its message. The manifests, the four kinds of
+plugin — loaders, architectures, tools and rewriters, which change a function's medium-level
+graph as it is lifted — and the conversations the commands speak are in `docs/plugins.md`.
 
 ## An MCP server: `ag mcp`
 

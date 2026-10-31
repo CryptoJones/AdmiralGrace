@@ -37,9 +37,12 @@ use std::sync::{mpsc, Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::arch::Bitness;
+use crate::ast::AstNode;
 use crate::cpu_context::{DecodedInsn, Flow};
 use crate::image::Section;
+use crate::lift::{NotLifted, Statement, StatementKind};
 use crate::pipeline::Disasm;
+use crate::structure::{Node, Terminator};
 
 /// What a loader reads out of a container: everything the engine needs to
 /// know about an image that it would otherwise ask the container for.
@@ -102,11 +105,648 @@ pub trait Architecture: Send + Sync {
     ) -> Result<DecodedSection, String>;
 }
 
+/// A rewriter changes a function's medium-level graph — the blocks of
+/// statements over variables, each ending in a return, a goto, a branch or
+/// a switch — after the lifter has built it and before it is structured
+/// into pseudocode: it may edit, remove, copy or add statements, add
+/// blocks, and point the gotos and branches elsewhere. Control-flow
+/// unflattening is the kind of thing it is for. Every function lifted
+/// passes through every registered rewriter in order; what one leaves is
+/// what the medium and high levels, and the pseudocode, show.
+pub trait Rewriter: Send + Sync {
+    /// The rewriter's name.
+    fn name(&self) -> &str;
+    /// Whether the rewriter wants the function at `address` named `name`;
+    /// every function, unless said. A rewriter that is a command is not
+    /// started for a function it does not want.
+    fn wants(&self, _address: u64, _name: &str) -> bool {
+        true
+    }
+    /// Rewrite the graph, or fail with a reason: the function is then not
+    /// lifted, and the reason is told with the rewriter's name.
+    fn rewrite(&self, rewrite: &mut Rewrite) -> Result<(), String>;
+}
+
+/// A function's medium-level graph under rewriting: the nodes, by index,
+/// with the entry's; the helpers keep the graph pointing at itself.
+#[derive(Debug, Clone)]
+pub struct Rewrite {
+    /// The function's address.
+    pub function: u64,
+    /// The function's name.
+    pub name: String,
+    /// The index of the node the function is entered at.
+    entry: usize,
+    /// The nodes: each with the address that labels it, its statements and
+    /// how it leaves.
+    pub nodes: Vec<Node>,
+    changed: bool,
+}
+
+impl Rewrite {
+    /// A graph to rewrite, for a rewriter run outside a lift.
+    pub fn new(function: u64, name: &str, entry: usize, nodes: Vec<Node>) -> Self {
+        Self {
+            function,
+            name: name.to_string(),
+            entry,
+            nodes,
+            changed: false,
+        }
+    }
+
+    /// The index of the node the function is entered at; a rewriter cannot
+    /// move it.
+    pub fn entry(&self) -> usize {
+        self.entry
+    }
+
+    /// Whether anything was changed through the helpers, or marked so.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Say the nodes were changed by hand, so the graph is analyzed again.
+    pub fn mark_changed(&mut self) {
+        self.changed = true;
+    }
+
+    /// A plain statement of an expression, from the addresses given.
+    pub fn statement(node: AstNode, addresses: Vec<u64>) -> Statement {
+        Statement {
+            node,
+            addresses,
+            kind: StatementKind::Plain,
+        }
+    }
+
+    /// An address no node has, for a block the rewriter adds: one past the
+    /// highest in the graph — a label, not an instruction's address.
+    pub fn fresh_address(&self) -> u64 {
+        self.nodes
+            .iter()
+            .map(|node| node.address)
+            .max()
+            .map_or(self.function, |most| most.saturating_add(1))
+    }
+
+    /// Add a block; its index, for the gotos that lead to it. The address
+    /// labels the block, so one another block has is refused.
+    pub fn add_block(
+        &mut self,
+        address: u64,
+        statements: Vec<Statement>,
+        terminator: Terminator,
+    ) -> Result<usize, String> {
+        if let Some(taken) = self.nodes.iter().position(|node| node.address == address) {
+            return Err(format!(
+                "block {taken} has the address {address:#x} already"
+            ));
+        }
+        let count = self.nodes.len();
+        for target in terminator.successors() {
+            if target > count {
+                return Err(format!("no block {target}: there are {count}"));
+            }
+        }
+        self.nodes.push(Node {
+            address,
+            statements,
+            terminator,
+        });
+        self.changed = true;
+        Ok(count)
+    }
+
+    fn node_mut(&mut self, block: usize) -> Result<&mut Node, String> {
+        let count = self.nodes.len();
+        self.nodes
+            .get_mut(block)
+            .ok_or_else(|| format!("no block {block}: there are {count}"))
+    }
+
+    /// A copy of one statement of a block.
+    pub fn copy_statement(&self, block: usize, index: usize) -> Result<Statement, String> {
+        let node = self
+            .nodes
+            .get(block)
+            .ok_or_else(|| format!("no block {block}: there are {}", self.nodes.len()))?;
+        node.statements
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("block {block} has no statement {index}"))
+    }
+
+    /// Take one statement out of a block.
+    pub fn remove_statement(&mut self, block: usize, index: usize) -> Result<Statement, String> {
+        let node = self.node_mut(block)?;
+        if index >= node.statements.len() {
+            return Err(format!("block {block} has no statement {index}"));
+        }
+        let statement = node.statements.remove(index);
+        self.changed = true;
+        Ok(statement)
+    }
+
+    /// Put a statement into a block at `index`, or at its end when `index`
+    /// is past the last.
+    pub fn insert_statement(
+        &mut self,
+        block: usize,
+        index: usize,
+        statement: Statement,
+    ) -> Result<(), String> {
+        let node = self.node_mut(block)?;
+        let at = index.min(node.statements.len());
+        node.statements.insert(at, statement);
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Point every way out of `block` that led to `from` at `to`.
+    pub fn redirect(&mut self, block: usize, from: usize, to: usize) -> Result<(), String> {
+        let count = self.nodes.len();
+        if to >= count {
+            return Err(format!("no block {to}: there are {count}"));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let node = self.node_mut(block)?;
+        let mut hit = false;
+        let mut point = |target: &mut usize| {
+            if *target == from {
+                *target = to;
+                hit = true;
+            }
+        };
+        match &mut node.terminator {
+            Terminator::Return => {}
+            Terminator::Goto { target, .. } => point(target),
+            Terminator::Branch { taken, next, .. } => {
+                point(taken);
+                point(next);
+            }
+            Terminator::Switch { cases, .. } => {
+                for (_, target) in cases {
+                    point(target);
+                }
+            }
+        }
+        if !hit {
+            return Err(format!("block {block} does not lead to block {from}"));
+        }
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Make `block` go straight to `target`.
+    pub fn set_goto(&mut self, block: usize, target: usize) -> Result<(), String> {
+        let count = self.nodes.len();
+        if target >= count {
+            return Err(format!("no block {target}: there are {count}"));
+        }
+        let node = self.node_mut(block)?;
+        let addresses = terminator_addresses(&node.terminator);
+        node.terminator = Terminator::Goto { target, addresses };
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Make `block` return.
+    pub fn set_return(&mut self, block: usize) -> Result<(), String> {
+        let node = self.node_mut(block)?;
+        node.terminator = Terminator::Return;
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Make `block` branch on `cond`: to `taken` when it holds, else to
+    /// `next`.
+    pub fn set_branch(
+        &mut self,
+        block: usize,
+        cond: AstNode,
+        taken: usize,
+        next: usize,
+    ) -> Result<(), String> {
+        let count = self.nodes.len();
+        for target in [taken, next] {
+            if target >= count {
+                return Err(format!("no block {target}: there are {count}"));
+            }
+        }
+        let node = self.node_mut(block)?;
+        let addresses = terminator_addresses(&node.terminator);
+        node.terminator = Terminator::Branch {
+            cond,
+            taken,
+            next,
+            addresses,
+        };
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Give `block` a terminator of the rewriter's own making.
+    pub fn set_terminator(&mut self, block: usize, terminator: Terminator) -> Result<(), String> {
+        let count = self.nodes.len();
+        for target in terminator.successors() {
+            if target >= count {
+                return Err(format!("no block {target}: there are {count}"));
+            }
+        }
+        self.node_mut(block)?.terminator = terminator;
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Drop the blocks the entry no longer reaches, renumbering the rest;
+    /// how many went. A block cut off by a redirect or a goto stays in the
+    /// graph until this is called, so a rewriter can still copy from it.
+    pub fn prune_unreachable(&mut self) -> usize {
+        let count = self.nodes.len();
+        if self.entry >= count {
+            return 0;
+        }
+        let mut reached = vec![false; count];
+        let mut work = vec![self.entry];
+        while let Some(block) = work.pop() {
+            if reached[block] {
+                continue;
+            }
+            reached[block] = true;
+            for target in self.nodes[block].terminator.successors() {
+                if target < count && !reached[target] {
+                    work.push(target);
+                }
+            }
+        }
+        let gone = reached.iter().filter(|kept| !**kept).count();
+        if gone == 0 {
+            return 0;
+        }
+        let mut renumbered = vec![usize::MAX; count];
+        let mut next = 0;
+        for (index, kept) in reached.iter().enumerate() {
+            if *kept {
+                renumbered[index] = next;
+                next += 1;
+            }
+        }
+        let point = |target: &mut usize| {
+            if *target < count && renumbered[*target] != usize::MAX {
+                *target = renumbered[*target];
+            }
+        };
+        let mut nodes = Vec::with_capacity(next);
+        for (index, mut node) in std::mem::take(&mut self.nodes).into_iter().enumerate() {
+            if !reached[index] {
+                continue;
+            }
+            match &mut node.terminator {
+                Terminator::Return => {}
+                Terminator::Goto { target, .. } => point(target),
+                Terminator::Branch { taken, next, .. } => {
+                    point(taken);
+                    point(next);
+                }
+                Terminator::Switch { cases, .. } => {
+                    for (_, target) in cases {
+                        point(target);
+                    }
+                }
+            }
+            nodes.push(node);
+        }
+        self.nodes = nodes;
+        self.entry = renumbered[self.entry];
+        self.changed = true;
+        gone
+    }
+
+    /// Whether the graph points only at itself: every way out of a block
+    /// leads to a block, and the entry is one.
+    pub fn validate(&self) -> Result<(), String> {
+        let count = self.nodes.len();
+        if self.entry >= count {
+            return Err(format!("the entry at block {} of {count}", self.entry));
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            for target in node.terminator.successors() {
+                if target >= count {
+                    return Err(format!(
+                        "block {index} leading to block {target}, of {count}"
+                    ));
+                }
+            }
+            if let Some(other) = self.nodes[..index]
+                .iter()
+                .position(|earlier| earlier.address == node.address)
+            {
+                return Err(format!(
+                    "blocks {other} and {index} both at {:#x}, the address that labels a block",
+                    node.address
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The graph as JSON for a rewriter that is a command: the blocks with
+    /// their statements as text and their terminators.
+    pub fn to_json(&self) -> serde_json::Value {
+        let text = |node: &AstNode| {
+            crate::emit::emit_node(node)
+                .trim_end()
+                .trim_end_matches(';')
+                .to_string()
+        };
+        serde_json::json!({
+            "function": self.function,
+            "function_hex": format!("{:#x}", self.function),
+            "name": self.name,
+            "entry": self.entry,
+            "blocks": self.nodes.iter().enumerate().map(|(id, node)| serde_json::json!({
+                "id": id,
+                "address": node.address,
+                "address_hex": format!("{:#x}", node.address),
+                "statements": node.statements.iter().enumerate().map(|(index, statement)| serde_json::json!({
+                    "index": index,
+                    "text": text(&statement.node),
+                    "addresses": statement.addresses,
+                })).collect::<Vec<_>>(),
+                "terminator": match &node.terminator {
+                    Terminator::Return => serde_json::json!({ "kind": "return" }),
+                    Terminator::Goto { target, .. } => serde_json::json!({ "kind": "goto", "target": target }),
+                    Terminator::Branch { cond, taken, next, .. } => serde_json::json!({
+                        "kind": "branch", "cond": text(cond), "taken": taken, "next": next,
+                    }),
+                    Terminator::Switch { index, cases, .. } => serde_json::json!({
+                        "kind": "switch", "index": text(index),
+                        "cases": cases.iter().map(|(values, target)| serde_json::json!({
+                            "values": values, "target": target,
+                        })).collect::<Vec<_>>(),
+                    }),
+                },
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Apply a command's edits, in order, each naming blocks and statements
+    /// as they stand when it is applied: `remove`, `copy`, `move`,
+    /// `add_block`, `redirect`, `goto`, `return`, `branch` (a block's
+    /// condition reused with new targets), `switch_case` (one case of a
+    /// block's switch pointed elsewhere), `prune` (the blocks the entry no
+    /// longer reaches dropped, the rest renumbered).
+    pub fn apply_edits(&mut self, edits: &serde_json::Value) -> Result<(), String> {
+        let edits = match edits {
+            serde_json::Value::Null => return Ok(()),
+            serde_json::Value::Object(answer) => match answer.get("edits") {
+                None | Some(serde_json::Value::Null) => return Ok(()),
+                Some(serde_json::Value::Array(edits)) => edits.clone(),
+                Some(_) => return Err("the edits are a JSON array".to_string()),
+            },
+            serde_json::Value::Array(edits) => edits.clone(),
+            _ => return Err("the answer is a JSON object with the edits".to_string()),
+        };
+        for (at, edit) in edits.iter().enumerate() {
+            let object = edit
+                .as_object()
+                .ok_or_else(|| format!("edit {at} is a JSON object"))?;
+            let op = object
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("edit {at} names its op"))?;
+            let index = |key: &str| -> Result<usize, String> {
+                object
+                    .get(key)
+                    .and_then(number)
+                    .map(|value| value as usize)
+                    .ok_or_else(|| format!("edit {at} ({op}) gives {key:?} as a number"))
+            };
+            let optional = |key: &str| -> Result<Option<usize>, String> {
+                match object.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(None),
+                    Some(value) => number(value)
+                        .map(|value| Some(value as usize))
+                        .ok_or_else(|| format!("edit {at} ({op}) gives {key:?} as a number")),
+                }
+            };
+            let result = match op {
+                "remove" => self
+                    .remove_statement(index("block")?, index("statement")?)
+                    .map(|_| ()),
+                "copy" | "move" => {
+                    let (from, statement) = (index("from")?, index("statement")?);
+                    let to = index("to")?;
+                    let copied = if op == "copy" {
+                        self.copy_statement(from, statement)?
+                    } else {
+                        self.remove_statement(from, statement)?
+                    };
+                    let at = optional("at")?.unwrap_or(usize::MAX);
+                    self.insert_statement(to, at, copied)
+                }
+                "add_block" => {
+                    let address = optional("address")?
+                        .map(|address| address as u64)
+                        .unwrap_or_else(|| self.fresh_address());
+                    let mut statements = Vec::new();
+                    for (which, source) in object
+                        .get("statements")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        let from = source.get("from").and_then(number).ok_or_else(|| {
+                            format!("edit {at} ({op}): statement {which} names the block it is copied from")
+                        })?;
+                        let statement = source.get("statement").and_then(number).ok_or_else(|| {
+                            format!("edit {at} ({op}): statement {which} names the statement it copies")
+                        })?;
+                        statements.push(self.copy_statement(from as usize, statement as usize)?);
+                    }
+                    let terminator = match object.get("terminator") {
+                        None | Some(serde_json::Value::Null) => {
+                            return Err(format!(
+                                "edit {at} (add_block): a new block names its terminator"
+                            ))
+                        }
+                        Some(given) => self.terminator_of(given, at)?,
+                    };
+                    self.add_block(address, statements, terminator).map(|_| ())
+                }
+                "redirect" => self.redirect(index("block")?, index("from")?, index("to")?),
+                "prune" => {
+                    self.prune_unreachable();
+                    Ok(())
+                }
+                "goto" => self.set_goto(index("block")?, index("target")?),
+                "return" => self.set_return(index("block")?),
+                "branch" => {
+                    let block = index("block")?;
+                    let (cond, taken, next) = self.branch_of(object, at)?;
+                    self.set_branch(block, cond, taken, next)
+                }
+                "switch_case" => {
+                    let (block, from, to) = (index("block")?, index("from")?, index("to")?);
+                    let count = self.nodes.len();
+                    if to >= count {
+                        Err(format!("no block {to}: there are {count}"))
+                    } else {
+                        let node = self.node_mut(block)?;
+                        match &mut node.terminator {
+                            Terminator::Switch { cases, .. } => {
+                                let mut hit = false;
+                                for (_, target) in cases.iter_mut() {
+                                    if *target == from {
+                                        *target = to;
+                                        hit = true;
+                                    }
+                                }
+                                if hit {
+                                    self.changed = true;
+                                    Ok(())
+                                } else {
+                                    Err(format!(
+                                        "block {block}'s switch has no case to block {from}"
+                                    ))
+                                }
+                            }
+                            _ => Err(format!("block {block} does not switch")),
+                        }
+                    }
+                }
+                other => Err(format!("no such op: {other:?}")),
+            };
+            result.map_err(|error| format!("edit {at} ({op}): {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// A terminator a command describes for a new block: `return`, `goto`
+    /// with a `target`, or `branch` as [`Rewrite::branch_of`] reads it.
+    fn terminator_of(&self, given: &serde_json::Value, at: usize) -> Result<Terminator, String> {
+        let object = given
+            .as_object()
+            .ok_or_else(|| format!("edit {at}: the terminator is a JSON object"))?;
+        match object.get("kind").and_then(serde_json::Value::as_str) {
+            Some("return") => Ok(Terminator::Return),
+            None => Err(format!("edit {at}: a terminator names its kind")),
+            Some("goto") => {
+                let target = object
+                    .get("target")
+                    .and_then(number)
+                    .ok_or_else(|| format!("edit {at}: a goto names its target"))?;
+                Ok(Terminator::Goto {
+                    target: target as usize,
+                    addresses: Vec::new(),
+                })
+            }
+            Some("branch") => {
+                let (cond, taken, next) = self.branch_of(object, at)?;
+                Ok(Terminator::Branch {
+                    cond,
+                    taken,
+                    next,
+                    addresses: Vec::new(),
+                })
+            }
+            Some(other) => Err(format!(
+                "edit {at}: a terminator is return, goto or branch, not {other:?}"
+            )),
+        }
+    }
+
+    /// A branch a command describes: the condition of the block `cond_of`
+    /// — a command cannot write expressions, only reuse them — and the
+    /// `taken` and `next` blocks.
+    fn branch_of(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        at: usize,
+    ) -> Result<(AstNode, usize, usize), String> {
+        let source = object.get("cond_of").and_then(number).ok_or_else(|| {
+            format!("edit {at}: a branch names cond_of, the block whose condition it tests")
+        })? as usize;
+        let cond = match self.nodes.get(source).map(|node| &node.terminator) {
+            Some(Terminator::Branch { cond, .. }) => cond.clone(),
+            Some(_) => return Err(format!("edit {at}: block {source} does not branch")),
+            None => return Err(format!("edit {at}: no block {source}")),
+        };
+        let taken = object
+            .get("taken")
+            .and_then(number)
+            .ok_or_else(|| format!("edit {at}: a branch names taken"))?
+            as usize;
+        let next = object
+            .get("next")
+            .and_then(number)
+            .ok_or_else(|| format!("edit {at}: a branch names next"))? as usize;
+        Ok((cond, taken, next))
+    }
+}
+
+/// The addresses a terminator came from, kept when it is replaced so the
+/// new one still maps onto the listing.
+fn terminator_addresses(terminator: &Terminator) -> Vec<u64> {
+    match terminator {
+        Terminator::Return => Vec::new(),
+        Terminator::Goto { addresses, .. }
+        | Terminator::Branch { addresses, .. }
+        | Terminator::Switch { addresses, .. } => addresses.clone(),
+    }
+}
+
+/// A rewriter that is a command: given the graph as JSON on its standard
+/// input, it prints the edits to apply as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRewriter {
+    pub name: String,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+    /// The functions the command is run for, by name or address; every
+    /// function when empty.
+    pub functions: Vec<String>,
+}
+
+impl Rewriter for ExternalRewriter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn wants(&self, address: u64, name: &str) -> bool {
+        self.functions.is_empty()
+            || self.functions.iter().any(|wanted| {
+                wanted == name
+                    || wanted
+                        .strip_prefix("0x")
+                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                        .is_some_and(|wanted| wanted == address)
+                    || wanted.parse::<u64>().is_ok_and(|wanted| wanted == address)
+            })
+    }
+
+    fn rewrite(&self, rewrite: &mut Rewrite) -> Result<(), String> {
+        let input = serde_json::to_vec(&rewrite.to_json()).map_err(|error| error.to_string())?;
+        let output = run_command(&self.command, &input, self.timeout)?;
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return Ok(());
+        }
+        let edits: serde_json::Value = serde_json::from_slice(&output)
+            .map_err(|error| format!("the answer is not JSON: {error}"))?;
+        rewrite.apply_edits(&edits)
+    }
+}
+
 /// Everything registered in this process.
 #[derive(Default)]
 struct Registry {
     loaders: Vec<Arc<dyn Loader>>,
     architectures: Vec<Arc<dyn Architecture>>,
+    rewriters: Vec<Arc<dyn Rewriter>>,
 }
 
 fn registry() -> &'static RwLock<Registry> {
@@ -130,6 +770,64 @@ pub fn register_architecture(architecture: Arc<dyn Architecture>) {
     let name = architecture.name().to_string();
     registry.architectures.retain(|known| known.name() != name);
     registry.architectures.push(architecture);
+}
+
+/// Add a rewriter: every function lifted after passes through it, after
+/// the ones registered before. One of the same name is replaced.
+pub fn register_rewriter(rewriter: Arc<dyn Rewriter>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = rewriter.name().to_string();
+    registry.rewriters.retain(|known| known.name() != name);
+    registry.rewriters.push(rewriter);
+}
+
+/// The rewriters registered, in the order they run.
+pub fn rewriters() -> Vec<Arc<dyn Rewriter>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .rewriters
+        .clone()
+}
+
+/// Run every registered rewriter that wants the function over its
+/// medium-level graph, in order: the nodes as they stand after, and whether
+/// any rewriter ran. A rewriter's failure, or a graph it leaves pointing
+/// outside itself or with two blocks at one address, refuses the lift with
+/// the rewriter's name.
+pub(crate) fn rewrite_nodes(
+    function: u64,
+    name: &str,
+    entry: usize,
+    nodes: Vec<Node>,
+) -> Result<(Vec<Node>, bool), NotLifted> {
+    let rewriters = rewriters();
+    if rewriters.is_empty() {
+        return Ok((nodes, false));
+    }
+    let mut rewrite = Rewrite {
+        function,
+        name: name.to_string(),
+        entry,
+        nodes,
+        changed: false,
+    };
+    let mut ran = false;
+    for rewriter in rewriters {
+        if !rewriter.wants(function, name) {
+            continue;
+        }
+        ran = true;
+        rewriter.rewrite(&mut rewrite).map_err(|error| {
+            NotLifted::new(format!("the rewriter {}: {error}", rewriter.name()))
+        })?;
+        rewrite.validate().map_err(|error| {
+            NotLifted::new(format!("the rewriter {} left {error}", rewriter.name()))
+        })?;
+    }
+    // Analyzed again whenever one ran: a rewriter may edit the nodes
+    // directly without marking them changed.
+    Ok((rewrite.nodes, ran))
 }
 
 /// The loaders registered, in the order they were.
@@ -223,6 +921,7 @@ pub struct Manifest {
     pub loaders: Vec<ExternalLoader>,
     pub architectures: Vec<ExternalArchitecture>,
     pub tools: Vec<ExternalTool>,
+    pub rewriters: Vec<ExternalRewriter>,
 }
 
 /// The directories manifests are read from: the ones `AG_PLUGINS` names,
@@ -456,12 +1155,22 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             input_schema,
         });
     }
+    let mut rewriters = Vec::new();
+    for (index, entry) in entries("rewriters")?.iter().enumerate() {
+        rewriters.push(ExternalRewriter {
+            name: entry_name(entry, index),
+            command: command_of(entry, "rewriter")?,
+            timeout: timeout_of(entry)?,
+            functions: strings(entry.get("functions")),
+        });
+    }
     Ok(Manifest {
         path: path.to_path_buf(),
         name,
         loaders,
         architectures,
         tools,
+        rewriters,
     })
 }
 
@@ -527,6 +1236,19 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                                 tool.name
                             ));
                         }
+                    }
+                    for rewriter in &manifest.rewriters {
+                        if manifests
+                            .iter()
+                            .any(|known| known.rewriters.iter().any(|r| r.name == rewriter.name))
+                        {
+                            problems.push(format!(
+                                "{}: the rewriter {:?} is declared again, and replaces the first",
+                                path.display(),
+                                rewriter.name
+                            ));
+                        }
+                        register_rewriter(Arc::new(rewriter.clone()));
                     }
                     manifests.push(manifest);
                 }
@@ -970,6 +1692,209 @@ mod tests {
             .to_string();
         assert!(error.contains("loading c"), "{error}");
         assert!(!error.contains("not today"), "{error}");
+    }
+
+    fn two_blocks() -> Rewrite {
+        let statement = |text: &str| Rewrite::statement(AstNode::var(text), vec![0x10]);
+        Rewrite::new(
+            0x1000,
+            "f",
+            0,
+            vec![
+                Node {
+                    address: 0x1000,
+                    statements: vec![statement("a"), statement("b")],
+                    terminator: Terminator::Branch {
+                        cond: AstNode::var("c"),
+                        taken: 1,
+                        next: 0,
+                        addresses: vec![0x1004],
+                    },
+                },
+                Node {
+                    address: 0x1010,
+                    statements: vec![statement("d")],
+                    terminator: Terminator::Return,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn a_rewrite_moves_statements_adds_blocks_and_points_the_ways_out() {
+        let mut rewrite = two_blocks();
+        assert!(!rewrite.changed());
+        let copied = rewrite.copy_statement(0, 1).unwrap();
+        assert!(!rewrite.changed());
+        rewrite.insert_statement(1, 0, copied).unwrap();
+        assert_eq!(rewrite.nodes[1].statements.len(), 2);
+        rewrite.remove_statement(0, 0).unwrap();
+        assert_eq!(rewrite.nodes[0].statements.len(), 1);
+        assert!(rewrite.remove_statement(0, 5).is_err());
+        assert!(rewrite.remove_statement(9, 0).is_err());
+        // A new block with a copy, entered by the loop's back edge.
+        let fresh = rewrite.fresh_address();
+        assert_eq!(fresh, 0x1011);
+        let copied = rewrite.copy_statement(1, 1).unwrap();
+        let added = rewrite
+            .add_block(
+                fresh,
+                vec![copied.clone()],
+                Terminator::Goto {
+                    target: 1,
+                    addresses: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(added, 2);
+        // An address in use labels a block already; a way out past the end
+        // is refused too.
+        assert!(rewrite
+            .add_block(0x1000, Vec::new(), Terminator::Return)
+            .unwrap_err()
+            .contains("block 0 has the address 0x1000 already"));
+        assert!(rewrite
+            .add_block(
+                0x2000,
+                vec![copied],
+                Terminator::Goto {
+                    target: 9,
+                    addresses: Vec::new()
+                }
+            )
+            .is_err());
+        rewrite.redirect(0, 0, added).unwrap();
+        assert_eq!(rewrite.nodes[0].terminator.successors(), vec![1, 2]);
+        assert!(rewrite.redirect(1, 0, 1).is_err(), "a return leads nowhere");
+        assert!(rewrite.redirect(0, 1, 7).is_err(), "no block 7");
+        rewrite.set_goto(0, 1).unwrap();
+        assert!(matches!(
+            rewrite.nodes[0].terminator,
+            Terminator::Goto { target: 1, ref addresses } if addresses == &[0x1004]
+        ));
+        rewrite.set_branch(2, AstNode::var("c"), 0, 1).unwrap();
+        assert!(rewrite.set_branch(2, AstNode::var("c"), 0, 9).is_err());
+        rewrite.set_return(2).unwrap();
+        rewrite.validate().unwrap();
+        assert!(rewrite.changed());
+        // Block 2 is cut off: pruning drops it and renumbers nothing else.
+        assert_eq!(rewrite.prune_unreachable(), 1);
+        assert_eq!(rewrite.nodes.len(), 2);
+        assert_eq!(rewrite.prune_unreachable(), 0);
+        // Pruning renumbers the blocks after the ones dropped.
+        let mut rewrite = two_blocks();
+        let third = rewrite
+            .add_block(0x1020, Vec::new(), Terminator::Return)
+            .unwrap();
+        rewrite.set_goto(0, third).unwrap();
+        assert_eq!(rewrite.prune_unreachable(), 1);
+        assert_eq!(rewrite.nodes.len(), 2);
+        assert!(matches!(
+            rewrite.nodes[0].terminator,
+            Terminator::Goto { target: 1, .. }
+        ));
+        assert_eq!(rewrite.nodes[1].address, 0x1020);
+        rewrite.validate().unwrap();
+        // A switch's cases are renumbered with the rest.
+        let mut rewrite = two_blocks();
+        let third = rewrite
+            .add_block(0x1020, Vec::new(), Terminator::Return)
+            .unwrap();
+        rewrite
+            .set_terminator(
+                0,
+                Terminator::Switch {
+                    index: AstNode::var("i"),
+                    cases: vec![(vec![0], third), (vec![1], 0)],
+                    addresses: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(rewrite.prune_unreachable(), 1);
+        assert!(matches!(
+            &rewrite.nodes[0].terminator,
+            Terminator::Switch { cases, .. } if cases == &vec![(vec![0], 1), (vec![1], 0)]
+        ));
+        // Two blocks at one address do not validate.
+        let mut rewrite = two_blocks();
+        rewrite.nodes[1].address = 0x1000;
+        assert!(rewrite.validate().unwrap_err().contains("both at 0x1000"));
+        // Redirecting a way to where it already leads changes nothing.
+        let mut rewrite = two_blocks();
+        rewrite.redirect(0, 1, 1).unwrap();
+        assert!(!rewrite.changed());
+        // A command's filter.
+        let external = ExternalRewriter {
+            name: "x".to_string(),
+            command: vec!["true".to_string()],
+            timeout: Duration::from_secs(1),
+            functions: vec!["main".to_string(), "0x1161".to_string()],
+        };
+        assert!(external.wants(0x1198, "main"));
+        assert!(external.wants(0x1161, "sum_to"));
+        assert!(!external.wants(0x1149, "add"));
+        rewrite.nodes[0].terminator = Terminator::Goto {
+            target: 5,
+            addresses: Vec::new(),
+        };
+        assert!(rewrite
+            .validate()
+            .unwrap_err()
+            .contains("block 0 leading to block 5"));
+    }
+
+    #[test]
+    fn a_commands_edits_are_applied_in_order_and_a_bad_one_is_named() {
+        let mut rewrite = two_blocks();
+        let json = rewrite.to_json();
+        assert_eq!(json["blocks"][0]["statements"][1]["text"], "b");
+        assert_eq!(json["blocks"][0]["terminator"]["kind"], "branch");
+        assert_eq!(json["blocks"][0]["terminator"]["cond"], "c");
+        assert_eq!(json["blocks"][1]["terminator"]["kind"], "return");
+        rewrite
+            .apply_edits(&serde_json::json!({ "edits": [
+                { "op": "move", "from": 0, "statement": 0, "to": 1, "at": 0 },
+                { "op": "add_block", "statements": [{ "from": 1, "statement": 1 }],
+                  "terminator": { "kind": "branch", "cond_of": 0, "taken": 1, "next": 0 } },
+                { "op": "redirect", "block": 0, "from": 0, "to": 2 },
+                { "op": "copy", "from": 1, "statement": 0, "to": 2 },
+                { "op": "goto", "block": 2, "target": 1 },
+            ] }))
+            .unwrap();
+        assert_eq!(rewrite.nodes.len(), 3);
+        assert_eq!(rewrite.nodes[0].statements.len(), 1);
+        assert_eq!(rewrite.nodes[1].statements.len(), 2);
+        assert_eq!(rewrite.nodes[2].statements.len(), 2);
+        assert_eq!(rewrite.nodes[2].address, 0x1011);
+        assert_eq!(rewrite.nodes[0].terminator.successors(), vec![1, 2]);
+        assert!(matches!(
+            rewrite.nodes[2].terminator,
+            Terminator::Goto { target: 1, .. }
+        ));
+        rewrite.validate().unwrap();
+        // Nothing to do is fine; a bad edit says which.
+        rewrite.apply_edits(&serde_json::json!({})).unwrap();
+        rewrite.apply_edits(&serde_json::Value::Null).unwrap();
+        let error = rewrite
+            .apply_edits(&serde_json::json!([{ "op": "remove", "block": 0, "statement": 4 }]))
+            .unwrap_err();
+        assert!(
+            error.starts_with("edit 0 (remove): block 0 has no statement 4"),
+            "{error}"
+        );
+        let error = rewrite
+            .apply_edits(&serde_json::json!([{ "op": "add_block", "statements": [] }]))
+            .unwrap_err();
+        assert!(error.contains("names its terminator"), "{error}");
+        let error = rewrite
+            .apply_edits(&serde_json::json!([{ "op": "fold" }]))
+            .unwrap_err();
+        assert!(error.contains("no such op"), "{error}");
+        let error = rewrite
+            .apply_edits(&serde_json::json!([{ "op": "branch", "block": 0, "cond_of": 1, "taken": 0, "next": 1 }]))
+            .unwrap_err();
+        assert!(error.contains("does not branch"), "{error}");
+        assert!(rewrite.apply_edits(&serde_json::json!("edits")).is_err());
     }
 
     #[test]
