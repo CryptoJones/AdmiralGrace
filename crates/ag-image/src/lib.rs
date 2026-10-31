@@ -456,19 +456,14 @@ impl Binary {
         // part of its address.
         let arm = ArmVariant::of_language(&language);
         let unbit = |address: u64| if arm.is_some() { address & !1 } else { address };
+        // The entry's low bit, the `$a`/`$t` mapping symbols, and the
+        // function symbols with their low bit set.
         let symbol_modes: BTreeMap<u64, ArmMode> = if arm.is_some() {
             image
-                .function_symbols()
+                .arm_mode_hints()
                 .into_iter()
-                .map(|(address, _)| {
-                    (
-                        address & !1,
-                        if address & 1 == 1 {
-                            ArmMode::Thumb
-                        } else {
-                            ArmMode::Arm
-                        },
-                    )
+                .map(|(address, thumb)| {
+                    (address, if thumb { ArmMode::Thumb } else { ArmMode::Arm })
                 })
                 .collect()
         } else {
@@ -657,21 +652,27 @@ impl Binary {
     }
 
     /// The instruction set `address` decodes in, when the image is ARM: the
-    /// analyst's mark at or before it, else the symbol's, else the image's
-    /// own default.
+    /// nearest mark at or before it, the image's or the analyst's — the
+    /// analyst's where the two meet — else the image's own default. What
+    /// the decoder reads the section under.
     pub fn mode_at(&self, address: u64) -> Option<ArmMode> {
         let variant = self.arm?;
-        let marked = self
-            .modes
-            .lock()
-            .ok()
-            .and_then(|held| held.range(..=address).next_back().map(|(_, mode)| *mode));
-        Some(marked.unwrap_or_else(|| {
-            self.symbol_modes
+        Some(
+            self.merged_modes()
                 .range(..=address)
                 .next_back()
-                .map_or(variant.default_mode, |(_, mode)| *mode)
-        }))
+                .map_or(variant.default_mode, |(_, mode)| *mode),
+        )
+    }
+
+    /// The image's modes with the analyst's marks over them: one map, the
+    /// one the decoder reads and `mode_at` answers from.
+    fn merged_modes(&self) -> BTreeMap<u64, ArmMode> {
+        let mut modes = self.symbol_modes.clone();
+        if let Ok(marks) = self.modes.lock() {
+            modes.extend(marks.iter().map(|(address, mode)| (*address, *mode)));
+        }
+        modes
     }
 
     /// Forget everything decoded, walked and indexed: the bytes, or the
@@ -1029,12 +1030,18 @@ impl Binary {
         let bytes = self.patched(&code.bytes, code.section.vma);
         let decoded = Arc::new(match self.arm {
             Some(variant) => {
-                // The symbols' modes, with the analyst's marks over them.
-                let mut modes = self.symbol_modes.clone();
-                if let Ok(marks) = self.modes.lock() {
-                    modes.extend(marks.iter().map(|(address, mode)| (*address, *mode)));
-                }
-                decode_arm_section(variant, &bytes, code.section.vma, &modes)
+                let marks = self
+                    .modes
+                    .lock()
+                    .map(|held| held.clone())
+                    .unwrap_or_default();
+                decode_arm_section(
+                    variant,
+                    &bytes,
+                    code.section.vma,
+                    &self.symbol_modes,
+                    &marks,
+                )
             }
             None => decode_section(&bytes, code.section.vma, code.bitness),
         });
@@ -2362,9 +2369,10 @@ fn decode_arm_section(
     variant: ArmVariant,
     bytes: &[u8],
     base: u64,
-    modes: &BTreeMap<u64, ArmMode>,
+    hints: &BTreeMap<u64, ArmMode>,
+    marks: &BTreeMap<u64, ArmMode>,
 ) -> Decoded {
-    match ag_engine::arm::decode_section(variant, bytes, base, modes) {
+    match ag_engine::arm::decode_section(variant, bytes, base, hints, marks) {
         Ok(decoded) => Decoded {
             disasm: decoded.disasm,
             text: decoded

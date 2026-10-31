@@ -8,9 +8,12 @@ The images the image tests read, and how they were made.
 | `sample.macho` | A Mach-O (x86-64) executable. |
 | `sample32.elf` | A 32-bit ELF (i386) executable, statically linked with no C library. |
 | `sample.c` | The source all of them were built from. |
-| `arm_thumb.elf` | A 32-bit ARM ELF object file whose code is Thumb, but for one function built as ARM: what the SLEIGH decoder reads in both instruction sets, and switches between. |
+| `arm_thumb.elf` | A 32-bit ARM ELF executable, statically linked with no C library, whose code is Thumb but for one function built as ARM: what the SLEIGH decoder reads in both instruction sets, and switches between. |
 | `arm_arm.elf` | The same source built as ARM throughout. |
-| `arm_sample.c` | The source of the two ARM objects. |
+| `arm_sample.c` | The source of the two ARM executables. |
+| `arm_flows.elf` | A hand-written ARM executable: a call and a return under a condition, a Thumb `blx` into ARM code no symbol names, a literal-pool load. |
+| `arm_flows_stripped.elf` | The same with every symbol removed: only the entry point's low bit says the mode. |
+| `arm_flows.s` | The source of the two. |
 
 The 64-bit ELF the tests read is in `crates/ag-engine/tests/fixtures/sample.elf`; the
 engine's own tests read it, and the image tests read it from there.
@@ -126,13 +129,26 @@ at `0x804900d`, the unnamed routine at `0x8049010`.
 gcc -m32 -nostdlib -static -no-pie -Wl,-e,main -o boundaries32.elf boundaries.s
 ```
 
-The ARM objects were built with clang alone — an object file needs no linker and no C
-library — so they are rebuilt anywhere clang is:
+The ARM executables were built with clang and its own linker (`-fuse-ld=lld`), with no C
+library, `.text` pinned at `0x20000` so the addresses in the tests hold:
 
 ```sh
-clang --target=armv7a-none-eabi -mthumb -O1 -c arm_sample.c -o arm_thumb.elf
-clang --target=armv7a-none-eabi -marm   -O1 -c arm_sample.c -o arm_arm.elf
+clang --target=armv7a-none-eabi -mthumb -O1 -nostdlib -static -fuse-ld=lld -Wl,-e,sum \
+      -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 \
+      arm_sample.c -o arm_thumb.elf
+clang --target=armv7a-none-eabi -marm   -O1 -nostdlib -static -fuse-ld=lld -Wl,-e,sum \
+      -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 \
+      arm_sample.c -o arm_arm.elf
+clang --target=armv7a-none-eabi -c arm_flows.s -o arm_flows.o
+clang --target=armv7a-none-eabi -nostdlib -static -fuse-ld=lld -Wl,-e,_start \
+      -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 arm_flows.o -o arm_flows.elf
+clang --target=armv7a-none-eabi -nostdlib -static -fuse-ld=lld -Wl,-e,_start -Wl,-s \
+      -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 arm_flows.o -o arm_flows_stripped.elf
 ```
 
-The loader places an object file's `.text` at `0x20000`; a Thumb function's symbol has its
-low bit set (`add` is `0x400001`), which is how the decoder learns its mode.
+A Thumb function's symbol has its low bit set (`add` is `0x20001` in `arm_thumb.elf`), the
+entry point's low bit says the same, and the assembler's `$t`/`$a` mapping symbols mark where
+the mode changes: that is how the decoder learns the mode. In `arm_thumb.elf` `other_mode`
+(`0x20038`) is the one ARM function; `arm_flows.elf` holds a call and a return under a
+condition, a Thumb `blx` into ARM code that no symbol names, and a literal-pool load, and its
+stripped twin keeps only the entry point's bit.

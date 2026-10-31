@@ -506,6 +506,12 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             // read under the project's layout, so a moved address is the
             // instruction's.
             let image = image_under(&target, &open_project(&target, &file)?)?;
+            // The no-op is x86's; an image of another architecture has
+            // instruction lengths now, but no `nop` of this spelling.
+            anyhow::ensure!(
+                image.bitness().is_some(),
+                "the target is not x86, so it has no no-op here"
+            );
             let len = match (len, to) {
                 (Some(len), _) => len,
                 (None, Some(to)) => {

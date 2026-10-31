@@ -1700,6 +1700,23 @@ fn an_arm_image_decodes_in_thumb_and_arm_by_its_symbols_and_the_analysts_marks()
     assert!(binary.set_modes(BTreeMap::new()));
     assert_eq!(binary.mode_at(0x2_0038), Some(ArmMode::Arm));
 
+    // What `mode_at` answers is what the decoder reads: a mark before a
+    // symbol does not reach past the symbol.
+    assert!(binary.set_modes(BTreeMap::from([(0x2_0000_u64, ArmMode::Arm)])));
+    assert_eq!(binary.mode_at(0x2_0000), Some(ArmMode::Arm));
+    assert_eq!(
+        binary.mode_at(0x2_0004),
+        Some(ArmMode::Thumb),
+        "sum's symbol wins"
+    );
+    let sum = binary.disassembly(0x2_0004).expect("sum is decoded");
+    assert!(sum
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|line| line.bytes.len() == 2));
+    assert!(binary.set_modes(BTreeMap::new()));
+
     // Pseudocode is refused by name, and an x86 image has no modes.
     let refused = binary.pseudocode(0x2_0000).expect_err("not lifted");
     assert!(refused.reason.contains("ARM"), "{}", refused.reason);
