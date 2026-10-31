@@ -420,7 +420,14 @@ impl canvas::Program<Message> for Margin {
         // instruction.
         let spot = Point::new(self.width - TURN / 2.0 - 1.0, mid);
         if self.marks.breakpoint {
-            frame.fill(&canvas::Path::circle(spot, 3.5), color::RED);
+            // Beside the wedge when the program is stopped here, so both
+            // show.
+            let dot = if self.marks.at_pc {
+                Point::new(spot.x - 8.0, mid)
+            } else {
+                spot
+            };
+            frame.fill(&canvas::Path::circle(dot, 3.5), color::RED);
         }
         if self.marks.at_pc {
             let wedge = canvas::Path::new(|builder| {

@@ -24,17 +24,40 @@ fn the_program_runs_to_its_breakpoints_and_the_stops_are_reported_in_the_images_
         eprintln!("gdb is not on this machine: the debugger is not run");
         return;
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("debug")
         .arg(fixture("sample.elf"))
         .arg("--break")
         .arg("main")
         .arg("--break")
         .arg("0x1149")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("the ag binary runs");
+    // A regression that hangs the run is a failure, not a hang.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("ag debug did not end within a minute");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    let output = child.wait_with_output().expect("the output");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("ptrace") || stderr.contains("Operation not permitted") {
+        eprintln!("tracing is not permitted here: the debugger is not run");
+        return;
+    }
     // The fixture exits with 10.
     assert_eq!(output.status.code(), Some(10), "{stdout}\n{stderr}");
     assert!(
@@ -52,7 +75,7 @@ fn the_program_runs_to_its_breakpoints_and_the_stops_are_reported_in_the_images_
         "{stdout}"
     );
     // A position-independent program runs under a slide.
-    assert!(stdout.contains("a slide of 0x"), "{stdout}");
+    assert!(stdout.contains("loaded with a slide of 0x"), "{stdout}");
 }
 
 #[test]

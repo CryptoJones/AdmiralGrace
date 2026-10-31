@@ -219,6 +219,19 @@ The same session runs headless as `ag debug IMAGE --break TARGET…`: the progra
 breakpoint, the registers and the stack are printed there, and the command ends with the
 program's exit code.
 
+What to expect of the debuggers: GDB on Linux is the supported path. The slide is learned from
+the process's mappings, which GDB prints on Linux; without them a position-independent
+program's breakpoints wait, and the log says so. LLDB through `lldb-mi` speaks the same
+interface but is untested here — `lldb-mi` is rarely installed, has no `starti` (the program
+is started at `main` instead) and no mappings. Attaching needs permission to trace the
+process: on Linux, `/proc/sys/kernel/yama/ptrace_scope` at 1 (the usual default) refuses a
+process that is not the debugger's own child unless the debugger runs with the right. The
+program's own terminal is nowhere (`/dev/null`): what it reads and prints is not shown, and
+cannot be mistaken for the debugger's words. Interrupt relies on the interface's asynchronous
+mode, which every modern GDB has. The debugger is driven on the window's thread: a command
+that reads the program's state is given three seconds, one that starts or moves it twenty,
+and the window waits meanwhile.
+
 ## Reading the panes
 
 The selection is shared: a function picked in the navigator, an address picked in the

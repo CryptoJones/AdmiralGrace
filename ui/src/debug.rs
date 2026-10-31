@@ -151,6 +151,11 @@ impl DebugState {
                 Event::Exited { code } => {
                     self.status = Status::Exited(*code);
                     self.pc = None;
+                    self.registers.clear();
+                    self.frames.clear();
+                    self.memory.clear();
+                    self.memory_rows.clear();
+                    self.memory_at = None;
                     self.note(match code {
                         Some(code) => format!("the program exited with code {code}"),
                         None => "the program ended".to_string(),

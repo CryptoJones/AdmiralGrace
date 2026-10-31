@@ -1568,7 +1568,9 @@ impl App {
         )
     }
 
-    /// Bring the listing to `pc`: the function it is in, and the instruction.
+    /// Bring the listing to `pc`: the function it is in, and the
+    /// instruction. A stop adds nothing to the history, so Back after a
+    /// run of steps goes where the analyst was, not through every step.
     fn follow_pc(&mut self, pc: u64) {
         let function = self
             .provider
@@ -1583,12 +1585,11 @@ impl App {
             .map(|row| row.address);
         if let Some(function) = function {
             if self.work.listing_of != Some(function) {
-                let _ = self.select_function(function, true);
+                let _ = self.select_function(function, false);
             }
-            self.selection = Selection::Address(pc);
-            self.history.push(self.selection);
-            self.refresh_bytes();
         }
+        self.selection = Selection::Address(pc);
+        self.refresh_bytes();
     }
 
     /// Write the graph on screen — the blocks as the tab draws them,

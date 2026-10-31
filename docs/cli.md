@@ -561,8 +561,11 @@ program under GDB (or LLDB through `lldb-mi`), stopped first at its first instru
 the session learns the slide a position-independent program runs under; then it runs the
 program to each breakpoint — a function by address or name — and prints where it stopped in
 the image's addresses, the registers and the stack, lets it go on, and ends with the
-program's exit code (1 when a signal or a fault stopped it, with the reason). The workbench
-drives the same session with its panes; see `docs/workbench.md`.
+program's exit code (1 when a signal or a fault stopped it, with the reason). A `--break`
+target is a function by address or name, or any address in the image's code. GDB on Linux is
+the supported path; LLDB through `lldb-mi` is untested, and starts the program at `main`. The
+program's terminal is `/dev/null`. The workbench drives the same session with its panes; see
+`docs/workbench.md`, which also says what attaching needs.
 
 ## Plugins: `ag plugins` and `ag tool`
 

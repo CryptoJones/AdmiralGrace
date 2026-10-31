@@ -39,9 +39,18 @@ pub fn run(
         _ => None,
     };
     let image = crate::image::open_image(binary, raw, slice, project_file.as_ref(), options)?;
+    // A breakpoint is a function, by address or name, or any address in
+    // the image's code.
     let stops: Vec<u64> = breakpoints
         .iter()
-        .map(|target| crate::image::resolve(&image, target))
+        .map(|target| {
+            if let Ok(address) = ag_corpus::parse_addr(target) {
+                if image.section_of(address).is_some() {
+                    return Ok(address);
+                }
+            }
+            crate::image::resolve(&image, target)
+        })
         .collect::<Result<_>>()?;
     let mut session = Session::launch(debugger, binary, image.base().unwrap_or(0))
         .with_context(|| format!("starting {}", debugger.name()))?;
@@ -52,12 +61,12 @@ pub fn run(
     }
     session.start(arguments).context("starting the program")?;
     println!(
-        "{} started {} under {}{}",
+        "{} started {}, {}{}",
         debugger.name(),
         binary.display(),
         match session.slide() {
-            Some(slide) => format!("a slide of {slide:#x}"),
-            None => "no slide".to_string(),
+            Some(slide) => format!("loaded with a slide of {slide:#x}"),
+            None => "loaded at the image's own addresses".to_string(),
         },
         if stops.is_empty() {
             String::new()
@@ -126,6 +135,9 @@ fn report_stop(
     runtime_pc: Option<u64>,
 ) {
     let place = match (pc, runtime_pc) {
+        (Some(pc), Some(runtime)) if image.section_of(pc).is_none() => {
+            format!("{runtime:#x}, outside the image")
+        }
         (Some(pc), Some(runtime)) => {
             let name = image
                 .function_name(pc)

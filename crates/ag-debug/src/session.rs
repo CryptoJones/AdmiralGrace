@@ -204,19 +204,31 @@ pub struct Frame {
 
 /// How long a command is waited for.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a command that only reads — registers, the stack, memory — is
+/// waited for, so a window stays answerable.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long the debugger is given to say hello.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A session over one program.
 pub struct Session {
     transport: Box<dyn Transport>,
+    debugger: Debugger,
     next_token: u64,
     program: PathBuf,
     /// The address the image loads at, as the image has it.
     image_base: u64,
     /// The program's address of the image's base, once the program runs.
     runtime_base: Option<u64>,
+    /// Whether the program was attached to, not started: it is detached,
+    /// not killed, when the session ends.
+    attached: bool,
     state: State,
+    /// Where the program last stopped, as the program runs.
+    last_stop: Option<u64>,
+    /// The token of the run command the debugger accepted and may yet
+    /// refuse — a breakpoint it cannot write is refused after `^running`.
+    running_token: Option<u64>,
     events: VecDeque<Event>,
     /// The breakpoints, by the image's address: the debugger's number when
     /// it is set, none while the program has not started.
@@ -229,6 +241,7 @@ impl Session {
     pub fn launch(debugger: Debugger, program: &Path, image_base: u64) -> Result<Self> {
         let transport = ProcessTransport::spawn(&debugger.command())?;
         let mut session = Self::with_transport(Box::new(transport), program, image_base);
+        session.debugger = debugger;
         session.hello()?;
         Ok(session)
     }
@@ -237,11 +250,15 @@ impl Session {
     pub fn with_transport(transport: Box<dyn Transport>, program: &Path, image_base: u64) -> Self {
         Self {
             transport,
+            debugger: Debugger::Gdb,
             next_token: 1,
             program: program.to_path_buf(),
             image_base,
             runtime_base: None,
+            attached: false,
             state: State::Idle,
+            last_stop: None,
+            running_token: None,
             events: VecDeque::new(),
             breakpoints: BTreeMap::new(),
             register_names: None,
@@ -269,6 +286,13 @@ impl Session {
         // interrupted while it runs; a debugger without it says so, and
         // runs the old way.
         let _ = self.command("-gdb-set mi-async on");
+        // No shell between the debugger and the program, so an argument is
+        // one word; no debug-information downloads, so nothing reaches out;
+        // the program's own terminal is nowhere, so what it reads and
+        // prints is never taken for the debugger's words.
+        let _ = self.command("-gdb-set startup-with-shell off");
+        let _ = self.command("-gdb-set debuginfod enabled off");
+        let _ = self.command("-inferior-tty-set /dev/null");
         self.command(&format!(
             "-file-exec-and-symbols {}",
             quoted(&self.program.display().to_string())
@@ -311,13 +335,22 @@ impl Session {
             let line: Vec<String> = arguments.iter().map(|a| quoted(a)).collect();
             self.command(&format!("-exec-arguments {}", line.join(" ")))?;
         }
-        self.command("-interpreter-exec console \"starti\"")?;
+        match self.debugger {
+            Debugger::Gdb => {
+                self.command("-interpreter-exec console \"starti\"")?;
+            }
+            // LLDB's interface has no `starti`: the program runs to `main`.
+            Debugger::Lldb => {
+                self.command("-exec-run --start")?;
+            }
+        }
         self.wait_for_stop()?;
         self.learn_slide()?;
         self.set_pending_breakpoints()?;
         // The start's own words — the run, the first stop — are not news:
-        // the program is stopped at its first instruction, as asked.
-        self.events.clear();
+        // the program is stopped at its first instruction, as asked. What
+        // the session itself noted — a slide not learned — is kept.
+        self.events.retain(|event| matches!(event, Event::Log(_)));
         Ok(())
     }
 
@@ -325,12 +358,13 @@ impl Session {
     /// the breakpoints set.
     pub fn attach(&mut self, pid: u64) -> Result<()> {
         self.command(&format!("-target-attach {pid}"))?;
+        self.attached = true;
         if !matches!(self.state, State::Stopped { .. }) {
             self.wait_for_stop()?;
         }
         self.learn_slide()?;
         self.set_pending_breakpoints()?;
-        self.events.clear();
+        self.events.retain(|event| matches!(event, Event::Log(_)));
         Ok(())
     }
 
@@ -353,7 +387,11 @@ impl Session {
     }
 
     /// Learn where the image sits in the process: the mapping of the
-    /// program's file at offset zero, from the process's mappings.
+    /// program's file at offset zero, from the process's mappings — by the
+    /// file's whole path as the system resolves it, or by its name. GDB
+    /// prints the mappings on Linux; elsewhere, and under LLDB, the
+    /// addresses stay as they are and a position-independent program's
+    /// breakpoints wait.
     fn learn_slide(&mut self) -> Result<()> {
         let before = self.events.len();
         let result = self.command("-interpreter-exec console \"info proc mappings\"");
@@ -369,17 +407,28 @@ impl Session {
         // The console's words were the answer, not news.
         self.events.truncate(before);
         if result.is_err() {
-            // A debugger without the mappings — another platform's —
-            // leaves the addresses as they are.
+            self.events.push_back(Event::Log(
+                "the process's mappings could not be read: addresses are taken as the image has them"
+                    .to_string(),
+            ));
             return Ok(());
         }
+        let canonical = std::fs::canonicalize(&self.program).ok();
         let file_name = self
             .program
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
+        // Older GDBs print no Perms column: the header says which column
+        // the file is in.
+        let mut file_column = 4;
+        let mut by_name = None;
         for text in lines.iter().flat_map(|text| text.lines()) {
+            if text.contains("Start Addr") {
+                file_column = if text.contains("Perms") { 5 } else { 4 };
+                continue;
+            }
             let fields: Vec<&str> = text.split_whitespace().collect();
-            if fields.len() < 5 {
+            if fields.len() <= file_column {
                 continue;
             }
             let (Some(start), Some(offset)) =
@@ -390,27 +439,41 @@ impl Session {
             if offset != 0 {
                 continue;
             }
-            let file = fields[4..].join(" ");
-            let file = fields
-                .get(5..)
-                .map(|rest| rest.join(" "))
-                .filter(|_| fields.len() > 5)
-                .unwrap_or(file);
-            let is_program = file_name.as_deref().is_some_and(|name| {
-                Path::new(file.trim())
-                    .file_name()
-                    .is_some_and(|f| f == name)
-            });
-            if is_program {
+            let file = fields[file_column..]
+                .join(" ")
+                .trim_end_matches(" (deleted)")
+                .to_string();
+            if canonical
+                .as_ref()
+                .is_some_and(|path| path == Path::new(&file))
+            {
                 self.runtime_base = Some(start);
                 return Ok(());
             }
+            if by_name.is_none()
+                && file_name
+                    .as_deref()
+                    .is_some_and(|name| Path::new(&file).file_name().is_some_and(|f| f == name))
+            {
+                by_name = Some(start);
+            }
+        }
+        if let Some(start) = by_name {
+            self.runtime_base = Some(start);
+        } else if self.image_base == 0 {
+            self.events.push_back(Event::Log(
+                "the program's mapping was not found: a position-independent program's breakpoints wait until it is"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
 
     /// Set the breakpoints the analyst asked for before the program ran.
     fn set_pending_breakpoints(&mut self) -> Result<()> {
+        if !self.addresses_known() {
+            return Ok(());
+        }
         let pending: Vec<u64> = self
             .breakpoints
             .iter()
@@ -422,6 +485,13 @@ impl Session {
             self.breakpoints.insert(address, Some(number));
         }
         Ok(())
+    }
+
+    /// Whether the image's addresses are the program's, or translate to
+    /// them: a program that is not position-independent, or one whose
+    /// slide was learned.
+    fn addresses_known(&self) -> bool {
+        self.runtime_base.is_some() || self.image_base != 0
     }
 
     fn insert_breakpoint(&mut self, address: u64) -> Result<u64> {
@@ -439,7 +509,8 @@ impl Session {
         if self.breakpoints.contains_key(&address) {
             return Ok(());
         }
-        let number = if self.runtime_base.is_some() || !matches!(self.state, State::Idle) {
+        let live = matches!(self.state, State::Stopped { .. } | State::Running);
+        let number = if live && self.addresses_known() {
             Some(self.insert_breakpoint(address)?)
         } else {
             None
@@ -487,11 +558,19 @@ impl Session {
         Ok(())
     }
 
-    /// End the program.
+    /// End the program — or let an attached one go on without the
+    /// debugger.
     pub fn kill(&mut self) -> Result<()> {
-        let _ = self.command("-exec-abort");
+        if matches!(self.state, State::Stopped { .. } | State::Running) {
+            let _ = if self.attached {
+                self.command("-target-detach")
+            } else {
+                self.command("-interpreter-exec console \"kill\"")
+            };
+        }
         self.state = State::Exited { code: None };
         self.runtime_base = None;
+        self.running_token = None;
         for number in self.breakpoints.values_mut() {
             *number = None;
         }
@@ -502,20 +581,17 @@ impl Session {
         if !matches!(self.state, State::Stopped { .. }) {
             bail!("the program is not stopped");
         }
-        let values = self.command(command);
-        match values {
-            Ok(_) => {
-                self.state = State::Running;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        let token = self.next_token;
+        self.command(command)?;
+        self.state = State::Running;
+        self.running_token = Some(token);
+        Ok(())
     }
 
     /// The registers and their values, the ones that are numbers.
     pub fn registers(&mut self) -> Result<Vec<(String, u64)>> {
         if self.register_names.is_none() {
-            let values = self.command("-data-list-register-names")?;
+            let values = self.command_within("-data-list-register-names", READ_TIMEOUT)?;
             let names: Vec<String> = values
                 .get("register-names")
                 .map(|list| {
@@ -528,7 +604,7 @@ impl Session {
                 .unwrap_or_default();
             self.register_names = Some(names);
         }
-        let values = self.command("-data-list-register-values x")?;
+        let values = self.command_within("-data-list-register-values x", READ_TIMEOUT)?;
         let names = self.register_names.clone().unwrap_or_default();
         let mut registers = Vec::new();
         for item in values
@@ -552,7 +628,7 @@ impl Session {
 
     /// The stack, innermost frame first.
     pub fn frames(&mut self) -> Result<Vec<Frame>> {
-        let values = self.command("-stack-list-frames")?;
+        let values = self.command_within("-stack-list-frames", READ_TIMEOUT)?;
         let mut frames = Vec::new();
         for item in values.get("stack").map(Value::items).unwrap_or(&[]) {
             let frame = item.get("frame").unwrap_or(item);
@@ -575,7 +651,10 @@ impl Session {
     /// `length` bytes at the image's `address`, as the program has them.
     pub fn memory(&mut self, address: u64, length: usize) -> Result<Vec<u8>> {
         let runtime = self.to_runtime(address);
-        let values = self.command(&format!("-data-read-memory-bytes {runtime:#x} {length}"))?;
+        let values = self.command_within(
+            &format!("-data-read-memory-bytes {runtime:#x} {length}"),
+            READ_TIMEOUT,
+        )?;
         let mut bytes = Vec::new();
         for block in values.get("memory").map(Value::items).unwrap_or(&[]) {
             let Some(contents) = block.text_of("contents") else {
@@ -623,12 +702,17 @@ impl Session {
     /// Send a command and read to its result; the events on the way are
     /// kept.
     pub fn command(&mut self, command: &str) -> Result<Value> {
+        self.command_within(command, COMMAND_TIMEOUT)
+    }
+
+    /// Send a command and read to its result within `timeout`.
+    pub fn command_within(&mut self, command: &str, timeout: Duration) -> Result<Value> {
         let token = self.next_token;
         self.next_token += 1;
         self.transport
             .send_line(&format!("{token}{command}"))
             .context("sending a command to the debugger")?;
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -665,6 +749,29 @@ impl Session {
     fn take(&mut self, line: &str) -> Option<Record> {
         let record = mi::parse_line(line);
         match &record {
+            // A run the debugger accepted and then refused — a breakpoint
+            // it could not write — leaves the program where it was.
+            Record::Result {
+                token: Some(token),
+                class,
+                values,
+            } if class == "error" && Some(*token) == self.running_token => {
+                self.running_token = None;
+                let runtime_pc = self.last_stop;
+                self.state = State::Stopped { runtime_pc };
+                self.events.push_back(Event::Stopped {
+                    reason: format!(
+                        "error: {}",
+                        values
+                            .text_of("msg")
+                            .unwrap_or("the run was refused")
+                            .trim()
+                            .replace('\n', " ")
+                    ),
+                    pc: runtime_pc.map(|pc| self.to_static(pc)),
+                    runtime_pc,
+                });
+            }
             Record::Async {
                 kind: AsyncKind::Exec,
                 class,
@@ -676,20 +783,16 @@ impl Session {
                     self.events.push_back(Event::Running);
                 }
                 "stopped" => {
+                    self.running_token = None;
                     let reason = values.text_of("reason").unwrap_or("stopped").to_string();
                     if reason.starts_with("exited") {
-                        let code = values
-                            .text_of("exit-code")
-                            .and_then(|code| {
-                                i64::from_str_radix(code.trim_start_matches('0'), 8)
-                                    .ok()
-                                    .or_else(|| code.parse().ok())
-                            })
-                            .or(if reason == "exited-normally" {
+                        let code = values.text_of("exit-code").and_then(exit_code).or(
+                            if reason == "exited-normally" {
                                 Some(0)
                             } else {
                                 None
-                            });
+                            },
+                        );
                         self.state = State::Exited { code };
                         self.runtime_base = None;
                         for number in self.breakpoints.values_mut() {
@@ -700,6 +803,7 @@ impl Session {
                         let runtime_pc = values
                             .get("frame")
                             .and_then(|frame| frame.number_of("addr"));
+                        self.last_stop = runtime_pc.or(self.last_stop);
                         self.state = State::Stopped { runtime_pc };
                         self.events.push_back(Event::Stopped {
                             reason,
@@ -728,6 +832,17 @@ impl Session {
             Record::Result { .. } | Record::Async { .. } | Record::Prompt => {}
         }
         Some(record)
+    }
+}
+
+/// An exit code as the debugger prints it: GDB's is octal with a leading
+/// zero (`012` is 10); one without the zero is read as decimal.
+fn exit_code(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.len() > 1 && text.starts_with('0') {
+        i64::from_str_radix(text, 8).ok()
+    } else {
+        text.parse().ok()
     }
 }
 
@@ -807,7 +922,9 @@ mod tests {
             "-data-read-memory-bytes 0x555555555198 4",
             &["^done,memory=[{begin=\"0x0000555555555198\",offset=\"0x0\",end=\"0x000055555555519c\",contents=\"f30f1efa\"}]"],
         );
-        scripted.answer("-exec-abort", &["^done"]);
+        scripted.answer("-interpreter-exec console \"kill\"", &["^done"]);
+        scripted.answer("-gdb-set", &["^done"]);
+        scripted.answer("-inferior-tty-set", &["^done"]);
         let mut session =
             Session::with_transport(Box::new(scripted), Path::new("/tmp/sample.elf"), 0);
         session.hello().expect("the handshake");
@@ -895,11 +1012,112 @@ mod tests {
     #[test]
     fn a_refused_command_is_an_error_with_the_debuggers_words() {
         let scripted = Scripted::new();
-        scripted.answer("-gdb-set mi-async on", &["^done"]);
+        scripted.answer("-gdb-set", &["^done"]);
+        scripted.answer("-inferior-tty-set", &["^done"]);
         scripted.answer("-file-exec-and-symbols", &["^error,msg=\"no such file\""]);
         let mut session = Session::with_transport(Box::new(scripted), Path::new("/nowhere"), 0);
         let error = session.hello().unwrap_err();
         assert!(error.to_string().contains("no such file"), "{error}");
         assert_eq!(quoted("a \"b\" c\\d"), "\"a \\\"b\\\" c\\\\d\"");
+        assert_eq!(exit_code("012"), Some(10));
+        assert_eq!(exit_code("0"), Some(0));
+        assert_eq!(exit_code("10"), Some(10));
+        assert_eq!(exit_code("x"), None);
+    }
+
+    #[test]
+    fn a_run_the_debugger_refuses_after_accepting_stops_the_program_where_it_was() {
+        let (mut session, _sent) = session();
+        session.start(&[]).unwrap();
+        let _ = session.poll(Duration::ZERO);
+        session.resume().unwrap();
+        assert_eq!(session.state(), State::Running);
+        assert_eq!(session.poll(Duration::ZERO), [Event::Running]);
+        let token = session.running_token.expect("the run's token");
+        session.take("&\"Cannot insert breakpoint 1.\\n\"");
+        session.take(&format!("{token}^error,msg=\"Command aborted.\""));
+        let events = session.poll(Duration::ZERO);
+        assert!(
+            matches!(session.state(), State::Stopped { .. }),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Stopped { reason, .. } if reason == "error: Command aborted."
+            )),
+            "{events:?}"
+        );
+        // A later error with another token is not a stop.
+        session.resume().unwrap();
+        session.take("99^error,msg=\"unrelated\"");
+        assert_eq!(session.state(), State::Running);
+    }
+
+    #[test]
+    fn the_mappings_are_read_by_the_headers_columns_and_a_pie_without_a_slide_waits() {
+        // An older layout, without the Perms column, and the file named by
+        // its path alone.
+        let scripted = Scripted::new();
+        scripted.answer("-gdb-set", &["^done"]);
+        scripted.answer("-inferior-tty-set", &["^done"]);
+        scripted.answer("-file-exec-and-symbols", &["^done"]);
+        scripted.answer(
+            "-interpreter-exec console \"starti\"",
+            &[
+                "^running",
+                "*stopped,reason=\"signal-received\",frame={addr=\"0x7ffff7fe3340\"}",
+            ],
+        );
+        scripted.answer(
+            "-interpreter-exec console \"info proc mappings\"",
+            &[
+                "~\"Start Addr           End Addr       Size     Offset objfile\\n\"",
+                "~\"      0x555555554000     0x555555555000     0x1000        0x0 /tmp/old sample.elf\\n\"",
+                "^done",
+            ],
+        );
+        let mut session =
+            Session::with_transport(Box::new(scripted), Path::new("/tmp/old sample.elf"), 0);
+        session.hello().unwrap();
+        session.start(&[]).unwrap();
+        assert_eq!(session.slide(), Some(0x555555554000));
+
+        // No mapping found for a position-independent program: the
+        // breakpoints wait, and the log says so.
+        let scripted = Scripted::new();
+        let sent = scripted.sent();
+        scripted.answer("-gdb-set", &["^done"]);
+        scripted.answer("-inferior-tty-set", &["^done"]);
+        scripted.answer("-file-exec-and-symbols", &["^done"]);
+        scripted.answer(
+            "-interpreter-exec console \"starti\"",
+            &[
+                "^running",
+                "*stopped,reason=\"signal-received\",frame={addr=\"0x7ffff7fe3340\"}",
+            ],
+        );
+        scripted.answer(
+            "-interpreter-exec console \"info proc mappings\"",
+            &["~\"process 1\\n\"", "^done"],
+        );
+        let mut session = Session::with_transport(Box::new(scripted), Path::new("/x/pie"), 0);
+        session.hello().unwrap();
+        session.add_breakpoint(0x1149).unwrap();
+        session.start(&[]).unwrap();
+        assert_eq!(session.slide(), None);
+        assert!(!sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("-break-insert")));
+        let events = session.poll(Duration::ZERO);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Log(text) if text.contains("wait"))),
+            "{events:?}"
+        );
+        assert!(session.breakpoints().contains(&0x1149));
     }
 }

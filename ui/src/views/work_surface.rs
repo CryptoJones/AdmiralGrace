@@ -1287,6 +1287,10 @@ fn debug_panel(app: &App) -> Element<'_, Message> {
                     .iter()
                     .filter(|row| row.address <= pc)
                     .max_by_key(|row| row.address)
+                    .filter(|row| {
+                        row.size
+                            .is_none_or(|size| pc < row.address.saturating_add(size))
+                    })
                     .map(|row| format!(" ({}+{:#x})", row.name, pc - row.address))
                     .unwrap_or_default()
             ),
@@ -1342,11 +1346,12 @@ fn debug_panel(app: &App) -> Element<'_, Message> {
                     .map(|name| format!(" {name}"))
                     .unwrap_or_default()
             );
-            stack = stack.push(
-                button(Text::new(label).size(12).font(MONO))
-                    .padding([2, 6])
-                    .on_press(Message::AddressSelected(frame.pc)),
-            );
+            // A frame in a library is outside the image: nowhere to go.
+            let mut row = button(Text::new(label).size(12).font(MONO)).padding([2, 6]);
+            if app.provider.contains_address(frame.pc) {
+                row = row.on_press(Message::AddressSelected(frame.pc));
+            }
+            stack = stack.push(row);
         }
         column = column.push(subtle("STACK")).push(stack);
     }
