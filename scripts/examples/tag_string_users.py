@@ -22,7 +22,13 @@ tag = sys.argv[2] if len(sys.argv) > 2 else "strings"
 
 ag = Session()
 users = Counter()
-for string in ag.strings(filter=pattern, limit=5000)["strings"]:
+strings = ag.strings(filter=pattern, limit=5000)
+if strings["total"] > strings["shown"]:
+    print(
+        f"only {strings['shown']} of {strings['total']} matching strings were listed",
+        file=sys.stderr,
+    )
+for string in strings["strings"]:
     for function in string["functions"]:
         users[function["address_hex"]] += 1
 

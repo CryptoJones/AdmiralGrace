@@ -276,7 +276,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "set_label",
-            description: "Name the address — a label on a branch target, a piece of data — in the project file; an empty name clears it. A function's entry is named with set_name. The project is saved.",
+            description: "Name the address — a label on a branch target, a piece of data — in the project file; an empty name clears it. At a function's entry the label is the function's name, as set_name sets it. The project is saved.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -425,8 +425,12 @@ impl Server {
                 }
             };
             if let Some(reply) = reply {
-                let written = serde_json::to_writer(&mut output, &reply)
-                    .map_err(std::io::Error::other)
+                // The reply is made whole first, so what the write reports
+                // is the pipe's own error, and a closed pipe is known for
+                // one.
+                let bytes = serde_json::to_vec(&reply).context("writing a reply")?;
+                let written = output
+                    .write_all(&bytes)
                     .and_then(|()| output.write_all(b"\n"))
                     .and_then(|()| output.flush());
                 match written {
@@ -803,6 +807,11 @@ impl Server {
                 let kind = target_kind(arguments.get("on"))?;
                 let add = words(arguments.get("add"), "add")?;
                 let remove = words(arguments.get("remove"), "remove")?;
+                if add.is_empty() && remove.is_empty() {
+                    return Err(
+                        "set_tags takes tags to add, or tags to remove, or both".to_string()
+                    );
+                }
                 self.change(kind, address, |record| {
                     for tag in add
                         .iter()
@@ -868,7 +877,8 @@ impl Server {
                 Ok(Answer::json(json!({ "tags": tags })))
             }
             "tagged" => {
-                let tag = text("tag")?;
+                let tag = ag_corpus::project::normalize_tag(&text("tag")?)
+                    .ok_or_else(|| "\"tag\" is one word".to_string())?;
                 self.reload()?;
                 let project = self.project()?;
                 let records: Vec<Value> = project
@@ -879,7 +889,8 @@ impl Server {
                         let address = ag_corpus::parse_addr(&record.address).ok();
                         json!({
                             "address": record.address,
-                            "on": record.kind.label(),
+                            // As `on` takes it back: a block record is `block`.
+                            "on": if record.block { "block" } else { record.kind.label() },
                             "name": record.name.clone().or_else(|| {
                                 address.and_then(|address| self.image.function_name(address).map(str::to_string))
                             }),
@@ -1975,9 +1986,25 @@ mod tests {
         let bad = call(
             &mut server,
             "set_tags",
-            json!({ "address": "0x1149", "on": "galaxy" }),
+            json!({ "address": "0x1149", "add": ["x"], "on": "galaxy" }),
         );
         assert_eq!(bad["isError"], true);
+        let nothing = call(&mut server, "set_tags", json!({ "address": "0x1149" }));
+        assert_eq!(nothing["isError"], true);
+        // One tag as a string, on a block: `tagged` says `block`, as `on`
+        // takes it back; the tag is normalized before the look-up.
+        let on_block = call(
+            &mut server,
+            "set_tags",
+            json!({ "address": "0x10c0", "add": "hot", "on": "block" }),
+        );
+        assert_eq!(
+            on_block["structuredContent"]["block"]["tags"],
+            json!(["hot"])
+        );
+        let hot = call(&mut server, "tagged", json!({ "tag": " hot " }));
+        assert_eq!(hot["structuredContent"]["records"][0]["on"], "block");
+        assert_eq!(hot["structuredContent"]["records"][0]["address"], "0x10c0");
 
         let colored = call(
             &mut server,
@@ -2008,6 +2035,20 @@ mod tests {
             json!({ "address": "0x11a4", "name": "again" }),
         );
         assert_eq!(labelled["structuredContent"]["record"]["name"], "again");
+        let unlabelled = call(
+            &mut server,
+            "set_label",
+            json!({ "address": "0x11a4", "name": "" }),
+        );
+        assert!(
+            unlabelled["structuredContent"]["record"].is_null(),
+            "{unlabelled}"
+        );
+        let _ = call(
+            &mut server,
+            "set_label",
+            json!({ "address": "0x11a4", "name": "again" }),
+        );
 
         let referenced = call(
             &mut server,

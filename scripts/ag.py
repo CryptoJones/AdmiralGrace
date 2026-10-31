@@ -20,7 +20,9 @@ a script copies it beside itself, adds the `scripts` directory to `sys.path`
 as the examples do, or runs with it on `PYTHONPATH`.
 """
 
+import io
 import json
+import os
 import sys
 
 
@@ -29,15 +31,33 @@ class ToolError(Exception):
 
 
 class ProtocolError(Exception):
-    """The server refused the request itself: an unknown tool, bad arguments."""
+    """The conversation itself went wrong: the server refused the request (an
+    unknown tool, arguments that are not an object), could not read a message,
+    answered with something that is not a reply, or ended."""
 
 
 class Session:
-    """One conversation with the server on the script's standard streams."""
+    """One conversation with the server on the script's standard streams.
+
+    Without a reader and a writer of its own, the session takes the script's
+    standard input and output — read as UTF-8, whatever the locale — and
+    moves `sys.stdout` onto standard error, so a stray `print()` reaches the
+    terminal instead of the server.
+    """
 
     def __init__(self, reader=None, writer=None):
-        self._reader = reader or sys.stdin
-        self._writer = writer or sys.stdout
+        if reader is None:
+            reader = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
+        if writer is None:
+            writer = sys.stdout
+            sys.stdout = sys.stderr
+            if os.environ.get("AG_IMAGE") is None:
+                print(
+                    "ag.py: AG_IMAGE is not set; this script is meant to be started by `ag run`",
+                    file=sys.stderr,
+                )
+        self._reader = reader
+        self._writer = writer
         self._next_id = 0
         self.server = self._request(
             "initialize",
@@ -73,7 +93,20 @@ class Session:
                 raise ProtocolError("the server ended the conversation")
             if not line.strip():
                 continue
-            reply = json.loads(line)
+            try:
+                reply = json.loads(line)
+            except ValueError as error:
+                raise ProtocolError(f"the server sent a line that is not JSON: {error}") from None
+            if not isinstance(reply, dict):
+                raise ProtocolError("the server sent something that is not a reply")
+            if "error" in reply and reply.get("id") is None:
+                # The server could not read a message: ours went out
+                # glued to something, or was too long. Waiting for a reply
+                # to it would wait forever.
+                error = reply["error"]
+                raise ProtocolError(
+                    f"the server could not read a message: {error.get('message')}"
+                )
             if reply.get("id") != self._next_id:
                 continue
             if "error" in reply:

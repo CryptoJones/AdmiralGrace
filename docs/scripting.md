@@ -21,9 +21,13 @@ starts the command and speaks the tool protocol to it:
   file — anything printed to standard output is read as a request, and a line that is not
   JSON is answered with a parse error.
 
-The command sees the image's path in `AG_IMAGE` and the project file's in `AG_PROJECT`.
-When the command's output closes the server stops, and `ag run` ends with the command's own
-exit status, so a script that fails fails the batch. With `--project FILE` the script's
+The command sees the image's path, as it was given to `ag run`, in `AG_IMAGE`, and the
+project file's in `AG_PROJECT` — empty when there is none. When the command's output closes
+the server stops, and `ag run` ends with the command's own exit status (128 plus the signal,
+for a command a signal ended), so a script that fails fails the batch. The server answers one
+request before it reads the next, so a script reads each reply before it sends another
+request, as the Python client does; one that sends many requests without reading the replies
+fills the pipes and waits on the server as the server waits on it. With `--project FILE` the script's
 changes — names, labels, comments, bookmarks, tags, colors, cross references — are saved to
 the file after every change, the same file the workbench opens; a file that is not there
 yet is made from the image. Without a project file the tools that write answer with an
@@ -78,8 +82,10 @@ users = ag.cross_references("0x4010")["used_by"] # a record, as a dict
 `set_label`, `set_comment`, `set_bookmark`, `bookmarks`, `set_tags`, `set_color`,
 `add_reference`, `remove_reference`, `tags`, `tagged`), each returning the structured answer
 when there is one and the text otherwise. A tool's failure raises `ToolError` with the
-tool's message; a refused request raises `ProtocolError`. Addresses are taken as ints or
-hex text.
+tool's message; a refused request, a message the server could not read, or a conversation
+that ended raises `ProtocolError`. Addresses are taken as ints or hex text. The session
+reads the script's standard input as UTF-8 and moves `sys.stdout` onto standard error, so a
+stray `print()` reaches the terminal and not the server.
 
 `scripts/examples/tag_string_users.py` tags every function that uses a string matching a
 pattern, bookmarks the one that uses the most, and leaves a note on it — a batch of the
