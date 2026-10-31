@@ -171,6 +171,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditNopRange,
             )),
             Item::new(separator()),
+            Item::new(item_button("Rebase image…", "", Message::EditRebase)),
+            Item::new(item_button("Add segment…", "", Message::EditSegmentAdd)),
+            Item::new(item_button(
+                "Remove segment…",
+                "",
+                Message::EditSegmentRemove,
+            )),
+            Item::new(item_button(
+                "Rename segment…",
+                "",
+                Message::EditSegmentRename,
+            )),
+            Item::new(separator()),
             Item::new(item_button(&undo_label, "Ctrl+Z", Message::EditUndo)),
             Item::new(item_button(&redo_label, "Ctrl+Shift+Z", Message::EditRedo)),
         ])

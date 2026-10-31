@@ -13,12 +13,19 @@ regenerated, and the annotations stay.
 
 ```json
 {
-  "format": 4,
+  "format": 5,
   "target": {
     "path": "/bin/ls",
     "sha256": "35ee8f62…"
   },
   "options": { "loop-form": "while" },
+  "layout": {
+    "base": "0x400000",
+    "segments": [
+      { "action": "rename", "name": ".text", "to": "code" },
+      { "action": "add", "name": "extra", "address": "0x405000", "size": 16, "file_offset": "0x3000" }
+    ]
+  },
   "annotations": [
     { "kind": "function", "address": "0x1198", "name": "main", "bookmark": true },
     { "kind": "address", "address": "EXTERNAL:0x1", "comment": "imported qsort" },
@@ -31,10 +38,11 @@ regenerated, and the annotations stay.
 
 | Field | Meaning |
 |---|---|
-| `format` | The format version. This program writes and reads `4`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register; version 4 adds a record for the block of bytes starting at an address, apart from the address's own. A reader of an older version would misread those records as the address's own. A file naming a newer version is refused with a notice, not misread. An older file that gains a register or block record is written back at `4`, so a reader that would misread it refuses it instead. |
+| `format` | The format version. This program writes and reads `5`. Version 2 lets one address carry a record per local variable as well as its own; version 3 adds a record per renamed register; version 4 adds a record for the block of bytes starting at an address, apart from the address's own; version 5 adds the `layout`. A reader of an older version would misread those records as the address's own, or read the image unmoved. A file naming a newer version is refused with a notice, not misread. An older file that gains a register or block record, or a layout, is written back at `5`, so a reader that would misread it refuses it instead. |
 | `target.path` | Where the target was when the project was written. |
 | `target.sha256` | The SHA-256 of the target, so a project can be checked against the binary it describes. |
 | `options` | The analysis options the run used, as name to value — the names `ag catalog` lists. |
+| `layout` | The layout the image is read under, when the analyst corrected the loader's: `base`, the address its lowest mapped page is moved to, and `segments`, the edits in order — `{ "action": "add", "name", "address", "size", "file_offset", "executable" }`, `{ "action": "remove", "name" }`, `{ "action": "rename", "name", "to" }`. Addresses are the moved image's; a reader applies the base first. Left out when it changes nothing. |
 | `annotations` | The analyst's changes, in the order they were made. |
 
 ## An annotation

@@ -74,6 +74,11 @@ impl Image {
         &self.name
     }
 
+    /// The bytes of the file, as read.
+    pub fn file_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// The SLEIGH language id the loader resolved, such as `x86:LE:64:default:gcc`.
     pub fn language(&self) -> String {
         String::from_utf8_lossy(self.inner.arch_id()).into_owned()

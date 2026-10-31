@@ -48,7 +48,13 @@ impl BinaryProvider {
     /// Read the image in the file at `path`, lifting its functions under
     /// `options` (`--option NAME VALUE` on the command line).
     pub fn load_with_options(path: &Path, options: Options) -> Result<Self> {
-        let binary = Arc::new(Binary::open(path)?.with_options(options));
+        Self::load_with(path, options, &ag_image::Layout::default())
+    }
+
+    /// Read the image in the file at `path` under the analyst's `layout`,
+    /// lifting its functions under `options`.
+    pub fn load_with(path: &Path, options: Options, layout: &ag_image::Layout) -> Result<Self> {
+        let binary = Arc::new(Binary::open_with_layout(path, layout)?.with_options(options));
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

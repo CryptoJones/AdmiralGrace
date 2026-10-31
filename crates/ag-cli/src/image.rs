@@ -22,6 +22,10 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// A project file whose layout — the base and the segments — the
+        /// image is read under.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The function and data symbols of the image.
     Symbols {
@@ -35,6 +39,10 @@ pub enum ImageCmd {
         /// May be repeated; `ag catalog` lists the options.
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
+        /// A project file whose layout — the base and the segments — the
+        /// image is read under.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The disassembly of one function.
     Disasm {
@@ -538,20 +546,28 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
         }
         _ => Options::default(),
     };
-    let image = Binary::open(binary)
-        .with_context(|| format!("reading {}", binary.display()))?
-        .with_options(options);
-    // The analyst's jump-table notes stand in where the walk cannot read
-    // a table from the code; they come from the project file, when one is
-    // named.
+    // The project file, when one is named: the image is read under its
+    // layout, and told its patches and its jump-table notes — the notes
+    // stand in where the walk cannot read a table from the code.
     let project = match &cmd {
-        ImageCmd::Disasm { project, .. }
+        ImageCmd::Info { project, .. }
+        | ImageCmd::Symbols { project, .. }
+        | ImageCmd::Disasm { project, .. }
         | ImageCmd::Cfg { project, .. }
-        | ImageCmd::Pseudocode { project, .. } => project.clone(),
+        | ImageCmd::Pseudocode { project, .. } => project
+            .as_deref()
+            .map(ag_corpus::project::ProjectFile::load)
+            .transpose()?,
         _ => None,
     };
+    let layout = match &project {
+        Some(project) => crate::project::layout_of(project)?,
+        None => ag_image::Layout::default(),
+    };
+    let image = Binary::open_with_layout(binary, &layout)
+        .with_context(|| format!("reading {}", binary.display()))?
+        .with_options(options);
     if let Some(project) = project {
-        let project = ag_corpus::project::ProjectFile::load(&project)?;
         // The analyst's patches are the bytes the image is read with.
         image.set_patches(project.patches());
         let notes = project.jump_tables();
@@ -573,7 +589,7 @@ pub fn run(binary: &Path, cmd: ImageCmd) -> Result<i32> {
     }
 
     match cmd {
-        ImageCmd::Info { json } => info(&image, json),
+        ImageCmd::Info { json, .. } => info(&image, json),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
         ImageCmd::Disasm { target, json, .. } => disasm(&image, &target, json),
         ImageCmd::Strings {

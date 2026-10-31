@@ -1374,3 +1374,147 @@ fn a_copy_is_written_whole_with_the_sources_mode_and_never_into_a_link_to_it() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_image_is_read_under_a_layout_moved_and_with_its_segments_edited() {
+    use ag_image::{Layout, SegmentEdit};
+
+    // Moved to 0x400000: every section, function, import and the entry
+    // move with it, and the listing reads at the moved addresses.
+    let moved = Binary::open_with_layout(
+        &sample_path(),
+        &Layout {
+            base: Some(0x400000),
+            segments: Vec::new(),
+        },
+    )
+    .expect("the sample loads moved");
+    assert_eq!(sample().base(), Some(0));
+    assert_eq!(moved.base(), Some(0x400000));
+    assert_eq!(moved.entry(), Some(0x401060));
+    let text = moved
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect(".text");
+    assert_eq!(text.vma, 0x401060);
+    let main = moved
+        .functions()
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main");
+    assert_eq!(main.address, 0x401198);
+    assert!(moved.imports().keys().all(|slot| *slot >= 0x400000));
+    let listing = moved.disassembly(0x401198).expect("main is decoded");
+    assert_eq!(listing.function, 0x401198);
+    assert!(moved
+        .strings()
+        .iter()
+        .all(|string| string.address >= 0x400000));
+    assert_eq!(moved.strings().len(), sample().strings().len());
+    // The bytes at the moved address are the file's bytes of `add`.
+    assert_eq!(moved.bytes_at(0x401149, 4), sample().bytes_at(0x1149, 4));
+
+    // Segments renamed, removed and added, in the moved image's addresses.
+    let edited = Binary::open_with_layout(
+        &sample_path(),
+        &Layout {
+            base: Some(0x400000),
+            segments: vec![
+                SegmentEdit::Rename {
+                    name: ".text".into(),
+                    to: "code".into(),
+                },
+                SegmentEdit::Remove {
+                    name: ".comment".into(),
+                },
+                SegmentEdit::Add {
+                    name: "extra".into(),
+                    vma: 0x405000,
+                    size: 16,
+                    file_offset: Some(0x3000),
+                    executable: false,
+                },
+            ],
+        },
+    )
+    .expect("the sample loads edited");
+    let names: Vec<&str> = edited
+        .sections()
+        .iter()
+        .map(|section| section.name.as_str())
+        .collect();
+    assert!(names.contains(&"code"), "{names:?}");
+    assert!(!names.contains(&".text"), "{names:?}");
+    assert!(!names.contains(&".comment"), "{names:?}");
+    let extra = edited
+        .sections()
+        .iter()
+        .find(|section| section.name == "extra")
+        .expect("extra");
+    assert_eq!(
+        (extra.vma, extra.size, extra.file_size),
+        (0x405000, 16, Some(16))
+    );
+    let original = std::fs::read(sample_path()).expect("the sample's bytes");
+    assert_eq!(
+        edited.bytes_at(0x405000, 16).as_deref(),
+        Some(&original[0x3000..0x3010])
+    );
+    assert_eq!(edited.disassembly(0x401198).expect("main").section, "code");
+
+    // What the image cannot take is refused by name.
+    let refused = |segments: Vec<SegmentEdit>| {
+        Binary::open_with_layout(
+            &sample_path(),
+            &Layout {
+                base: None,
+                segments,
+            },
+        )
+        .expect_err("refused")
+        .to_string()
+    };
+    assert!(refused(vec![SegmentEdit::Add {
+        name: "clash".into(),
+        vma: 0x1070,
+        size: 4,
+        file_offset: None,
+        executable: true,
+    }])
+    .contains("overlaps .text"));
+    assert!(refused(vec![SegmentEdit::Remove {
+        name: "nosuch".into()
+    }])
+    .contains("no segment named nosuch"));
+    assert!(refused(vec![SegmentEdit::Rename {
+        name: ".text".into(),
+        to: ".data".into(),
+    }])
+    .contains("already has a segment named .data"));
+    assert!(refused(vec![SegmentEdit::Add {
+        name: "far".into(),
+        vma: 0x9000,
+        size: 16,
+        file_offset: Some(0x1_0000_0000),
+        executable: false,
+    }])
+    .contains("past the end of the file"));
+
+    // A removed code segment takes its functions with it.
+    let without = Binary::open_with_layout(
+        &sample_path(),
+        &Layout {
+            base: None,
+            segments: vec![SegmentEdit::Remove {
+                name: ".text".into(),
+            }],
+        },
+    )
+    .expect("loads");
+    assert!(without
+        .functions()
+        .iter()
+        .all(|function| function.name != "main"));
+    assert_eq!(without.entry(), None);
+}

@@ -411,15 +411,28 @@ impl std::fmt::Debug for Binary {
 impl Binary {
     /// Read the image in the file at `path`.
     pub fn open(path: &Path) -> Result<Binary> {
+        Self::open_with_layout(path, &Layout::default())
+    }
+
+    /// Read the image at `path` under the analyst's `layout`: moved to the
+    /// base it names, with the segments it adds, removes and renames.
+    ///
+    /// The layout is applied before anything is decoded or walked, so every
+    /// address the image reports is the moved one. A layout the image
+    /// cannot take — a segment over another, a name it has no segment by —
+    /// is an error that names what is wrong.
+    pub fn open_with_layout(path: &Path, layout: &Layout) -> Result<Binary> {
         let image = Image::open(path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Binary::from_image(image))
+        let mut binary = Binary::from_image(&image);
+        binary.apply_layout(layout, image.file_bytes())?;
+        Ok(binary)
     }
 
     /// Read the image out of the engine's loader.
     ///
     /// The image is read here and dropped: what is kept is plain data, so the
     /// result can be shared between threads.
-    fn from_image(image: Image) -> Binary {
+    fn from_image(image: &Image) -> Binary {
         let language = image.language();
         // The decoder reads x86 of either width, and the language says which
         // this image is. An image of another architecture has no bitness
@@ -590,6 +603,194 @@ impl Binary {
             *held = None;
         }
         true
+    }
+
+    /// The address the image is loaded at: the lowest address a mapped
+    /// section has, rounded down to the page.
+    pub fn base(&self) -> Option<u64> {
+        self.sections
+            .iter()
+            .filter(|section| section.vma != 0)
+            .map(|section| section.vma & !0xfff)
+            .min()
+    }
+
+    /// Read the image under `layout`, with `file` the bytes of the file it
+    /// came from: moved to the base the layout names, then its segments
+    /// edited in the order given, in the moved image's addresses.
+    fn apply_layout(&mut self, layout: &Layout, file: &[u8]) -> Result<()> {
+        if layout.base.is_none() && layout.segments.is_empty() {
+            return Ok(());
+        }
+        if let Some(base) = layout.base {
+            let from = self
+                .base()
+                .context("the image has no mapped section to move")?;
+            self.rebase(base.wrapping_sub(from));
+        }
+        for edit in &layout.segments {
+            match edit {
+                SegmentEdit::Add {
+                    name,
+                    vma,
+                    size,
+                    file_offset,
+                    executable,
+                } => self.add_segment(name, *vma, *size, *file_offset, *executable, file)?,
+                SegmentEdit::Remove { name } => self.remove_segment(name)?,
+                SegmentEdit::Rename { name, to } => self.rename_segment(name, to)?,
+            }
+        }
+        // The strings are found again: a segment added holds some, one
+        // removed held some, and every one sits at a moved address.
+        let (strings, wide_strings) = scan_strings(&self.file);
+        self.strings = strings;
+        self.wide_strings = wide_strings;
+        Ok(())
+    }
+
+    /// Move every address of the image by `delta`. Nothing has been decoded
+    /// yet when this runs, so there is nothing to forget.
+    fn rebase(&mut self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        let shift = |address: u64| address.wrapping_add(delta);
+        for section in self.sections.iter_mut().filter(|section| section.vma != 0) {
+            section.vma = shift(section.vma);
+        }
+        for held in self.file.iter_mut().filter(|held| held.section.vma != 0) {
+            held.section.vma = shift(held.section.vma);
+        }
+        for function in &mut self.functions {
+            function.address = shift(function.address);
+        }
+        for datum in &mut self.data {
+            datum.address = shift(datum.address);
+        }
+        self.imports = std::mem::take(&mut self.imports)
+            .into_iter()
+            .map(|(slot, name)| (shift(slot), name))
+            .collect();
+        self.entry = self.entry.map(shift);
+    }
+
+    /// Add the segment `name` at `vma`, `size` bytes long, holding the
+    /// file's bytes from `file_offset` when the file holds them.
+    fn add_segment(
+        &mut self,
+        name: &str,
+        vma: u64,
+        size: u64,
+        file_offset: Option<u64>,
+        executable: bool,
+        file: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(!name.is_empty(), "a segment needs a name");
+        anyhow::ensure!(vma != 0, "a segment at address 0 would not be mapped");
+        anyhow::ensure!(size > 0, "the segment {name} has no size");
+        let end = vma.checked_add(size).with_context(|| {
+            format!("the segment {name} runs past the end of the address space")
+        })?;
+        anyhow::ensure!(
+            !self.sections.iter().any(|section| section.name == name),
+            "the image already has a segment named {name}"
+        );
+        if let Some(other) = self
+            .sections
+            .iter()
+            .filter(|section| section.vma != 0)
+            .find(|section| section.vma < end && vma < section.vma.saturating_add(section.size))
+        {
+            anyhow::bail!(
+                "the segment {name} at {vma:#x} overlaps {} at {:#x}",
+                other.name,
+                other.vma
+            );
+        }
+        let held = match file_offset {
+            Some(offset) => {
+                let start = usize::try_from(offset)
+                    .ok()
+                    .filter(|start| *start < file.len())
+                    .with_context(|| {
+                        format!("the file offset {offset:#x} of {name} is past the end of the file")
+                    })?;
+                let count = (file.len() - start).min(usize::try_from(size).unwrap_or(usize::MAX));
+                Some((start, count))
+            }
+            None => None,
+        };
+        let section = SectionInfo {
+            name: name.to_string(),
+            vma,
+            size,
+            executable,
+            file_offset,
+            file_size: held.map(|(_, count)| count as u64),
+        };
+        if let Some((start, count)) = held {
+            self.file.push(FileSection {
+                section: section.clone(),
+                bytes: file[start..start + count].to_vec(),
+                bitness: self.bitness.unwrap_or(Bitness::Bits64),
+                decoded: Mutex::new(None),
+            });
+            self.file
+                .sort_by_key(|held| (held.section.vma == 0, held.section.vma));
+        }
+        self.sections.push(section);
+        // Mapped sections in address order, the unmapped ones after them,
+        // as the container lists its own.
+        self.sections
+            .sort_by_key(|section| (section.vma == 0, section.vma));
+        Ok(())
+    }
+
+    /// Remove the segment `name`, and with it the functions, data and
+    /// import slots that lay in it: they have no bytes to be read from.
+    fn remove_segment(&mut self, name: &str) -> Result<()> {
+        let index = self
+            .sections
+            .iter()
+            .position(|section| section.name == name)
+            .with_context(|| format!("the image has no segment named {name}"))?;
+        let gone = self.sections.remove(index);
+        self.file.retain(|held| held.section.name != name);
+        if gone.vma != 0 {
+            let within =
+                |address: u64| gone.vma <= address && address < gone.vma.saturating_add(gone.size);
+            self.functions.retain(|function| !within(function.address));
+            self.data.retain(|datum| !within(datum.address));
+            self.imports.retain(|slot, _| !within(*slot));
+            if self.entry.is_some_and(within) {
+                self.entry = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Call the segment `name` `to`.
+    fn rename_segment(&mut self, name: &str, to: &str) -> Result<()> {
+        anyhow::ensure!(!to.is_empty(), "a segment needs a name");
+        anyhow::ensure!(
+            !self.sections.iter().any(|section| section.name == to),
+            "the image already has a segment named {to}"
+        );
+        let section = self
+            .sections
+            .iter_mut()
+            .find(|section| section.name == name)
+            .with_context(|| format!("the image has no segment named {name}"))?;
+        section.name = to.to_string();
+        for held in self
+            .file
+            .iter_mut()
+            .filter(|held| held.section.name == name)
+        {
+            held.section.name = to.to_string();
+        }
+        Ok(())
     }
 
     /// The bytes the analyst wrote over the image's, by address.
@@ -1647,6 +1848,47 @@ impl Symbols for ImageSymbols<'_> {
             .function_name(address)
             .map(|name| Pointee::Function(name.to_string()))
     }
+}
+
+/// The layout the analyst reads an image under, correcting the loader's:
+/// the base it is moved to, and the segments added, removed and renamed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layout {
+    /// The address the image is moved to, when it is: its lowest mapped
+    /// page goes here, and every address with it.
+    pub base: Option<u64>,
+    /// The edits to the segments, in order, in the moved image's addresses.
+    pub segments: Vec<SegmentEdit>,
+}
+
+/// One change to an image's segments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentEdit {
+    /// A segment the loader missed.
+    Add {
+        /// Its name.
+        name: String,
+        /// The address it maps to.
+        vma: u64,
+        /// Its size in memory.
+        size: u64,
+        /// Where its bytes start in the file, when the file holds them.
+        file_offset: Option<u64>,
+        /// Whether it holds code.
+        executable: bool,
+    },
+    /// A segment taken out of the image.
+    Remove {
+        /// Its name.
+        name: String,
+    },
+    /// A segment called something else.
+    Rename {
+        /// Its name.
+        name: String,
+        /// Its new name.
+        to: String,
+    },
 }
 
 /// Whether `a` and `b` name one file — the same file on the same device,

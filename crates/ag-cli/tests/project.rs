@@ -433,7 +433,7 @@ fn a_color_is_set_normalized_and_cleared() {
     let report = show_json(&file);
     assert_eq!(
         report["format"],
-        serde_json::json!(4),
+        serde_json::json!(5),
         "a block record names the version"
     );
     let annotations = report["annotations"].as_array().expect("the annotations");
@@ -966,4 +966,98 @@ fn a_copy_of_the_target_is_written_with_the_patches_in_it() {
         "--force",
     ]);
     assert!(ok, "{stderr}");
+}
+
+#[test]
+fn the_image_is_rebased_and_its_segments_edited_through_the_project() {
+    let file = TempFile::new("layout");
+    let image = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("sample.elf"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // Moved to 0x400000, the image's symbols, sections and listing follow.
+    let (ok, stdout, stderr) = project(&["rebase", "--file", &file.text(), "0x400000"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("read at 0x400000"), "{stdout}");
+    let (ok, stdout, stderr) = image(&["symbols", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x401198 main"), "{stdout}");
+    let (ok, stdout, stderr) = image(&["info", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains(".text vma=0x401060"), "{stdout}");
+    assert!(stdout.contains("entry: 0x401060"), "{stdout}");
+    let (ok, stdout, stderr) = image(&["disasm", "main", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("401198"), "{stdout}");
+
+    // Segments renamed, removed and added, in the moved image's addresses.
+    let (ok, _, stderr) = project(&["segment", "--file", &file.text(), "rename", ".text", "code"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["segment", "--file", &file.text(), "remove", ".comment"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project(&[
+        "segment",
+        "--file",
+        &file.text(),
+        "add",
+        "extra",
+        "0x405000",
+        "0x10",
+        "--file-offset",
+        "0x3000",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("segment extra added at 0x405000, 16 bytes"),
+        "{stdout}"
+    );
+    let (ok, stdout, stderr) = image(&["info", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("code vma=0x401060"), "{stdout}");
+    assert!(!stdout.contains(".comment"), "{stdout}");
+    assert!(stdout.contains("extra vma=0x405000 size=16"), "{stdout}");
+
+    // What the image cannot take is refused before it is written.
+    let (ok, _, stderr) = project(&[
+        "segment",
+        "--file",
+        &file.text(),
+        "add",
+        "clash",
+        "0x401070",
+        "4",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("overlaps code"), "{stderr}");
+    let (ok, _, stderr) = project(&["segment", "--file", &file.text(), "remove", "nosuch"]);
+    assert!(!ok);
+    assert!(stderr.contains("no segment named nosuch"), "{stderr}");
+    let (ok, _, stderr) = project(&["segment", "--file", &file.text(), "rename", "code", "extra"]);
+    assert!(!ok);
+    assert!(stderr.contains("already"), "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(report["format"], serde_json::json!(5));
+    assert_eq!(report["layout"]["base"], serde_json::json!("0x400000"));
+    assert_eq!(
+        report["layout"]["segments"].as_array().map(Vec::len),
+        Some(3),
+        "{report}"
+    );
+
+    // Put back, the image reads where the loader puts it.
+    let (ok, _, stderr) = project(&["rebase", "--file", &file.text(), "none"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = image(&["symbols", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1198 main"), "{stdout}");
 }

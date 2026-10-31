@@ -219,6 +219,23 @@ pub enum ProjectCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Move the whole image to a new base address, or put it back.
+    Rebase {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address the image's lowest mapped page goes to, or `none`.
+        base: String,
+    },
+    /// Add, remove or rename a segment of the image.
+    Segment {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The edit.
+        #[command(subcommand)]
+        edit: SegmentCmd,
+    },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
         /// The project file to read.
@@ -275,6 +292,8 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             force,
         } => save(&target, &out, options, force),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
+        ProjectCmd::Rebase { file, base } => rebase(&target, &file, &base),
+        ProjectCmd::Segment { file, edit } => segment(&target, &file, edit),
         ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
         ProjectCmd::Rename {
             file,
@@ -613,6 +632,164 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
         std::fs::metadata(target)?.len(),
         project.options.len()
     );
+    Ok(0)
+}
+
+/// One edit to the image's segments.
+#[derive(Subcommand)]
+pub enum SegmentCmd {
+    /// Add a segment the loader missed.
+    Add {
+        /// Its name.
+        name: String,
+        /// The address it maps to, in the moved image's addresses.
+        address: String,
+        /// Its size in memory, in bytes (`16` or `0x10`).
+        size: String,
+        /// Where its bytes start in the file, when the file holds them.
+        #[arg(long)]
+        file_offset: Option<String>,
+        /// The segment holds code.
+        #[arg(long)]
+        exec: bool,
+    },
+    /// Take a segment out of the image.
+    Remove {
+        /// Its name.
+        name: String,
+    },
+    /// Call a segment something else.
+    Rename {
+        /// Its name.
+        name: String,
+        /// Its new name.
+        to: String,
+    },
+}
+
+/// The layout `project` records, in the image's terms, or why it does not
+/// read as one.
+pub fn layout_of(project: &ProjectFile) -> Result<ag_image::Layout> {
+    let address = |text: &str| -> Result<u64> {
+        ag_corpus::parse_addr_space(text)
+            .map(|(value, _)| value)
+            .map_err(|_| anyhow::anyhow!("{text:?} in the layout is not an address"))
+    };
+    let base = project.layout.base.as_deref().map(address).transpose()?;
+    let mut segments = Vec::new();
+    for edit in &project.layout.segments {
+        segments.push(match edit {
+            ag_corpus::project::SegmentEdit::Add {
+                name,
+                address: at,
+                size,
+                file_offset,
+                executable,
+            } => ag_image::SegmentEdit::Add {
+                name: name.clone(),
+                vma: address(at)?,
+                size: *size,
+                file_offset: file_offset.as_deref().map(address).transpose()?,
+                executable: *executable,
+            },
+            ag_corpus::project::SegmentEdit::Remove { name } => {
+                ag_image::SegmentEdit::Remove { name: name.clone() }
+            }
+            ag_corpus::project::SegmentEdit::Rename { name, to } => ag_image::SegmentEdit::Rename {
+                name: name.clone(),
+                to: to.clone(),
+            },
+        });
+    }
+    Ok(ag_image::Layout { base, segments })
+}
+
+/// A number as the command line spells it: decimal, or hex with `0x`.
+fn number(text: &str) -> Result<u64> {
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => text.parse(),
+    }
+    .with_context(|| format!("{text:?} is not a number"))
+}
+
+/// Read `target` under the layout `project` now records, so a layout the
+/// image cannot take is refused before it is written.
+fn check_layout(target: &Path, project: &ProjectFile) -> Result<()> {
+    let layout = layout_of(project)?;
+    ag_image::Binary::open_with_layout(target, &layout)
+        .with_context(|| format!("reading {} under the layout", target.display()))?;
+    Ok(())
+}
+
+/// Move the image to `base`, or put it back with `none`.
+fn rebase(target: &Path, file: &Path, base: &str) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    let base = match base {
+        "none" => None,
+        text => Some(
+            ag_corpus::parse_addr_space(text)
+                .map(|(value, _)| value)
+                .map_err(|_| anyhow::anyhow!("{text:?} is not an address"))?,
+        ),
+    };
+    project.set_base(base);
+    check_layout(target, &project)?;
+    project.save(file)?;
+    match base {
+        Some(base) => println!("{}: the image is read at {base:#x}", file.display()),
+        None => println!(
+            "{}: the image is read where the loader puts it",
+            file.display()
+        ),
+    }
+    Ok(0)
+}
+
+/// Add, remove or rename a segment.
+fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
+    use ag_corpus::project::SegmentEdit;
+    let mut project = open_project(target, file)?;
+    let (edit, said) = match edit {
+        SegmentCmd::Add {
+            name,
+            address,
+            size,
+            file_offset,
+            exec,
+        } => {
+            let at = ag_corpus::parse_addr_space(&address)
+                .map(|(value, _)| value)
+                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let size = number(&size)?;
+            let offset = file_offset.as_deref().map(number).transpose()?;
+            let said = format!("segment {name} added at {at:#x}, {size} bytes");
+            (
+                SegmentEdit::Add {
+                    name,
+                    address: format!("{at:#x}"),
+                    size,
+                    file_offset: offset.map(|offset| format!("{offset:#x}")),
+                    executable: exec,
+                },
+                said,
+            )
+        }
+        SegmentCmd::Remove { name } => {
+            let said = format!("segment {name} removed");
+            (SegmentEdit::Remove { name }, said)
+        }
+        SegmentCmd::Rename { name, to } => {
+            let said = format!("segment {name} renamed {to}");
+            (SegmentEdit::Rename { name, to }, said)
+        }
+    };
+    project
+        .edit_segment(edit)
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+    check_layout(target, &project)?;
+    project.save(file)?;
+    println!("{}: {said}", file.display());
     Ok(0)
 }
 
