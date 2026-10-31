@@ -122,6 +122,19 @@ block that reaches it — and the graph is drawn to fit the pane. It can be drag
 mouse and zoomed with the wheel, and clicking a box moves the selection to the start of
 that block.
 
+A minimap of the whole graph sits in the pane's bottom right corner — every block a mark, the
+selected one bright, the part of the graph the pane shows outlined — and a click on it moves
+the view there. The arrow keys walk the graph while the tab is open: Down follows the
+fall-through out of the selected block, Up goes to the block that reaches it, Left and Right
+move along its row. The keys reach the graph from any pane, so Up and Down typed into a
+filter field while the tab is open move the selection too. **Block text…** (Ctrl+Shift+L, or
+the inspector's button, or the Edit menu) puts the
+analyst's own title on the block holding the selection, in place of its range of addresses;
+**Group…** (Ctrl+G) puts the block in a named group, and every block of the function in one
+group is drawn as one node under the name, with a line per member and the ways in and out of
+the group as its arrows — empty text takes the block out again. Both are kept in the project
+file beside the block's highlight.
+
 The kind of an arrow is worked out by the rule the `ag image cfg` command reports by, so
 the workbench and the command line name an edge the same way: the way that is the address
 after the block is the fall-through, and every other way is the branch that is taken.

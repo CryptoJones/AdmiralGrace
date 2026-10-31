@@ -122,7 +122,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .push(note_button("＋ Add comment", Message::EditComment))
             .push(note_button("☆ Bookmark", Message::EditBookmark))
             .push(note_button("# Tags", Message::EditTags))
-            .push(note_button("◆ Highlight", Message::EditColor)),
+            .push(note_button("◆ Highlight", Message::EditColor))
+            .push(note_button("▭ Block text", Message::EditBlockText))
+            .push(note_button("⊞ Group", Message::EditGroup)),
     );
 
     scrollable(column)

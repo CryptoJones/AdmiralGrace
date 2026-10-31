@@ -144,6 +144,38 @@ pub struct GraphNode {
     /// The analyst's highlight on the block — its own, or its function's —
     /// when there is one.
     pub color: Option<Color>,
+    /// The analyst's text on the block, when there is one: its title, in
+    /// place of the range of addresses.
+    pub label: Option<String>,
+    /// The group the node stands for, when it is several blocks drawn as
+    /// one: the group's name, and how many blocks are in it.
+    pub group: Option<(String, usize)>,
+    /// The blocks the node stands for, as `(from, to)`: the one block, or
+    /// a group's members — which need not be side by side, so the span
+    /// from `from` to `to` may hold blocks of other nodes.
+    pub members: Vec<(u64, u64)>,
+}
+
+impl GraphNode {
+    /// Whether `address` is in a block the node stands for.
+    pub fn contains(&self, address: u64) -> bool {
+        self.members
+            .iter()
+            .any(|(from, to)| *from <= address && address < *to)
+    }
+}
+
+/// A way the selection moves through the graph by the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// To a block that reaches this one.
+    Up,
+    /// To a block this one goes on to.
+    Down,
+    /// To the block beside this one on the left.
+    Left,
+    /// To the block beside this one on the right.
+    Right,
 }
 
 /// An edge between two blocks.
@@ -218,11 +250,50 @@ pub struct View {
 /// The edges come from the provider, with the kind each edge has, and are
 /// routed around the blocks they do not connect.
 pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
-    let blocks = &graph.blocks;
+    // The blocks the analyst grouped are drawn as one: every group is one
+    // synthetic block spanning its members, with the ways out of the group
+    // as its successors, and one line per member.
+    let (grouped, groups) = grouped_blocks(graph, renamed);
+    let blocks = &grouped;
 
     let mut nodes: Vec<GraphNode> = blocks
         .iter()
         .map(|block| {
+            if let Some((name, members)) = groups.get(&block.from) {
+                let lines: Vec<GraphLine> = members
+                    .iter()
+                    .enumerate()
+                    .map(|(row, (from, to, count))| GraphLine {
+                        address: format!("{from:08X}"),
+                        bytes: String::new(),
+                        mnemonic: format!("{from:#x} - {to:#x}"),
+                        operands: format!(
+                            "{count} instruction{}",
+                            if *count == 1 { "" } else { "s" }
+                        ),
+                        comment: None,
+                        comment_above: false,
+                        row,
+                        color: None,
+                    })
+                    .collect();
+                let height = HEADER_HEIGHT + PADDING * 2.0 + lines.len() as f32 * LINE_HEIGHT;
+                return GraphNode {
+                    from: block.from,
+                    to: block.to,
+                    rank: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    width: NODE_WIDTH,
+                    height,
+                    lines,
+                    branching: block.successors.len() > 1,
+                    color: renamed.block_color(block.from).or(renamed.function_color()),
+                    label: renamed.block_label(block.from).map(str::to_string),
+                    group: Some((name.clone(), members.len())),
+                    members: members.iter().map(|(from, to, _)| (*from, *to)).collect(),
+                };
+            }
             // Each instruction takes a row, and an above-comment takes one
             // more over it. The rows are numbered as they are laid out so
             // the painter draws a note directly over its instruction, and
@@ -256,6 +327,9 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
                 // The block's own color, or the function's for every
                 // block the analyst did not color apart.
                 color: renamed.block_color(block.from).or(renamed.function_color()),
+                label: renamed.block_label(block.from).map(str::to_string),
+                group: None,
+                members: vec![(block.from, block.to)],
             }
         })
         .collect();
@@ -297,6 +371,26 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
     }
 
     let mut edges = drawn_edges(graph);
+    // An edge into or out of a group's member is the group's; one inside
+    // the group is not drawn; the same way twice is drawn once.
+    if !groups.is_empty() {
+        let node_of = |address: u64| -> u64 {
+            groups
+                .iter()
+                .find(|(_, (_, members))| members.iter().any(|(from, _, _)| *from == address))
+                .map(|(from, _)| *from)
+                .unwrap_or(address)
+        };
+        for edge in &mut edges {
+            edge.from = node_of(edge.from);
+            edge.to = node_of(edge.to);
+        }
+        edges.retain(|edge| edge.from != edge.to || !groups.contains_key(&edge.from));
+        // The first of the two keeps its kind: a node standing for several
+        // blocks has no one way out to color the arrow by.
+        let mut seen = HashSet::new();
+        edges.retain(|edge| seen.insert((edge.from, edge.to)));
+    }
 
     // Every edge is routed around the blocks it does not connect.
     for edge in &mut edges {
@@ -358,6 +452,234 @@ pub fn layout(graph: &Graph, renamed: &crate::app::Renames) -> GraphLayout {
         width,
         height,
     }
+}
+
+/// The blocks of a graph with the analyst's groups merged: each group is
+/// one block spanning its members, its successors the ways out of the
+/// group; and, by the merged block's start, each group's name and its
+/// members as `(from, to, instructions)`. A block in no group is itself.
+#[allow(clippy::type_complexity)]
+fn grouped_blocks(
+    graph: &Graph,
+    renamed: &crate::app::Renames,
+) -> (
+    Vec<GraphBlock>,
+    HashMap<u64, (String, Vec<(u64, u64, usize)>)>,
+) {
+    let mut by_name: Vec<(String, Vec<&GraphBlock>)> = Vec::new();
+    for block in &graph.blocks {
+        if let Some(name) = renamed.block_group(block.from) {
+            match by_name.iter_mut().find(|(group, _)| group == name) {
+                Some((_, members)) => members.push(block),
+                None => by_name.push((name.to_string(), vec![block])),
+            }
+        }
+    }
+    if by_name.is_empty() {
+        return (graph.blocks.clone(), HashMap::new());
+    }
+    // Every member's start is the start of its group, so a way into a
+    // member of any group — this one or another — is a way to the group.
+    let mut merged: HashMap<u64, u64> = HashMap::new();
+    for (_, members) in &by_name {
+        let from = members.iter().map(|block| block.from).min().unwrap_or(0);
+        for block in members {
+            merged.insert(block.from, from);
+        }
+    }
+    let mut groups = HashMap::new();
+    let mut blocks = Vec::new();
+    for (name, members) in &by_name {
+        let from = members.iter().map(|block| block.from).min().unwrap_or(0);
+        let to = members.iter().map(|block| block.to).max().unwrap_or(0);
+        let mut successors: Vec<u64> = members
+            .iter()
+            .flat_map(|block| block.successors.iter().copied())
+            .map(|successor| merged.get(&successor).copied().unwrap_or(successor))
+            .filter(|successor| *successor != from)
+            .collect();
+        successors.sort_unstable();
+        successors.dedup();
+        groups.insert(
+            from,
+            (
+                name.clone(),
+                members
+                    .iter()
+                    .map(|block| (block.from, block.to, block.instructions.len()))
+                    .collect(),
+            ),
+        );
+        blocks.push(GraphBlock {
+            from,
+            to,
+            successors,
+            instructions: Vec::new(),
+        });
+    }
+    // The blocks in no group keep their place, their successors pointing
+    // at a group where a member was.
+    let mut all: Vec<GraphBlock> = graph
+        .blocks
+        .iter()
+        .filter(|block| !merged.contains_key(&block.from))
+        .map(|block| {
+            let mut block = block.clone();
+            for successor in &mut block.successors {
+                if let Some(group) = merged.get(successor) {
+                    *successor = *group;
+                }
+            }
+            block.successors.sort_unstable();
+            block.successors.dedup();
+            block
+        })
+        .collect();
+    all.extend(blocks);
+    all.sort_by_key(|block| block.from);
+    (all, groups)
+}
+
+/// The block the selection moves to from `current` in `direction`, by its
+/// start: down an edge that leaves the block holding `current` — the
+/// fall-through first — or to the nearest block of the row below; up an
+/// edge that arrives, or to the nearest block of the row above; left or
+/// right to the block beside it in its row.
+pub fn neighbour(layout: &GraphLayout, current: u64, direction: Direction) -> Option<u64> {
+    let node = layout
+        .nodes
+        .iter()
+        .find(|node| node.contains(current))
+        .or_else(|| layout.nodes.iter().find(|node| node.from == current))?;
+    let by_start = |from: u64| layout.nodes.iter().find(|node| node.from == from);
+    let nearest = |rank: usize| -> Option<u64> {
+        layout
+            .nodes
+            .iter()
+            .filter(|other| other.rank == rank)
+            .min_by(|a, b| {
+                let da = (a.x - node.x).abs();
+                let db = (b.x - node.x).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|other| other.from)
+    };
+    match direction {
+        Direction::Down => {
+            let mut out: Vec<&GraphEdge> = layout
+                .edges
+                .iter()
+                .filter(|edge| edge.from == node.from && edge.to != node.from)
+                .collect();
+            // The fall-through first, then a way to a row below before a
+            // way back up, the nearest row first.
+            out.sort_by_key(|edge| {
+                let rank = by_start(edge.to).map_or(usize::MAX, |other| other.rank);
+                (
+                    edge.kind != ag_image::EdgeKind::Fallthrough,
+                    rank <= node.rank,
+                    rank,
+                )
+            });
+            out.first()
+                .map(|edge| edge.to)
+                .or_else(|| nearest(node.rank + 1))
+        }
+        Direction::Up => {
+            let mut into: Vec<&GraphEdge> = layout
+                .edges
+                .iter()
+                .filter(|edge| edge.to == node.from && edge.from != node.from)
+                .collect();
+            // A way from a row above before a loop back from below, the
+            // nearest row first.
+            into.sort_by_key(|edge| {
+                let rank = by_start(edge.from).map_or(0, |other| other.rank);
+                (rank >= node.rank, std::cmp::Reverse(rank))
+            });
+            into.first()
+                .map(|edge| edge.from)
+                .or_else(|| node.rank.checked_sub(1).and_then(nearest))
+        }
+        Direction::Left | Direction::Right => {
+            let mut row: Vec<&GraphNode> = layout
+                .nodes
+                .iter()
+                .filter(|other| other.rank == node.rank)
+                .collect();
+            row.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+            let index = row.iter().position(|other| other.from == node.from)?;
+            let next = if direction == Direction::Left {
+                index.checked_sub(1)?
+            } else {
+                index + 1
+            };
+            row.get(next).map(|other| other.from)
+        }
+    }
+}
+
+/// The width of the minimap, and the most height it takes.
+const MINIMAP_WIDTH: f32 = 160.0;
+const MINIMAP_MAX_HEIGHT: f32 = 110.0;
+/// The gap between the minimap and the pane's edge.
+const MINIMAP_MARGIN: f32 = 12.0;
+
+/// Where the minimap of the whole graph sits in a viewport: the bottom
+/// right corner, as wide as [`MINIMAP_WIDTH`] and as tall as the graph's
+/// shape asks, up to [`MINIMAP_MAX_HEIGHT`]. `None` for a graph of nothing,
+/// and for a viewport too small to spare the room.
+pub fn minimap_rect(layout: &GraphLayout, viewport: Size) -> Option<Rectangle> {
+    if layout.nodes.is_empty() || layout.width <= 0.0 || layout.height <= 0.0 {
+        return None;
+    }
+    if viewport.width < MINIMAP_WIDTH * 2.5 || viewport.height < MINIMAP_MAX_HEIGHT * 2.5 {
+        return None;
+    }
+    let height = (MINIMAP_WIDTH * layout.height / layout.width).clamp(24.0, MINIMAP_MAX_HEIGHT);
+    Some(Rectangle {
+        x: viewport.width - MINIMAP_WIDTH - MINIMAP_MARGIN,
+        y: viewport.height - height - MINIMAP_MARGIN,
+        width: MINIMAP_WIDTH,
+        height,
+    })
+}
+
+/// How the whole graph is drawn inside the minimap: fitted, and centred.
+pub fn minimap_view(layout: &GraphLayout, rect: Rectangle) -> View {
+    let inset = 4.0;
+    let scale = ((rect.width - inset * 2.0) / layout.width)
+        .min((rect.height - inset * 2.0) / layout.height)
+        .max(f32::MIN_POSITIVE);
+    View {
+        scale,
+        offset: Point::new(
+            rect.x + (rect.width - layout.width * scale) / 2.0,
+            rect.y + (rect.height - layout.height * scale) / 2.0,
+        ),
+    }
+}
+
+/// The pan that puts the graph point under `point` of the minimap at the
+/// centre of the viewport, at the zoom in force.
+pub fn minimap_pan(
+    layout: &GraphLayout,
+    viewport: Size,
+    rect: Rectangle,
+    zoom: f32,
+    point: Point,
+) -> Vector {
+    let mini = minimap_view(layout, rect);
+    let graph = Point::new(
+        (point.x - mini.offset.x) / mini.scale,
+        (point.y - mini.offset.y) / mini.scale,
+    );
+    let base = fit(layout, viewport);
+    let scale = base.scale * zoom;
+    Vector::new(
+        viewport.width / 2.0 - base.offset.x - graph.x * scale,
+        viewport.height / 2.0 - base.offset.y - graph.y * scale,
+    )
 }
 
 /// The edges of a graph, as the view draws them.
@@ -658,7 +980,7 @@ impl GraphProgram {
         let width = node.width * scale;
         let height = node.height * scale;
 
-        let focused = selected.is_some_and(|address| address >= node.from && address < node.to);
+        let focused = selected.is_some_and(|address| node.contains(address));
 
         let path = canvas::Path::rounded_rectangle(
             Point::new(x, y),
@@ -681,11 +1003,24 @@ impl GraphProgram {
 
         let size = (12.0 * scale).max(1.0);
 
-        // The header: the range of addresses the block covers.
+        // The header: the analyst's text on the block, the group's name
+        // and size, or the range of addresses the block covers.
+        let header = match (&node.group, &node.label) {
+            (Some((name, members)), _) => format!(
+                "⊞ {name} ({members} block{})",
+                if *members == 1 { "" } else { "s" }
+            ),
+            (None, Some(label)) => label.clone(),
+            (None, None) => format!("{:#x} - {:#x}", node.from, node.to),
+        };
         frame.fill_text(text(
-            &format!("{:#x} - {:#x}", node.from, node.to),
+            &header,
             Point::new(x + PADDING * scale, y + 4.0 * scale),
-            color::MUTED,
+            if node.label.is_some() || node.group.is_some() {
+                color::TEXT
+            } else {
+                color::MUTED
+            },
             size,
         ));
 
@@ -1005,6 +1340,27 @@ impl canvas::Program<Message> for GraphProgram {
 
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                // A press on the minimap moves the view there, and starts
+                // no drag.
+                if let Some(position) = position {
+                    let local = Point::new(
+                        position.x - bounds.position().x,
+                        position.y - bounds.position().y,
+                    );
+                    if let Some(rect) = minimap_rect(&self.layout, bounds.size()) {
+                        if rect.contains(local) {
+                            let zoom = if state.graph == self.id() {
+                                state.zoom
+                            } else {
+                                1.0
+                            };
+                            state.pan = minimap_pan(&self.layout, bounds.size(), rect, zoom, local);
+                            state.press = None;
+                            state.last = None;
+                            return Some(canvas::Action::request_redraw());
+                        }
+                    }
+                }
                 state.press = position;
                 state.last = position;
                 None
@@ -1119,6 +1475,69 @@ impl canvas::Program<Message> for GraphProgram {
 
         for node in &self.layout.nodes {
             self.draw_node(&mut frame, node, view, self.selected);
+        }
+
+        // The minimap: the whole graph small in the corner, every block a
+        // mark, the selected one bright, and the part of it the pane shows
+        // outlined.
+        if let Some(rect) = minimap_rect(&self.layout, bounds.size()) {
+            let mini = minimap_view(&self.layout, rect);
+            let panel = canvas::Path::rounded_rectangle(
+                Point::new(rect.x, rect.y),
+                Size::new(rect.width, rect.height),
+                4.0.into(),
+            );
+            frame.fill(&panel, color::PANEL);
+            frame.stroke(
+                &panel,
+                canvas::Stroke::default()
+                    .with_color(color::LINE)
+                    .with_width(1.0),
+            );
+            for node in &self.layout.nodes {
+                let focused = self.selected.is_some_and(|address| node.contains(address));
+                let tint = match (focused, node.color) {
+                    (true, _) => color::CYAN,
+                    (false, Some(tint)) => tinted(color::CARD, tint, 0.6),
+                    (false, None) => color::MUTED,
+                };
+                frame.fill_rectangle(
+                    Point::new(
+                        mini.offset.x + node.x * mini.scale,
+                        mini.offset.y + node.y * mini.scale,
+                    ),
+                    Size::new(
+                        (node.width * mini.scale).max(2.0),
+                        (node.height * mini.scale).max(1.5),
+                    ),
+                    tint,
+                );
+            }
+            // What the pane shows, in graph units, then in the minimap's.
+            let shown_x0 = ((0.0 - view.offset.x) / view.scale).clamp(0.0, self.layout.width);
+            let shown_y0 = ((0.0 - view.offset.y) / view.scale).clamp(0.0, self.layout.height);
+            let shown_x1 =
+                ((bounds.width - view.offset.x) / view.scale).clamp(0.0, self.layout.width);
+            let shown_y1 =
+                ((bounds.height - view.offset.y) / view.scale).clamp(0.0, self.layout.height);
+            if shown_x1 > shown_x0 && shown_y1 > shown_y0 {
+                let outline = canvas::Path::rectangle(
+                    Point::new(
+                        mini.offset.x + shown_x0 * mini.scale,
+                        mini.offset.y + shown_y0 * mini.scale,
+                    ),
+                    Size::new(
+                        (shown_x1 - shown_x0) * mini.scale,
+                        (shown_y1 - shown_y0) * mini.scale,
+                    ),
+                );
+                frame.stroke(
+                    &outline,
+                    canvas::Stroke::default()
+                        .with_color(color::CYAN)
+                        .with_width(1.0),
+                );
+            }
         }
 
         vec![frame.into_geometry()]
@@ -1435,6 +1854,160 @@ mod tests {
         let layout = layout(&graph_of(blocks), &crate::app::Renames::default());
 
         assert_eq!(layout.edges[0].kind, ag_image::EdgeKind::Taken);
+    }
+
+    #[test]
+    fn the_blocks_of_a_group_are_one_node_with_the_edges_remapped() {
+        // 0x1000 -> {0x1010, 0x1020}; 0x1010 -> 0x1030; 0x1020 -> 0x1030.
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010, 0x1020], 2),
+            block(0x1010, 0x1020, vec![0x1030], 3),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![], 1),
+        ]);
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_group(0x1010, "arms");
+        renamed.set_block_group(0x1020, "arms");
+        renamed.set_block_label(0x1030, "join");
+        let layout = layout(&graph, &renamed);
+        let starts: Vec<u64> = layout.nodes.iter().map(|node| node.from).collect();
+        assert_eq!(starts, [0x1000, 0x1010, 0x1030]);
+        let group = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == 0x1010)
+            .expect("the group");
+        assert_eq!(group.to, 0x1030);
+        assert_eq!(group.group, Some(("arms".to_string(), 2)));
+        assert_eq!(group.lines.len(), 2);
+        assert_eq!(group.lines[1].mnemonic, "0x1020 - 0x1030");
+        assert_eq!(group.lines[1].operands, "1 instruction");
+        let join = layout
+            .nodes
+            .iter()
+            .find(|node| node.from == 0x1030)
+            .expect("the join");
+        assert_eq!(join.label.as_deref(), Some("join"));
+        // Two edges into the group are one; the group goes on once.
+        let mut edges: Vec<(u64, u64)> = layout
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect();
+        edges.sort_unstable();
+        assert_eq!(edges, [(0x1000, 0x1010), (0x1010, 0x1030)]);
+        // The group sits below the entry and above the join.
+        assert!(group.rank > layout.nodes[0].rank);
+        assert!(join.rank > group.rank);
+    }
+
+    #[test]
+    fn a_way_from_one_group_to_another_reaches_the_other_group() {
+        // 0x1000 -> 0x1010 -> 0x1030; 0x1000 -> 0x1020 -> 0x1030; with
+        // {0x1010} one group and {0x1020, 0x1030} another, so the first
+        // group's way out lands in a member of the second.
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010, 0x1020], 2),
+            block(0x1010, 0x1020, vec![0x1030], 3),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![], 1),
+        ]);
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_group(0x1010, "a");
+        renamed.set_block_group(0x1020, "b");
+        renamed.set_block_group(0x1030, "b");
+        let (blocks, _) = grouped_blocks(&graph, &renamed);
+        let a = blocks.iter().find(|block| block.from == 0x1010).expect("a");
+        assert_eq!(a.successors, [0x1020]);
+        let layout = layout(&graph, &renamed);
+        let rank_of = |from: u64| layout.nodes.iter().find(|n| n.from == from).unwrap().rank;
+        assert!(rank_of(0x1010) > rank_of(0x1000));
+        assert!(rank_of(0x1020) > rank_of(0x1010));
+        // A group of blocks apart holds its members and nothing between.
+        let mut renamed = crate::app::Renames::default();
+        renamed.set_block_group(0x1000, "ends");
+        renamed.set_block_group(0x1030, "ends");
+        let apart = super::layout(&graph, &renamed);
+        let ends = apart.nodes.iter().find(|n| n.from == 0x1000).unwrap();
+        assert_eq!(ends.members, [(0x1000, 0x1010), (0x1030, 0x1040)]);
+        assert!(ends.contains(0x1034));
+        assert!(!ends.contains(0x1014));
+        assert_eq!(neighbour(&apart, 0x1014, Direction::Right), Some(0x1020));
+    }
+
+    #[test]
+    fn the_arrows_prefer_the_rows_they_are_named_for() {
+        // A loop: 0x1000 -> 0x1010 (header) -> 0x1020 -> 0x1030 -> 0x1010;
+        // 0x1030 -> 0x1040 leaves.
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010], 1),
+            block(0x1010, 0x1020, vec![0x1020], 1),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![0x1010, 0x1040], 2),
+            block(0x1040, 0x1050, vec![], 1),
+        ]);
+        let layout = layout(&graph, &crate::app::Renames::default());
+        // Up from the header goes to the entry above, not the latch below.
+        assert_eq!(neighbour(&layout, 0x1010, Direction::Up), Some(0x1000));
+        // Down from the latch takes the way out below over the loop back.
+        assert_eq!(neighbour(&layout, 0x1030, Direction::Down), Some(0x1040));
+    }
+
+    #[test]
+    fn the_arrows_walk_the_graph_from_block_to_block() {
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010, 0x1020], 2),
+            block(0x1010, 0x1020, vec![0x1030], 3),
+            block(0x1020, 0x1030, vec![0x1030], 1),
+            block(0x1030, 0x1040, vec![], 1),
+        ]);
+        let layout = layout(&graph, &crate::app::Renames::default());
+        // Down follows the fall-through first; up comes back; left and
+        // right move along the row; off the edge there is nowhere.
+        assert_eq!(neighbour(&layout, 0x1000, Direction::Down), Some(0x1010));
+        assert_eq!(neighbour(&layout, 0x1010, Direction::Right), Some(0x1020));
+        assert_eq!(neighbour(&layout, 0x1020, Direction::Left), Some(0x1010));
+        assert_eq!(neighbour(&layout, 0x1010, Direction::Left), None);
+        assert_eq!(neighbour(&layout, 0x1020, Direction::Down), Some(0x1030));
+        assert_eq!(neighbour(&layout, 0x1030, Direction::Up), Some(0x1010));
+        assert_eq!(neighbour(&layout, 0x1000, Direction::Up), None);
+        // An address inside a block moves from that block.
+        assert_eq!(neighbour(&layout, 0x1004, Direction::Down), Some(0x1010));
+        assert_eq!(neighbour(&layout, 0x9999, Direction::Down), None);
+    }
+
+    #[test]
+    fn the_minimap_sits_in_the_corner_and_maps_the_graph() {
+        let graph = graph_of(vec![
+            block(0x1000, 0x1010, vec![0x1010], 2),
+            block(0x1010, 0x1020, vec![], 3),
+        ]);
+        let layout = layout(&graph, &crate::app::Renames::default());
+        let viewport = Size::new(800.0, 600.0);
+        let rect = minimap_rect(&layout, viewport).expect("room for a minimap");
+        assert_eq!(rect.width, MINIMAP_WIDTH);
+        assert!(rect.x + rect.width <= viewport.width);
+        assert!(rect.y + rect.height <= viewport.height);
+        assert!(rect.height <= MINIMAP_MAX_HEIGHT);
+        // The whole graph fits inside it.
+        let mini = minimap_view(&layout, rect);
+        assert!(mini.offset.x >= rect.x && mini.offset.y >= rect.y);
+        assert!(mini.offset.x + layout.width * mini.scale <= rect.x + rect.width + 0.01);
+        assert!(mini.offset.y + layout.height * mini.scale <= rect.y + rect.height + 0.01);
+        // A click in the middle of the minimap centres the graph's middle.
+        let middle = Point::new(
+            mini.offset.x + layout.width * mini.scale / 2.0,
+            mini.offset.y + layout.height * mini.scale / 2.0,
+        );
+        let pan = minimap_pan(&layout, viewport, rect, 1.0, middle);
+        let base = fit(&layout, viewport);
+        let centre_x = base.offset.x + pan.x + layout.width * base.scale / 2.0;
+        let centre_y = base.offset.y + pan.y + layout.height * base.scale / 2.0;
+        assert!((centre_x - viewport.width / 2.0).abs() < 0.01);
+        assert!((centre_y - viewport.height / 2.0).abs() < 0.01);
+        // No room, no minimap; no graph, no minimap.
+        assert!(minimap_rect(&layout, Size::new(200.0, 150.0)).is_none());
+        assert!(minimap_rect(&GraphLayout::default(), viewport).is_none());
     }
 
     #[test]
