@@ -420,6 +420,32 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "version_variable",
+            description: "Force a new version of a function's variable at an address where nothing assigns it — the start of an `if`'s arm, or past a join — so the variable can be named apart on that path: a definition `<variable>_2 = <variable>;` (or `_3`… where taken), declared with the variable's type and printed with the comment `// new version of <variable>`, goes just before the first statement, in the order the pseudocode reads, whose line carries `address` (after it, where that is a label), and the uses it reaches until another definition of the variable read the new name. An address of an `if`'s condition puts it before the `if`; one of the first line of an arm, at that arm's start. A use the new definition reaches with another definition reaching it too would need both names, and the version is refused in the function's leading comments: `v1 has no new version at 0x401020: a use at 0x401030 is reached from before it too`; so is one that reaches no use, one where no statement carries the address, and one of a variable whose address is taken. The new versions are made after the splits and before the merges; a rename of the new variable (`ag project … var`) keys on its own name. The pseudocode is read again with the word. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it." },
+                    "address": { "type": "string", "description": "The address of the statement the new definition goes before: any of its line's addresses that no earlier line carries." },
+                },
+                "required": ["function", "variable", "address"]
+            }),
+        },
+        Tool {
+            name: "unversion_variable",
+            description: "Take back a new version of a function's variable at an address; the pseudocode is read again. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it." },
+                    "address": { "type": "string", "description": "The address the new version is at." },
+                },
+                "required": ["function", "variable", "address"]
+            }),
+        },
+        Tool {
             name: "opaque_predicates",
             description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
             schema: json!({
@@ -1184,7 +1210,8 @@ impl Server {
                     &candidates,
                 )))
             }
-            "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable" => {
+            "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable"
+            | "version_variable" | "unversion_variable" => {
                 let address = self.function(&text("function")?)?;
                 let word = |key: &str| -> Result<String, String> {
                     let value = text(key)?.trim().to_string();
@@ -1222,10 +1249,22 @@ impl Server {
                             record.split_variable(&variable, &at)
                         })?;
                     }
-                    _ => {
+                    "unsplit_variable" => {
                         let (variable, at) = (word("variable")?, at()?);
                         self.change(TargetKind::Function, address, |record| {
                             had = record.unsplit_variable(&variable, &at)
+                        })?;
+                    }
+                    "version_variable" => {
+                        let (variable, at) = (word("variable")?, at()?);
+                        self.change(TargetKind::Function, address, |record| {
+                            record.version_variable(&variable, &at)
+                        })?;
+                    }
+                    _ => {
+                        let (variable, at) = (word("variable")?, at()?);
+                        self.change(TargetKind::Function, address, |record| {
+                            had = record.unversion_variable(&variable, &at)
                         })?;
                     }
                 }
@@ -1966,6 +2005,10 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
                 "variable": split.variable,
                 "at": split.at,
             })).collect::<Vec<Value>>(),
+            "versions": record.versions.iter().map(|version| json!({
+                "variable": version.variable,
+                "at": version.at,
+            })).collect::<Vec<Value>>(),
         })
     };
     json!({
@@ -2192,6 +2235,8 @@ mod tests {
                 "unmerge_variable",
                 "split_variable",
                 "unsplit_variable",
+                "version_variable",
+                "unversion_variable",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",

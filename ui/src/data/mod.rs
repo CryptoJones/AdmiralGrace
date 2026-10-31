@@ -377,8 +377,13 @@ pub struct OpaquePatch {
 }
 pub use kuna::is_kuna_export;
 
-/// One function's merges, `(keep, gone)`, and splits, `(variable, at)`.
-pub type VariableWords = (Vec<(String, String)>, Vec<(String, u64)>);
+/// One function's merges, `(keep, gone)`, splits, `(variable, at)`, and
+/// new versions, `(variable, at)`.
+pub type VariableWords = (
+    Vec<(String, String)>,
+    Vec<(String, u64)>,
+    Vec<(String, u64)>,
+);
 
 /// Read access to the open project.
 pub trait Provider: Send + Sync {
@@ -456,10 +461,11 @@ pub trait Provider: Send + Sync {
         false
     }
 
-    /// Tell the analysis which variables of each function are merged and
-    /// where one is split — by the function's entry, the merges as
-    /// `(keep, gone)` and the splits as `(variable, at)`, the names the lift
-    /// declares — and say whether that changed anything.
+    /// Tell the analysis which variables of each function are merged, where
+    /// one is split and where one has a new version — by the function's
+    /// entry, the merges as `(keep, gone)` and the splits and versions as
+    /// `(variable, at)`, the names the lift declares — and say whether that
+    /// changed anything.
     fn set_variable_edits(&self, _edits: BTreeMap<u64, VariableWords>) -> bool {
         false
     }

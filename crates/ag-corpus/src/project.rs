@@ -557,6 +557,13 @@ pub struct Annotation {
     /// the variable whole and misreads nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub splits: Vec<VariableSplit>,
+    /// On a function's record: the new versions the analyst forced of its
+    /// variables, each the variable and the address of the statement the
+    /// new definition `v1_2 = v1;` goes before, in the order they are made.
+    /// The uses it reaches take the fresh name. A reader that does not know
+    /// the field prints the variable whole and misreads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<VariableVersion>,
 }
 
 /// A split of a variable at one of its definitions, on a function's record.
@@ -569,9 +576,18 @@ pub struct VariableSplit {
     pub at: String,
 }
 
-/// The analyst's merges of one function's variables, `(keep, gone)`, and
-/// its splits, `(variable, at)`.
-pub type VariableWords = (Vec<(String, String)>, Vec<(String, u64)>);
+/// A new version of a variable forced at an address, on a function's
+/// record: the variable, and the address of the statement the new
+/// definition goes before. Spelled as a split is.
+pub type VariableVersion = VariableSplit;
+
+/// The analyst's merges of one function's variables, `(keep, gone)`, its
+/// splits, `(variable, at)`, and its new versions, `(variable, at)`.
+pub type VariableWords = (
+    Vec<(String, String)>,
+    Vec<(String, u64)>,
+    Vec<(String, u64)>,
+);
 
 impl Annotation {
     /// An empty annotation for the local variable `variable` of the function
@@ -603,6 +619,7 @@ impl Annotation {
             inline: None,
             merges: Vec::new(),
             splits: Vec::new(),
+            versions: Vec::new(),
         }
     }
 
@@ -635,6 +652,7 @@ impl Annotation {
             inline: None,
             merges: Vec::new(),
             splits: Vec::new(),
+            versions: Vec::new(),
         }
     }
 
@@ -666,6 +684,7 @@ impl Annotation {
             inline: None,
             merges: Vec::new(),
             splits: Vec::new(),
+            versions: Vec::new(),
         }
     }
 
@@ -884,6 +903,7 @@ impl Annotation {
             && self.inline.is_none()
             && self.merges.is_empty()
             && self.splits.is_empty()
+            && self.versions.is_empty()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -922,6 +942,30 @@ impl Annotation {
         self.splits
             .retain(|s| !(s.variable == variable && s.at == at));
         self.splits.len() != before
+    }
+
+    /// Force a new version of `variable` at `at`, in its canonical
+    /// spelling; a word already there stays where it is.
+    pub fn version_variable(&mut self, variable: &str, at: &str) {
+        if !self
+            .versions
+            .iter()
+            .any(|v| v.variable == variable && v.at == at)
+        {
+            self.versions.push(VariableVersion {
+                variable: variable.to_string(),
+                at: at.to_string(),
+            });
+        }
+    }
+
+    /// Take back the new version of `variable` at `at`, and say whether
+    /// there was one.
+    pub fn unversion_variable(&mut self, variable: &str, at: &str) -> bool {
+        let before = self.versions.len();
+        self.versions
+            .retain(|v| !(v.variable == variable && v.at == at));
+        self.versions.len() != before
     }
 }
 
@@ -1383,23 +1427,29 @@ impl ProjectFile {
         removable
     }
 
-    /// The analyst's merges and splits of each function's variables, by
-    /// the value of the function's entry. A split at an address that does
-    /// not read is left out.
+    /// The analyst's merges, splits and new versions of each function's
+    /// variables, by the value of the function's entry. A split or a
+    /// version at an address that does not read is left out.
     pub fn variable_edits(&self) -> BTreeMap<u64, VariableWords> {
+        let read = |words: &[VariableSplit]| -> Vec<(String, u64)> {
+            words
+                .iter()
+                .filter_map(|s| {
+                    let (at, _) = crate::parse_addr_space(&s.at).ok()?;
+                    Some((s.variable.clone(), at))
+                })
+                .collect()
+        };
         self.places()
-            .filter(|a| !a.block && (!a.merges.is_empty() || !a.splits.is_empty()))
+            .filter(|a| {
+                !a.block && (!a.merges.is_empty() || !a.splits.is_empty() || !a.versions.is_empty())
+            })
             .filter_map(|a| {
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
-                let splits = a
-                    .splits
-                    .iter()
-                    .filter_map(|s| {
-                        let (at, _) = crate::parse_addr_space(&s.at).ok()?;
-                        Some((s.variable.clone(), at))
-                    })
-                    .collect();
-                Some((value, (a.merges.clone(), splits)))
+                Some((
+                    value,
+                    (a.merges.clone(), read(&a.splits), read(&a.versions)),
+                ))
             })
             .collect()
     }
@@ -2626,6 +2676,7 @@ mod tests {
                         ("v3".to_string(), "v2".to_string())
                     ],
                     vec![("local_14".to_string(), 0x401020)],
+                    Vec::new(),
                 )
             )])
         );
@@ -2641,6 +2692,43 @@ mod tests {
         assert!(record.unmerge_variable("v3"));
         assert!(!record.unmerge_variable("v3"));
         assert!(record.unsplit_variable("local_14", "0x401020"));
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn new_versions_are_kept_on_the_functions_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        record.version_variable("a", "0x40101b");
+        record.version_variable("a", "0x40101b");
+        record.version_variable("local_c", "0x40102e");
+        assert_eq!(record.versions.len(), 2, "one word per version");
+        let edits = project.variable_edits();
+        assert_eq!(
+            edits,
+            BTreeMap::from([(
+                0x401000,
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    vec![
+                        ("a".to_string(), 0x40101b),
+                        ("local_c".to_string(), 0x40102e)
+                    ],
+                )
+            )])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"versions\": ["), "{json}");
+        assert!(!json.contains("\"splits\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.variable_edits(), edits);
+        assert_eq!(read.format, FORMAT_VERSION);
+        // Taken back, the record goes.
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        assert!(record.unversion_variable("a", "0x40101b"));
+        assert!(!record.unversion_variable("a", "0x40101b"));
+        assert!(record.unversion_variable("local_c", "0x40102e"));
         assert!(record.is_empty());
     }
 }

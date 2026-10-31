@@ -999,6 +999,12 @@ fn emit_statements(
                             notes.push(&note.text);
                         }
                     }
+                    // A definition the analyst put says so.
+                    let version;
+                    if let Some(of) = crate::merge::new_version_of(node) {
+                        version = format!("new version of {of}");
+                        notes.push(&version);
+                    }
                     {
                         if let (false, Some(last)) = (notes.is_empty(), lines.last_mut()) {
                             last.text.push_str("  ");
@@ -1605,6 +1611,11 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
                 }
                 arguments_named(args, names.map(Vec::as_slice), out, style);
             }
+        }
+        // A new version's definition reads the variable it copies, and the
+        // comment at the end of its line says what it is.
+        AstNode::Intrinsic { .. } if crate::merge::versioned(n).is_some() => {
+            out.push_str(crate::merge::versioned(n).expect("checked above"));
         }
         AstNode::Intrinsic { name, args } => {
             out.push_str(name);

@@ -5,9 +5,9 @@
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
 //! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `merge`,
-//! `split`, `patch`, `asm`, `nop`, `opaque`) so a script or an agent can
-//! build a project without editing JSON by hand, and reports the tags the
-//! analyst gave (`tags`).
+//! `split`, `version`, `patch`, `asm`, `nop`, `opaque`) so a script or an
+//! agent can build a project without editing JSON by hand, and reports the
+//! tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -253,6 +253,35 @@ pub enum ProjectCmd {
         /// The variable, as the lift declares it.
         variable: String,
         /// The address of the statement the split is at.
+        address: String,
+    },
+    /// Force a new version of a function's variable at an address where
+    /// nothing assigns it — the start of an `if`'s arm, past a join: a
+    /// definition `VAR_2 = VAR;` goes before the first statement whose line
+    /// carries the address, and the uses it reaches read `VAR_2`.
+    Version {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it.
+        variable: String,
+        /// The address of the statement the new definition goes before.
+        address: String,
+    },
+    /// Take back a new version of a function's variable at an address.
+    Unversion {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it.
+        variable: String,
+        /// The address the new version is at.
         address: String,
     },
     /// Write bytes over the image's at an address: a patch the image is
@@ -682,6 +711,39 @@ pub fn run(
             })?;
             if !had {
                 eprintln!("{variable} was not split at {at} in {address}");
+            }
+            Ok(code)
+        }
+        ProjectCmd::Version {
+            file,
+            function,
+            variable,
+            address: at,
+        } => {
+            let at = ag_corpus::project::canonical_address(&at)
+                .ok_or_else(|| anyhow::anyhow!("{at:?} is not an address"))?;
+            let address = function_key(&target, &file, &function)?;
+            let variable = variable.trim().to_string();
+            edit(&target, &file, TargetKind::Function, &address, |a| {
+                a.version_variable(&variable, &at);
+            })
+        }
+        ProjectCmd::Unversion {
+            file,
+            function,
+            variable,
+            address: at,
+        } => {
+            let at = ag_corpus::project::canonical_address(&at)
+                .ok_or_else(|| anyhow::anyhow!("{at:?} is not an address"))?;
+            let address = function_key(&target, &file, &function)?;
+            let variable = variable.trim().to_string();
+            let mut had = false;
+            let code = edit(&target, &file, TargetKind::Function, &address, |a| {
+                had = a.unversion_variable(&variable, &at);
+            })?;
+            if !had {
+                eprintln!("{variable} had no new version at {at} in {address}");
             }
             Ok(code)
         }
@@ -1764,6 +1826,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     for split in &annotation.splits {
         parts.push(format!("split {} at {}", split.variable, split.at));
+    }
+    for version in &annotation.versions {
+        parts.push(format!("version {} at {}", version.variable, version.at));
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {
