@@ -1893,3 +1893,23 @@ fn a_function_is_emulated_with_its_arguments_and_the_run_is_reported() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("is a number"));
 }
+
+#[test]
+fn a_function_is_transpiled_to_c_plus_plus_with_a_harness() {
+    let text = image(
+        "sample.elf",
+        &["transpile", "sum_to", "--harness", "sum_to"],
+    );
+    assert!(text.contains("long sum_to(int a)"), "{text}");
+    assert!(text.contains("block_1161:"), "{text}");
+    assert!(text.contains("goto block_118a;"), "{text}");
+    assert!(text.contains("int main(int argc, char **argv)"), "{text}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .arg("transpile")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("name the functions"));
+}

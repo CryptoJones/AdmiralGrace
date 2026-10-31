@@ -232,6 +232,19 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "transpile",
+            description: "The functions as C++ that compiles: the medium level of each with a label per block and a goto for every way out, the globals they name defined with the image's bytes, the imports declared, every function of the image they call included unless told otherwise, and with `harness` a main that calls that function with the numbers on its command line and prints what it returns.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "targets": { "type": "array", "items": { "type": "string" }, "description": "The functions, by address or name; every function of the image when `all` is true." },
+                    "all": { "type": "boolean", "description": "Every function of the image (default false)." },
+                    "follow": { "type": "boolean", "description": "Follow the calls into the image's functions and define them too (default true)." },
+                    "harness": { "type": "string", "description": "The function main calls with the command line's numbers." },
+                },
+            }),
+        },
+        Tool {
             name: "control_flow",
             description: "The control-flow graph of one function: its blocks with their instructions, the edges between them (fall-through or taken), and the jump tables its indirect jumps read.",
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
@@ -815,6 +828,43 @@ impl Server {
                 let mut answer = Answer::json(crate::image::emulation_json(&run));
                 answer.text = run.text();
                 Ok(answer)
+            }
+            "transpile" => {
+                let all = flag("all", false)?;
+                let follow = flag("follow", true)?;
+                let targets = match arguments.get("targets") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .ok_or_else(|| {
+                                    format!("a target is a name or an address, not {item}")
+                                })
+                                .and_then(|target| self.function(target))
+                        })
+                        .collect::<Result<Vec<u64>, String>>()?,
+                    Some(_) => {
+                        return Err("\"targets\" is a list of names or addresses".to_string())
+                    }
+                };
+                let harness = match optional_text("harness")? {
+                    Some(target) => Some(self.function(&target)?),
+                    None => None,
+                };
+                if !all && targets.is_empty() && harness.is_none() {
+                    return Err("name the functions to write, or set all".to_string());
+                }
+                let addresses: Vec<u64> = if all {
+                    self.image.functions().iter().map(|f| f.address).collect()
+                } else {
+                    targets
+                };
+                let text = self
+                    .image
+                    .transpile(&addresses, follow, harness)
+                    .map_err(|error| format!("not transpiled: {}", error.reason))?;
+                Ok(Answer::text(text))
             }
             "control_flow" => {
                 let address = self.function(&text("target")?)?;
@@ -1744,6 +1794,7 @@ mod tests {
                 "decompile",
                 "il",
                 "emulate",
+                "transpile",
                 "control_flow",
                 "callers",
                 "callees",

@@ -159,7 +159,7 @@ Filed 2026-10-26.
 - [x] Function-level, context-aware lifting for complex ISAs — [#342](https://github.com/CryptoJones/AdmiralGrace/issues/342)
 - [x] Model architecture flags with producer and consumer semantics — [#343](https://github.com/CryptoJones/AdmiralGrace/issues/343)
 - [x] IL emulator — [#344](https://github.com/CryptoJones/AdmiralGrace/issues/344)
-- [ ] IL-to-C++ transpiler for testing lifters — [#345](https://github.com/CryptoJones/AdmiralGrace/issues/345)
+- [x] IL-to-C++ transpiler for testing lifters — [#345](https://github.com/CryptoJones/AdmiralGrace/issues/345)
 
 ### Decompiler output and control
 

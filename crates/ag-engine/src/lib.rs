@@ -22,6 +22,7 @@ pub mod register;
 pub mod structure;
 pub mod swift;
 pub mod swift_demangle;
+pub mod transpile;
 pub mod unwind;
 
 pub use arch::Bitness;

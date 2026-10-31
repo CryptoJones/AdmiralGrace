@@ -2235,6 +2235,163 @@ impl Binary {
         ))
     }
 
+    /// The functions at `targets` as C++ that compiles — their medium levels
+    /// with a label per block and a `goto` for every way out — and, when
+    /// `follow`, every function of the image they call, reached through the
+    /// calls; the globals they name defined with the image's bytes, the
+    /// imports and the functions the lifter refuses declared; and, with
+    /// `harness`, a `main` that calls that function with the numbers on its
+    /// command line and prints what it returns. See `ag_engine::transpile`.
+    pub fn transpile(
+        &self,
+        targets: &[u64],
+        follow: bool,
+        harness: Option<u64>,
+    ) -> Result<String, NotLifted> {
+        use ag_engine::transpile::{External, Global, Program};
+        let mut queue: Vec<u64> = targets.to_vec();
+        if let Some(harness) = harness {
+            if !queue.contains(&harness) {
+                queue.push(harness);
+            }
+        }
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut lifted: Vec<(u64, Arc<Stages>)> = Vec::new();
+        let mut externals: Vec<External> = Vec::new();
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        let name_of = |address: u64| {
+            self.function_name(address)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("sub_{address:x}"))
+        };
+        let mut index = 0;
+        while index < queue.len() {
+            let address = queue[index];
+            index += 1;
+            if !seen.insert(address) {
+                continue;
+            }
+            let name = name_of(address);
+            match self.stages(address) {
+                Ok(stages) => {
+                    if let Some(callee) = &stages.function.thunk {
+                        // A thunk is defined as the call on it is, and its
+                        // callee is followed like any other.
+                        if harness == Some(address) {
+                            return Err(NotLifted {
+                                reason: format!(
+                                    "{name} is a thunk for {callee}, with no body to run"
+                                ),
+                            });
+                        }
+                        match self.functions().iter().find(|f| f.name == *callee) {
+                            Some(target) if follow && !seen.contains(&target.address) => {
+                                queue.push(target.address)
+                            }
+                            Some(_) => {}
+                            None => push_external(&mut externals, callee, None, None),
+                        }
+                        if *callee != name {
+                            lifted.push((address, stages));
+                        }
+                        continue;
+                    }
+                    for node in &stages.medium {
+                        for statement in &node.statements {
+                            names.extend(il::names_in(&statement.node));
+                            collect_calls(&statement.node, &mut |callee, at| {
+                                if self.functions().iter().any(|f| f.address == at) {
+                                    if follow && !seen.contains(&at) {
+                                        queue.push(at);
+                                    } else if !follow && !seen.contains(&at) {
+                                        // Declared with its own signature when
+                                        // its lift is known.
+                                        let signature = self
+                                            .stages(at)
+                                            .ok()
+                                            .filter(|stages| stages.function.thunk.is_none())
+                                            .map(|stages| ag_engine::transpile::signature(&stages));
+                                        push_external(&mut externals, callee, None, signature);
+                                    }
+                                } else {
+                                    push_external(&mut externals, callee, None, None);
+                                }
+                            });
+                        }
+                        match &node.terminator {
+                            ag_engine::Terminator::Branch { cond, .. } => {
+                                names.extend(il::names_in(cond))
+                            }
+                            ag_engine::Terminator::Switch { index, .. } => {
+                                names.extend(il::names_in(index))
+                            }
+                            _ => {}
+                        }
+                    }
+                    lifted.push((address, stages));
+                }
+                Err(error) => {
+                    // The harness is run, so it must lift; another function
+                    // the lifter refuses is declared with the reason.
+                    if harness == Some(address) {
+                        return Err(error);
+                    }
+                    push_external(&mut externals, &name, Some(error.to_string()), None);
+                }
+            }
+        }
+        if lifted.is_empty() {
+            return Err(NotLifted {
+                reason: match externals
+                    .iter()
+                    .find_map(|external| external.reason.clone())
+                {
+                    Some(reason) => format!("no function lifted: {reason}"),
+                    None => "no function lifted".to_string(),
+                },
+            });
+        }
+        // A function defined is not declared as an external too.
+        for (address, _) in &lifted {
+            let name = name_of(*address);
+            externals.retain(|external| external.name != name);
+        }
+        let mut globals = Vec::new();
+        for symbol in self.data_symbols() {
+            if !names.contains(&symbol.name) {
+                continue;
+            }
+            let len = usize::try_from(symbol.size).unwrap_or(0);
+            let mut bytes = self.bytes_at(symbol.address, len).unwrap_or_default();
+            bytes.resize(len, 0);
+            globals.push(Global {
+                name: symbol.name.clone(),
+                address: symbol.address,
+                bytes,
+            });
+        }
+        // The functions in the order asked, the ones followed after.
+        lifted.sort_by_key(|(address, _)| {
+            targets
+                .iter()
+                .position(|target| target == address)
+                .unwrap_or(usize::MAX)
+        });
+        let functions: Vec<&Stages> = lifted.iter().map(|(_, stages)| stages.as_ref()).collect();
+        let harness = harness.and_then(|address| {
+            lifted
+                .iter()
+                .find(|(at, _)| *at == address)
+                .map(|(_, stages)| stages.as_ref())
+        });
+        Ok(ag_engine::transpile::program(&Program {
+            functions,
+            externals,
+            globals,
+            harness,
+        }))
+    }
+
     /// The stages of a function the image's architecture lifts itself, when
     /// it is a plugin's that does; `None` leaves it to the engine's lifter.
     fn architecture_stages(
@@ -2976,6 +3133,70 @@ fn decode_arm_section(
                 base,
             }
         }
+    }
+}
+
+/// Every call in an expression: the callee's name and address.
+fn collect_calls(node: &ag_engine::AstNode, found: &mut dyn FnMut(&str, u64)) {
+    use ag_engine::AstNode;
+    match node {
+        AstNode::Call { callee, args } => {
+            if let AstNode::FunctionName { name, address } = callee.as_ref() {
+                found(name, *address);
+            } else {
+                collect_calls(callee, found);
+            }
+            for arg in args {
+                collect_calls(arg, found);
+            }
+        }
+        AstNode::Assign { lhs, rhs } | AstNode::Binary { lhs, rhs, .. } => {
+            collect_calls(lhs, found);
+            collect_calls(rhs, found);
+        }
+        AstNode::Deref { target }
+        | AstNode::AddressOf { target }
+        | AstNode::Cast { target, .. } => collect_calls(target, found),
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            collect_calls(cond, found);
+            collect_calls(then, found);
+            collect_calls(otherwise, found);
+        }
+        AstNode::Return { value: Some(value) } => collect_calls(value, found),
+        AstNode::Intrinsic { args, .. } => {
+            for arg in args {
+                collect_calls(arg, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Add an external once, by name; a reason or a signature given is kept.
+fn push_external(
+    externals: &mut Vec<ag_engine::transpile::External>,
+    name: &str,
+    reason: Option<String>,
+    signature: Option<String>,
+) {
+    match externals.iter_mut().find(|external| external.name == name) {
+        Some(external) => {
+            if external.reason.is_none() {
+                external.reason = reason;
+            }
+            if external.signature.is_none() {
+                external.signature = signature;
+            }
+        }
+        None => externals.push(ag_engine::transpile::External {
+            name: name.to_string(),
+            reason,
+            signature,
+        }),
     }
 }
 

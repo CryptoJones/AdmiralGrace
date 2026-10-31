@@ -212,6 +212,29 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Write the functions as C++ that compiles: the medium level of each,
+    /// a label per block and a `goto` for every way out, the globals they
+    /// name and the imports they call declared, and, with `--harness`, a
+    /// `main` that calls one of them with the numbers on its command line.
+    Transpile {
+        /// The functions: addresses such as `0x1149`, or names. Every
+        /// function of the image when `--all`.
+        targets: Vec<String>,
+        /// Every function of the image.
+        #[arg(long)]
+        all: bool,
+        /// Do not follow the calls: a callee not asked for is declared, not
+        /// defined.
+        #[arg(long = "no-follow")]
+        no_follow: bool,
+        /// The function `main` calls with the command line's numbers,
+        /// printing what it returns.
+        #[arg(long, value_name = "TARGET")]
+        harness: Option<String>,
+        /// Write the C++ here instead of standard output.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// The data the image holds, and the functions that use it.
     Data {
         /// The function or the data: an address such as `0x1198`, or a name.
@@ -843,6 +866,20 @@ pub fn run(
             depth,
             json,
         } => emulate(&image, &target, &args, steps, depth, json),
+        ImageCmd::Transpile {
+            targets,
+            all,
+            no_follow,
+            harness,
+            out,
+        } => transpile(
+            &image,
+            &targets,
+            all,
+            !no_follow,
+            harness.as_deref(),
+            out.as_deref(),
+        ),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
         ImageCmd::Export {
             dir,
@@ -1724,6 +1761,47 @@ fn il(
             Ok(1)
         }
     }
+}
+
+/// Write the functions as C++.
+fn transpile(
+    image: &Binary,
+    targets: &[String],
+    all: bool,
+    follow: bool,
+    harness: Option<&str>,
+    out: Option<&Path>,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_pseudocode(),
+        "the lifter reads 64-bit x86, and this image is {}",
+        image.language()
+    );
+    anyhow::ensure!(
+        all || !targets.is_empty() || harness.is_some(),
+        "name the functions to write, or --all for every one"
+    );
+    let addresses: Vec<u64> = if all {
+        image.functions().iter().map(|f| f.address).collect()
+    } else {
+        targets
+            .iter()
+            .map(|target| resolve(image, target))
+            .collect::<Result<Vec<u64>>>()?
+    };
+    let harness = harness.map(|target| resolve(image, target)).transpose()?;
+    let text = image
+        .transpile(&addresses, follow, harness)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &text)
+                .map_err(|error| anyhow::anyhow!("writing {}: {error}", path.display()))?;
+            println!("wrote {} ({} bytes)", path.display(), text.len());
+        }
+        None => print!("{text}"),
+    }
+    Ok(0)
 }
 
 /// Run one function with the arguments given and report the run.
