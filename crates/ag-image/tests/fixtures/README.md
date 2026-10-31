@@ -17,6 +17,10 @@ The images the image tests read, and how they were made.
 | `arm64.elf` | An AArch64 ELF executable built from `arm_sample.c`, statically linked with no C library. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
+| `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass, a category and a protocol, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
+| `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
+| `sample.m` | The Objective-C source of the two. |
+| `strip_symtab.py` | Empties a Mach-O's symbol table in place, for hosts without `strip` for Mach-O. |
 
 The 64-bit ELF the tests read is in `crates/ag-engine/tests/fixtures/sample.elf`; the
 engine's own tests read it, and the image tests read it from there.
@@ -167,4 +171,16 @@ one `fat_arch` per slice, each slice at an offset aligned to 2^14 as `lipo` alig
 clang --target=arm64-apple-macos11 -O1 -nostdlib -fuse-ld=lld -Wl,-e,_sum \
       -Wl,-platform_version,macos,11.0,11.0 arm_sample.c -o sample_arm64.macho
 python3 make_fat.py sample_fat.macho x86_64=sample.macho arm64=sample_arm64.macho
+```
+
+The Objective-C program was built with clang and lld, with no Foundation and no runtime
+library linked — the runtime's symbols are left for the dynamic loader — and the stripped
+twin's symbol table emptied by `strip_symtab.py`, since lld's `-s` is obsolete and does
+nothing:
+
+```sh
+clang --target=x86_64-apple-macos11 -x objective-c -fno-objc-arc -fobjc-runtime=macosx-11.0 \
+      -O1 -nostdlib -fuse-ld=lld -Wl,-e,_main -Wl,-platform_version,macos,11.0,11.0 \
+      -Wl,-undefined,dynamic_lookup sample.m -o sample_objc
+python3 strip_symtab.py sample_objc sample_objc_stripped
 ```

@@ -60,6 +60,9 @@ pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
+pub use ag_engine::objc::{
+    ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProtocol,
+};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::Bitness;
@@ -381,6 +384,8 @@ pub struct Binary {
     slice_offset: u64,
     /// The slice of a universal Mach-O the image is, when it is one.
     slice: Option<Slice>,
+    /// The Objective-C metadata the image carries, when it carries any.
+    objc: Option<ObjcMetadata>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
@@ -596,6 +601,7 @@ impl Binary {
             base: image.load_base(),
             slice_offset: image.slice().map_or(0, |slice| slice.offset),
             slice: image.slice().cloned(),
+            objc: image.objc().cloned(),
             sections,
             functions,
             data,
@@ -674,6 +680,13 @@ impl Binary {
     /// The slice of a universal Mach-O the image is, when it is one.
     pub fn slice(&self) -> Option<&Slice> {
         self.slice.as_ref()
+    }
+
+    /// The Objective-C metadata the image carries — its classes, categories
+    /// and protocols — when it carries any. The methods' code is already in
+    /// the function list under the names the metadata gives.
+    pub fn objc(&self) -> Option<&ObjcMetadata> {
+        self.objc.as_ref()
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose

@@ -1385,3 +1385,49 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
     assert!(!ok);
     assert!(stderr.contains("has no slice"), "{stderr}");
 }
+
+#[test]
+fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
+    // The stripped twin names nothing in its symbol table; the metadata does.
+    let report = image("sample_objc_stripped", &["symbols"]);
+    assert!(report.contains(" -[Derived greet:]\n"), "{report}");
+    assert!(report.contains(" +[Base answer]\n"), "{report}");
+    assert!(report.contains(" -[Base(Extra) thrice:]\n"), "{report}");
+    assert!(report.contains(" OBJC_CLASS_$_Base"), "{report}");
+    // An instance method's name starts with `-`, so `--` ends the flags first.
+    let report = image(
+        "sample_objc_stripped",
+        &["disasm", "--", "-[Derived greet:]"],
+    );
+    assert!(report.contains("-[Derived greet:]"), "{report}");
+    let report = image("sample_objc_stripped", &["calls"]);
+    assert!(report.contains("-[Derived greet:]"), "{report}");
+
+    // The classes, categories and protocols, as text and as JSON.
+    let report = image("sample_objc_stripped", &["objc"]);
+    assert!(report.contains("classes: 2"), "{report}");
+    assert!(report.contains("  Derived : Base <Greeting>"), "{report}");
+    assert!(report.contains("    - greet:  0x"), "{report}");
+    assert!(report.contains("    + answer  0x"), "{report}");
+    assert!(report.contains("    ivar isa"), "{report}");
+    assert!(report.contains("  Base(Extra)"), "{report}");
+    assert!(report.contains("protocols: 1"), "{report}");
+    assert!(report.contains("  Greeting"), "{report}");
+    let report = image("sample_objc_stripped", &["objc", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&report).expect("JSON");
+    assert_eq!(json["classes"][1]["name"], serde_json::json!("Derived"));
+    assert_eq!(json["classes"][1]["superclass"], serde_json::json!("Base"));
+    assert_eq!(json["categories"][0]["class"], serde_json::json!("Base"));
+    assert_eq!(
+        json["protocols"][0]["instance_methods"][0]["selector"],
+        serde_json::json!("greet:")
+    );
+    assert!(json["protocols"][0]["instance_methods"][0]["imp"].is_null());
+
+    // An image without Objective-C says so.
+    let report = image("sample.macho", &["objc"]);
+    assert!(report.contains("no Objective-C metadata"), "{report}");
+    let report = image("sample.elf", &["objc", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&report).expect("JSON");
+    assert_eq!(json["classes"].as_array().map(Vec::len), Some(0));
+}

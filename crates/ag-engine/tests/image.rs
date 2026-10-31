@@ -351,3 +351,95 @@ fn a_64_bit_fat_header_a_slice_past_the_end_and_a_haswell_slice_are_read() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    let stripped = Image::open(&fixtures.join("sample_objc_stripped")).expect("loads");
+    let objc = stripped.objc().expect("Objective-C metadata");
+
+    // Two classes, one on the other; a category on the root; a protocol.
+    let names: Vec<&str> = objc
+        .classes
+        .iter()
+        .map(|class| class.name.as_str())
+        .collect();
+    assert_eq!(names, ["Base", "Derived"]);
+    let base = &objc.classes[0];
+    assert_eq!(base.superclass, None, "a root class");
+    assert_eq!(base.class_methods.len(), 1);
+    assert_eq!(base.class_methods[0].selector, "answer");
+    assert_eq!(base.instance_methods[0].selector, "twice:");
+    assert!(base.instance_methods[0]
+        .types
+        .as_deref()
+        .is_some_and(|t| t.starts_with("i")));
+    assert_eq!(base.ivars.len(), 1);
+    assert_eq!(base.ivars[0].name, "isa");
+    let derived = &objc.classes[1];
+    assert_eq!(derived.superclass.as_deref(), Some("Base"));
+    assert_eq!(derived.protocols, ["Greeting"]);
+    assert_eq!(derived.instance_methods[0].selector, "greet:");
+    assert_eq!(objc.categories.len(), 1);
+    assert_eq!(objc.categories[0].name, "Extra");
+    assert_eq!(objc.categories[0].class.as_deref(), Some("Base"));
+    assert_eq!(objc.categories[0].instance_methods[0].selector, "thrice:");
+    assert_eq!(objc.protocols.len(), 1);
+    assert_eq!(objc.protocols[0].name, "Greeting");
+    assert_eq!(objc.protocols[0].instance_methods[0].selector, "greet:");
+    assert_eq!(objc.protocols[0].instance_methods[0].imp, None);
+
+    // The methods' code is named from the metadata, symbols or none, and the
+    // names agree with what the linker kept in the unstripped twin.
+    let stripped_names: Vec<String> = stripped
+        .function_symbols()
+        .into_iter()
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" -[Derived greet:]")),
+        "{stripped_names:?}"
+    );
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" +[Base answer]")),
+        "{stripped_names:?}"
+    );
+    assert!(
+        stripped_names
+            .iter()
+            .any(|line| line.ends_with(" -[Base(Extra) thrice:]")),
+        "{stripped_names:?}"
+    );
+    let full = Image::open(&fixtures.join("sample_objc")).expect("loads");
+    let full_names: Vec<String> = full
+        .function_symbols()
+        .into_iter()
+        .filter(|(_, name)| name.starts_with('-') || name.starts_with('+'))
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    let from_metadata: Vec<String> = objc
+        .method_names()
+        .into_iter()
+        .map(|(address, name)| format!("{address:#x} {name}"))
+        .collect();
+    assert_eq!(full_names, from_metadata);
+    assert!(stripped
+        .data_symbols()
+        .iter()
+        .any(|(_, name, _)| name == "OBJC_CLASS_$_Derived"));
+
+    // Nothing of the kind in an ELF, or a Mach-O without Objective-C.
+    let elf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
+    assert!(Image::open(&elf).expect("loads").objc().is_none());
+    assert!(Image::open(&fixtures.join("sample.macho"))
+        .expect("loads")
+        .objc()
+        .is_none());
+}

@@ -37,6 +37,8 @@ pub struct Image {
     /// The slice of a universal Mach-O the bytes are, when they are one:
     /// the file's offsets are the slice's, this far into the file.
     slice: Option<Slice>,
+    /// The Objective-C metadata the image carries, read once when asked.
+    objc: std::cell::OnceCell<Option<crate::objc::ObjcMetadata>>,
 }
 
 /// One slice of a universal (fat) Mach-O: an image of one architecture
@@ -275,6 +277,7 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            objc: std::cell::OnceCell::new(),
         })
     }
 
@@ -343,7 +346,20 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            objc: std::cell::OnceCell::new(),
         })
+    }
+
+    /// The Objective-C metadata the image carries — its classes, categories
+    /// and protocols — when it is a Mach-O with any.
+    pub fn objc(&self) -> Option<&crate::objc::ObjcMetadata> {
+        self.objc
+            .get_or_init(|| {
+                self.object()
+                    .map(|_| crate::objc::read(&self.bytes))
+                    .unwrap_or(None)
+            })
+            .as_ref()
     }
 
     /// The loader's reading of the container, when there is one.
@@ -506,16 +522,39 @@ impl Image {
 
     /// The function symbols as `(address, name)`, rebased to the load address.
     pub fn function_symbols(&self) -> Vec<(u64, String)> {
-        self.object()
+        let mut symbols = self
+            .object()
             .map(|inner| inner.func_symbols())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // An Objective-C method's implementation is named by the metadata —
+        // `-[Class sel]` — where no symbol names it, as in a stripped image.
+        if let Some(objc) = self.objc() {
+            for (imp, name) in objc.method_names() {
+                if !symbols.iter().any(|(address, _)| *address == imp) {
+                    symbols.push((imp, name));
+                }
+            }
+            symbols.sort_by_key(|(address, _)| *address);
+        }
+        symbols
     }
 
     /// The named data objects as `(address, name, size)`.
     pub fn data_symbols(&self) -> Vec<(u64, String, u64)> {
-        self.object()
+        let mut symbols = self
+            .object()
             .map(|inner| inner.data_symbols())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A class object is data the loader registers, named by its class.
+        if let Some(objc) = self.objc() {
+            for (address, name) in objc.class_symbols() {
+                if !symbols.iter().any(|(found, _, _)| *found == address) {
+                    symbols.push((address, name, 0x28));
+                }
+            }
+            symbols.sort_by_key(|(address, _, _)| *address);
+        }
+        symbols
     }
 
     /// The name of the function symbol at `address`, when there is one.

@@ -24,6 +24,14 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The Objective-C the image describes: its classes with their
+    /// superclass, protocols, methods and instance variables; its categories;
+    /// its protocols.
+    Objc {
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The language, the entry point and the sections of the image.
     Info {
         /// Report as JSON.
@@ -679,6 +687,7 @@ pub fn run(
 
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
+        ImageCmd::Objc { json } => objc(&image, json),
         // Answered above, before any image was read.
         ImageCmd::Slices { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
@@ -699,6 +708,148 @@ pub fn run(
             ..
         } => crate::export::run(&image, binary, &dir, functions.as_deref(), force),
     }
+}
+
+/// Print the Objective-C the image describes.
+fn objc(image: &Binary, json: bool) -> Result<i32> {
+    let Some(objc) = image.objc() else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "classes": [], "categories": [], "protocols": [] })
+            );
+        } else {
+            println!("no Objective-C metadata");
+        }
+        return Ok(0);
+    };
+    let method_json = |method: &ag_image::ObjcMethod| {
+        serde_json::json!({
+            "selector": method.selector,
+            "types": method.types,
+            "imp": method.imp.map(|imp| format!("{imp:#x}")),
+        })
+    };
+    let methods_json = |methods: &[ag_image::ObjcMethod]| -> Vec<serde_json::Value> {
+        methods.iter().map(method_json).collect()
+    };
+    if json {
+        let report = serde_json::json!({
+            "classes": objc.classes.iter().map(|class| serde_json::json!({
+                "name": class.name,
+                "address": format!("{:#x}", class.address),
+                "superclass": class.superclass,
+                "protocols": class.protocols,
+                "instance_methods": methods_json(&class.instance_methods),
+                "class_methods": methods_json(&class.class_methods),
+                "ivars": class.ivars.iter().map(|ivar| serde_json::json!({
+                    "name": ivar.name,
+                    "types": ivar.types,
+                    "offset": ivar.offset,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "categories": objc.categories.iter().map(|category| serde_json::json!({
+                "name": category.name,
+                "address": format!("{:#x}", category.address),
+                "class": category.class,
+                "protocols": category.protocols,
+                "instance_methods": methods_json(&category.instance_methods),
+                "class_methods": methods_json(&category.class_methods),
+            })).collect::<Vec<_>>(),
+            "protocols": objc.protocols.iter().map(|protocol| serde_json::json!({
+                "name": protocol.name,
+                "address": format!("{:#x}", protocol.address),
+                "protocols": protocol.protocols,
+                "instance_methods": methods_json(&protocol.instance_methods),
+                "class_methods": methods_json(&protocol.class_methods),
+                "optional_instance_methods": methods_json(&protocol.optional_instance_methods),
+                "optional_class_methods": methods_json(&protocol.optional_class_methods),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+    let print_methods = |kind: char, methods: &[ag_image::ObjcMethod]| {
+        for method in methods {
+            let imp = method
+                .imp
+                .map(|imp| format!("  {imp:#x}"))
+                .unwrap_or_default();
+            let types = method
+                .types
+                .as_deref()
+                .map(|types| format!("  {types}"))
+                .unwrap_or_default();
+            println!("    {kind} {}{imp}{types}", method.selector);
+        }
+    };
+    let adopts = |protocols: &[String]| {
+        if protocols.is_empty() {
+            String::new()
+        } else {
+            format!(" <{}>", protocols.join(", "))
+        }
+    };
+    println!("classes: {}", objc.classes.len());
+    for class in &objc.classes {
+        let superclass = class
+            .superclass
+            .as_deref()
+            .map(|superclass| format!(" : {superclass}"))
+            .unwrap_or_default();
+        println!(
+            "  {}{superclass}{}  {:#x}",
+            class.name,
+            adopts(&class.protocols),
+            class.address
+        );
+        print_methods('+', &class.class_methods);
+        print_methods('-', &class.instance_methods);
+        for ivar in &class.ivars {
+            println!(
+                "    ivar {}{}{}",
+                ivar.name,
+                ivar.types
+                    .as_deref()
+                    .map(|types| format!("  {types}"))
+                    .unwrap_or_default(),
+                ivar.offset
+                    .map(|offset| format!("  @{offset}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    println!("categories: {}", objc.categories.len());
+    for category in &objc.categories {
+        println!(
+            "  {}({}){}  {:#x}",
+            category.class.as_deref().unwrap_or("?"),
+            category.name,
+            adopts(&category.protocols),
+            category.address
+        );
+        print_methods('+', &category.class_methods);
+        print_methods('-', &category.instance_methods);
+    }
+    println!("protocols: {}", objc.protocols.len());
+    for protocol in &objc.protocols {
+        println!(
+            "  {}{}  {:#x}",
+            protocol.name,
+            adopts(&protocol.protocols),
+            protocol.address
+        );
+        print_methods('+', &protocol.class_methods);
+        print_methods('-', &protocol.instance_methods);
+        if !protocol.optional_class_methods.is_empty()
+            || !protocol.optional_instance_methods.is_empty()
+        {
+            println!("    optional:");
+            print_methods('+', &protocol.optional_class_methods);
+            print_methods('-', &protocol.optional_instance_methods);
+        }
+    }
+    Ok(0)
 }
 
 /// Report the language, the entry point and the sections.
