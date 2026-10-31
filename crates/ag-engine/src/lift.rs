@@ -235,6 +235,14 @@ pub enum Pointee {
     /// — a GOT entry — by the function's name. A load from the slot is that
     /// function; a `jmp` through it is a tail call to it.
     Import(String),
+    /// A slot that holds the address of an Objective-C selector's name — a
+    /// selector reference the runtime fixes up — by the selector. A load
+    /// from the slot is the selector, which a message send is sent with.
+    Selector(String),
+    /// A slot that holds the address of an Objective-C class object — a
+    /// class reference — by the class object's name. A load from the slot
+    /// is the class, which a class message is sent to.
+    ClassRef(String),
 }
 
 /// Why a function was not lifted.
@@ -2244,18 +2252,30 @@ impl<'a> Lifter<'a> {
         let address = self.address_of(base, index, scale, disp, 64, ins)?;
         let from = sorted(address.from.iter().copied().chain([ins.address]));
         // A GOT slot holds the address of the import it is relocated to, so
-        // a pointer-wide load from it is that function.
+        // a pointer-wide load from it is that function; a selector
+        // reference holds the address of the selector's name, so a load
+        // from it is the selector.
         if let Sym::Node(AstNode::Constant { value: slot, .. }) = &address.sym {
             if bits == 64 {
-                if let Some(Pointee::Import(name)) = self.symbols.pointee(*slot) {
-                    return Ok(Value::node(
-                        AstNode::FunctionName {
-                            name,
-                            address: *slot,
-                        },
-                        bits,
-                        from,
-                    ));
+                match self.symbols.pointee(*slot) {
+                    Some(Pointee::Import(name)) => {
+                        return Ok(Value::node(
+                            AstNode::FunctionName {
+                                name,
+                                address: *slot,
+                            },
+                            bits,
+                            from,
+                        ));
+                    }
+                    Some(Pointee::Selector(text)) => {
+                        return Ok(Value::node(AstNode::StringLiteral { text }, bits, from));
+                    }
+                    Some(Pointee::ClassRef(name)) => {
+                        self.globals.insert(name.clone());
+                        return Ok(Value::node(AstNode::var(name), bits, from));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2704,11 +2724,14 @@ impl<'a> Lifter<'a> {
                     name,
                     address: target,
                 },
-                // The address of a GOT slot is an address: the function is
-                // what the slot holds, not where it is.
-                Some(Pointee::Data(_)) | Some(Pointee::Import(_)) | None => {
-                    AstNode::constant(target, bits / 8)
-                }
+                // The address of a GOT slot, a selector reference or a class
+                // reference is an address: what the slot holds is not where
+                // it is.
+                Some(Pointee::Data(_))
+                | Some(Pointee::Import(_))
+                | Some(Pointee::Selector(_))
+                | Some(Pointee::ClassRef(_))
+                | None => AstNode::constant(target, bits / 8),
             };
             Value::node(node, bits, vec![at])
         } else {
@@ -2755,15 +2778,35 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// A call: of the function a direct call names, or of the function a
+    /// register or a memory operand holds — an import loaded from its slot,
+    /// a function's address — when the lifter knows what it holds; a call
+    /// through a value it does not know is refused.
     fn call(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
-        let Flow::Call(target) = ins.flow else {
+        let named = |this: &Self, target: u64| -> String {
+            this.symbols
+                .function_name(target)
+                .unwrap_or_else(|| format!("sub_{target:x}"))
+        };
+        if let Flow::Call(target) = ins.flow {
+            let name = named(self, target);
+            return self.emit_call(name, target, ins.address);
+        }
+        let [operand] = ins.operands.as_slice() else {
             return Err(NotLifted::new("an indirect call"));
         };
-        let name = self
-            .symbols
-            .function_name(target)
-            .unwrap_or_else(|| format!("sub_{target:x}"));
-        self.emit_call(name, target, ins.address)
+        let value = self.value_of(operand, 64, ins)?;
+        match &value.sym {
+            Sym::Node(AstNode::FunctionName { name, address }) => {
+                let (name, address) = (name.clone(), *address);
+                self.emit_call(name, address, ins.address)
+            }
+            Sym::Node(AstNode::Constant { value: target, .. }) => {
+                let (name, target) = (named(self, *target), *target);
+                self.emit_call(name, target, ins.address)
+            }
+            _ => Err(NotLifted::new("an indirect call")),
+        }
     }
 
     /// The function a `jmp` that leaves the function goes to, by name and
@@ -2871,6 +2914,37 @@ impl<'a> Lifter<'a> {
             let value = self.at_width(value.clone(), value.bits, register, at)?;
             addresses.extend(value.from.iter().copied());
             args.push(self.node_of(&value)?);
+        }
+        // A message send's arity is its selector's: the receiver, the
+        // selector and one argument per colon. A register the block did
+        // not write is then the function's own parameter, passed on — as
+        // `self` is, in a method that sends itself a message.
+        if is_dispatcher(&name) {
+            let registers = self.abi.argument_registers().to_vec();
+            let mut wanted = 2;
+            while args.len() < wanted.min(registers.len()) {
+                let register = registers[args.len()];
+                // A selector stub loads the selector its name carries into
+                // the second argument register itself.
+                if args.len() == 1 {
+                    if let Some(selector) = stub_selector(&name) {
+                        args.push(AstNode::StringLiteral {
+                            text: selector.to_string(),
+                        });
+                        wanted = message_arity(&name, &args).unwrap_or(wanted);
+                        continue;
+                    }
+                }
+                let value = self.read(RegisterId::new(RC_GPR, register, 64), at)?;
+                if matches!(value.sym, Sym::Unknown(_)) {
+                    break;
+                }
+                addresses.extend(value.from.iter().copied());
+                args.push(self.node_of(&value)?);
+                if let Some(arity) = message_arity(&name, &args) {
+                    wanted = arity;
+                }
+            }
         }
         let callee_name = name.clone();
         let node = AstNode::Call {
@@ -3634,6 +3708,54 @@ fn local_name(names: SlotNames, offset: i64) -> String {
         SlotNames::Hex => format!("{prefix}_{magnitude:x}"),
         SlotNames::Decimal => format!("{prefix}_{magnitude}"),
     }
+}
+
+/// Whether `callee` is the Objective-C runtime's dispatcher, or one of its
+/// variants — the names of a message send — or a selector stub,
+/// `objc_msgSend$sel`, which loads the selector itself before it
+/// dispatches.
+fn is_dispatcher(callee: &str) -> bool {
+    let name = callee.strip_prefix('_').unwrap_or(callee);
+    if name.strip_prefix("objc_msgSend$").is_some() {
+        return true;
+    }
+    matches!(
+        name.strip_prefix("objc_msgSend"),
+        Some(
+            "" | "_fpret"
+                | "_fp2ret"
+                | "_stret"
+                | "Super"
+                | "Super2"
+                | "Super_stret"
+                | "Super2_stret"
+        )
+    )
+}
+
+/// The selector a selector stub's name carries: `greet:` of
+/// `objc_msgSend$greet:`.
+fn stub_selector(callee: &str) -> Option<&str> {
+    let name = callee.strip_prefix('_').unwrap_or(callee);
+    name.strip_prefix("objc_msgSend$")
+}
+
+/// How many arguments a call of the Objective-C dispatcher takes, when the
+/// callee is one and the selector is known: the receiver, the selector and
+/// one per colon of the selector, the result's address first for a
+/// struct-returning send. `None` for any other call, and until the
+/// selector is known.
+fn message_arity(callee: &str, args: &[AstNode]) -> Option<usize> {
+    if !is_dispatcher(callee) {
+        return None;
+    }
+    let name = callee.strip_prefix('_').unwrap_or(callee);
+    let returns_struct = name.ends_with("_stret");
+    let skip = usize::from(returns_struct);
+    let AstNode::StringLiteral { text } = args.get(skip + 1)? else {
+        return None;
+    };
+    Some(skip + 2 + text.matches(':').count())
 }
 
 /// The mnemonic of an instruction, as the listing spells it.

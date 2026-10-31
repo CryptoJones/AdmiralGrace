@@ -1216,6 +1216,8 @@ mod tests {
             }],
             categories: vec![],
             protocols: vec![],
+            selectors: Default::default(),
+            class_refs: Default::default(),
         };
         let header = write(&objc);
         assert!(
@@ -1259,6 +1261,8 @@ mod tests {
                 }],
             }],
             protocols: vec![],
+            selectors: Default::default(),
+            class_refs: Default::default(),
         };
         let header = write(&objc);
         assert!(header.contains("struct __CFString;\n"), "{header}");
@@ -1302,6 +1306,8 @@ mod tests {
             classes,
             categories: vec![],
             protocols,
+            selectors: Default::default(),
+            class_refs: Default::default(),
         };
         let header = write(&objc);
         // The last of each chain is the root, and comes first.
@@ -1381,6 +1387,8 @@ mod tests {
                 optional_class_methods: vec![],
                 properties: vec![],
             }],
+            selectors: Default::default(),
+            class_refs: Default::default(),
         };
         let header = write(&objc);
         let expected = "\

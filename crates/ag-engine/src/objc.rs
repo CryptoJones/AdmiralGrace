@@ -143,11 +143,27 @@ pub struct ObjcMetadata {
     pub categories: Vec<ObjcCategory>,
     /// The protocols, in the order of `__objc_protolist`.
     pub protocols: Vec<ObjcProtocol>,
+    /// The selector references, by slot: what the runtime fixes each slot
+    /// of `__objc_selrefs` up to — a selector, by its name. Code loads a
+    /// selector from its slot to send a message with it.
+    pub selectors: BTreeMap<u64, String>,
+    /// The class references, by slot: the class each slot of
+    /// `__objc_classrefs` points at, by its name, where the image holds it.
+    /// Code loads a class from its slot to send it a class message.
+    pub class_refs: BTreeMap<u64, String>,
 }
 
 impl ObjcMetadata {
-    /// Whether the image says nothing of Objective-C.
+    /// Whether the image says nothing of Objective-C: no declaration, and
+    /// no reference either.
     pub fn is_empty(&self) -> bool {
+        self.declares_nothing() && self.selectors.is_empty() && self.class_refs.is_empty()
+    }
+
+    /// Whether the image declares nothing — no class, category or protocol
+    /// of its own — though it may send messages to another image's. There
+    /// is then nothing to list, and no header to write.
+    pub fn declares_nothing(&self) -> bool {
         self.classes.is_empty() && self.categories.is_empty() && self.protocols.is_empty()
     }
 
@@ -220,6 +236,14 @@ impl ObjcMetadata {
             shift_methods(&mut protocol.optional_instance_methods);
             shift_methods(&mut protocol.optional_class_methods);
         }
+        self.selectors = std::mem::take(&mut self.selectors)
+            .into_iter()
+            .map(|(slot, name)| (slot.wrapping_add(delta), name))
+            .collect();
+        self.class_refs = std::mem::take(&mut self.class_refs)
+            .into_iter()
+            .map(|(slot, name)| (slot.wrapping_add(delta), name))
+            .collect();
     }
 
     /// The metadata as an Objective-C header: every protocol, class and
@@ -637,6 +661,35 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
                 .method_list(field(layout::PROTOCOL_OPTIONAL_CLASS_METHODS)),
             properties: walk.property_list(field(layout::PROTOCOL_INSTANCE_PROPERTIES)),
         });
+    }
+
+    // The selector and class references: each slot of the section, and
+    // what it points at. A class of another image is bound at load, and
+    // its slot names nothing here.
+    let slots = |section: &str| -> Vec<u64> {
+        let Some(section) = file.section_by_name(section) else {
+            return Vec::new();
+        };
+        let Ok(data) = section.data() else {
+            return Vec::new();
+        };
+        let start = section.address();
+        (0..data.len() as u64 / 8)
+            .map(|index| start.wrapping_add(index * 8))
+            .collect()
+    };
+    for slot in slots("__objc_selrefs") {
+        if let Some(name) = walk.pointer(slot).and_then(|name| walk.name_at(name)) {
+            metadata.selectors.insert(slot, name);
+        }
+    }
+    for slot in slots("__objc_classrefs") {
+        if let Some(name) = walk
+            .pointer(slot)
+            .and_then(|class| walk.class_name_at(class))
+        {
+            metadata.class_refs.insert(slot, name);
+        }
     }
 
     (!metadata.is_empty()).then_some(metadata)

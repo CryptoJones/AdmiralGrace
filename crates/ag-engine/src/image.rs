@@ -772,8 +772,9 @@ impl Image {
     /// `mov rax, [rip+slot]; call rax`; this is what names the function at
     /// the other end. Only these two relocation kinds are read: a `COPY`
     /// relocation fills its slot with the symbol's bytes, not its address,
-    /// and a `RELATIVE` one names no symbol. Empty for every other
-    /// container and architecture.
+    /// and a `RELATIVE` one names no symbol. A Mach-O's are its symbol
+    /// pointer sections, named by the indirect symbol table. Empty for
+    /// every other container and architecture.
     pub fn import_slots(&self) -> Vec<(u64, String)> {
         if self.object().is_none() {
             return Vec::new();
@@ -784,6 +785,9 @@ impl Image {
         let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
             return Vec::new();
         };
+        if file.format() == object::BinaryFormat::MachO {
+            return self.macho_import_slots();
+        }
         if !matches!(
             file.architecture(),
             Architecture::X86_64 | Architecture::I386
@@ -821,6 +825,76 @@ impl Image {
             };
             if !name.is_empty() {
                 slots.push((slot, name.to_string()));
+            }
+        }
+        slots.sort_by_key(|(slot, _)| *slot);
+        slots
+    }
+
+    /// A 64-bit Mach-O's import slots: the entries of its lazy and non-lazy
+    /// symbol pointer sections (`__got`, `__la_symbol_ptr`), each named by
+    /// the indirect symbol table — the undefined symbol the loader binds it
+    /// to — whatever the fixup scheme.
+    fn macho_import_slots(&self) -> Vec<(u64, String)> {
+        use object::read::macho::{MachOFile64, Nlist as _, Section as _};
+        use object::read::{Object, ObjectSection};
+        use object::{Endianness, SymbolIndex};
+
+        let Ok(file) = MachOFile64::<Endianness>::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let endian = file.endian();
+        let Ok(mut commands) = file.macho_load_commands() else {
+            return Vec::new();
+        };
+        let mut indirect = None;
+        while let Ok(Some(command)) = commands.next() {
+            if let Ok(Some(dysymtab)) = command.dysymtab() {
+                indirect = dysymtab
+                    .indirect_symbols(endian, self.bytes.as_slice())
+                    .ok();
+            }
+        }
+        let Some(indirect) = indirect else {
+            return Vec::new();
+        };
+        let symbols = file.macho_symbol_table();
+        let strings = symbols.strings();
+        let mut slots = Vec::new();
+        for section in file.sections() {
+            let raw = section.macho_section();
+            if !matches!(
+                raw.section_type(endian),
+                object::macho::S_NON_LAZY_SYMBOL_POINTERS | object::macho::S_LAZY_SYMBOL_POINTERS
+            ) {
+                continue;
+            }
+            let Ok(entries) = raw.indirect_symbols(endian, indirect) else {
+                continue;
+            };
+            for (index, entry) in entries.iter().enumerate() {
+                let entry = entry.get(endian);
+                if entry
+                    & (object::macho::INDIRECT_SYMBOL_LOCAL | object::macho::INDIRECT_SYMBOL_ABS)
+                    != 0
+                {
+                    continue;
+                }
+                let Ok(symbol) = symbols.symbol(SymbolIndex(entry as usize)) else {
+                    continue;
+                };
+                let Ok(name) = symbol.name(endian, strings) else {
+                    continue;
+                };
+                let Ok(name) = std::str::from_utf8(name) else {
+                    continue;
+                };
+                if !name.is_empty() {
+                    slots.push((
+                        section.address().wrapping_add(index as u64 * 8),
+                        name.to_string(),
+                    ));
+                }
             }
         }
         slots.sort_by_key(|(slot, _)| *slot);

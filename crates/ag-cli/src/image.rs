@@ -911,7 +911,7 @@ fn objc(image: &Binary, json: bool, header: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&objc_json(image))?);
         return Ok(0);
     }
-    let Some(objc) = image.objc() else {
+    let Some(objc) = image.objc().filter(|objc| !objc.declares_nothing()) else {
         println!("no Objective-C metadata");
         return Ok(0);
     };
@@ -2353,7 +2353,7 @@ mod tests {
         let report = pseudocode_json(&image, 0x1050);
         assert_eq!(report.return_type, None);
         assert_eq!(report.return_reason, None);
-        let report = pseudocode_json(&image, 0x1000);
+        let report = pseudocode_json(&image, 0x10c0);
         assert_eq!(report.return_type, None);
         assert_eq!(report.return_reason, None);
     }
@@ -2470,14 +2470,11 @@ mod tests {
     fn the_pseudocode_of_a_refused_function_says_why() {
         let image = sample();
 
-        // _init calls through a register.
-        let report = pseudocode_json(&image, 0x1000);
+        // register_tm_clones shifts right, which the lifter does not read.
+        let report = pseudocode_json(&image, 0x10c0);
 
         assert!(!report.lifted);
-        assert_eq!(
-            report.reason.as_deref(),
-            Some("not lifted yet: an indirect call")
-        );
+        assert_eq!(report.reason.as_deref(), Some("not lifted yet: shr"));
         assert!(report.lines.is_empty());
         assert_eq!(report.text, None);
     }

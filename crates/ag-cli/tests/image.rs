@@ -588,11 +588,11 @@ fn the_start_up_glue_is_void_by_use_and_the_option_restores_the_refusal() {
 
 #[test]
 fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
-    // _init calls through a register.
+    // register_tm_clones shifts right, which the lifter does not read.
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "_init"])
+        .args(["pseudocode", "register_tm_clones"])
         .output()
         .expect("the ag binary runs");
 
@@ -600,13 +600,13 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     let report = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         report,
-        "// _init at 0x1000: not lifted yet: an indirect call\n"
+        "// register_tm_clones at 0x10c0: not lifted yet: shr\n"
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "_init", "--json"])
+        .args(["pseudocode", "register_tm_clones", "--json"])
         .output()
         .expect("the ag binary runs");
 
@@ -616,7 +616,7 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     assert_eq!(report["lifted"], serde_json::json!(false));
     assert_eq!(
         report["reason"],
-        serde_json::json!("not lifted yet: an indirect call")
+        serde_json::json!("not lifted yet: shr")
     );
     assert_eq!(report["text"], serde_json::Value::Null);
 }
@@ -914,12 +914,12 @@ fn a_function_of_an_export_names_itself_and_holds_the_four_reports() {
     assert_eq!(sum_to["pseudocode"]["lifted"], serde_json::json!(true));
 
     // A function the lifter refuses carries the reason instead.
-    let init = dir.json("functions/0x1000.json");
-    assert_eq!(init["name"], serde_json::json!("_init"));
+    let init = dir.json("functions/0x10c0.json");
+    assert_eq!(init["name"], serde_json::json!("register_tm_clones"));
     assert_eq!(init["pseudocode"]["lifted"], serde_json::json!(false));
     assert_eq!(
         init["pseudocode"]["reason"],
-        serde_json::json!("not lifted yet: an indirect call")
+        serde_json::json!("not lifted yet: shr")
     );
 
     // The listing is what `disasm` prints.
@@ -1641,6 +1641,14 @@ fn an_objective_c_image_is_described_and_its_methods_named_from_its_metadata() {
     assert!(report.contains("-[Derived greet:]"), "{report}");
     let report = image("sample_objc_stripped", &["calls"]);
     assert!(report.contains("-[Derived greet:]"), "{report}");
+
+    // The pseudocode reads a call of the dispatcher as the message it sends.
+    let report = image("sample_objc", &["pseudocode", "_main"]);
+    assert!(report.contains("[0 greet:[Base answer]]"), "{report}");
+    assert!(report.contains("[0 thrice:2]"), "{report}");
+    assert!(!report.contains("objc_msgSend("), "{report}");
+    let report = image("sample_objc", &["pseudocode", "--", "-[Derived greet:]"]);
+    assert!(report.contains("[a twice:c] + 1"), "{report}");
 
     // The classes, categories and protocols, as text and as JSON.
     let report = image("sample_objc_stripped", &["objc"]);
