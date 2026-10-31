@@ -554,25 +554,110 @@ struct LineJson {
 #[derive(Debug, Serialize)]
 pub(crate) struct PseudocodeJson {
     /// The function's entry address.
-    function: u64,
+    pub(crate) function: u64,
     /// The address, as a hex string.
-    function_hex: String,
+    pub(crate) function_hex: String,
     /// The function's name, when it has one.
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Whether the function was lifted.
     pub(crate) lifted: bool,
     /// Why it was not, when it was not.
-    reason: Option<String>,
+    pub(crate) reason: Option<String>,
     /// The C return type, when the function was lifted and has one of its
     /// own: `void`, `int`, `long`. A thunk's is its callee's, and `null`.
-    return_type: Option<String>,
+    pub(crate) return_type: Option<String>,
     /// What decided the return type — `no caller reads the result`, `main
     /// reads eax after the call` — as the function's leading comment says.
-    return_reason: Option<String>,
+    pub(crate) return_reason: Option<String>,
     /// The whole text, when it was.
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     /// The lines, each with the addresses it came from.
     lines: Vec<LineJson>,
+}
+
+/// Open the image `binary` the way the `image` commands read it: under the
+/// project's layout when there is one, as raw bytes or the slice the flags
+/// or the project say, with the engine's `options`, and told the project's
+/// patches, mode marks and jump-table notes.
+pub(crate) fn open_image(
+    binary: &Path,
+    raw: Option<ag_image::RawSpec>,
+    slice: Option<String>,
+    project: Option<&ag_corpus::project::ProjectFile>,
+    options: Options,
+) -> Result<Binary> {
+    let layout = match &project {
+        Some(project) => crate::project::layout_of(project)?,
+        None => ag_image::Layout::default(),
+    };
+    // Raw bytes load as the flags say, or as the project remembers; flags
+    // that disagree with the project would read other bytes under its
+    // records, and are refused.
+    let raw = match (raw, project) {
+        (Some(raw), Some(project)) => {
+            let recorded = crate::project::raw_of_project(project)?;
+            anyhow::ensure!(
+                recorded.as_ref() == Some(&raw),
+                "the --raw flags say the target loads {}, but the project says {}",
+                crate::project::describe_raw(&raw),
+                recorded.as_ref().map_or(
+                    "it is not raw bytes".to_string(),
+                    crate::project::describe_raw
+                )
+            );
+            Some(raw)
+        }
+        (Some(raw), None) => Some(raw),
+        (None, Some(project)) => crate::project::raw_of_project(project)?,
+        (None, None) => None,
+    };
+    // So is the slice of a universal Mach-O chosen: by the flag, or as the
+    // project remembers — and a flag that names another slice than the
+    // project's is refused.
+    if let (Some(flag), Some(project)) = (slice.as_deref(), project) {
+        crate::project::check_slice_flag(
+            binary,
+            Some(flag),
+            project.target.slice.as_deref(),
+            Path::new("the project"),
+        )?;
+    }
+    let slice = slice.or_else(|| project.and_then(|project| project.target.slice.clone()));
+    let image = crate::project::open_target(binary, raw.as_ref(), slice.as_deref(), &layout)?
+        .with_options(options);
+    if let Some(project) = project {
+        // The analyst's patches are the bytes the image is read with, and
+        // the modes the instruction sets they are read in.
+        image.set_patches(project.patches());
+        let modes: std::collections::BTreeMap<u64, ag_image::ArmMode> = project
+            .modes()
+            .into_iter()
+            .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
+            .collect();
+        if !modes.is_empty() && !image.set_modes(modes) {
+            eprintln!(
+                "note: the project's mode marks mean nothing to {}: it has one instruction set",
+                image.language()
+            );
+        }
+        let notes = project.jump_tables();
+        let hints = notes
+            .into_iter()
+            .map(|(site, note)| {
+                (
+                    site,
+                    ag_image::JumpTableHint {
+                        table: note.table,
+                        width: note.width,
+                        count: note.count,
+                        relative: note.relative,
+                    },
+                )
+            })
+            .collect();
+        image.set_jump_table_hints(hints);
+    }
+    Ok(image)
 }
 
 /// Report on a program image.
@@ -638,81 +723,7 @@ pub fn run(
             .transpose()?,
         _ => None,
     };
-    let layout = match &project {
-        Some(project) => crate::project::layout_of(project)?,
-        None => ag_image::Layout::default(),
-    };
-    // Raw bytes load as the flags say, or as the project remembers; flags
-    // that disagree with the project would read other bytes under its
-    // records, and are refused.
-    let raw = match (raw, &project) {
-        (Some(raw), Some(project)) => {
-            let recorded = crate::project::raw_of_project(project)?;
-            anyhow::ensure!(
-                recorded.as_ref() == Some(&raw),
-                "the --raw flags say the target loads {}, but the project says {}",
-                crate::project::describe_raw(&raw),
-                recorded.as_ref().map_or(
-                    "it is not raw bytes".to_string(),
-                    crate::project::describe_raw
-                )
-            );
-            Some(raw)
-        }
-        (Some(raw), None) => Some(raw),
-        (None, Some(project)) => crate::project::raw_of_project(project)?,
-        (None, None) => None,
-    };
-    // So is the slice of a universal Mach-O chosen: by the flag, or as the
-    // project remembers — and a flag that names another slice than the
-    // project's is refused.
-    if let (Some(flag), Some(project)) = (slice.as_deref(), &project) {
-        crate::project::check_slice_flag(
-            binary,
-            Some(flag),
-            project.target.slice.as_deref(),
-            Path::new("the project"),
-        )?;
-    }
-    let slice = slice.or_else(|| {
-        project
-            .as_ref()
-            .and_then(|project| project.target.slice.clone())
-    });
-    let image = crate::project::open_target(binary, raw.as_ref(), slice.as_deref(), &layout)?
-        .with_options(options);
-    if let Some(project) = project {
-        // The analyst's patches are the bytes the image is read with, and
-        // the modes the instruction sets they are read in.
-        image.set_patches(project.patches());
-        let modes: std::collections::BTreeMap<u64, ag_image::ArmMode> = project
-            .modes()
-            .into_iter()
-            .filter_map(|(address, mode)| Some((address, ag_image::ArmMode::parse(&mode)?)))
-            .collect();
-        if !modes.is_empty() && !image.set_modes(modes) {
-            eprintln!(
-                "note: the project's mode marks mean nothing to {}: it has one instruction set",
-                image.language()
-            );
-        }
-        let notes = project.jump_tables();
-        let hints = notes
-            .into_iter()
-            .map(|(site, note)| {
-                (
-                    site,
-                    ag_image::JumpTableHint {
-                        table: note.table,
-                        width: note.width,
-                        count: note.count,
-                        relative: note.relative,
-                    },
-                )
-            })
-            .collect();
-        image.set_jump_table_hints(hints);
-    }
+    let image = open_image(binary, raw, slice, project.as_ref(), options)?;
 
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
@@ -2007,14 +2018,14 @@ fn call_json(call: &ag_image::Call) -> CallJson {
 /// A target that reads as an address is looked for as one first — `0x1000`,
 /// `0X1000`, or a bare hexadecimal number. An address that names no function
 /// is not an error: the target may still be a name.
-fn resolve(image: &Binary, target: &str) -> Result<u64> {
+pub(crate) fn resolve(image: &Binary, target: &str) -> Result<u64> {
     find_function(image, target).ok_or_else(|| anyhow::anyhow!("no function matching {target:?}"))
 }
 
 /// The address of the function `target` names, when it names one.
 ///
 /// The name is matched loosely: an exact name first, then a substring.
-fn find_function(image: &Binary, target: &str) -> Option<u64> {
+pub(crate) fn find_function(image: &Binary, target: &str) -> Option<u64> {
     if let Ok(address) = ag_corpus::parse_addr(target) {
         if image.function_name(address).is_some() {
             return Some(address);
@@ -2048,7 +2059,7 @@ fn find_function(image: &Binary, target: &str) -> Option<u64> {
 /// A target that reads as an address is looked for as one first, and the
 /// symbol that holds it is the one that is named. A name is matched loosely:
 /// an exact name first, then a substring.
-fn resolve_data(image: &Binary, target: &str) -> Result<u64> {
+pub(crate) fn resolve_data(image: &Binary, target: &str) -> Result<u64> {
     if let Ok(address) = ag_corpus::parse_addr(target) {
         return Ok(data_key(image, address));
     }

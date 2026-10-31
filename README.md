@@ -119,6 +119,20 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 `export` writes the whole analysis to a directory in one pass: `info.json`, `symbols.json`, `strings.json`, `data.json` and `calls.json` as the subcommands print them under `--json`, a `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json`, and a `README.md` naming the binary, its SHA-256 and the `ag` version. `--functions REGEX` limits the per-function files; a directory that is not empty is refused without `--force`.
 
+## MCP server
+
+`ag mcp` serves a program image to a language model over the Model Context Protocol, on
+standard input and output: the functions and strings and a search over them, the disassembly,
+pseudocode and control flow of a function, its callers, callees and cross references, the
+bytes at an address — and, with `--project FILE`, the analyst's names, comments and
+bookmarks, read and written in the same project file the workbench opens.
+
+```bash
+cargo run --bin ag -- mcp ./sample.elf --project ./sample.agproj
+```
+
+The tools are listed in [docs/cli.md](docs/cli.md#an-mcp-server-ag-mcp).
+
 ## Corpus format
 
 A corpus is a directory holding `decompile-index.json` and one file per function. The index is JSON: a `version`, the `target_sha256` of the binary that was analysed, the `provider` that produced it, and a `functions` array. Each entry gives the function's `address` and `name`, its `status`, and the byte `range` its body covers. The body lives in `functions/<address>.c`, or wherever the entry's `relative_path` points. The leading `//` comment header of a body is dropped; the signature and the locals are kept.
