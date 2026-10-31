@@ -199,6 +199,9 @@ pub enum Stop {
     /// The function has no blocks at the medium level: a thunk, or a lift
     /// without one.
     NoBlocks,
+    /// The path ended after a call to a function that never returns, at
+    /// the call.
+    NoReturn { at: Option<u64> },
 }
 
 impl Stop {
@@ -212,6 +215,10 @@ impl Stop {
             Stop::Unknown { at: None, what } => format!("stopped: {what}"),
             Stop::NoBlock(block) => format!("stopped: no block {block}"),
             Stop::NoBlocks => "stopped: the function has no blocks at the medium level".to_string(),
+            Stop::NoReturn { at: Some(at) } => {
+                format!("stopped at {at:#x}: the call does not return")
+            }
+            Stop::NoReturn { at: None } => "stopped: the call does not return".to_string(),
         }
     }
 }
@@ -436,6 +443,12 @@ impl Machine<'_> {
                         step.note = self.pending_note.take();
                         self.steps.push(step);
                         return Stop::Returned(returned);
+                    }
+                    // The marker after a call that never returns: the path
+                    // ends here, as the program's would.
+                    AstNode::Intrinsic { name, .. } if name == crate::lift::UNREACHABLE => {
+                        self.steps.push(step);
+                        return Stop::NoReturn { at: address };
                     }
                     node => {
                         let result = self.execute(node, &mut step);

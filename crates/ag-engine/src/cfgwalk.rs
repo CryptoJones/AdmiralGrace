@@ -555,13 +555,21 @@ fn step_of(
     table: Option<&JumpTable>,
 ) -> Step {
     let mut step = step_before_boundaries(ins, entry, entries, table);
-    // No function runs into the next one: code that would fall into
-    // another function's entry ended before it — after a call that never
-    // returns, or an instruction that never falls through.
+    // No function runs into the next one. Code that would fall into
+    // another function's entry goes on in that function: a tail call to
+    // it, which returns if it does — except after a call, a system call
+    // or an interrupt, whose fall-through was never real: the callee did
+    // not come back, and the function ended there.
     let next = ins.address + ins.length as u64;
     if step.falls_through && next != entry && entries.is_function(next) {
         step.falls_through = false;
         step.ends_block = true;
+        if !matches!(
+            ins.flow,
+            Flow::Call(_) | Flow::IndirectCall | Flow::Syscall | Flow::Interrupt
+        ) {
+            step.tail_call = Some(next);
+        }
     }
     step
 }

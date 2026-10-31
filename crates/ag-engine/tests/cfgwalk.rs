@@ -813,4 +813,29 @@ fn code_does_not_run_into_the_next_functions_entry() {
     assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
     assert_eq!(cfg.blocks[0].to, 0x1007);
     assert!(cfg.blocks[0].successor_addresses.is_empty());
+    // After the system call nothing fell through: not a tail call.
+    assert!(cfg.tail_calls.is_empty(), "{cfg:?}");
+}
+
+// 0x1000: mov eax, 1     ; b8 01 00 00 00   — outer, which falls into
+// 0x1005: ret            ; c3               — inner, a function of its own
+#[test]
+fn code_that_falls_into_the_next_function_tail_calls_it() {
+    let bytes = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+    let mut ctx = X86IcedContext::default();
+    let disasm = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+    let cfg = resolve_branches_among(
+        &disasm,
+        0x1000,
+        &Dying {
+            functions: &[0x1000, 0x1005],
+            noreturn: &[],
+        },
+    );
+    assert_eq!(cfg.blocks.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.blocks[0].to, 0x1005);
+    assert!(cfg.blocks[0].successor_addresses.is_empty());
+    assert_eq!(cfg.tail_calls.len(), 1, "{cfg:?}");
+    assert_eq!(cfg.tail_calls[0].site, 0x1000);
+    assert_eq!(cfg.tail_calls[0].target, 0x1005);
 }
