@@ -1583,4 +1583,7 @@ fn a_slice_flag_that_disagrees_with_the_project_is_refused_and_save_checks_the_s
     ]);
     assert!(!ok);
     assert!(stderr.contains("cannot be used with"), "{stderr}");
+    let (ok, _, stderr) = run(&["project", &fat, "save", "--out", &missing.text()]);
+    assert!(!ok);
+    assert!(stderr.contains("say which one with --slice"), "{stderr}");
 }
