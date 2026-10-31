@@ -558,6 +558,10 @@ fn an_objective_c_image_is_written_as_a_header() {
     let expected = "\
 // Objective-C declarations recovered from the image: 2 classes, 1 category, 1 protocol.
 // Types are read from the runtime's encodings; where an encoding is missing, a type is `id`.
+#import <objc/objc.h>
+
+@class Base, Derived;
+@protocol Greeting;
 
 struct Point {
     int x;
@@ -571,6 +575,7 @@ struct Point {
 - (void)wave:(const char *)arg1;
 @end
 
+__attribute__((objc_root_class))
 @interface Base {
     Class isa;
 }

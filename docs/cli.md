@@ -106,13 +106,16 @@ or the class a category extends — is bound at load, so a category on one names
 none.)
 
 `ag image FILE objc --header` writes the same as an Objective-C header — the quickest
-overview of such a binary: every protocol, class and category declared as a compiler would
-read it back, with its properties, instance variables and methods under the types the
-runtime's encodings say (`i20@0:8i16` is `- (int)greet:(int)arg1;`). A protocol comes before
-the protocol that adopts it, a superclass before its subclass, a class before its categories;
-classes and protocols of other images are forward-declared; a property's accessors are not
-listed again as methods; where an encoding is missing, the type is `id`. `export` writes it
-as `objc.h`, beside `objc.json`, when the image has Objective-C.
+overview of such a binary: every protocol, class and category declared, with its properties,
+instance variables and methods under the types the runtime's encodings say (`i20@0:8i16` is
+`- (int)greet:(int)arg1;`). Every class and protocol is forward-declared first, those of other
+images marked as such; the structs the encodings spell out are defined, each after the structs
+it holds; a protocol comes before the protocol that adopts it, a superclass before its subclass,
+a class before its categories; a category on a class of another image is kept as a comment; a
+property's accessors are not listed again as methods; where an encoding is missing, the type is
+`id`. The header compiles against the runtime's `objc/objc.h` where the image is whole; a
+superclass or a type of another image needs that image's headers too. `export` writes it as
+`objc.h`, beside `objc.json`, when the image has Objective-C.
 
 A universal (fat) Mach-O holds several images, one per architecture. `ag image FILE slices`
 lists them, and `--slice ARCH` (or the slice's position, from 0) before the subcommand says

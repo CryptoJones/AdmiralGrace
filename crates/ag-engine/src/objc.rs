@@ -20,8 +20,11 @@
 //!
 //! Every count and every string is bounded, since the records are read from
 //! an untrusted file: no list is read past [`ObjcMetadata::MOST_IN_A_LIST`]
-//! entries, no image past [`ObjcMetadata::MOST_METHODS`] methods, and no
-//! name past [`ObjcMetadata::LONGEST_NAME`] bytes.
+//! entries, no image past [`ObjcMetadata::MOST_ENTRIES`] methods, instance
+//! variables and properties together, and no name past
+//! [`ObjcMetadata::LONGEST_NAME`] bytes. A class listed twice is read once.
+//! Class properties — a metaclass's, a protocol's `_classProperties` — are
+//! not read; their `+` accessors show as class methods.
 //!
 //! [`ObjcMetadata::header`] writes what was read as an Objective-C header:
 //! the quickest overview of such a binary. The type encodings are decoded
@@ -231,9 +234,10 @@ impl ObjcMetadata {
     pub const CLASS_OBJECT_SIZE: u64 = 0x28;
     /// No real list is longer: a bound on a corrupt count.
     pub const MOST_IN_A_LIST: u64 = 4096;
-    /// No real image holds more methods: a bound on the lists of a crafted
-    /// one, across every class, category and protocol.
-    pub const MOST_METHODS: usize = 1 << 20;
+    /// No real image holds more: a bound on the entries — methods, instance
+    /// variables, properties — read from the lists of a crafted one, across
+    /// every class, category and protocol.
+    pub const MOST_ENTRIES: usize = 1 << 20;
     /// No real name — a class, a selector, a type encoding — is longer: a
     /// bound on a pointer into a crafted string section.
     pub const LONGEST_NAME: usize = 4096;
@@ -293,10 +297,11 @@ mod layout {
 }
 
 /// The image under the walk: kuna's view of its sections with the chained
-/// fixups resolved, and the count of methods read so far, against the bound.
+/// fixups resolved, and the count of list entries read so far, against the
+/// bound.
 struct Walk<'a> {
     img: MachoImage<'a>,
-    methods: Cell<usize>,
+    entries: Cell<usize>,
 }
 
 impl Walk<'_> {
@@ -335,6 +340,15 @@ impl Walk<'_> {
         Some(text)
     }
 
+    /// Count one list entry against the bound: whether it may be read.
+    fn take_entry(&self) -> bool {
+        if self.entries.get() >= ObjcMetadata::MOST_ENTRIES {
+            return false;
+        }
+        self.entries.set(self.entries.get() + 1);
+        true
+    }
+
     /// The header of a `method_list_t`, `ivar_list_t` or `property_list_t`
     /// at `list`: the
     /// entsize, and the count bounded by [`ObjcMetadata::MOST_IN_A_LIST`].
@@ -351,7 +365,7 @@ impl Walk<'_> {
     /// layout, or as three offsets from each field's own address in the
     /// relative one — where the selector offset reaches a selector reference,
     /// a pointer to the string. A protocol's entries have no implementation.
-    /// Nothing is read once the image's methods pass the bound.
+    /// Nothing is read once the image's entries pass the bound.
     fn method_list(&self, list: u64) -> Vec<ObjcMethod> {
         let mut methods = Vec::new();
         if list == 0 {
@@ -371,10 +385,9 @@ impl Walk<'_> {
             return methods;
         }
         for index in 0..count {
-            if self.methods.get() >= ObjcMetadata::MOST_METHODS {
+            if !self.take_entry() {
                 break;
             }
-            self.methods.set(self.methods.get() + 1);
             let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
             let (selector, types, imp) = if relative {
                 let field = |offset: u64| -> Option<u64> {
@@ -422,6 +435,9 @@ impl Walk<'_> {
             return ivars;
         }
         for index in 0..count {
+            if !self.take_entry() {
+                break;
+            }
             let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
             let Some(name) = self
                 .pointer(entry.wrapping_add(layout::IVAR_NAME))
@@ -457,6 +473,9 @@ impl Walk<'_> {
             return properties;
         }
         for index in 0..count {
+            if !self.take_entry() {
+                break;
+            }
             let entry = list.wrapping_add(layout::LIST_FIRST + index * entsize);
             let Some(name) = self
                 .pointer(entry.wrapping_add(layout::PROPERTY_NAME))
@@ -521,7 +540,7 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
     }
     let walk = Walk {
         img: MachoImage::with_fixups(&file, resolve_chained_fixups(&file, bytes)),
-        methods: Cell::new(0),
+        entries: Cell::new(0),
     };
     let mut metadata = ObjcMetadata::default();
 
@@ -540,7 +559,12 @@ pub fn read(bytes: &[u8]) -> Option<ObjcMetadata> {
             .collect()
     };
 
+    // A class listed twice is read once.
+    let mut seen = std::collections::BTreeSet::new();
     for class_ptr in pointers("__objc_classlist") {
+        if !seen.insert(class_ptr) {
+            continue;
+        }
         let Some(class) = classt::read_class_t(&walk.img, class_ptr) else {
             continue;
         };

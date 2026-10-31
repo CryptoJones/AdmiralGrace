@@ -8,17 +8,22 @@
 //! runtime's type encodings (`i20@0:8i16` for `- (int)greet:(int)times`),
 //! decoded by [`decode_type`] and [`decode_method`]; where an encoding is
 //! missing or unreadable the type is `id`, and the header still parses.
-//! Declarations are ordered so that what one needs comes first: a protocol
+//! Every class and protocol is forward-declared first, those of other images
+//! — a framework's — marked as such; then the structs the encodings spell
+//! out are defined — an instance variable's encoding names the fields,
+//! `{Point="x"i"y"i}` — each after the structs it holds by value; then the
+//! declarations, ordered so that what one needs comes first: a protocol
 //! before the protocol that adopts it, a superclass before its subclass, a
-//! class before its categories. Classes and protocols the image refers to
-//! but does not hold — a framework's — are forward-declared, and the structs
-//! the encodings spell out — an instance variable's encoding names the
-//! fields, `{Point="x"i"y"i}` — are defined before they are used.
+//! class before its categories. A category on a class of another image is
+//! written as a comment, since there is no class to extend. The header
+//! compiles against the runtime's `objc/objc.h` alone where the image is
+//! whole; a superclass or a type of another image needs that image's
+//! headers too.
 //!
 //! A property's accessors are its own declaration, so a method the property
 //! already declares — its getter, its setter — is not listed twice.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ObjcCategory, ObjcClass, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol};
 
@@ -35,6 +40,7 @@ pub fn write(objc: &ObjcMetadata) -> String {
         plural(objc.protocols.len(), "protocol", "protocols"),
     ));
     out.push_str("// Types are read from the runtime's encodings; where an encoding is missing, a type is `id`.\n");
+    out.push_str("#import <objc/objc.h>\n");
 
     // What the image refers to but does not hold.
     let held_classes: BTreeSet<&str> = objc.classes.iter().map(|c| c.name.as_str()).collect();
@@ -106,22 +112,38 @@ pub fn write(objc: &ObjcMetadata) -> String {
             }
         }
     }
-    let external_classes: Vec<&String> = classes_referred
+    // Every class and protocol, declared before anything refers to it: a
+    // protocol's method may take a class declared later, a class may hold a
+    // pointer to its own subclass.
+    let external_classes: Vec<&str> = classes_referred
         .iter()
-        .filter(|name| !held_classes.contains(name.as_str()))
+        .map(String::as_str)
+        .filter(|name| !held_classes.contains(name))
         .collect();
-    let external_protocols: Vec<&String> = protocols_referred
+    let external_protocols: Vec<&str> = protocols_referred
         .iter()
-        .filter(|name| !held_protocols.contains(name.as_str()))
+        .map(String::as_str)
+        .filter(|name| !held_protocols.contains(name))
         .collect();
+    if !held_classes.is_empty() || !held_protocols.is_empty() {
+        out.push('\n');
+        if !held_classes.is_empty() {
+            let names: Vec<&str> = held_classes.iter().copied().collect();
+            out.push_str(&format!("@class {};\n", names.join(", ")));
+        }
+        if !held_protocols.is_empty() {
+            let names: Vec<&str> = held_protocols.iter().copied().collect();
+            out.push_str(&format!("@protocol {};\n", names.join(", ")));
+        }
+    }
     if !external_classes.is_empty() || !external_protocols.is_empty() {
         out.push('\n');
-        out.push_str("// Of other images, bound at load.\n");
-        for name in external_classes {
-            out.push_str(&format!("@class {name};\n"));
+        out.push_str("// Of other images, bound at load; their own headers declare them.\n");
+        if !external_classes.is_empty() {
+            out.push_str(&format!("@class {};\n", external_classes.join(", ")));
         }
-        for name in external_protocols {
-            out.push_str(&format!("@protocol {name};\n"));
+        if !external_protocols.is_empty() {
+            out.push_str(&format!("@protocol {};\n", external_protocols.join(", ")));
         }
     }
 
@@ -135,21 +157,29 @@ pub fn write(objc: &ObjcMetadata) -> String {
         out.push('\n');
         write_protocol(&mut out, protocol);
     }
+    // The categories, by the class each extends, in the image's order.
+    let mut categories_of: BTreeMap<&str, Vec<&ObjcCategory>> = BTreeMap::new();
+    let mut unplaced: Vec<&ObjcCategory> = Vec::new();
+    for category in &objc.categories {
+        match category.class.as_deref() {
+            Some(class) if held_classes.contains(class) => {
+                categories_of.entry(class).or_default().push(category)
+            }
+            _ => unplaced.push(category),
+        }
+    }
     for class in ordered_classes(objc) {
         out.push('\n');
         write_class(&mut out, class);
-        for category in objc
-            .categories
-            .iter()
-            .filter(|category| category.class.as_deref() == Some(class.name.as_str()))
+        for category in categories_of
+            .remove(class.name.as_str())
+            .unwrap_or_default()
         {
             out.push('\n');
             write_category(&mut out, category);
         }
     }
-    for category in objc.categories.iter().filter(
-        |category| !matches!(&category.class, Some(class) if held_classes.contains(class.as_str())),
-    ) {
+    for category in unplaced {
         out.push('\n');
         write_category(&mut out, category);
     }
@@ -159,7 +189,7 @@ pub fn write(objc: &ObjcMetadata) -> String {
 /// The structs and unions the encodings spell out, defined: `struct Point {
 /// int x; int y; };`. An instance variable's encoding names the fields; a
 /// method's does not, and a struct seen only there gets its fields numbered.
-/// A struct named without a body (`{Point}`) is only declared.
+/// A struct named without a body (`{Point}` or `{Point=}`) is only declared.
 fn struct_definitions(objc: &ObjcMetadata) -> String {
     let mut found: std::collections::BTreeMap<String, (String, Option<String>)> =
         std::collections::BTreeMap::new();
@@ -231,24 +261,65 @@ fn struct_definitions(objc: &ObjcMetadata) -> String {
     for encoding in encodings {
         see(encoding);
     }
+    // Each struct after the structs it holds by value, so a field of one
+    // never names an incomplete type; a pointer to one needs no definition.
+    let bodies: BTreeMap<&str, (&str, Option<Vec<Field>>)> = found
+        .iter()
+        .map(|(name, (keyword, body))| {
+            let fields = body
+                .as_deref()
+                .filter(|body| !body.is_empty())
+                .map(|body| fields_of(body, 0));
+            (name.as_str(), (keyword.as_str(), fields))
+        })
+        .collect();
+    let held_by_value = |fields: &[Field]| -> Vec<String> {
+        fields
+            .iter()
+            .filter(|(base, _, _)| !base.ends_with('*'))
+            .filter_map(|(base, _, _)| {
+                base.strip_prefix("struct ")
+                    .or_else(|| base.strip_prefix("union "))
+                    .map(str::to_string)
+            })
+            .collect()
+    };
     let mut out = String::new();
-    for (name, (keyword, body)) in found {
-        match body {
-            None => out.push_str(&format!("{keyword} {name};\n")),
-            Some(body) => {
-                out.push_str(&format!("{keyword} {name} {{\n"));
-                let mut parser = Parser::new(&body);
-                let mut index = 0;
-                while !parser.done() {
-                    let field = parser.quoted_name();
-                    let Some((base, suffix)) = parser.ty() else {
-                        break;
-                    };
-                    let field = field.unwrap_or_else(|| format!("field{index}"));
-                    out.push_str(&format!("    {}{field}{suffix};\n", declarator(&base)));
-                    index += 1;
+    let mut written: BTreeSet<&str> = BTreeSet::new();
+    for name in bodies.keys() {
+        // Each entry: the struct, and whether what it holds was pushed.
+        let mut stack: Vec<(&str, bool)> = vec![(name, false)];
+        while let Some((name, expanded)) = stack.pop() {
+            if written.contains(name) {
+                continue;
+            }
+            let Some((keyword, fields)) = bodies.get(name) else {
+                continue;
+            };
+            if !expanded {
+                stack.push((name, true));
+                if let Some(fields) = fields {
+                    for held in held_by_value(fields) {
+                        if let Some((held, _)) = bodies.get_key_value(held.as_str()) {
+                            if !written.contains(held) && !stack.iter().any(|(on, _)| *on == *held)
+                            {
+                                stack.push((held, false));
+                            }
+                        }
+                    }
                 }
-                out.push_str("};\n");
+                continue;
+            }
+            written.insert(name);
+            match fields {
+                None => out.push_str(&format!("{keyword} {name};\n")),
+                Some(fields) => {
+                    out.push_str(&format!("{keyword} {name} {{\n"));
+                    for (base, suffix, field) in fields {
+                        out.push_str(&format!("    {}{field}{suffix};\n", declarator(base)));
+                    }
+                    out.push_str("};\n");
+                }
             }
         }
     }
@@ -294,54 +365,71 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 }
 
 /// The protocols, each after the protocols it adopts; otherwise in the
-/// image's order.
+/// image's order. A walk with its own stack, so a crafted chain of
+/// thousands cannot overflow the thread's.
 fn ordered_protocols(objc: &ObjcMetadata) -> Vec<&ObjcProtocol> {
+    let by_name: BTreeMap<&str, &ObjcProtocol> = objc
+        .protocols
+        .iter()
+        .map(|protocol| (protocol.name.as_str(), protocol))
+        .collect();
     let mut ordered = Vec::new();
     let mut placed = BTreeSet::new();
-    fn place<'a>(
-        objc: &'a ObjcMetadata,
-        protocol: &'a ObjcProtocol,
-        placed: &mut BTreeSet<&'a str>,
-        ordered: &mut Vec<&'a ObjcProtocol>,
-    ) {
-        if !placed.insert(protocol.name.as_str()) {
-            return;
-        }
-        for adopted in &protocol.protocols {
-            if let Some(adopted) = objc.protocols.iter().find(|p| &p.name == adopted) {
-                place(objc, adopted, placed, ordered);
+    for protocol in &objc.protocols {
+        // Each entry: the protocol, and whether its adoptions were pushed.
+        let mut stack = vec![(protocol, false)];
+        while let Some((protocol, expanded)) = stack.pop() {
+            if placed.contains(protocol.name.as_str()) {
+                continue;
+            }
+            if expanded {
+                placed.insert(protocol.name.as_str());
+                ordered.push(protocol);
+                continue;
+            }
+            stack.push((protocol, true));
+            for adopted in protocol.protocols.iter().rev() {
+                if let Some(adopted) = by_name.get(adopted.as_str()) {
+                    if !placed.contains(adopted.name.as_str())
+                        && !stack.iter().any(|(on, _)| std::ptr::eq(*on, *adopted))
+                    {
+                        stack.push((adopted, false));
+                    }
+                }
             }
         }
-        ordered.push(protocol);
-    }
-    for protocol in &objc.protocols {
-        place(objc, protocol, &mut placed, &mut ordered);
     }
     ordered
 }
 
 /// The classes, each after its superclass; otherwise in the image's order.
+/// The superclass chain is followed by a loop, so a crafted chain of
+/// thousands cannot overflow the thread's stack.
 fn ordered_classes(objc: &ObjcMetadata) -> Vec<&ObjcClass> {
+    let by_name: BTreeMap<&str, &ObjcClass> = objc
+        .classes
+        .iter()
+        .map(|class| (class.name.as_str(), class))
+        .collect();
     let mut ordered = Vec::new();
     let mut placed = BTreeSet::new();
-    fn place<'a>(
-        objc: &'a ObjcMetadata,
-        class: &'a ObjcClass,
-        placed: &mut BTreeSet<&'a str>,
-        ordered: &mut Vec<&'a ObjcClass>,
-    ) {
-        if !placed.insert(class.name.as_str()) {
-            return;
-        }
-        if let Some(superclass) = &class.superclass {
-            if let Some(superclass) = objc.classes.iter().find(|c| &c.name == superclass) {
-                place(objc, superclass, placed, ordered);
+    for class in &objc.classes {
+        // The chain up from this class to the first one already placed, or
+        // to a root or a class of another image; then placed top down.
+        let mut chain = Vec::new();
+        let mut current = class;
+        while placed.insert(current.name.as_str()) {
+            chain.push(current);
+            match current
+                .superclass
+                .as_deref()
+                .and_then(|superclass| by_name.get(superclass))
+            {
+                Some(superclass) => current = superclass,
+                None => break,
             }
         }
-        ordered.push(class);
-    }
-    for class in &objc.classes {
-        place(objc, class, &mut placed, &mut ordered);
+        ordered.extend(chain.into_iter().rev());
     }
     ordered
 }
@@ -393,6 +481,9 @@ fn write_class(out: &mut String, class: &ObjcClass) {
         .as_deref()
         .map(|superclass| format!(" : {superclass}"))
         .unwrap_or_default();
+    if class.superclass.is_none() {
+        out.push_str("__attribute__((objc_root_class))\n");
+    }
     out.push_str(&format!(
         "@interface {}{superclass}{}",
         class.name,
@@ -425,19 +516,30 @@ fn write_class(out: &mut String, class: &ObjcClass) {
 }
 
 fn write_category(out: &mut String, category: &ObjcCategory) {
-    out.push_str(&format!(
+    let mut text = String::new();
+    text.push_str(&format!(
         "@interface {} ({}){}\n",
         category.class.as_deref().unwrap_or("?"),
         category.name,
         adopts(&category.protocols)
     ));
     write_members(
-        out,
+        &mut text,
         &category.properties,
         &category.class_methods,
         &category.instance_methods,
     );
-    out.push_str("@end\n");
+    text.push_str("@end\n");
+    if category.class.is_some() {
+        out.push_str(&text);
+    } else {
+        // The class is another image's, bound at load: there is nothing
+        // here to extend, so the category is kept as a comment.
+        out.push_str("// A category on a class of another image, bound at load.\n");
+        for line in text.lines() {
+            out.push_str(&format!("// {line}\n"));
+        }
+    }
 }
 
 fn write_members(
@@ -510,6 +612,10 @@ fn method_line(kind: char, method: &ObjcMethod) -> String {
                 line.push(' ');
             }
             line.push_str(&format!("{piece}:({arg})arg{}", index + 1));
+        }
+        // A malformed selector ending without a colon keeps its last piece.
+        if let Some(last) = pieces.last().filter(|last| !last.is_empty()) {
+            line.push_str(&format!(" {last}"));
         }
     }
     line.push_str(";\n");
@@ -678,31 +784,87 @@ fn names_in(encoding: &str) -> (Vec<String>, Vec<String>) {
         let after = &rest[at + 2..];
         let Some(end) = after.find('"') else { break };
         let name = &after[..end];
-        let (class, protos) = match name.find('<') {
-            Some(open) => (&name[..open], name[open + 1..].trim_end_matches('>')),
-            None => (name, ""),
-        };
+        let (class, protos) = class_and_protocols(name);
         if !class.is_empty() && class.chars().all(|c| c.is_alphanumeric() || c == '_') {
             classes.push(class.to_string());
         }
-        for proto in protos.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            protocols.push(proto.to_string());
-        }
+        protocols.extend(protos.into_iter().map(str::to_string));
         rest = &after[end + 1..];
     }
     (classes, protocols)
 }
 
+/// The class and the protocols an object encoding's name spells: `Name`,
+/// `<A><B>` (`id` under two protocols), `Name<A><B>`.
+fn class_and_protocols(name: &str) -> (&str, Vec<&str>) {
+    let (class, protocols) = match name.find('<') {
+        Some(open) => (&name[..open], &name[open..]),
+        None => (name, ""),
+    };
+    let protocols = protocols
+        .split(['<', '>'])
+        .map(str::trim)
+        .filter(|protocol| !protocol.is_empty())
+        .collect();
+    (class, protocols)
+}
+
+/// One field of an aggregate: its type before the name, what follows the
+/// name, and the name — the encoding's (`"x"`) or a numbered one.
+type Field = (String, String, String);
+
+/// The fields of an aggregate's body.
+fn fields_of(body: &str, depth: usize) -> Vec<Field> {
+    let mut parser = Parser::new(body);
+    parser.depth = depth + 1;
+    let mut fields = Vec::new();
+    if parser.depth > DEEPEST_TYPE {
+        return fields;
+    }
+    let mut index = 0;
+    while !parser.done() {
+        let field = parser.quoted_name();
+        let Some((base, suffix)) = parser.ty() else {
+            break;
+        };
+        fields.push((
+            base,
+            suffix,
+            field.unwrap_or_else(|| format!("field{index}")),
+        ));
+        index += 1;
+    }
+    fields
+}
+
 /// A reader over one type encoding.
 struct Parser<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
+    /// How many pointers and arrays are open: a bound on the recursion a
+    /// crafted `^^^^…` would cause.
+    depth: usize,
 }
+
+/// No real type is nested deeper.
+const DEEPEST_TYPE: usize = 64;
 
 impl<'a> Parser<'a> {
     fn new(encoding: &'a str) -> Self {
         Parser {
             chars: encoding.chars().peekable(),
+            depth: 0,
         }
+    }
+
+    /// One type under a pointer or an array: the recursion, bounded.
+    fn inner(&mut self) -> Option<(String, String)> {
+        if self.depth >= DEEPEST_TYPE {
+            return None;
+        }
+        self.depth += 1;
+        let inner = self.ty();
+        self.depth -= 1;
+        inner
     }
 
     fn done(&mut self) -> bool {
@@ -760,12 +922,14 @@ impl<'a> Parser<'a> {
             'c' => ("char".to_string(), String::new()),
             'i' => ("int".to_string(), String::new()),
             's' => ("short".to_string(), String::new()),
-            'l' => ("long".to_string(), String::new()),
+            // `l` and `L` are 32 bits in the runtime's encodings, whatever
+            // the platform's `long`.
+            'l' => ("int".to_string(), String::new()),
             'q' => ("long long".to_string(), String::new()),
             'C' => ("unsigned char".to_string(), String::new()),
             'I' => ("unsigned int".to_string(), String::new()),
             'S' => ("unsigned short".to_string(), String::new()),
-            'L' => ("unsigned long".to_string(), String::new()),
+            'L' => ("unsigned int".to_string(), String::new()),
             'Q' => ("unsigned long long".to_string(), String::new()),
             't' => ("__int128".to_string(), String::new()),
             'T' => ("unsigned __int128".to_string(), String::new()),
@@ -780,7 +944,7 @@ impl<'a> Parser<'a> {
             '?' => ("void *".to_string(), String::new()),
             '%' => ("NXAtom".to_string(), String::new()),
             'j' => {
-                let (inner, suffix) = self.ty()?;
+                let (inner, suffix) = self.inner()?;
                 (format!("_Complex {inner}"), suffix)
             }
             'b' => {
@@ -795,28 +959,35 @@ impl<'a> Parser<'a> {
                 Some('"') => {
                     self.chars.next();
                     let name = self.until('"');
-                    if let Some(rest) = name.strip_prefix('<') {
-                        (format!("id<{}>", rest.trim_end_matches('>')), String::new())
-                    } else if name.is_empty() {
-                        ("id".to_string(), String::new())
+                    // `@"Name"`, `@"<A><B>"` (`id<A, B>`), `@"Name<A><B>"`.
+                    let (class, protocols) = class_and_protocols(&name);
+                    let protocols = if protocols.is_empty() {
+                        String::new()
                     } else {
-                        (format!("{name} *"), String::new())
+                        format!("<{}>", protocols.join(", "))
+                    };
+                    if class.is_empty() {
+                        (format!("id{protocols}"), String::new())
+                    } else {
+                        (format!("{class}{protocols} *"), String::new())
                     }
                 }
                 _ => ("id".to_string(), String::new()),
             },
             '^' => {
-                let (inner, suffix) = self.ty()?;
-                if inner == "void *" && suffix.is_empty() {
-                    // `^?`: a pointer to a function.
-                    ("void (*)(void) *".to_string(), String::new())
+                if self.chars.peek() == Some(&'?') {
+                    // `^?`: a pointer to a function, whose signature the
+                    // encoding does not carry.
+                    self.chars.next();
+                    ("void *".to_string(), String::new())
                 } else {
+                    let (inner, suffix) = self.inner()?;
                     (format!("{}*", declarator(&inner)), suffix)
                 }
             }
             '[' => {
                 let count = self.digits().unwrap_or(0);
-                let (inner, suffix) = self.ty()?;
+                let (inner, suffix) = self.inner()?;
                 let _ = self.until(']');
                 (inner, format!("[{count}]{suffix}"))
             }
@@ -824,9 +995,24 @@ impl<'a> Parser<'a> {
                 let close = if c == '{' { '}' } else { ')' };
                 let keyword = if c == '{' { "struct" } else { "union" };
                 let body = self.nested(c, close);
-                let name = body.split('=').next().unwrap_or("").to_string();
+                let (name, fields) = match body.find('=') {
+                    Some(eq) => (&body[..eq], Some(&body[eq + 1..])),
+                    None => (body.as_str(), None),
+                };
                 if name.is_empty() || name == "?" {
-                    (format!("{keyword} {{ ... }}"), String::new())
+                    // Anonymous: the fields are spelled where the type is.
+                    let fields = fields
+                        .filter(|fields| !fields.is_empty())
+                        .map(|fields| {
+                            fields_of(fields, self.depth)
+                                .into_iter()
+                                .map(|(base, suffix, field)| {
+                                    format!("{}{field}{suffix}; ", declarator(&base))
+                                })
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default();
+                    (format!("{keyword} {{ {fields}}}"), String::new())
                 } else {
                     (format!("{keyword} {name}"), String::new())
                 }
@@ -891,12 +1077,35 @@ mod tests {
         assert_eq!(ty("^^c"), "char **");
         assert_eq!(ty("^{Point=ii}"), "struct Point *");
         assert_eq!(ty("{Point=ii}"), "struct Point");
-        assert_eq!(ty("{?=ii}"), "struct { ... }");
+        assert_eq!(ty("{?=ii}"), "struct { int field0; int field1; }");
+        assert_eq!(ty("{?=\"x\"i\"y\"d}"), "struct { int x; double y; }");
         assert_eq!(ty("(U=ii)"), "union U");
         assert_eq!(ty("[4i]"), "int[4]");
         assert_eq!(ty("b3"), "unsigned int : 3");
         assert_eq!(ty(""), "id");
         assert_eq!(ty("~"), "id");
+        // `l` and `L` are 32 bits in an encoding, whatever the platform.
+        assert_eq!(ty("l"), "int");
+        assert_eq!(ty("L"), "unsigned int");
+        // A pointer to a function, a pointer to a pointer, and the two apart.
+        assert_eq!(ty("^?"), "void *");
+        assert_eq!(ty("^^v"), "void **");
+        assert_eq!(ty("^^?"), "void **");
+        // Several protocols, on `id` and on a class.
+        assert_eq!(ty("@\"<A><B>\""), "id<A, B>");
+        assert_eq!(ty("@\"NSObject<A><B>\""), "NSObject<A, B> *");
+        // A crafted depth is refused, not recursed into.
+        let deep = format!("{}i", "^".repeat(10_000));
+        assert_eq!(ty(&deep), "id");
+        let deep = format!("{}i{}", "[2".repeat(10_000), "]".repeat(10_000));
+        assert_eq!(ty(&deep), "id");
+    }
+
+    #[test]
+    fn the_names_an_encoding_refers_to_are_found() {
+        let (classes, protocols) = names_in("v32@0:8@\"NSObject<A><B>\"16@\"<C>\"24@\"Base\"32");
+        assert_eq!(classes, ["NSObject", "Base"]);
+        assert_eq!(protocols, ["A", "B", "C"]);
     }
 
     #[test]
@@ -1018,10 +1227,90 @@ mod tests {
             header.contains("struct Point {\n    int x;\n    int y;\n};\n"),
             "{header}"
         );
+        // Point is held by value in Box, so it is defined first.
+        assert!(
+            header.find("struct Point {").unwrap() < header.find("struct Box {").unwrap(),
+            "{header}"
+        );
         assert!(header.contains("    struct Point _origin;\n"), "{header}");
         assert!(header.contains("    struct Box _box;\n"), "{header}");
         assert!(header.contains("    struct Opaque *_opaque;\n"), "{header}");
         assert!(header.contains("- (struct Point)origin;\n"), "{header}");
+    }
+
+    #[test]
+    fn a_category_on_a_class_of_another_image_is_a_comment_and_a_struct_body_may_be_empty() {
+        let objc = ObjcMetadata {
+            classes: vec![],
+            categories: vec![ObjcCategory {
+                address: 0x2200,
+                name: "Extra".to_string(),
+                class: None,
+                protocols: vec![],
+                instance_methods: vec![ObjcMethod {
+                    selector: "thrice:".to_string(),
+                    types: Some("i20@0:8i16".to_string()),
+                    imp: Some(0x1000),
+                }],
+                class_methods: vec![],
+                properties: vec![ObjcProperty {
+                    name: "ref".to_string(),
+                    attributes: Some("T^{__CFString=},N".to_string()),
+                }],
+            }],
+            protocols: vec![],
+        };
+        let header = write(&objc);
+        assert!(header.contains("struct __CFString;\n"), "{header}");
+        assert!(!header.contains("struct __CFString {"), "{header}");
+        assert!(
+            header.contains(
+                "// A category on a class of another image, bound at load.\n// @interface ? (Extra)\n// @property (nonatomic) struct __CFString *ref;\n// - (int)thrice:(int)arg1;\n// @end\n"
+            ),
+            "{header}"
+        );
+        assert!(!header.contains("\n@interface"), "{header}");
+    }
+
+    #[test]
+    fn a_chain_of_thousands_of_classes_and_protocols_is_ordered_without_recursion() {
+        let classes = (0..50_000u64)
+            .map(|index| ObjcClass {
+                address: index,
+                name: format!("C{index}"),
+                superclass: Some(format!("C{}", index + 1)),
+                protocols: vec![],
+                instance_methods: vec![],
+                class_methods: vec![],
+                ivars: vec![],
+                properties: vec![],
+            })
+            .collect();
+        let protocols = (0..50_000u64)
+            .map(|index| ObjcProtocol {
+                address: index,
+                name: format!("P{index}"),
+                protocols: vec![format!("P{}", index + 1)],
+                instance_methods: vec![],
+                class_methods: vec![],
+                optional_instance_methods: vec![],
+                optional_class_methods: vec![],
+                properties: vec![],
+            })
+            .collect();
+        let objc = ObjcMetadata {
+            classes,
+            categories: vec![],
+            protocols,
+        };
+        let header = write(&objc);
+        // The last of each chain is the root, and comes first.
+        let root = header.find("@interface C49999").expect("root class");
+        let leaf = header.find("@interface C0 ").expect("leaf class");
+        assert!(root < leaf);
+        let root = header.find("@protocol P49999 ").expect("root protocol");
+        let leaf = header.find("@protocol P0 ").expect("leaf protocol");
+        assert!(root < leaf);
     }
 
     #[test]
@@ -1097,8 +1386,12 @@ mod tests {
         let expected = "\
 // Objective-C declarations recovered from the image: 2 classes, 1 category, 1 protocol.
 // Types are read from the runtime's encodings; where an encoding is missing, a type is `id`.
+#import <objc/objc.h>
 
-// Of other images, bound at load.
+@class Base, Derived;
+@protocol Greeting;
+
+// Of other images, bound at load; their own headers declare them.
 @class NSObject;
 @protocol NSObject;
 
