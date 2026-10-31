@@ -171,6 +171,9 @@ pub enum Message {
     /// Allow or prevent one of the lift's judgment calls at the selected
     /// address.
     EditOverride,
+    /// Say whether the function on screen is inlined into its callers'
+    /// pseudocode.
+    EditInline,
     /// Take one variable's dead stores out of the pseudocode, or put them
     /// back.
     EditDeadStores,
@@ -287,6 +290,9 @@ pub enum PromptKind {
     Mode,
     /// A word on a judgment call at the selection: `KIND on|off|clear`.
     Override,
+    /// Whether the function on screen is inlined into its callers:
+    /// `on`, `off` or `clear`.
+    Inline,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The address the image is moved to, or `none`.
@@ -1140,6 +1146,7 @@ impl App {
             self.tell_jump_tables();
             self.tell_overrides();
             self.tell_dead_stores();
+            self.tell_inlines();
         }
         task
     }
@@ -2915,6 +2922,7 @@ impl App {
                         | PromptKind::Reference { .. }
                         | PromptKind::Switch
                         | PromptKind::Override
+                        | PromptKind::Inline
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -2934,6 +2942,7 @@ impl App {
                 self.tell_jump_tables();
                 self.tell_overrides();
                 self.tell_dead_stores();
+                self.tell_inlines();
             }
         }
         task
@@ -3056,6 +3065,20 @@ impl App {
             .provider
             .set_removable_stores(self.annotations.removable_stores())
         {
+            return;
+        }
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
+        }
+    }
+
+    /// Tell the analysis which functions the analyst inlines into their
+    /// callers, and read the function on screen again when that changed
+    /// anything.
+    fn tell_inlines(&mut self) {
+        if !self.provider.set_inlines(self.annotations.inlines()) {
             return;
         }
         if let Some(function) = self.work.listing_of {
@@ -3297,6 +3320,24 @@ impl App {
                 });
             }
 
+            Message::EditInline => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function to inline into its callers".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let current = match self.annotations.annotation_for(&key).and_then(|a| a.inline) {
+                    Some(true) => "on",
+                    Some(false) => "off",
+                    None => "",
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Inline,
+                    title: "Inline into callers (on|off|clear)",
+                    value: current.to_string(),
+                });
+            }
+
             Message::EditMark(mark) => {
                 use ag_corpus::project::{ByteType, TargetKind};
                 let Some(address) = self.selection.address() else {
@@ -3389,6 +3430,7 @@ impl App {
                 self.tell_jump_tables();
                 self.tell_overrides();
                 self.tell_dead_stores();
+                self.tell_inlines();
             }
 
             Message::EditRedo => {
@@ -3409,6 +3451,7 @@ impl App {
                 self.tell_jump_tables();
                 self.tell_overrides();
                 self.tell_dead_stores();
+                self.tell_inlines();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -3803,6 +3846,7 @@ impl App {
                                     self.tell_jump_tables();
                                     self.tell_overrides();
                                     self.tell_dead_stores();
+                                    self.tell_inlines();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -4365,6 +4409,32 @@ impl App {
                             ),
                         });
                         self.tell_dead_stores();
+                    }
+                    PromptKind::Inline => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let on = match prompt.value.trim().to_ascii_lowercase().as_str() {
+                            "on" => Some(true),
+                            "off" => Some(false),
+                            "clear" | "" => None,
+                            other => {
+                                self.notice =
+                                    Some(format!("The state is on, off or clear, not {other:?}"));
+                                return Task::none();
+                            }
+                        };
+                        let key = self.annotation_key(function);
+                        self.annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                            .inline = on;
+                        self.annotations.prune();
+                        self.notice = Some(match on {
+                            Some(true) => format!("{key} is inlined into its callers"),
+                            Some(false) => format!("{key} is never inlined"),
+                            None => format!("Inlining {key} left to the analysis"),
+                        });
+                        self.tell_inlines();
                     }
                     PromptKind::Override => {
                         // `KIND on|off|clear`, or several apart by commas —
@@ -10676,6 +10746,57 @@ mod tests {
         let _ = app.update(Message::ViewToggleRainbowBraces);
         let _ = app.update(Message::ViewToggleIndentGuides);
         assert!(!app.rainbow_braces && !app.indent_guides);
+    }
+
+    #[test]
+    fn a_function_marked_inline_reads_as_its_body_in_its_callers_and_undo_takes_it_back() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let main = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        // add, at 0x1149, is marked on its own screen.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditInline);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").kind,
+            PromptKind::Inline
+        );
+        let _ = app.update(Message::PromptChanged("on".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x1149")
+                .and_then(|a| a.inline),
+            Some(true)
+        );
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(
+            main(&app).contains("  // inlined: add\n  v2 = sum_to(3 + a);\n"),
+            "{}",
+            main(&app)
+        );
+        // The prompt reads back the word, and a bad one is refused.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        let _ = app.update(Message::EditInline);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "on");
+        let _ = app.update(Message::PromptChanged("maybe".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("not \"maybe\"")),
+            "{:?}",
+            app.notice
+        );
+        // Undo takes the word back, and the caller reads the call again.
+        app.prompt = None;
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.annotation_for("0x1149").is_none());
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(main(&app).contains("sum_to(add(a, 3))"), "{}", main(&app));
     }
 
     #[test]

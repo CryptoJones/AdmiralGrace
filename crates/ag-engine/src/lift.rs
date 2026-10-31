@@ -208,6 +208,15 @@ pub trait Symbols {
         Vec::new()
     }
 
+    /// The function at `address` as its own lift reads, when the analyst
+    /// marked it to be inlined into its callers' pseudocode: `None` when it
+    /// is not marked, and why it cannot be had when it is marked and does
+    /// not lift — a phrase completing `f is not inlined at 0x401020: …`.
+    /// Nothing is inlined unless the image says.
+    fn inline_body(&self, _address: u64) -> Option<Result<LiftedFunction, String>> {
+        None
+    }
+
     /// What the pointer to `address` lands on, when the image knows.
     fn pointee(&self, _address: u64) -> Option<Pointee> {
         None
@@ -900,7 +909,6 @@ fn lift_inner(
     };
     let medium = if keep { nodes.clone() } else { Vec::new() };
     let body = structure::structure(&nodes, &medium_analysis, 0, options, &SymbolSites(symbols));
-    let high = if keep { body.clone() } else { Vec::new() };
     let stack_pointer = if keep {
         std::mem::take(&mut lifter.stack_pointers)
     } else {
@@ -931,7 +939,16 @@ fn lift_inner(
         }
         types.insert("flags".to_string(), "flags".to_string());
     }
+    let call_sites = std::mem::take(&mut lifter.call_sites);
     let mut function = lifter.finish(name, entry, &chains, body)?;
+    // The calls to the functions the analyst marked are read as their
+    // bodies, once the function's own return and notes are decided.
+    crate::inline::inline_calls(&mut function, symbols, &call_sites);
+    let high = if keep {
+        function.body.clone()
+    } else {
+        Vec::new()
+    };
     // Where the walk did not go on, and why.
     for halt in &cfg.halts {
         function.notes.push(format!(
@@ -2122,6 +2139,9 @@ struct Lifter<'a> {
     /// over this function's own values — a call result inlined later is
     /// inlined here too.
     call_notes: Vec<(u64, String, AstNode)>,
+    /// The direct calls made so far: the call's address, and the callee's —
+    /// for the calls the analyst has inlined.
+    call_sites: BTreeMap<u64, u64>,
     /// While resolving: the variable the last constant store wrote to or
     /// into, and the offset just past that store — where the next word of a
     /// string put on the stack would go.
@@ -2162,6 +2182,7 @@ impl<'a> Lifter<'a> {
             state: State::initial(),
             address_taken: BTreeSet::new(),
             call_notes: Vec::new(),
+            call_sites: BTreeMap::new(),
             string_run: None,
             locals: BTreeMap::new(),
             stack_pointers: BTreeMap::new(),
@@ -4550,6 +4571,7 @@ impl<'a> Lifter<'a> {
     /// The call of `name` at `target` from `at`: the arguments from the
     /// register state, the clobbers, and the result in `rax` as a temporary.
     fn emit_call(&mut self, name: String, target: u64, at: u64) -> Result<(), NotLifted> {
+        self.call_sites.insert(at, target);
         let callee = AstNode::FunctionName {
             name: name.clone(),
             address: target,

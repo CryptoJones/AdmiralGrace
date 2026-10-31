@@ -418,6 +418,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Tell the analysis which functions are inlined into their callers'
+    /// pseudocode, by entry — `true` to inline, `false` never to — and say
+    /// whether that changed anything.
+    fn set_inlines(&self, _inlines: BTreeMap<u64, bool>) -> bool {
+        false
+    }
+
     /// Bytes around an address, when available.
     ///
     /// The rows hold the bytes of the file around the address, sixteen to a

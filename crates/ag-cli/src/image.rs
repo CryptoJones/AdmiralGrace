@@ -759,6 +759,7 @@ pub(crate) fn open_image(
         image.set_jump_table_hints(hints);
         image.set_site_overrides(site_overrides(project));
         image.set_removable_stores(project.removable_stores());
+        image.set_inlines(project.inlines());
     }
     Ok(image)
 }

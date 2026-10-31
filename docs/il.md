@@ -109,6 +109,18 @@ names has an argument to stand for it. Conditions deeper in a body are not said,
 hold only under the ones above them. The path after such a call ends in a marker the
 pseudocode does not print and the transpiler writes for the compiler, `__builtin_unreachable()`.
 
+## Inlining a function
+
+A function the analyst marks (`ag project … inline FUNCTION on`, the `set_inline` tool, or
+**Edit ▸ Inline function into callers…**) reads as its own lifted body in its callers'
+structured body — the pseudocode and the high level — after the marker `__inlined("f")`, which
+the pseudocode prints as `// inlined: f`. Its parameters stand for the call's arguments, all at
+once, and its locals are the caller's under fresh names, `f_local_c`; the value it returns at
+its end is the call's. The lifted, low and medium levels, the graph, the emulator and the
+transpiler keep the call. Where the body cannot stand in the call's place — it has a `goto`,
+returns before its end, takes another number of arguments, is the function itself or one
+being inlined already — the call stays, and the caller notes why after its return comment.
+
 ## Calls through pointers, and Windows control-flow guard
 
 A call or a jump through a value the lift knows — a parameter, a field loaded from a struct —

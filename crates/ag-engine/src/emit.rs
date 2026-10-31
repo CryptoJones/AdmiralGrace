@@ -860,6 +860,16 @@ fn emit_statements(
                         &statement.addresses,
                     );
                 }
+                // Where a call is read as the callee's body: said as a note
+                // before the statements that stand for it.
+                node if crate::inline::inlined_callee(node).is_some() => {
+                    let callee = crate::inline::inlined_callee(node).expect("checked above");
+                    push(
+                        lines,
+                        format!("{pad}{}", style.comment(&format!("inlined: {callee}"))),
+                        &statement.addresses,
+                    );
+                }
                 node => {
                     let mut text = String::new();
                     emit_into(node, &mut text, 0, style);

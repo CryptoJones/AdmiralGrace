@@ -172,6 +172,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::EditOverride,
             )),
+            Item::new(item_button(
+                "Inline function into callers…",
+                "",
+                Message::EditInline,
+            )),
             Item::new(separator()),
             Item::new(item_button(
                 "Assemble over bytes…",

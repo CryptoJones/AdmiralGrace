@@ -1971,3 +1971,107 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     assert!(!ok);
     assert!(stderr.contains("drop or keep"), "{stderr}");
 }
+
+#[test]
+fn a_function_marked_inline_reads_as_its_body_in_its_callers() {
+    let file = TempFile::new("inline");
+    // What `ag image inline.elf pseudocode FUNCTION --project FILE` prints.
+    let pseudocode = |function: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(["pseudocode", function, "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let inline = |function: &str, state: &str| -> (bool, String, String) {
+        project_with(
+            "inline.elf",
+            &["inline", "--file", &file.text(), function, state],
+        )
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = pseudocode("start");
+    assert!(before.contains("  v1 = ping(a);\n"), "{before}");
+
+    // By name: ping calls pong, which calls ping back.
+    let (ok, stdout, stderr) = inline("ping", "on");
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now inline on"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = inline("pong", "on");
+    assert!(ok, "{stderr}");
+    let text = pseudocode("start");
+    assert!(
+        text.contains(
+            "  // inlined: ping\n  ping_local_c = a;\n  ping_eax = a;\n  if (ping_eax > 0) {\n    // inlined: pong\n    ping_pong_a = a - 1;\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("  int ping_pong_local_c;\n"), "{text}");
+    assert!(text.contains("  v1 = ping_local_c;\n"), "{text}");
+    // The cycle is not followed round: pong's call to ping stays, and the
+    // caller says why.
+    assert!(
+        text.contains("      ping_pong_local_c = ping(ping_pong_a - 1) + 7;\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("// ping is not inlined at 0x401057: it is recursive\n"),
+        "{text}"
+    );
+    // Nor is a function inlined into itself.
+    let ping = pseudocode("ping");
+    assert!(ping.contains("    // inlined: pong\n"), "{ping}");
+    assert!(
+        ping.contains("pong_local_c = ping(pong_a - 1) + 7;"),
+        "{ping}"
+    );
+
+    // A function that does not lift is not inlined, and says so.
+    let (ok, _, stderr) = inline("0x401067", "on");
+    assert!(ok, "{stderr}");
+    let text = pseudocode("start");
+    assert!(text.contains("return tangle(a) + v1;"), "{text}");
+    assert!(
+        text.contains(
+            "// tangle is not inlined at 0x4010b7: it is not lifted: irreducible control flow at 0x40108b\n"
+        ),
+        "{text}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["annotations"][0]["inline"],
+        serde_json::json!(true),
+        "{report}"
+    );
+
+    // `off` keeps the call, and `clear` takes the record off.
+    let (ok, stdout, stderr) = inline("ping", "off");
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("now inline off"), "{stdout}");
+    assert!(pseudocode("start").contains("  v1 = ping(a);\n"));
+    let (ok, stdout, stderr) = inline("0x401000", "clear");
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("function 0x401000 cleared"), "{stdout}");
+
+    // A state or a name that is not one is refused.
+    let (ok, _, stderr) = inline("ping", "maybe");
+    assert!(!ok);
+    assert!(stderr.contains("on, off or clear"), "{stderr}");
+    let (ok, _, stderr) = inline("nowhere", "on");
+    assert!(!ok);
+    assert!(
+        stderr.contains("no function is named \"nowhere\""),
+        "{stderr}"
+    );
+}

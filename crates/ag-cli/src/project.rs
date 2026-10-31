@@ -4,8 +4,8 @@
 //! and SHA-256 — the analysis options the run used, and the analyst's own
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
-//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `patch`, `asm`,
-//! `nop`) so a script or an agent can build a project without editing JSON
+//! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `patch`,
+//! `asm`, `nop`) so a script or an agent can build a project without editing JSON
 //! by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
@@ -184,6 +184,20 @@ pub enum ProjectCmd {
         kind: String,
         /// `on` to allow it, `off` to prevent it, `clear` to leave it to
         /// the lift.
+        state: String,
+    },
+    /// Say whether a function is inlined into its callers' pseudocode: a
+    /// call to it reads as its own body, where the body can stand there,
+    /// and the caller says why where it cannot.
+    Inline {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// `on` to inline it, `off` never to, `clear` to leave it to the
+        /// analysis, which inlines nothing by itself.
         state: String,
     },
     /// Write bytes over the image's at an address: a patch the image is
@@ -511,6 +525,43 @@ pub fn run(
             };
             edit(&target, &file, TargetKind::Address, &address, |a| {
                 a.set_override(&kind, on);
+            })
+        }
+        ProjectCmd::Inline {
+            file,
+            function,
+            state,
+        } => {
+            let on = match state.trim().to_ascii_lowercase().as_str() {
+                "on" | "yes" | "true" => Some(true),
+                "off" | "no" | "false" => Some(false),
+                "clear" | "none" => None,
+                other => anyhow::bail!("the state is on, off or clear, not {other:?}"),
+            };
+            // An address spelled `0x…` or with its space is taken as it is;
+            // anything else is a name the image says the address of first,
+            // so a function called `beef` is not the address 0xbeef.
+            let name = function.trim();
+            let spelled = name.to_ascii_lowercase().starts_with("0x") || name.contains(':');
+            let address = match ag_corpus::project::canonical_address(name) {
+                Some(address) if spelled => address,
+                bare => {
+                    let image = image_under(&target, &open_project(&target, &file)?)?;
+                    let found = image
+                        .functions()
+                        .iter()
+                        .find(|f| f.name == name)
+                        .map(|f| f.address)
+                        .or_else(|| image.address_of_mangled(name));
+                    match (found, bare) {
+                        (Some(found), _) => format!("{found:#x}"),
+                        (None, Some(address)) => address,
+                        (None, None) => anyhow::bail!("no function is named {name:?}"),
+                    }
+                }
+            };
+            edit(&target, &file, TargetKind::Function, &address, |a| {
+                a.inline = on;
             })
         }
         ProjectCmd::Patch {
@@ -1484,6 +1535,11 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if !annotation.overrides.is_empty() {
         parts.push(format!("override {}", annotation.overrides_label()));
+    }
+    match annotation.inline {
+        Some(true) => parts.push("inline on".to_string()),
+        Some(false) => parts.push("inline off".to_string()),
+        None => {}
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {

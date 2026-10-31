@@ -66,6 +66,7 @@ An annotation is one address's worth of the analyst's decisions.
 | `register` | The register the record renames, spelled as the listing spells it — `rax`, `ebp`. A register belongs to no one address; it is printed across one function's pseudocode and listing, so the record keys on the register's name beside the function's entry address and the rename reaches that function alone. |
 | `name` | The analyst's name, replacing the analysis's own. |
 | `drop_stores` | On a variable's record: `true` when the stores to the variable that nothing reads are taken out of the pseudocode even while the `dead-code` option keeps the rest. Absent means kept, greyed out in the workbench. A reader that does not know the field keeps them and misreads nothing. |
+| `inline` | On a function's record: `true` when a call to the function reads as the function's own body in its callers' pseudocode, `false` when it never does. Absent leaves it to the analysis, which inlines nothing by itself. A reader that does not know the field prints the call and misreads nothing, so the format version does not change for it. |
 | `comment` | The analyst's note. |
 | `comment_above` | Whether the note stands on its own line above the instruction. Absent means inline, at the end of the line. A reader that does not know the field prints every comment inline, which loses placement but misreads nothing. |
 | `bookmark` | Whether the target is bookmarked. |
