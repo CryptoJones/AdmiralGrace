@@ -659,14 +659,25 @@ thread_local! {
 fn target_of(target: &Path, sha256: Option<String>) -> Target {
     let raw = RAW.with(|held| held.borrow().clone());
     let slice = SLICE.with(|held| held.borrow().clone());
+    target_for(target, sha256, raw.as_ref(), slice.as_deref())
+}
+
+/// The target as a run reads it: the raw flags and the slice folded in when
+/// they were given, so a project made here opens the same bytes later.
+pub(crate) fn target_for(
+    target: &Path,
+    sha256: Option<String>,
+    raw: Option<&ag_image::RawSpec>,
+    slice: Option<&str>,
+) -> Target {
     Target {
         path: Some(target.display().to_string()),
         sha256,
-        slice,
+        slice: slice.map(str::to_string),
         raw: raw.map(|spec| {
             let arch = ag_image::raw_arch(&spec.language)
                 .expect("a raw language the command line handed out has its word");
-            RawArgs::target(&spec, arch)
+            RawArgs::target(spec, arch)
         }),
     }
 }

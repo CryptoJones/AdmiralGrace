@@ -23,13 +23,16 @@
 //! between, so the server is tested in-process; `serve` is the thin loop
 //! over the two pipes.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use ag_corpus::project::{ProjectFile, TargetKind};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use ag_corpus::project::{Annotation, ProjectFile, TargetKind};
 use ag_image::Binary;
 
 /// The protocol version the server speaks when the client's is unknown.
@@ -42,6 +45,8 @@ const DEFAULT_LIMIT: usize = 200;
 const MOST_ROWS: usize = 5000;
 /// No read of bytes is longer than this.
 const MOST_BYTES: usize = 4096;
+/// No message is longer than this, in bytes.
+const LONGEST_MESSAGE: usize = 16 << 20;
 
 /// A JSON-RPC error code: the request was not a valid request.
 const INVALID_REQUEST: i64 = -32600;
@@ -60,7 +65,7 @@ struct Project {
 
 /// The server: one image, and the project file when there is one.
 pub struct Server {
-    image: Binary,
+    image: Arc<Binary>,
     binary: PathBuf,
     project: Option<Project>,
 }
@@ -148,7 +153,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "search",
-            description: "Search the image's function names, data symbol names and strings with a regular expression (case-insensitive).",
+            description: "Search the image's function names, data symbol names and strings with a regular expression (case-insensitive); the limit applies to each of the three lists.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -196,7 +201,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "strings",
-            description: "The strings of the image, each with its address, its section, its length and the functions that refer to it.",
+            description: "The strings of the image, each with its address, its section, its length and the functions that refer to it. The first call reads every function to find the users, which takes a while on a large image; the server warms that up as it starts.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +224,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "annotations",
-            description: "The analyst's records at an address from the project file: the function's (its name and bookmark), the address's own (its comment, tags, references) and the block's.",
+            description: "The analyst's records at an address from the project file, as they are on disk: the address's own (the function's name and bookmark when a function starts there, the comment, tags and references) and the block's.",
             schema: json!({ "type": "object", "properties": { "address": address }, "required": ["address"] }),
         },
         Tool {
@@ -272,38 +277,89 @@ impl Server {
     /// `project` when there is one.
     pub fn new(image: Binary, binary: PathBuf, project: Option<(PathBuf, ProjectFile)>) -> Self {
         Self {
-            image,
+            image: Arc::new(image),
             binary,
             project: project.map(|(path, file)| Project { path, file }),
         }
     }
 
+    /// Start working out who uses every string and every piece of data, on
+    /// a thread of its own: the first `strings` or `cross_references` call
+    /// would otherwise read the whole image before answering.
+    pub fn warm_up(&self) {
+        let image = Arc::clone(&self.image);
+        std::thread::spawn(move || {
+            image.string_users();
+            image.data_users();
+        });
+    }
+
     /// Serve `input` to `output`, one message a line, until the input ends.
-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> Result<()> {
-        for line in input.lines() {
-            let line = line.context("reading a message")?;
-            if line.trim().is_empty() {
-                continue;
+    ///
+    /// A line that is not JSON — or not text, or longer than the server
+    /// takes — is answered with a parse error and the conversation goes
+    /// on; a client that has closed its end ends it, and that is no
+    /// failure.
+    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = input
+                .by_ref()
+                .take(LONGEST_MESSAGE as u64 + 1)
+                .read_until(b'\n', &mut line)
+                .context("reading a message")?;
+            if read == 0 {
+                return Ok(());
             }
-            let reply = match serde_json::from_str::<Value>(&line) {
-                Ok(message) => self.handle(&message),
-                Err(error) => Some(error_reply(
+            let reply = if line.len() > LONGEST_MESSAGE {
+                // The rest of the line is thrown away, up to its end.
+                if !line.ends_with(b"\n") {
+                    let mut rest = Vec::new();
+                    while input
+                        .read_until(b'\n', &mut rest)
+                        .context("reading a message")?
+                        > 0
+                        && !rest.ends_with(b"\n")
+                    {
+                        rest.clear();
+                    }
+                }
+                Some(error_reply(
                     Value::Null,
                     PARSE_ERROR,
-                    format!("the message is not JSON: {error}"),
-                )),
+                    format!("the message is longer than {LONGEST_MESSAGE} bytes"),
+                ))
+            } else if line.iter().all(u8::is_ascii_whitespace) {
+                None
+            } else {
+                match serde_json::from_slice::<Value>(&line) {
+                    Ok(message) => self.handle(&message),
+                    Err(error) => Some(error_reply(
+                        Value::Null,
+                        PARSE_ERROR,
+                        format!("the message is not JSON: {error}"),
+                    )),
+                }
             };
             if let Some(reply) = reply {
-                serde_json::to_writer(&mut output, &reply).context("writing a reply")?;
-                output.write_all(b"\n")?;
-                output.flush()?;
+                let written = serde_json::to_writer(&mut output, &reply)
+                    .map_err(std::io::Error::other)
+                    .and_then(|()| output.write_all(b"\n"))
+                    .and_then(|()| output.flush());
+                match written {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                    Err(error) => return Err(error).context("writing a reply"),
+                }
             }
         }
-        Ok(())
     }
 
     /// The reply to one message, or to a batch of them: none for a
-    /// notification, or a batch of nothing but notifications.
+    /// notification, or a batch of nothing but notifications. Batches left
+    /// the protocol in its 2025-06-18 revision; they are taken for the
+    /// clients of the revisions before.
     pub fn handle(&mut self, message: &Value) -> Option<Value> {
         match message {
             Value::Array(batch) => {
@@ -329,7 +385,18 @@ impl Server {
                 "a message is a JSON object",
             ));
         };
-        let id = object.get("id").cloned().filter(|id| !id.is_null());
+        // A request's id is a string or a number; one that is null, or
+        // anything else, is a request the server cannot answer to.
+        let id = object.get("id").cloned();
+        if let Some(id) = &id {
+            if !(id.is_string() || id.is_number()) {
+                return Some(error_reply(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "a request's id is a string or a number",
+                ));
+            }
+        }
         let Some(method) = object.get("method").and_then(Value::as_str) else {
             return Some(error_reply(
                 id.unwrap_or(Value::Null),
@@ -417,9 +484,21 @@ impl Server {
         if !tools().iter().any(|tool| tool.name == name) {
             return Err((INVALID_PARAMS, format!("unknown tool {name:?}")));
         }
-        let answer = match self.tool(name, arguments) {
-            Ok(answer) => answer,
-            Err(message) => Answer::failed(message),
+        // A fault in the engine under one call is that call's failure, not
+        // the server's end.
+        let answer = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.tool(name, arguments)
+        })) {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(message)) => Answer::failed(message),
+            Err(panic) => {
+                let what = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "an unknown fault".to_string());
+                Answer::failed(format!("the tool {name} failed inside the engine: {what}"))
+            }
         };
         let mut result = json!({
             "content": [ { "type": "text", "text": answer.text } ],
@@ -569,46 +648,46 @@ impl Server {
             }
             "annotations" => {
                 let address = parse_address(&text("address")?)?;
-                let project = self.project()?;
-                Ok(Answer::json(annotations_json(&project.file, address)))
+                self.reload()?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
             }
             "set_name" => {
                 let address = parse_address(&text("address")?)?;
                 let name = text("name")?;
-                let project = self.project_mut()?;
-                let key = format!("{address:#x}");
-                let record = project.file.annotation_mut(TargetKind::Function, &key);
-                record.name = (!name.trim().is_empty()).then(|| name.trim().to_string());
-                self.save()?;
-                let project = self.project()?;
-                Ok(Answer::json(annotations_json(&project.file, address)))
+                self.change(TargetKind::Function, address, |record| {
+                    record.name = (!name.trim().is_empty()).then(|| name.trim().to_string());
+                })?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
             }
             "set_comment" => {
                 let address = parse_address(&text("address")?)?;
                 let comment = text("text")?;
                 let above = flag("above", false)?;
-                let project = self.project_mut()?;
-                let key = format!("{address:#x}");
-                let record = project.file.annotation_mut(TargetKind::Address, &key);
-                record.set_comment((!comment.is_empty()).then_some(comment), above);
-                self.save()?;
-                let project = self.project()?;
-                Ok(Answer::json(annotations_json(&project.file, address)))
+                self.change(TargetKind::Address, address, |record| {
+                    record.set_comment((!comment.is_empty()).then_some(comment), above);
+                })?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
             }
             "set_bookmark" => {
                 let address = parse_address(&text("address")?)?;
                 let on = flag("on", true)?;
-                let project = self.project_mut()?;
-                let key = format!("{address:#x}");
-                project
-                    .file
-                    .annotation_mut(TargetKind::Function, &key)
-                    .bookmark = on;
-                self.save()?;
-                let project = self.project()?;
-                Ok(Answer::json(annotations_json(&project.file, address)))
+                self.change(TargetKind::Function, address, |record| record.bookmark = on)?;
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
             }
             "bookmarks" => {
+                self.reload()?;
                 let project = self.project()?;
                 let bookmarks: Vec<Value> = project
                     .file
@@ -643,15 +722,45 @@ impl Server {
             .ok_or_else(|| "the server was started without --project, so there is no project file to read or write".to_string())
     }
 
-    /// Save the project file after a change, with the empty records
-    /// pruned.
-    fn save(&mut self) -> Result<(), String> {
+    /// Read the project file again, so the records are the ones on disk —
+    /// the analyst may have saved from the workbench or the command line
+    /// since — keeping the in-memory ones when the file is not there yet.
+    fn reload(&mut self) -> Result<(), String> {
         let project = self.project_mut()?;
+        if project.path.exists() {
+            project.file = ProjectFile::load(&project.path)
+                .map_err(|error| format!("reading {}: {error:#}", project.path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Change one record of the project and save the file: the file is read
+    /// again first and written whole after, so another writer's records
+    /// between two changes are kept, and a change is the last word only on
+    /// its own record. The file is written beside itself and moved into
+    /// place, so a reader never sees half of it.
+    fn change(
+        &mut self,
+        kind: TargetKind,
+        address: u64,
+        edit: impl FnOnce(&mut Annotation),
+    ) -> Result<(), String> {
+        self.reload()?;
+        let project = self.project_mut()?;
+        let key = format!("{address:#x}");
+        edit(project.file.annotation_mut(kind, &key));
         project.file.prune();
-        project
+        let json = project
             .file
-            .save(&project.path)
-            .map_err(|error| format!("saving {}: {error:#}", project.path.display()))
+            .to_json()
+            .map_err(|error| format!("writing {}: {error:#}", project.path.display()))?;
+        let staged = project.path.with_extension("agproj.part");
+        std::fs::write(&staged, json)
+            .and_then(|()| std::fs::rename(&staged, &project.path))
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&staged);
+                format!("saving {}: {error}", project.path.display())
+            })
     }
 
     /// The function `target` names.
@@ -670,8 +779,41 @@ impl Server {
             .and_then(|record| record.name.clone())
     }
 
+    /// The analyst's names for every function, by address: one pass over
+    /// the records, for the tools that list many functions.
+    fn project_names(&self) -> HashMap<u64, String> {
+        self.project
+            .as_ref()
+            .map(|project| {
+                project
+                    .file
+                    .annotations
+                    .iter()
+                    .filter(|record| {
+                        record.kind == TargetKind::Function
+                            && record.variable.is_none()
+                            && record.register.is_none()
+                            && !record.block
+                    })
+                    .filter_map(|record| {
+                        Some((
+                            ag_corpus::parse_addr(&record.address).ok()?,
+                            record.name.clone()?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// A function, as the tools report one.
     fn function_json(&self, address: u64) -> Value {
+        self.function_json_named(address, self.project_name(address).as_deref())
+    }
+
+    /// A function, as the tools report one, with the analyst's name already
+    /// looked up.
+    fn function_json_named(&self, address: u64, project_name: Option<&str>) -> Value {
         let mut value = json!({
             "address": address,
             "address_hex": format!("{address:#x}"),
@@ -684,8 +826,8 @@ impl Server {
             value["end"] = json!(end);
             value["end_hex"] = Value::String(format!("{end:#x}"));
         }
-        if let Some(name) = self.project_name(address) {
-            value["project_name"] = Value::String(name);
+        if let Some(name) = project_name {
+            value["project_name"] = Value::String(name.to_string());
         }
         value
     }
@@ -706,6 +848,7 @@ impl Server {
     }
 
     fn list_functions(&self, filter: Option<&regex::Regex>, limit: usize) -> Answer {
+        let names = self.project_names();
         let matching: Vec<&ag_image::Function> = self
             .image
             .functions()
@@ -713,9 +856,9 @@ impl Server {
             .filter(|function| {
                 filter.is_none_or(|filter| {
                     filter.is_match(&function.name)
-                        || self
-                            .project_name(function.address)
-                            .is_some_and(|name| filter.is_match(&name))
+                        || names
+                            .get(&function.address)
+                            .is_some_and(|name| filter.is_match(name))
                 })
             })
             .collect();
@@ -723,7 +866,12 @@ impl Server {
         let functions: Vec<Value> = matching
             .iter()
             .take(limit)
-            .map(|function| self.function_json(function.address))
+            .map(|function| {
+                self.function_json_named(
+                    function.address,
+                    names.get(&function.address).map(String::as_str),
+                )
+            })
             .collect();
         Answer::json(json!({
             "total": total,
@@ -733,18 +881,24 @@ impl Server {
     }
 
     fn search(&self, query: &regex::Regex, limit: usize) -> Answer {
+        let names = self.project_names();
         let functions: Vec<Value> = self
             .image
             .functions()
             .iter()
             .filter(|function| {
                 query.is_match(&function.name)
-                    || self
-                        .project_name(function.address)
-                        .is_some_and(|name| query.is_match(&name))
+                    || names
+                        .get(&function.address)
+                        .is_some_and(|name| query.is_match(name))
             })
             .take(limit)
-            .map(|function| self.function_json(function.address))
+            .map(|function| {
+                self.function_json_named(
+                    function.address,
+                    names.get(&function.address).map(String::as_str),
+                )
+            })
             .collect();
         let data: Vec<Value> = self
             .image
@@ -821,7 +975,42 @@ impl Server {
     /// The cross references of a function, or of a piece of data or a
     /// string.
     fn cross_references(&self, target: &str) -> Result<Answer, String> {
-        if let Some(address) = crate::image::find_function(&self.image, target) {
+        // An exact name or address wins over a loose one: a data symbol
+        // named `buf` is asked for by its name, not the function `buffer`.
+        let exact_function = ag_corpus::parse_addr(target)
+            .ok()
+            .filter(|address| self.image.function_name(*address).is_some())
+            .or_else(|| {
+                self.image
+                    .functions()
+                    .iter()
+                    .find(|function| function.name == target)
+                    .map(|function| function.address)
+            });
+        let exact_data = ag_corpus::parse_addr(target)
+            .ok()
+            .filter(|address| {
+                self.image.data_symbol(*address).is_some()
+                    || self
+                        .image
+                        .strings()
+                        .iter()
+                        .chain(self.image.wide_strings().iter())
+                        .any(|string| string.address == *address)
+            })
+            .or_else(|| {
+                self.image
+                    .data_symbols()
+                    .iter()
+                    .find(|symbol| symbol.name == target)
+                    .map(|symbol| symbol.address)
+            });
+        let function = match (exact_function, exact_data) {
+            (Some(address), _) => Some(address),
+            (None, Some(_)) => None,
+            (None, None) => crate::image::find_function(&self.image, target),
+        };
+        if let Some(address) = function {
             let data: Vec<Value> = self
                 .image
                 .data_references(address)
@@ -883,8 +1072,11 @@ impl Server {
                 "recorded": self.recorded_references(address),
             })));
         }
-        let address =
-            crate::image::resolve_data(&self.image, target).map_err(|error| error.to_string())?;
+        let address = match exact_data {
+            Some(address) => address,
+            None => crate::image::resolve_data(&self.image, target)
+                .map_err(|error| error.to_string())?,
+        };
         let users: Vec<Value> = self
             .image
             .data_users()
@@ -980,30 +1172,44 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
     })
 }
 
-/// Run the server over standard input and output.
-pub fn run(
+/// Open the image and the project file the way the server serves them:
+/// the engine's `options` from `--option` pairs, the project loaded or made
+/// from the image when its file is not there yet, and the image read under
+/// the project as `ag image` reads it.
+pub fn open(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
-) -> Result<i32> {
+) -> Result<Server> {
     let options =
         ag_image::Options::from_flat(&options).map_err(|error| anyhow::anyhow!("{error}"))?;
     let project = match project {
         Some(path) => {
             let file = match ProjectFile::load(path) {
                 Ok(file) => file,
-                Err(error) if !path.exists() => {
+                Err(_) if !path.exists() => {
                     // A project that is not there yet is made from the
-                    // target, as the first `ag project` edit makes it.
-                    let _ = error;
-                    let sha256 = ag_corpus::project::sha256_of(binary).ok();
-                    ProjectFile::new(ag_corpus::project::Target {
-                        path: Some(binary.display().to_string()),
+                    // target as the first `ag project` edit makes it: the
+                    // raw flags and the slice recorded with it, so every
+                    // later reader opens the same bytes.
+                    let sha256 = match ag_corpus::project::sha256_of(binary) {
+                        Ok(sha) => Some(sha),
+                        Err(error) => {
+                            eprintln!(
+                                "note: {} cannot be hashed to record: {error:#}",
+                                binary.display()
+                            );
+                            None
+                        }
+                    };
+                    ProjectFile::new(crate::project::target_for(
+                        binary,
                         sha256,
-                        ..Default::default()
-                    })
+                        raw.as_ref(),
+                        slice.as_deref(),
+                    ))
                 }
                 Err(error) => return Err(error),
             };
@@ -1019,7 +1225,7 @@ pub fn run(
         options,
     )?;
     eprintln!(
-        "ag mcp: serving {} with {} tools{}",
+        "ag: {} open, {} tools{}",
         binary.display(),
         tools().len(),
         project
@@ -1027,7 +1233,19 @@ pub fn run(
             .map(|(path, _)| format!(", project {}", path.display()))
             .unwrap_or_default()
     );
-    let mut server = Server::new(image, binary.to_path_buf(), project);
+    Ok(Server::new(image, binary.to_path_buf(), project))
+}
+
+/// Run the server over standard input and output.
+pub fn run(
+    binary: &Path,
+    raw: Option<ag_image::RawSpec>,
+    slice: Option<String>,
+    project: Option<&Path>,
+    options: Vec<String>,
+) -> Result<i32> {
+    let mut server = open(binary, raw, slice, project, options)?;
+    server.warm_up();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     server.serve(stdin.lock(), stdout.lock())?;
@@ -1387,6 +1605,114 @@ mod tests {
             info["structuredContent"]["project"],
             path.display().to_string()
         );
+
+        // A name and a comment on one address keep each other.
+        let _ = call(
+            &mut server,
+            "set_name",
+            json!({ "address": "0x1198", "name": "entry_point" }),
+        );
+        let both = call(
+            &mut server,
+            "set_comment",
+            json!({ "address": "0x1198", "text": "where it starts" }),
+        );
+        assert_eq!(both["structuredContent"]["record"]["name"], "entry_point");
+        assert_eq!(
+            both["structuredContent"]["record"]["comment"],
+            "where it starts"
+        );
+
+        // Another writer's change between two of the server's is kept: the
+        // file is read again before each change.
+        let mut other = ProjectFile::load(&path).expect("the project");
+        other.annotation_mut(TargetKind::Function, "0x1149").name =
+            Some("from_the_workbench".to_string());
+        other.save(&path).expect("the other writer saves");
+        let after = call(&mut server, "set_bookmark", json!({ "address": "0x1198" }));
+        assert_eq!(after["structuredContent"]["record"]["bookmark"], true);
+        let saved = ProjectFile::load(&path).expect("the project saved");
+        assert_eq!(
+            saved.annotation_for("0x1149").and_then(|a| a.name.clone()),
+            Some("from_the_workbench".to_string())
+        );
+        assert!(saved.annotation_for("0x1198").is_some_and(|a| a.bookmark));
+        // And the read tools see it without a restart.
+        let seen = call(&mut server, "annotations", json!({ "address": "0x1149" }));
+        assert_eq!(
+            seen["structuredContent"]["record"]["name"],
+            "from_the_workbench"
+        );
+        assert!(!path.with_extension("agproj.part").exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_exact_data_name_is_the_data_not_a_function_that_contains_it() {
+        let mut server = server(None);
+        // `completed.0` is a data symbol of the fixture; by its exact name
+        // the answer is the data, with its users.
+        let data = call(
+            &mut server,
+            "cross_references",
+            json!({ "target": "completed.0" }),
+        );
+        assert_eq!(data["isError"], false, "{data}");
+        assert_eq!(data["structuredContent"]["name"], "completed.0");
+        assert!(data["structuredContent"]["used_by"].is_array());
+        // By its address too.
+        let by_address = call(
+            &mut server,
+            "cross_references",
+            json!({ "target": "0x4010" }),
+        );
+        assert_eq!(by_address["structuredContent"]["name"], "completed.0");
+        // A loose name still finds a function.
+        let loose = call(
+            &mut server,
+            "cross_references",
+            json!({ "target": "frame_dum" }),
+        );
+        assert_eq!(
+            loose["structuredContent"]["function"]["name"],
+            "frame_dummy"
+        );
+    }
+
+    #[test]
+    fn a_new_project_for_raw_bytes_records_how_they_load() {
+        let path = temp_project("raw");
+        let _ = std::fs::remove_file(&path);
+        let flags = crate::project::RawArgs {
+            raw: Some("x86-64".to_string()),
+            base: Some("0x400000".to_string()),
+            ..Default::default()
+        };
+        let raw = flags.spec().expect("the flags read").expect("raw");
+        let mut server = open(&fixture(), Some(raw), None, Some(&path), Vec::new())
+            .expect("a raw image with a project not there yet opens");
+        let _ = call(
+            &mut server,
+            "set_name",
+            json!({ "address": "0x400000", "name": "start" }),
+        );
+        let saved = ProjectFile::load(&path).expect("the project saved");
+        assert_eq!(
+            saved.target.raw.as_ref().map(|raw| raw.arch.as_str()),
+            Some("x86-64")
+        );
+        assert_eq!(
+            saved.target.raw.as_ref().map(|raw| raw.base.as_str()),
+            Some("0x400000")
+        );
+        // And it opens again under the same flags.
+        let flags = crate::project::RawArgs {
+            raw: Some("x86-64".to_string()),
+            base: Some("0x400000".to_string()),
+            ..Default::default()
+        };
+        let raw = flags.spec().unwrap().unwrap();
+        assert!(open(&fixture(), Some(raw), None, Some(&path), Vec::new()).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1418,6 +1744,20 @@ mod tests {
             .dispatch(&json!({ "jsonrpc": "2.0", "id": 5 }))
             .unwrap();
         assert_eq!(reply["error"]["code"], INVALID_REQUEST);
+        // A null id, or one that is not a string or a number, is refused,
+        // not taken for a notification.
+        let reply = server
+            .dispatch(&json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }))
+            .unwrap();
+        assert_eq!(reply["error"]["code"], INVALID_REQUEST);
+        let reply = server
+            .dispatch(&json!({ "jsonrpc": "2.0", "id": [1], "method": "ping" }))
+            .unwrap();
+        assert_eq!(reply["error"]["code"], INVALID_REQUEST);
+        let reply = server
+            .dispatch(&json!({ "jsonrpc": "2.0", "id": "seven", "method": "ping" }))
+            .unwrap();
+        assert_eq!(reply["id"], "seven");
         let reply = server.dispatch(&json!("not an object")).unwrap();
         assert_eq!(reply["error"]["code"], INVALID_REQUEST);
         // A missing argument is the tool's error, told as one.
@@ -1448,13 +1788,15 @@ mod tests {
     #[test]
     fn serve_reads_a_message_a_line_and_writes_a_reply_a_line() {
         let mut server = server(None);
-        let input = concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
-            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "\n",
-            "this is not json\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list_functions\",\"arguments\":{\"filter\":\"main\"}}}\n",
-        );
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n");
+        input
+            .extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+        input.extend_from_slice(b"\n");
+        input.extend_from_slice(b"this is not json\n");
+        // A line that is not text is a parse error too, not the end.
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\xff\"}\n");
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list_functions\",\"arguments\":{\"filter\":\"main\"}}}\n");
         let mut output = Vec::new();
         server
             .serve(std::io::Cursor::new(input), &mut output)
@@ -1464,15 +1806,37 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("one JSON reply a line"))
             .collect();
-        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines.len(), 4, "{text}");
         assert_eq!(lines[0]["id"], 1);
         assert_eq!(lines[0]["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
         assert!(lines[1]["id"].is_null());
-        assert_eq!(lines[2]["id"], 2);
-        assert!(lines[2]["result"]["content"][0]["text"]
+        assert_eq!(lines[2]["error"]["code"], PARSE_ERROR);
+        assert_eq!(lines[3]["id"], 2);
+        assert!(lines[3]["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("main"));
+        // A line longer than the server takes is answered and skipped, and
+        // the conversation goes on.
+        let mut long = vec![b'x'; LONGEST_MESSAGE + 10];
+        long.push(b'\n');
+        long.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+        server
+            .serve(std::io::Cursor::new(long), &mut output)
+            .expect("serves to the end");
+        let text = String::from_utf8(output).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON reply a line"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(lines[0]["error"]["code"], PARSE_ERROR);
+        assert!(lines[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("longer"));
+        assert_eq!(lines[1]["id"], 3);
     }
 }

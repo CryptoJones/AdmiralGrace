@@ -596,8 +596,11 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `set_bookmark address [on]` | Bookmarks the function, or takes the bookmark off. |
 | `bookmarks` | The project's bookmarks. |
 
-Every write saves the project file at once, so the workbench opened on the same file sees
-the change on its next reload, and the model's work is kept the way the analyst's is. Without
+Every write reads the project file again, changes the one record and saves the file whole —
+written beside itself and moved into place — so a change the analyst saved from the command
+line or the workbench between two of the model's is kept; the last writer of one record has
+the last word, and the workbench opened on the same file sees the model's changes on its
+next reload (and writes its own over the file when it saves). Without
 `--project` the write tools answer with an error saying so. Lists are cut at 200 rows unless
 `limit` says otherwise, and at 5000 at most; a tool's own failure — a function that is not
 there, an address outside the image — is answered as a tool error (`isError`), and a request
