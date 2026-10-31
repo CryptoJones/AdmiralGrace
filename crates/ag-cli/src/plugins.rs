@@ -48,6 +48,10 @@ pub fn list(json: bool) -> Result<i32> {
         .iter()
         .map(|rewriter| rewriter.name().to_string())
         .collect();
+    let formatters: Vec<String> = ag_image::plugin::formatters()
+        .iter()
+        .map(|formatter| formatter.name().to_string())
+        .collect();
     if json {
         let report = json!({
             "directories": ag_image::plugin::manifest_dirs(),
@@ -58,11 +62,13 @@ pub fn list(json: bool) -> Result<i32> {
                 "architectures": manifest.architectures.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
                 "tools": manifest.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 "rewriters": manifest.rewriters.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                "formatters": manifest.formatters.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
             })).collect::<Vec<Value>>(),
             "loaders": loaders,
             "architectures": architectures,
             "tools": tools,
             "rewriters": rewriters,
+            "formatters": formatters,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
@@ -120,6 +126,7 @@ pub fn list(json: bool) -> Result<i32> {
         }
     }
     listed("rewriters", rewriters);
+    listed("formatters", formatters);
     Ok(0)
 }
 

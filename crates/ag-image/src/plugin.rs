@@ -17,9 +17,10 @@ use ag_engine::plugin::ExternalTool;
 // The engine's side of the SDK, reachable from here so a crate that builds
 // on the image alone has the whole of it.
 pub use ag_engine::plugin::{
-    architecture_for, architectures, loader_for, loaders, manifest_dirs, number as plugin_number,
-    read_manifest, register_architecture, register_loader, register_rewriter, rewriters,
-    Architecture, DecodedSection, ExternalRewriter, FunctionCode, LiftedGraph, LoadedImage, Loader,
+    architecture_for, architectures, formatters, loader_for, loaders, manifest_dirs,
+    number as plugin_number, read_manifest, register_architecture, register_formatter,
+    register_loader, register_rewriter, rewriters, Architecture, DecodedSection, ExternalFormatter,
+    ExternalRewriter, Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage, Loader,
     Manifest, RecoveredBlock, Rewrite, Rewriter,
 };
 

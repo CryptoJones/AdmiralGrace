@@ -37,8 +37,8 @@ pub use lift::{
 pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{
-    Architecture, DecodedSection, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest,
-    RecoveredBlock, Rewrite, Rewriter,
+    Architecture, DecodedSection, Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage,
+    Loader, Manifest, RecoveredBlock, Rewrite, Rewriter,
 };
 pub use procedure::FunctionSignature;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};

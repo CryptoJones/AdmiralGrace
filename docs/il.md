@@ -92,6 +92,20 @@ of declarations. It is pseudocode in each language, not a program: `long(x)` and
 addresses the language has no spelling for, and `/` and `>>` keep C's meaning. The levels
 and the transpiler keep C, which a compiler reads. `docs/options.md` has the option.
 
+## The pseudocode's layout
+
+How the text is laid out is the analyst's too, apart from what it says: `--option brace-style broken`
+puts each control statement's `{` on a line of its own under its head and `else` on its own line
+(C and Objective-C; Rust keeps its braces attached and Python has none); `--option ternaries expand`
+writes `x = c ? a : b;` as an `if`/`else` assigning in each arm, and a return of one as two returns;
+`--option wrap 80` breaks a statement longer than eighty columns between a call's arguments, the
+rest indented two levels; `--option call-hints names` labels each argument with the callee's
+parameter name — `sum_to(/* a */ add(/* a */ a, /* b */ 3))`, or `add(a=1, b=2)` in Python — where
+the callee is a function of the image. Every line keeps the addresses it came from, so a wrapped
+statement's pieces all map to its instructions and a brace alone maps to none. The workbench adds
+rainbow braces and indent guides, which are drawing, not text; and a formatter plugin
+(`docs/plugins.md`) has the last word on the lines.
+
 ## Transpiling to C++
 
 The medium level compiles. `ag image X transpile FUNCTION… [--all] [--no-follow] [--harness

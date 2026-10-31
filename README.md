@@ -168,16 +168,20 @@ way out, with a `main` to run one against the program it came from. The pseudoco
 reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
 each language's way; and the analyst has the last word at any one site — a guard, a folded
 condition, a turned-round branch, a switch — recorded in the project file. Dead code the
-lift keeps is greyed out, and one variable's unused stores can be dropped on their own.
+lift keeps is greyed out, and one variable's unused stores can be dropped on their own. The
+text's layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
+`wrap 80`, `call-hints names` — with rainbow braces and indent guides in the workbench, and a
+formatter plugin has the last word on the lines.
 
 See [docs/il.md](docs/il.md).
 
 ## Plugins
 
 A loader, an architecture — one that may recover a function's blocks and lift it whole
-itself, for an instruction set with delay slots or hardware loops, or a bytecode — a tool or
-a rewriter, which changes a function's medium-level graph as it is lifted, for work such as
-control-flow unflattening, is added without forking: in Rust, against the traits of `ag_engine::plugin` and `ag_image::plugin`; or in any
+itself, for an instruction set with delay slots or hardware loops, or a bytecode — a tool, a
+rewriter, which changes a function's medium-level graph as it is lifted, for work such as
+control-flow unflattening, or a formatter, which changes the pseudocode's lines after they
+are printed, is added without forking: in Rust, against the traits of `ag_engine::plugin` and `ag_image::plugin`; or in any
 language, as a command declared in a JSON manifest in a plugin directory (`AG_PLUGINS`, or
 `~/.config/ag/plugins`) that `ag` finds as it starts. `ag plugins` lists what is registered;
 `ag tool` runs a plugin's tool.

@@ -544,3 +544,95 @@ fn a_manifests_loader_architecture_and_tool_carry_a_toy_image_through_the_comman
     assert_eq!(replies[1]["result"]["isError"], false, "{}", replies[1]);
     assert_eq!(replies[1]["result"]["structuredContent"]["doubled"], 8);
 }
+
+#[test]
+fn a_manifests_formatter_has_the_last_word_on_the_pseudocode_and_is_listed() {
+    if !has_python() {
+        eprintln!("python3 is not on this machine: the formatter is not run");
+        return;
+    }
+    let dir = Dir::new("format");
+    // The formatter notes the language on the first line and tags every
+    // line that came from an instruction; a dead line is said to be.
+    std::fs::write(
+        dir.0.join("tag.py"),
+        r#"
+import json, sys
+given = json.load(sys.stdin)
+lines = []
+for line in given["lines"]:
+    text = line["text"]
+    if line["addresses"] and not text.startswith("//"):
+        text = text + "  // @" + line["addresses_hex"][0]
+    lines.append({"text": text, "addresses": line["addresses"], "dead": line["dead"]})
+lines.insert(0, {"text": "// formatted as " + given["language"] + " for " + given["name"]})
+json.dump({"lines": lines}, sys.stdout)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.0.join("tag.json"),
+        serde_json::json!({
+            "name": "tag",
+            "formatters": [{ "name": "tagger", "command": ["python3", dir.0.join("tag.py")] }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let sample =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["pseudocode", "add", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let lines = report["lines"].as_array().expect("the lines");
+    assert_eq!(lines[0]["text"], "// formatted as c for add");
+    assert!(lines[0]["addresses"].as_array().is_some_and(Vec::is_empty));
+    let signature = lines
+        .iter()
+        .find(|line| {
+            line["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("int add("))
+        })
+        .expect("the signature");
+    assert!(
+        signature["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("  // @0x1149"),
+        "{signature}"
+    );
+    assert_eq!(signature["addresses"][0], 0x1149);
+    // Listed with the rest.
+    let output = ag(&dir.0).arg("plugins").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("formatters: tagger"), "{stdout}");
+    let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["formatters"][0], "tagger");
+    assert_eq!(report["manifests"][0]["formatters"][0], "tagger");
+    // A formatter that answers badly refuses the pseudocode, by name.
+    std::fs::write(
+        dir.0.join("bad.json"),
+        r#"{ "name": "bad", "formatters": [{ "name": "garbler", "command": ["sh", "-c", "cat >/dev/null; echo '{\"lines\": [7]}'"] }] }"#,
+    )
+    .unwrap();
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&sample)
+        .args(["pseudocode", "add"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("the formatter garbler")
+            && stdout.contains("line 0 is a string or an object"),
+        "{stdout}"
+    );
+}

@@ -83,6 +83,10 @@ pub enum Message {
     ViewCycleLevel,
     /// Show the active pane's level in SSA form, or out of it.
     ViewToggleSsa,
+    /// Color the pseudocode's braces by their depth, or stop.
+    ViewToggleRainbowBraces,
+    /// Draw a guide down each indented block of the pseudocode, or stop.
+    ViewToggleIndentGuides,
     /// Show, or stop showing, one of the notes beside a level's items.
     ViewToggleIlOption(IlOption),
     /// Run the program under the debugger, stopped at its first instruction.
@@ -781,6 +785,10 @@ pub struct App {
     pub show_bottom: bool,
     /// Whether the about dialog is open.
     pub show_about: bool,
+    /// Whether the pseudocode's braces are colored by depth.
+    pub rainbow_braces: bool,
+    /// Whether a guide is drawn down each indented block of the pseudocode.
+    pub indent_guides: bool,
     /// An open path prompt, when one is active.
     pub prompt: Option<Prompt>,
     /// The corpus directory currently open.
@@ -892,6 +900,8 @@ impl App {
             show_inspector: true,
             show_bottom: true,
             show_about: false,
+            rainbow_braces: false,
+            indent_guides: false,
             prompt: None,
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
@@ -5094,6 +5104,14 @@ impl App {
 
             Message::ViewToggleNavigator => {
                 self.show_navigator = !self.show_navigator;
+            }
+
+            Message::ViewToggleRainbowBraces => {
+                self.rainbow_braces = !self.rainbow_braces;
+            }
+
+            Message::ViewToggleIndentGuides => {
+                self.indent_guides = !self.indent_guides;
             }
 
             Message::ViewToggleInspector => {
@@ -10637,6 +10655,26 @@ mod tests {
             Some("fold off, guard off".to_string())
         );
         assert!(!folded(&app), "{:?}", app.work.pseudocode);
+    }
+
+    #[test]
+    fn the_view_menu_toggles_the_rainbow_braces_and_the_indent_guides() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        assert!(!app.rainbow_braces && !app.indent_guides);
+        let _ = app.update(Message::ViewToggleRainbowBraces);
+        assert!(app.rainbow_braces);
+        let _ = app.update(Message::ViewToggleIndentGuides);
+        assert!(app.indent_guides);
+        // The pane draws with both on.
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        let _ = crate::views::work_surface::view(&app);
+        let _ = app.update(Message::ViewToggleRainbowBraces);
+        let _ = app.update(Message::ViewToggleIndentGuides);
+        assert!(!app.rainbow_braces && !app.indent_guides);
     }
 
     #[test]
