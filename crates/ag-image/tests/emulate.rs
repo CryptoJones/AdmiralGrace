@@ -86,6 +86,20 @@ fn sum_to_runs_to_its_sum_and_main_follows_its_calls() {
         run.text()
     );
     assert!(run.returned().is_none());
+    // A global the file holds no bytes for is zero when loaded: the run
+    // reads it, not an unknown.
+    let dtors = address_of(&image, "__do_global_dtors_aux");
+    let run = image
+        .emulate(dtors, &[], &EmulationLimits::default())
+        .expect("the destructor glue lifts");
+    assert!(
+        !run.text().contains("completed.0 != 0 depends"),
+        "{}",
+        run.text()
+    );
+    // It goes on to the import slot it reads next, which is not the image's
+    // to know.
+    assert!(run.text().contains("__cxa_finalize"), "{}", run.text());
     // A function the lifter refuses is not run.
     assert!(image
         .emulate(

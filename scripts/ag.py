@@ -169,7 +169,7 @@ class Session:
         return self.call(
             "emulate",
             target=str(target),
-            args=[str(arg) if isinstance(arg, str) else arg for arg in args],
+            args=list(args),
             **_given(steps=steps, depth=depth),
         )
 

@@ -7,6 +7,7 @@
 //! says why. A plugin's rewriter has already had the graph, as has an
 //! architecture that lifts its own.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::ast::{AstNode, BinaryOp};
@@ -24,17 +25,30 @@ pub trait World {
         None
     }
     /// A call to the function `name` at `address` with `args`, `depth`
-    /// calls deep: the value it returns, or `None` when the call cannot be
-    /// followed, which leaves its result unknown.
-    fn call(&self, _name: &str, _address: u64, _args: &[Val], _depth: usize) -> Option<Val> {
+    /// calls deep, sharing the run's `memory` and its step `budget`: the
+    /// value it returns, or `None` when the call cannot be followed, which
+    /// leaves its result unknown.
+    fn call(
+        &self,
+        _name: &str,
+        _address: u64,
+        _args: &[Val],
+        _depth: usize,
+        _memory: &mut Memory,
+        _budget: &Cell<usize>,
+    ) -> Option<Val> {
         None
     }
 }
 
+/// The bytes a run has written, by address, over the image's.
+pub type Memory = BTreeMap<u64, u8>;
+
 /// How far a run goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// The statements run before the run is stopped.
+    /// The statements and blocks run, over the whole run and the calls it
+    /// follows, before the run is stopped.
     pub steps: usize,
     /// How many calls deep the emulator follows.
     pub depth: usize,
@@ -142,16 +156,33 @@ pub fn type_of(ty: &str) -> (u32, bool) {
     if ty.ends_with('*') {
         return (64, false);
     }
-    let unsigned = ty.starts_with("unsigned");
-    let base = ty.trim_start_matches("unsigned").trim();
-    let bits = match base {
-        "char" | "_Bool" | "bool" => 8,
-        "short" => 16,
-        "int" => 32,
-        "long" | "long long" | "" => 64,
-        _ => 64,
-    };
-    (bits, !unsigned)
+    let words: Vec<&str> = ty
+        .split_whitespace()
+        .filter(|word| !matches!(*word, "const" | "volatile"))
+        .collect();
+    let unsigned = words.contains(&"unsigned");
+    let base: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| !matches!(*word, "unsigned" | "signed"))
+        .collect();
+    let base = base.join(" ");
+    match base.as_str() {
+        "_Bool" | "bool" => (8, false),
+        "size_t" | "uintptr_t" | "uint64_t" => (64, false),
+        "uint32_t" => (32, false),
+        "uint16_t" => (16, false),
+        "uint8_t" => (8, false),
+        "int64_t" | "intptr_t" | "ssize_t" => (64, true),
+        "int32_t" => (32, true),
+        "int16_t" => (16, true),
+        "int8_t" => (8, true),
+        "char" => (8, !unsigned),
+        "short" | "short int" => (16, !unsigned),
+        "int" | "" => (32, !unsigned),
+        "long" | "long int" | "long long" | "long long int" => (64, !unsigned),
+        _ => (64, !unsigned),
+    }
 }
 
 /// Why a run stopped.
@@ -165,6 +196,9 @@ pub enum Stop {
     Unknown { at: Option<u64>, what: String },
     /// The graph went to no block.
     NoBlock(usize),
+    /// The function has no blocks at the medium level: a thunk, or a lift
+    /// without one.
+    NoBlocks,
 }
 
 impl Stop {
@@ -177,6 +211,7 @@ impl Stop {
             Stop::Unknown { at: Some(at), what } => format!("stopped at {at:#x}: {what}"),
             Stop::Unknown { at: None, what } => format!("stopped: {what}"),
             Stop::NoBlock(block) => format!("stopped: no block {block}"),
+            Stop::NoBlocks => "stopped: the function has no blocks at the medium level".to_string(),
         }
     }
 }
@@ -249,41 +284,56 @@ impl Run {
 /// Run the function of `stages` with `args` as its parameters, in order,
 /// against `world`, within `limits`.
 pub fn run(stages: &Stages, args: &[u64], world: &dyn World, limits: &Limits) -> Run {
-    run_at_depth(stages, args, world, limits, 0)
+    let args: Vec<Val> = args.iter().map(|arg| Val::known(*arg, 64, true)).collect();
+    run_with(
+        stages,
+        &args,
+        world,
+        limits,
+        0,
+        Memory::new(),
+        &Cell::new(limits.steps),
+    )
 }
 
-/// [`run`], `depth` calls deep.
-pub fn run_at_depth(
+/// [`run`] as a call `depth` deep: the parameters from `args`, each cast
+/// to its type, an unknown one unknown; the `memory` the caller has
+/// written so far, which comes back in the run; and the step `budget` the
+/// whole run shares.
+pub fn run_with(
     stages: &Stages,
-    args: &[u64],
+    args: &[Val],
     world: &dyn World,
     limits: &Limits,
     depth: usize,
+    memory: Memory,
+    budget: &Cell<usize>,
 ) -> Run {
     let mut machine = Machine {
         variables: BTreeMap::new(),
         types: BTreeMap::new(),
-        memory: BTreeMap::new(),
+        memory,
         world,
         depth,
         limits,
+        budget,
         steps: Vec::new(),
+        pending_note: None,
+        return_type: type_of(&stages.function.return_type),
+        returns_value: stages.function.return_type != "void",
     };
     for variable in stages.function.params.iter().chain(&stages.function.locals) {
-        let (bits, signed) = type_of(&variable.ty);
-        machine.types.insert(variable.name.clone(), (bits, signed));
-    }
-    for (variable, arg) in stages.function.params.iter().zip(args) {
-        let (bits, signed) = type_of(&variable.ty);
         machine
-            .variables
-            .insert(variable.name.clone(), Val::known(*arg, bits, signed));
+            .types
+            .insert(variable.name.clone(), type_of(&variable.ty));
     }
-    for variable in stages.function.params.iter().skip(args.len()) {
+    for (index, variable) in stages.function.params.iter().enumerate() {
         let (bits, signed) = type_of(&variable.ty);
-        machine
-            .variables
-            .insert(variable.name.clone(), Val::unknown(bits, signed));
+        let value = match args.get(index) {
+            Some(arg) => arg.cast(bits, signed),
+            None => Val::unknown(bits, signed),
+        };
+        machine.variables.insert(variable.name.clone(), value);
     }
     let stop = machine.walk(&stages.medium, 0);
     let mut variables = machine.variables;
@@ -310,32 +360,51 @@ struct Why(String);
 struct Machine<'a> {
     variables: BTreeMap<String, Val>,
     types: BTreeMap<String, (u32, bool)>,
-    memory: BTreeMap<u64, u8>,
+    memory: Memory,
     world: &'a dyn World,
     depth: usize,
     limits: &'a Limits,
+    /// The steps left to the whole run, shared with the calls it follows.
+    budget: &'a Cell<usize>,
     steps: Vec<Step>,
+    /// A note an evaluation left for the statement it is in.
+    pending_note: Option<String>,
+    return_type: (u32, bool),
+    returns_value: bool,
 }
 
 impl Machine<'_> {
+    /// Take one step off the budget; whether one was left.
+    fn step(&self) -> bool {
+        let left = self.budget.get();
+        if left == 0 {
+            return false;
+        }
+        self.budget.set(left - 1);
+        true
+    }
+
     /// Run the graph from `entry`.
     fn walk(&mut self, nodes: &[Node], entry: usize) -> Stop {
+        if nodes.is_empty() {
+            return Stop::NoBlocks;
+        }
         let mut block = entry;
-        let mut count = 0usize;
         loop {
             let Some(node) = nodes.get(block) else {
                 return Stop::NoBlock(block);
             };
+            // A block costs a step of its own, so a loop of nothing but
+            // jumps runs out too.
+            if !self.step() {
+                return Stop::Steps(self.limits.steps);
+            }
             for statement in &node.statements {
-                if count >= self.limits.steps {
-                    return Stop::Steps(count);
+                if !self.step() {
+                    return Stop::Steps(self.limits.steps);
                 }
-                count += 1;
                 let address = statement.addresses.iter().min().copied();
-                let text = crate::emit::emit_node(&statement.node)
-                    .trim_end()
-                    .trim_end_matches(';')
-                    .to_string();
+                let text = one_line(&statement.node);
                 let mut step = Step {
                     address,
                     block,
@@ -343,23 +412,37 @@ impl Machine<'_> {
                     wrote: None,
                     note: None,
                 };
+                self.pending_note = None;
                 match &statement.node {
                     AstNode::Return { value } => {
                         let returned = match value {
                             Some(value) => match self.eval(value) {
-                                Ok(value) => Some(value),
+                                Ok(value) => {
+                                    let (bits, signed) = self.return_type;
+                                    Some(if self.returns_value {
+                                        value.cast(bits, signed)
+                                    } else {
+                                        value
+                                    })
+                                }
                                 Err(Why(what)) => {
+                                    step.note = self.pending_note.take();
                                     self.steps.push(step);
                                     return Stop::Unknown { at: address, what };
                                 }
                             },
                             None => None,
                         };
+                        step.note = self.pending_note.take();
                         self.steps.push(step);
                         return Stop::Returned(returned);
                     }
                     node => {
-                        if let Err(Why(what)) = self.execute(node, &mut step) {
+                        let result = self.execute(node, &mut step);
+                        if step.note.is_none() {
+                            step.note = self.pending_note.take();
+                        }
+                        if let Err(Why(what)) = result {
                             self.steps.push(step);
                             return Stop::Unknown { at: address, what };
                         }
@@ -455,14 +538,29 @@ impl Machine<'_> {
                             .copied()
                             .unwrap_or((value.bits, value.signed));
                         let stored = value.cast(bits, signed);
-                        if self.types.contains_key(name) {
+                        let stored = if self.types.contains_key(name) {
                             self.variables.insert(name.clone(), stored);
+                            stored
                         } else if let Some(address) = self.world.address_of(name) {
-                            // A global the lift names.
+                            // A global the lift names, at the width its symbol
+                            // says.
+                            let Some(bits) = self
+                                .world
+                                .size_of(name)
+                                .filter(|size| matches!(size, 1 | 2 | 4 | 8))
+                                .map(|size| size as u32 * 8)
+                            else {
+                                return Err(Why(format!(
+                                    "a store to {name}, whose width the image does not say"
+                                )));
+                            };
+                            let stored = value.cast(bits, value.signed);
                             self.store(address, stored)?;
+                            stored
                         } else {
                             self.variables.insert(name.clone(), stored);
-                        }
+                            stored
+                        };
                         step.wrote = Some((name.clone(), stored));
                     }
                     AstNode::Deref { target } => {
@@ -487,8 +585,8 @@ impl Machine<'_> {
             }
             AstNode::Call { .. } | AstNode::Intrinsic { .. } => {
                 let value = self.eval(node)?;
-                if value.value.is_none() {
-                    step.note = Some("not followed; its result is unknown".to_string());
+                if value.value.is_none() && self.pending_note.is_none() {
+                    step.note = Some("its result is unknown".to_string());
                 }
                 Ok(())
             }
@@ -507,7 +605,8 @@ impl Machine<'_> {
     fn pointer(&mut self, target: &AstNode) -> Result<(Val, u32, bool), Why> {
         match target {
             AstNode::Cast { ty, target } if ty.trim_end().ends_with('*') => {
-                let pointee = ty.trim_end().trim_end_matches('*');
+                // One star off: `int **` points at a pointer.
+                let pointee = ty.trim_end().strip_suffix('*').unwrap_or_default();
                 let (bits, signed) = type_of(pointee);
                 Ok((self.eval(target)?, bits, signed))
             }
@@ -557,15 +656,16 @@ impl Machine<'_> {
             AstNode::Var { name } => match self.variables.get(name) {
                 Some(value) => *value,
                 None => match self.world.address_of(name) {
-                    // A global: read from the image at the width its symbol says.
-                    Some(address) => {
-                        let bits = self
-                            .world
-                            .size_of(name)
-                            .filter(|size| matches!(size, 1 | 2 | 4 | 8))
-                            .map_or(64, |size| size as u32 * 8);
-                        self.load(address, bits, true)
-                    }
+                    // A global: read from the image at the width its symbol
+                    // says; one of a width the image does not say is unknown.
+                    Some(address) => match self
+                        .world
+                        .size_of(name)
+                        .filter(|size| matches!(size, 1 | 2 | 4 | 8))
+                    {
+                        Some(size) => self.load(address, size as u32 * 8, true),
+                        None => Val::unknown(64, true),
+                    },
                     None => {
                         let (bits, signed) = self.types.get(name).copied().unwrap_or((64, true));
                         Val::unknown(bits, signed)
@@ -636,13 +736,49 @@ impl Machine<'_> {
                 for arg in args {
                     values.push(self.eval(arg)?);
                 }
-                match callee.as_ref() {
+                let followed = match callee.as_ref() {
                     AstNode::FunctionName { name, address } if self.depth < self.limits.depth => {
-                        self.world
-                            .call(name, *address, &values, self.depth + 1)
-                            .unwrap_or_else(|| Val::unknown(64, true))
+                        let mut memory = std::mem::take(&mut self.memory);
+                        let result = self.world.call(
+                            name,
+                            *address,
+                            &values,
+                            self.depth + 1,
+                            &mut memory,
+                            self.budget,
+                        );
+                        self.memory = memory;
+                        result
                     }
-                    _ => Val::unknown(64, true),
+                    _ => None,
+                };
+                match followed {
+                    Some(value) => value,
+                    None => {
+                        // Not followed: the result is unknown, and so is any
+                        // local whose address the call was given.
+                        let mut taken = Vec::new();
+                        for arg in args {
+                            if let AstNode::AddressOf { target } = arg {
+                                if let AstNode::Var { name } = target.as_ref() {
+                                    if let Some((bits, signed)) = self.types.get(name).copied() {
+                                        self.variables
+                                            .insert(name.clone(), Val::unknown(bits, signed));
+                                        taken.push(name.clone());
+                                    }
+                                }
+                            }
+                        }
+                        self.pending_note = Some(if taken.is_empty() {
+                            "not followed; its result is unknown, and what it wrote to memory is not known".to_string()
+                        } else {
+                            format!(
+                                "not followed; its result is unknown, as are {} after it",
+                                taken.join(", ")
+                            )
+                        });
+                        Val::unknown(64, true)
+                    }
                 }
             }
             AstNode::Intrinsic { args, .. } => {
@@ -669,8 +805,26 @@ impl Machine<'_> {
 /// An operator over two values: unknown when either is, the width the
 /// wider operand's, the comparisons a byte that is 1 or 0.
 fn binary(op: BinaryOp, l: Val, r: Val) -> Result<Val, Why> {
+    // A shift has its left operand's type, and a count the width allows.
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        let (Some(a), Some(count)) = (l.value, r.value) else {
+            return Ok(Val::unknown(l.bits, l.signed));
+        };
+        let count = (count & u64::from(l.bits.max(1) - 1)) as u32;
+        return Ok(match op {
+            BinaryOp::Shl => Val::known(a << count, l.bits, l.signed),
+            _ if l.signed => Val::known((sign_extend(a, l.bits) >> count) as u64, l.bits, true),
+            _ => Val::known(a >> count, l.bits, false),
+        });
+    }
+    // The usual conversions: the wider operand's type, and when the widths
+    // are the same, unsigned if either is.
     let bits = l.bits.max(r.bits);
-    let signed = l.signed && r.signed;
+    let signed = match l.bits.cmp(&r.bits) {
+        std::cmp::Ordering::Greater => l.signed,
+        std::cmp::Ordering::Less => r.signed,
+        std::cmp::Ordering::Equal => l.signed && r.signed,
+    };
     let (Some(a), Some(b)) = (l.cast(bits, l.signed).value, r.cast(bits, r.signed).value) else {
         let out_bits = if matches!(
             op,
@@ -718,19 +872,7 @@ fn binary(op: BinaryOp, l: Val, r: Val) -> Result<Val, Why> {
         BinaryOp::And => Val::known(a & b, bits, signed),
         BinaryOp::Or => Val::known(a | b, bits, signed),
         BinaryOp::Xor => Val::known(a ^ b, bits, signed),
-        BinaryOp::Shl => Val::known(a.checked_shl(b as u32).unwrap_or(0), bits, signed),
-        BinaryOp::Shr => {
-            if l.signed {
-                Val::known(
-                    sa.checked_shr(b as u32)
-                        .unwrap_or(if sa < 0 { -1 } else { 0 }) as u64,
-                    bits,
-                    signed,
-                )
-            } else {
-                Val::known(a.checked_shr(b as u32).unwrap_or(0), bits, signed)
-            }
-        }
+        BinaryOp::Shl | BinaryOp::Shr => unreachable!("shifts are done above"),
         BinaryOp::Equal => truth(a == b),
         BinaryOp::NotEqual => truth(a != b),
         BinaryOp::Less => truth(if signed { sa < sb } else { a < b }),
@@ -924,6 +1066,148 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_of_nothing_but_jumps_runs_out_of_steps_and_an_empty_graph_says_so() {
+        let mut stages = sum_to();
+        stages.medium = vec![Node {
+            address: 0x10,
+            statements: Vec::new(),
+            terminator: Terminator::Goto {
+                target: 0,
+                addresses: vec![0x10],
+            },
+        }];
+        let run = super::run(
+            &stages,
+            &[1],
+            &Nowhere,
+            &Limits {
+                steps: 20,
+                depth: 1,
+            },
+        );
+        assert_eq!(run.stop, Stop::Steps(20));
+        stages.medium.clear();
+        let run = super::run(&stages, &[1], &Nowhere, &Limits::default());
+        assert_eq!(run.stop, Stop::NoBlocks);
+        assert!(run.text().contains("no blocks at the medium level"));
+    }
+
+    #[test]
+    fn pointers_to_pointers_shifts_and_mixed_widths_follow_c() {
+        struct Bytes;
+        impl World for Bytes {
+            fn read(&self, address: u64, len: usize) -> Option<Vec<u8>> {
+                (0x4000..0x4020).contains(&address).then(|| {
+                    (0..len)
+                        .map(|i| (address as u8).wrapping_add(i as u8))
+                        .collect()
+                })
+            }
+            fn address_of(&self, name: &str) -> Option<u64> {
+                (name == "counter").then_some(0x4010)
+            }
+            fn size_of(&self, _name: &str) -> Option<u64> {
+                Some(4)
+            }
+        }
+        // *(int **)0x4000 reads eight bytes, a pointer.
+        let load = AstNode::Deref {
+            target: Box::new(AstNode::Cast {
+                ty: "int **".to_string(),
+                target: Box::new(AstNode::constant(0x4000, 8)),
+            }),
+        };
+        let mut stages = sum_to();
+        stages.function.params.clear();
+        stages.function.locals = vec![
+            Variable {
+                ty: "long".to_string(),
+                name: "p".to_string(),
+            },
+            Variable {
+                ty: "int".to_string(),
+                name: "x".to_string(),
+            },
+        ];
+        stages.medium = vec![Node {
+            address: 0x10,
+            statements: vec![
+                statement(assign("p", load), 0x10),
+                // A long written to a 4-byte global takes four bytes.
+                statement(assign("counter", AstNode::constant(0x1_0000_0001, 8)), 0x14),
+                statement(assign("x", var("counter")), 0x18),
+                statement(
+                    AstNode::Return {
+                        value: Some(Box::new(var("p"))),
+                    },
+                    0x1c,
+                ),
+            ],
+            terminator: Terminator::Return,
+        }];
+        let run = super::run(&stages, &[], &Bytes, &Limits::default());
+        assert_eq!(
+            run.variables["p"].value,
+            Some(0x0706_0504_0302_0100),
+            "{}",
+            run.text()
+        );
+        assert_eq!(run.memory.len(), 4, "{:?}", run.memory);
+        assert_eq!(run.variables["x"].value, Some(1));
+        // Shifts take the left operand's type and a count the width allows.
+        let shifted = binary(
+            BinaryOp::Shr,
+            Val::known(0x8000_0000, 32, true),
+            Val::known(31, 8, true),
+        )
+        .unwrap();
+        assert_eq!(shifted.as_i64(), Some(-1));
+        assert_eq!(shifted.bits, 32);
+        let shifted = binary(
+            BinaryOp::Shl,
+            Val::known(1, 32, true),
+            Val::known(33, 32, true),
+        )
+        .unwrap();
+        assert_eq!(shifted.value, Some(2), "the count is masked to the width");
+        // A wider signed operand against a narrower unsigned one is signed.
+        let less = binary(
+            BinaryOp::Less,
+            Val::known(u64::MAX, 64, true),
+            Val::known(1, 32, false),
+        )
+        .unwrap();
+        assert_eq!(less.value, Some(1), "-1L < 1u");
+        assert_eq!(type_of("const unsigned int"), (32, false));
+        assert_eq!(type_of("unsigned"), (32, false));
+        assert_eq!(type_of("signed char"), (8, true));
+        assert_eq!(type_of("uint64_t"), (64, false));
+        assert_eq!(type_of("_Bool"), (8, false));
+        // A ternary picks by its condition.
+        let pick = AstNode::Ternary {
+            cond: Box::new(AstNode::binary(
+                AstNode::constant(1, 4),
+                BinaryOp::Less,
+                AstNode::constant(2, 4),
+            )),
+            then: Box::new(AstNode::constant(7, 4)),
+            otherwise: Box::new(AstNode::constant(9, 4)),
+        };
+        stages.medium = vec![Node {
+            address: 0x10,
+            statements: vec![statement(
+                AstNode::Return {
+                    value: Some(Box::new(pick)),
+                },
+                0x10,
+            )],
+            terminator: Terminator::Return,
+        }];
+        let run = super::run(&stages, &[], &Nowhere, &Limits::default());
+        assert_eq!(run.returned().and_then(|v| v.value), Some(7));
+    }
+
+    #[test]
     fn values_have_widths_and_signs() {
         assert_eq!(type_of("unsigned int"), (32, false));
         assert_eq!(type_of("char"), (8, true));
@@ -948,6 +1232,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(less.value, Some(0), "unsigned: 0xffffffff is not below 1");
+        let less = binary(BinaryOp::Less, minus_one, Val::known(1, 32, false)).unwrap();
+        assert_eq!(
+            less.value,
+            Some(0),
+            "signed against unsigned of one width is unsigned"
+        );
         assert!(binary(
             BinaryOp::Div,
             Val::known(1, 32, true),

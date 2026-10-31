@@ -62,7 +62,13 @@ depends on a value the run does not know, and says why:
 ```
 
 Every step carries the address it came from, the statement, what it wrote and a note when a
-call was not followed or a store went to memory. `--json` gives the steps, the `stop`, the
+call was not followed or a store went to memory. A section the file holds no bytes for reads
+as the zeros it is loaded with. A call that is followed runs on the memory the caller has
+written so far and leaves its own writes behind; the whole run, calls and all, has one step
+budget, and a block costs a step as a statement does, so a loop of nothing but jumps runs out
+too. A call that is not followed leaves its result unknown, and so the locals whose addresses
+it was given; what it may have written to memory the run does not know, and says so beside
+the step. `--json` gives the steps, the `stop`, the
 value `returned` (its bits, its signed reading, its hex and its width), the `variables` and
 the `memory` written. The MCP tool `emulate` and `scripts/ag.py`'s `emulate(target, *args)`
 answer the same; in Rust, `Binary::emulate(address, args, limits)` runs

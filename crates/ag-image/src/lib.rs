@@ -2216,15 +2216,22 @@ impl Binary {
         limits: &ag_engine::emulate::Limits,
     ) -> Result<ag_engine::emulate::Run, NotLifted> {
         let stages = self.stages(address)?;
-        Ok(ag_engine::emulate::run_at_depth(
+        let args: Vec<ag_engine::emulate::Val> = args
+            .iter()
+            .map(|arg| ag_engine::emulate::Val::known(*arg, 64, true))
+            .collect();
+        Ok(ag_engine::emulate::run_with(
             &stages,
-            args,
+            &args,
             &Emulated {
                 image: self,
                 limits: *limits,
+                stages: std::cell::RefCell::new(HashMap::new()),
             },
             limits,
             0,
+            ag_engine::emulate::Memory::new(),
+            &std::cell::Cell::new(limits.steps),
         ))
     }
 
@@ -2972,19 +2979,26 @@ fn decode_arm_section(
     }
 }
 
-/// Decode the bytes of a section through a plugin's architecture; a
-/// section it cannot decode is reported and left empty, as the engine's
-/// own decoders leave one.
-/// The image as the emulator's world: its bytes, its data symbols, and
-/// its functions followed as calls.
+/// The image as the emulator's world: its bytes — zero where a section has
+/// none in the file — its data symbols, and its functions followed as
+/// calls, each lifted once.
 struct Emulated<'a> {
     image: &'a Binary,
     limits: ag_engine::emulate::Limits,
+    stages: std::cell::RefCell<HashMap<u64, Arc<Stages>>>,
 }
 
 impl ag_engine::emulate::World for Emulated<'_> {
     fn read(&self, address: u64, len: usize) -> Option<Vec<u8>> {
-        self.image.bytes_at(address, len)
+        let section = self.image.section_of(address)?;
+        let end = address.checked_add(len as u64)?;
+        if end > section.vma.saturating_add(section.size) {
+            return None;
+        }
+        // The tail of a section the file does not hold is zero when loaded.
+        let mut bytes = self.image.bytes_at(address, len).unwrap_or_default();
+        bytes.resize(len, 0);
+        Some(bytes)
     }
 
     fn address_of(&self, name: &str) -> Option<u64> {
@@ -3001,6 +3015,7 @@ impl ag_engine::emulate::World for Emulated<'_> {
             .iter()
             .find(|symbol| symbol.name == name)
             .map(|symbol| symbol.size)
+            .filter(|size| *size > 0)
     }
 
     fn call(
@@ -3009,20 +3024,39 @@ impl ag_engine::emulate::World for Emulated<'_> {
         address: u64,
         args: &[ag_engine::emulate::Val],
         depth: usize,
+        memory: &mut ag_engine::emulate::Memory,
+        budget: &std::cell::Cell<usize>,
     ) -> Option<ag_engine::emulate::Val> {
-        // A function of the image is run in turn, with the arguments that
-        // are known; an import, or a function the lifter refuses, is not.
+        // A function of the image is run in turn, on the memory the caller
+        // has written and the steps it has left; an import, or a function
+        // the lifter refuses, is not.
         if depth > self.limits.depth || !self.image.functions().iter().any(|f| f.address == address)
         {
             return None;
         }
-        let args: Vec<u64> = args
-            .iter()
-            .map(|arg| arg.value)
-            .collect::<Option<Vec<u64>>>()?;
-        let stages = self.image.stages(address).ok()?;
-        let run = ag_engine::emulate::run_at_depth(&stages, &args, self, &self.limits, depth);
-        run.returned()
+        let cached = self.stages.borrow().get(&address).cloned();
+        let stages = match cached {
+            Some(stages) => stages,
+            None => {
+                let stages = self.image.stages(address).ok()?;
+                self.stages
+                    .borrow_mut()
+                    .insert(address, Arc::clone(&stages));
+                stages
+            }
+        };
+        let run = ag_engine::emulate::run_with(
+            &stages,
+            args,
+            self,
+            &self.limits,
+            depth,
+            std::mem::take(memory),
+            budget,
+        );
+        let returned = run.returned();
+        *memory = run.memory;
+        returned
     }
 }
 
@@ -3103,6 +3137,9 @@ fn cfg_from_blocks(
     Ok(cfg)
 }
 
+/// Decode the bytes of a section through a plugin's architecture; a
+/// section it cannot decode is reported and left empty, as the engine's
+/// own decoders leave one.
 fn decode_plugin_section(
     arch: &dyn ag_engine::plugin::Architecture,
     language: &str,

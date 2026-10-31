@@ -197,11 +197,12 @@ pub enum ImageCmd {
     Emulate {
         /// The function: an address such as `0x1149`, or a name.
         target: String,
-        /// An argument, in parameter order; a number, decimal or hex. May
-        /// be repeated.
-        #[arg(long = "arg", value_name = "N", action = clap::ArgAction::Append)]
+        /// An argument, in parameter order; a number, decimal or hex,
+        /// negative with a `-`. May be repeated.
+        #[arg(long = "arg", value_name = "N", action = clap::ArgAction::Append, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// The statements run before the run is stopped.
+        /// The statements and blocks run, over the whole run and the calls
+        /// it follows, before the run is stopped.
         #[arg(long, default_value_t = 10_000)]
         steps: usize,
         /// How many calls deep a call to a function of the image is followed.
@@ -1725,7 +1726,6 @@ fn il(
     }
 }
 
-/// A function at one level, as JSON.
 /// Run one function with the arguments given and report the run.
 fn emulate(
     image: &Binary,
@@ -1740,6 +1740,7 @@ fn emulate(
         "the lifter reads 64-bit x86, and this image is {}",
         image.language()
     );
+    anyhow::ensure!(steps >= 1, "--steps is a whole number from 1");
     let address = resolve(image, target)?;
     let args = args
         .iter()
@@ -1779,13 +1780,11 @@ fn emulate(
 /// A number as the command line spells it: decimal, or hex with `0x`.
 fn parse_number(text: &str) -> Option<u64> {
     let text = text.trim();
+    if let Some(negative) = text.strip_prefix('-') {
+        return parse_number(negative).map(|value| value.wrapping_neg());
+    }
     if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).ok()
-    } else if let Some(negative) = text.strip_prefix('-') {
-        negative
-            .parse::<u64>()
-            .ok()
-            .map(|value| value.wrapping_neg())
     } else {
         text.parse().ok()
     }
@@ -1796,11 +1795,12 @@ pub(crate) fn emulation_json(run: &ag_image::Emulation) -> serde_json::Value {
     let value = |value: &ag_image::emulate::Val| match value.value {
         Some(bits) => serde_json::json!({
             "value": bits,
-            "signed": value.as_i64(),
+            "as_signed": value.as_i64(),
             "hex": format!("{bits:#x}"),
             "bits": value.bits,
+            "signed": value.signed,
         }),
-        None => serde_json::json!({ "value": null, "bits": value.bits }),
+        None => serde_json::json!({ "value": null, "bits": value.bits, "signed": value.signed }),
     };
     serde_json::json!({
         "function": run.address,
@@ -1821,6 +1821,7 @@ pub(crate) fn emulation_json(run: &ag_image::Emulation) -> serde_json::Value {
     })
 }
 
+/// A function at one level, as JSON.
 pub(crate) fn il_json(function: &ag_image::IlFunction) -> serde_json::Value {
     serde_json::json!({
         "function": function.address,

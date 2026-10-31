@@ -1869,6 +1869,14 @@ fn a_function_is_emulated_with_its_arguments_and_the_run_is_reported() {
     );
     assert_eq!(report["returned"]["value"], 10);
     assert_eq!(report["stop"], "returned 10 (0xa)");
+    // A negative argument, and a negative return read as such.
+    let negative = image_json(
+        "sample.elf",
+        &["emulate", "add", "--arg", "-7", "--arg", "3"],
+    );
+    assert_eq!(negative["returned"]["as_signed"], -4, "{negative}");
+    assert_eq!(negative["returned"]["signed"], true);
+    assert_eq!(negative["returned"]["value"], 4294967292u64);
     assert!(report["steps"]
         .as_array()
         .unwrap()

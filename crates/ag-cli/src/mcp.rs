@@ -782,6 +782,13 @@ impl Server {
                         .iter()
                         .map(|item| {
                             ag_image::plugin::plugin_number(item)
+                                .or_else(|| item.as_i64().map(|value| value as u64))
+                                .or_else(|| {
+                                    item.as_str()
+                                        .and_then(|text| text.strip_prefix('-'))
+                                        .and_then(|text| text.parse::<u64>().ok())
+                                        .map(|value| value.wrapping_neg())
+                                })
                                 .ok_or_else(|| format!("an argument is a number, not {item}"))
                         })
                         .collect::<Result<Vec<u64>, String>>()?,
