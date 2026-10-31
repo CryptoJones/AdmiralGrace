@@ -17,7 +17,7 @@
 //! 32-bit image reads like a 64-bit one.
 //!
 //! The pseudocode is the engine's too: the instructions of a function go
-//! through [`lift_function`] and [`emit_function`], and what comes back is C
+//! through [`lift_function`] and [`emit_function_with`], and what comes back is C
 //! with every line mapped to the instructions it came from, or the reason
 //! the lifter refused. The calling convention is read from the image's
 //! language, so a Windows image passes its arguments the Microsoft way, and
@@ -45,7 +45,7 @@ use iced_x86::Formatter as _;
 use ag_engine::arm::ArmVariant;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
-use ag_engine::emit::emit_function;
+use ag_engine::emit::emit_function_with;
 use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
@@ -437,6 +437,10 @@ pub struct Binary {
     /// The analyst's words on the sites, by address: the judgment calls the
     /// lift is to make or not make there.
     site_overrides: Mutex<BTreeMap<u64, SiteOverride>>,
+    /// The variables whose dead stores the analyst called noise, by the
+    /// address of the function that declares them: taken out of the
+    /// pseudocode even when the dead code is kept.
+    removable_stores: Mutex<BTreeMap<u64, Vec<String>>>,
     /// The levels of the lift, by function, level and form; forgotten with
     /// the pseudocode.
     levels: Mutex<LevelCache>,
@@ -741,6 +745,7 @@ impl Binary {
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
             levels: Mutex::new(HashMap::new()),
+            removable_stores: Mutex::new(BTreeMap::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
             plugin_stages: Mutex::new(HashMap::new()),
@@ -1493,6 +1498,31 @@ impl Binary {
             .unwrap_or_default()
     }
 
+    /// Tell the lift which variables' dead stores to take out of the
+    /// pseudocode — by the address of the function declaring each — and say
+    /// whether that changed anything. The pseudocode is read again after.
+    pub fn set_removable_stores(&self, removable: BTreeMap<u64, Vec<String>>) -> bool {
+        if let Ok(mut held) = self.removable_stores.lock() {
+            if *held == removable {
+                return false;
+            }
+            *held = removable;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        true
+    }
+
+    /// The variables of the function at `address` whose dead stores go.
+    fn removable_of(&self, address: u64) -> Vec<String> {
+        self.removable_stores
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+            .unwrap_or_default()
+    }
+
     /// Tell the image where the jump tables are that its code does not
     /// say: one hint per indirect jump, by the jump's address. The walks
     /// and the pseudocode built so far are forgotten, since the graph of
@@ -2011,8 +2041,10 @@ impl Binary {
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
 
+        let removable = self.removable_of(address);
         if let Some(stages) = self.architecture_stages(&decoded, &cfg, address, &name) {
-            return stages.map(|stages| emit_function(&stages.function, &self.options));
+            return stages
+                .map(|stages| emit_function_with(&stages.function, &self.options, &removable));
         }
         let function = lift_function(
             &decoded.disasm,
@@ -2024,7 +2056,7 @@ impl Binary {
             &ImageSymbols(self),
             &self.options,
         )?;
-        Ok(emit_function(&function, &self.options))
+        Ok(emit_function_with(&function, &self.options, &removable))
     }
 
     /// The control-flow graph of the function at `address`.

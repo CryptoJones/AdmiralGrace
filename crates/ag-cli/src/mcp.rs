@@ -337,6 +337,19 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_dead_stores",
+            description: "Say whether the stores to a local variable that nothing reads are taken out of the pseudocode even when the dead code is kept: `drop` true takes them out, false leaves them in, marked. The variable is named as the pseudocode declares it, under the function that declares it. The project is saved and the pseudocode read again.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "address": address,
+                    "variable": { "type": "string", "description": "The variable's declared name." },
+                    "drop": { "type": "boolean", "description": "true to take its dead stores out, false to keep them." },
+                },
+                "required": ["address", "variable", "drop"]
+            }),
+        },
+        Tool {
             name: "set_bookmark",
             description: "Bookmark the function at an address in the project file, or take the bookmark off. The project is saved.",
             schema: json!({
@@ -996,6 +1009,31 @@ impl Server {
                     address,
                 )))
             }
+            "set_dead_stores" => {
+                let address = parse_address(&text("address")?)?;
+                let variable = text("variable")?;
+                if variable.trim().is_empty() {
+                    return Err(
+                        "\"variable\" names the variable as the pseudocode declares it".to_string(),
+                    );
+                }
+                let drop = match arguments.get("drop") {
+                    Some(Value::Bool(drop)) => *drop,
+                    _ => return Err("\"drop\" is true or false".to_string()),
+                };
+                let key = format!("{address:#x}");
+                self.change_file(|file| {
+                    file.variable_mut(&key, variable.trim()).drop_stores = drop;
+                })?;
+                self.image
+                    .set_removable_stores(self.project()?.file.removable_stores());
+                Ok(Answer::json(json!({
+                    "address": address,
+                    "address_hex": key,
+                    "variable": variable.trim(),
+                    "drop_stores": drop,
+                })))
+            }
             "set_bookmark" => {
                 let address = parse_address(&text("address")?)?;
                 let on = flag("on", true)?;
@@ -1172,10 +1210,15 @@ impl Server {
         address: u64,
         edit: impl FnOnce(&mut Annotation),
     ) -> Result<(), String> {
+        let key = format!("{address:#x}");
+        self.change_file(|file| edit(file.annotation_mut(kind, &key)))
+    }
+
+    /// Read the project again, change it with `edit`, and save it.
+    fn change_file(&mut self, edit: impl FnOnce(&mut ProjectFile)) -> Result<(), String> {
         self.reload()?;
         let project = self.project_mut()?;
-        let key = format!("{address:#x}");
-        edit(project.file.annotation_mut(kind, &key));
+        edit(&mut project.file);
         project.file.prune();
         let json = project
             .file
@@ -1843,6 +1886,7 @@ mod tests {
                 "set_name",
                 "set_comment",
                 "set_override",
+                "set_dead_stores",
                 "set_bookmark",
                 "bookmarks",
                 "set_label",

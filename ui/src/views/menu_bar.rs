@@ -84,6 +84,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditRenameVariable,
             )),
             Item::new(item_button(
+                "Drop dead stores of variable…",
+                "",
+                Message::EditDeadStores,
+            )),
+            Item::new(item_button(
                 "Add comment inline",
                 "Ctrl+/",
                 Message::EditComment,

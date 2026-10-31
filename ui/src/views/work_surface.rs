@@ -616,7 +616,8 @@ fn pseudocode_content(app: &App) -> Element<'_, Message> {
             Some(note) => format!("{text}  ; {}", note.text),
             None => text,
         };
-        list = list.push(pseudocode_row(index, shown, addresses, selection));
+        let dead = app.work.dead_lines.contains(&index);
+        list = list.push(pseudocode_row(index, shown, addresses, selection, dead));
     }
 
     let body = scrollable(list).height(Length::Fill).width(Length::Fill);
@@ -664,6 +665,7 @@ fn pseudocode_row(
     line: String,
     addresses: Option<Vec<u64>>,
     selection: Option<u64>,
+    dead: bool,
 ) -> Element<'static, Message> {
     let focused = addresses
         .as_ref()
@@ -683,7 +685,8 @@ fn pseudocode_row(
             .push(
                 Text::new(line)
                     .size(12)
-                    .color(color::TEXT)
+                    // Dead code the analysis kept reads greyed out.
+                    .color(if dead { color::DIM } else { color::TEXT })
                     .font(MONO)
                     .width(Length::Fill),
             ),

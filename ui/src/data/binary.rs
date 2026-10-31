@@ -8,7 +8,7 @@
 //! instructions it came from. A function the lifter refuses has no body, and
 //! the Problems panel says why.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -293,19 +293,17 @@ impl Provider for BinaryProvider {
         };
 
         let summary = match section {
-            Some(section) if section.executable => {
-                match self.binary.bitness() {
-                    Some(width) => format!(
-                        "Decoded from {} by the native {width} x86 decoder.",
-                        section.name
-                    ),
-                    None => format!(
-                        "Decoded from {} by the SLEIGH decoder, as {}.",
-                        section.name,
-                        self.binary.language()
-                    ),
-                }
-            }
+            Some(section) if section.executable => match self.binary.bitness() {
+                Some(width) => format!(
+                    "Decoded from {} by the native {width} x86 decoder.",
+                    section.name
+                ),
+                None => format!(
+                    "Decoded from {} by the SLEIGH decoder, as {}.",
+                    section.name,
+                    self.binary.language()
+                ),
+            },
             Some(section) => format!("The symbol lives in {}.", section.name),
             None => "The symbol lives outside every section.".to_string(),
         };
@@ -378,6 +376,18 @@ impl Provider for BinaryProvider {
             .ok()
             .map(|pseudocode| pseudocode.line_addresses())
             .unwrap_or_default()
+    }
+
+    fn dead_lines(&self, address: u64) -> BTreeSet<usize> {
+        self.binary
+            .pseudocode(address)
+            .ok()
+            .map(|pseudocode| pseudocode.dead_lines.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_removable_stores(&self, removable: BTreeMap<u64, Vec<String>>) -> bool {
+        self.binary.set_removable_stores(removable)
     }
 
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
