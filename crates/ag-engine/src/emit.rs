@@ -525,6 +525,23 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
                 out.push(')');
             }
         }
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            if nested {
+                out.push('(');
+            }
+            expr(cond, out, true, style);
+            out.push_str(" ? ");
+            expr(then, out, true, style);
+            out.push_str(" : ");
+            expr(otherwise, out, true, style);
+            if nested {
+                out.push(')');
+            }
+        }
         AstNode::Deref { target } => {
             out.push('*');
             operand(target, out, style);

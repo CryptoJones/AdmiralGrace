@@ -35,6 +35,31 @@ may have more or fewer blocks than the chains, or other edges, so a block's id a
 is no longer its id at another — the addresses still map the levels onto each other — and
 its SSA form is built on its own graph. A thunk passes no rewriter.
 
+## How the lifter reads the flags
+
+The machine's flags are read back as the relations they stand for, by who wrote them. Each
+status flag (`CF`, `PF`, `AF`, `ZF`, `SF`, `OF`) remembers the instruction that wrote it last
+— the decoder says which flags each instruction writes, so `inc` and `dec` leave the carry's
+producer standing while they take the others — and a consumer reads the flags its condition
+code needs: `je` the zero flag, `jl` the sign and overflow flags, `jb` the carry, `jbe` the
+carry and the zero flag. The producers are kinds of write: a compare (`cmp a, b`: every flag
+of `a - b`, so `jl` is `a < b` and `jb` is `(unsigned int)a < (unsigned int)b`), a test
+(`test a, b`: the flags of `a & b`, the carry clear, so `jne` after `test a, a` is `a != 0`),
+an arithmetic instruction with its operands and result (`sub` reads as a compare of its
+operands; the zero and sign flags of any operation are its result's, `(a + 1) == 0` after
+`inc`; the carry of an addition is the sum wrapping below an operand, and the logical
+operations clear it), and `bt` (the carry is the bit, `(a >> 3) & 1`). The consumers are the
+conditional jumps, `setcc` (the condition as the byte it is: `eax = a < b`), `cmovcc` (a
+value chosen by the condition: `(a < b) ? b : a`) and `adc`/`sbb` (the carry added or borrowed,
+`sbb eax, eax` the idiom for `0 - (a < b)`).
+
+A consumer whose flags two instructions wrote — `cmp` then `inc` then `jbe` — is refused by
+name (`reads flags two instructions set: the cmp at … and the inc at …`), as is one reading
+a flag nothing tracked wrote (`jb` after `inc`: `reads CF that nothing tracked set`), and a
+condition no producer can say (`jo`, `jp`, a `jb` after an instruction known only by its
+result). A flag survives a join only when every path had the same instruction write it, and
+is dropped when a variable its producer read is written again.
+
 ## SSA form
 
 With `--ssa`, every definition of a name gets a version — `local_14#1 = 1`,

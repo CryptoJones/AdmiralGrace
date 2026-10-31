@@ -64,6 +64,13 @@ pub enum AstNode {
     Return {
         value: Option<Box<AstNode>>,
     },
+    /// `cond ? then : otherwise`: a value chosen by a condition, which is
+    /// how a conditional move reads.
+    Ternary {
+        cond: Box<AstNode>,
+        then: Box<AstNode>,
+        otherwise: Box<AstNode>,
+    },
     /// A C cast: `(ty)target`.
     ///
     /// The lifter uses it where a value changes width: a 32-bit register read
@@ -171,6 +178,11 @@ impl AstNode {
                 cond.as_deref().is_some_and(|c| c.any(pred)) || body.any(pred)
             }
             Self::ConstantCondition { compared, .. } => compared.any(pred),
+            Self::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => cond.any(pred) || then.any(pred) || otherwise.any(pred),
             Self::Label { .. }
             | Self::Goto { .. }
             | Self::Register { .. }
@@ -205,6 +217,11 @@ impl AstNode {
                 cond.as_deref().is_some_and(|c| c.reads_var(name)) || body.reads_var(name)
             }
             Self::ConstantCondition { compared, .. } => compared.reads_var(name),
+            Self::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => cond.reads_var(name) || then.reads_var(name) || otherwise.reads_var(name),
             Self::Label { .. }
             | Self::Goto { .. }
             | Self::Register { .. }
@@ -314,6 +331,15 @@ impl AstNode {
             Self::Return { value } => Self::Return {
                 value: value.map(sub),
             },
+            Self::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => Self::Ternary {
+                cond: sub(cond),
+                then: sub(then),
+                otherwise: sub(otherwise),
+            },
             other => other,
         }
     }
@@ -349,6 +375,15 @@ impl AstNode {
             },
             Self::Return { value } => Self::Return {
                 value: value.map(sub),
+            },
+            Self::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => Self::Ternary {
+                cond: sub(cond),
+                then: sub(then),
+                otherwise: sub(otherwise),
             },
             other => other,
         }
