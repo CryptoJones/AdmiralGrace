@@ -163,7 +163,7 @@ Filed 2026-10-26.
 
 ### Decompiler output and control
 
-- [ ] Pluggable output languages: Pseudo-C, Pseudo-Rust, Pseudo-ObjC, Pseudo-Python — [#346](https://github.com/CryptoJones/AdmiralGrace/issues/346)
+- [x] Pluggable output languages: Pseudo-C, Pseudo-Rust, Pseudo-ObjC, Pseudo-Python — [#346](https://github.com/CryptoJones/AdmiralGrace/issues/346)
 - [ ] Per-site decompiler overrides: early return, expression folding, condition inversion, switch recovery — [#347](https://github.com/CryptoJones/AdmiralGrace/issues/347)
 - [ ] Per-variable dead store elimination — [#348](https://github.com/CryptoJones/AdmiralGrace/issues/348)
 - [ ] Pseudocode formatting options: brace style, rainbow braces, indent guides, ternaries, wrapping, call parameter hints — [#349](https://github.com/CryptoJones/AdmiralGrace/issues/349)

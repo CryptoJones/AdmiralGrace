@@ -42,6 +42,9 @@ a store in the listing that the C says nothing about | `--option dead-code keep`
 `0x64` where the source said `100` | `--option constant-style decimal`
 `8` where the source said `0x8`, a mask or an offset | `--option constant-style hex`
 `16777216` where `0x1000000` would be read at a glance | `--option constant-style mixed`
+`(long)x` and braces where `x as i64` and `match` would read at home | `--option language rust`
+`true` and `false` in an Objective-C program that says `YES` and `NO` | `--option language objc`
+braces, semicolons and declarations where indentation would do | `--option language python`
 bodies indented two spaces next to source indented four | `--option indent 4`
 
 ## Decode
@@ -80,6 +83,7 @@ Option | Tier | Takes | Default | What it decides
 `dead-code` | transform | `keep` \| `drop` | `keep` | A statement whose result nothing uses — a variable assigned and never read, or assigned again before it is read, a branch whose condition can only go one way — kept as the code made it, or dropped; a call in a dropped assignment stays, as the call it is.
 `constant-conditions` | rendering | `fold` \| `expression` | `fold` | A condition that can only go one way — a relation with the same expression on both sides, `&completed.0 != &completed.0` or `rax != rax` — printed as the constant it is, `if (0) { // constant: &completed.0 != &completed.0`, with the comparison in the comment, or as the comparison itself.
 `constant-style` | rendering | `mixed` \| `decimal` \| `hex` | `mixed` | How a constant is spelled: decimal below 10 and hex from 10 up, all decimal, or all hex.
+`language` | rendering | `c` \| `rust` \| `objc` \| `python` | `c` | The language the pseudocode reads as: C; Rust (`fn f(a: i32) -> i64`, `x as i64`, `match`); Objective-C (C with `YES` and `NO`); or Python (`def f(a):`, blocks by indentation, `and`/`or`). The same lift, spelled each language's way.
 `indent` | rendering | an integer, 1 to 8 | `2` | The spaces one level of a body is indented by.
 
 ## Tiers

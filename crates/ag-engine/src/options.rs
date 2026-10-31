@@ -434,6 +434,19 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "language",
+        phase: Phase::Emit,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["c", "rust", "objc", "python"]),
+        default: "c",
+        description: "The language the pseudocode reads as: C; Rust (`fn f(a: i32) -> i64`, `x as i64`, `match`); Objective-C (C with `YES` and `NO`); or Python (`def f(a):`, blocks by indentation, `and`/`or`). The same lift, spelled each language's way.",
+        symptoms: &[
+            symptom("`(long)x` and braces where `x as i64` and `match` would read at home", "rust"),
+            symptom("`true` and `false` in an Objective-C program that says `YES` and `NO`", "objc"),
+            symptom("braces, semicolons and declarations where indentation would do", "python"),
+        ],
+    },
+    OptionSpec {
         name: "indent",
         phase: Phase::Emit,
         tier: Tier::Rendering,
@@ -691,6 +704,36 @@ pub struct Options {
     pub constant_conditions: ConstantConditions,
     pub constant_style: ConstantStyle,
     pub indent: u8,
+    pub language: Language,
+}
+
+/// The language the pseudocode reads as: the same lift, spelled each
+/// language's way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Language {
+    /// C: braces, semicolons, `(long)x`, `*(int *)p`.
+    #[default]
+    C,
+    /// Rust: `fn f(a: i32) -> i64`, `let mut x: i32;`, `x as i64`, `match`,
+    /// `loop` for a do-while.
+    Rust,
+    /// Objective-C: C with `YES` and `NO`, and message sends as they are.
+    ObjC,
+    /// Python: `def f(a):`, blocks by indentation, `and`/`or`, `True`,
+    /// `x if c else y`, no declarations.
+    Python,
+}
+
+impl Language {
+    /// The language's name, as the option spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Language::C => "c",
+            Language::Rust => "rust",
+            Language::ObjC => "objc",
+            Language::Python => "python",
+        }
+    }
 }
 
 impl Default for Options {
@@ -714,6 +757,7 @@ impl Default for Options {
             constant_conditions: ConstantConditions::default(),
             constant_style: ConstantStyle::default(),
             indent: 2,
+            language: Language::default(),
         }
     }
 }
@@ -928,6 +972,18 @@ impl Options {
                     ],
                 )?
             }
+            "language" => {
+                self.language = choose(
+                    spec,
+                    value,
+                    &[
+                        ("c", Language::C),
+                        ("rust", Language::Rust),
+                        ("objc", Language::ObjC),
+                        ("python", Language::Python),
+                    ],
+                )?
+            }
             "indent" => {
                 let Kind::Integer { min, max } = spec.kind else {
                     unreachable!("indent is an integer");
@@ -1024,6 +1080,7 @@ impl Options {
                     ConstantStyle::Hex => "hex",
                 },
                 "indent" => return Some(self.indent.to_string()),
+                "language" => self.language.name(),
                 _ => return None,
             }
             .to_string(),
