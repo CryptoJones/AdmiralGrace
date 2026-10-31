@@ -164,9 +164,10 @@ See [docs/il.md](docs/il.md).
 
 ## Plugins
 
-A loader, an architecture, a tool or a rewriter — which changes a function's medium-level
-graph as it is lifted, for work such as control-flow unflattening — is added without
-forking: in Rust, against the traits of `ag_engine::plugin` and `ag_image::plugin`; or in any
+A loader, an architecture — one that may recover a function's blocks and lift it whole
+itself, for an instruction set with delay slots or hardware loops, or a bytecode — a tool or
+a rewriter, which changes a function's medium-level graph as it is lifted, for work such as
+control-flow unflattening, is added without forking: in Rust, against the traits of `ag_engine::plugin` and `ag_image::plugin`; or in any
 language, as a command declared in a JSON manifest in a plugin directory (`AG_PLUGINS`, or
 `~/.config/ag/plugins`) that `ag` finds as it starts. `ag plugins` lists what is registered;
 `ag tool` runs a plugin's tool.

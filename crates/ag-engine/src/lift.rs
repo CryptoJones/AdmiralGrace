@@ -599,6 +599,121 @@ pub fn lift_stages(
     )
 }
 
+/// The stages of a function an architecture lifted itself
+/// ([`crate::plugin::Architecture::lift`]): its medium-level graph goes
+/// through the registered rewriters and is analyzed and structured as the
+/// lifter's own would be. The chains are the function's blocks in `cfg`, by
+/// the nodes' addresses, for the lifted level; there is no low level.
+pub fn lift_graph(
+    graph: crate::plugin::LiftedGraph,
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    address: u64,
+    name: &str,
+    options: &Options,
+) -> Result<Stages, NotLifted> {
+    let crate::plugin::LiftedGraph {
+        return_type,
+        params,
+        locals,
+        entry,
+        nodes,
+        frame,
+    } = graph;
+    if nodes.is_empty() {
+        return Err(NotLifted::new("the architecture lifted no blocks"));
+    }
+    if entry >= nodes.len() {
+        return Err(NotLifted::new(format!(
+            "the architecture's entry is block {entry} of {}",
+            nodes.len()
+        )));
+    }
+    // A function that returns a value returns it in a statement: a block
+    // that returns without one would fall off the end of the pseudocode.
+    if return_type != "void" {
+        for (index, node) in nodes.iter().enumerate() {
+            if matches!(node.terminator, Terminator::Return)
+                && !matches!(
+                    node.statements.last().map(|statement| &statement.node),
+                    Some(AstNode::Return { value: Some(_) })
+                )
+            {
+                return Err(NotLifted::new(format!(
+                    "block {index} at {:#x} returns no value in a function returning {return_type}",
+                    node.address
+                )));
+            }
+        }
+    }
+    let successors = |nodes: &[Node]| -> Vec<Vec<usize>> {
+        nodes
+            .iter()
+            .map(|node| node.terminator.successors())
+            .collect()
+    };
+    // The chains: one per node, holding the instructions of the block of
+    // `cfg` that starts where the node does.
+    let stage_chains: Vec<StageChain> = nodes
+        .iter()
+        .map(|node| {
+            let instructions = cfg
+                .blocks
+                .iter()
+                .find(|block| block.from == node.address)
+                .or_else(|| cfg.block_containing(node.address))
+                .map(|block| {
+                    disasm
+                        .instructions
+                        .iter()
+                        .filter(|ins| ins.address >= block.from && ins.address < block.to)
+                        .map(|ins| ins.address)
+                        .collect()
+                })
+                .unwrap_or_default();
+            StageChain {
+                address: node.address,
+                instructions,
+                successors: node.terminator.successors(),
+            }
+        })
+        .collect();
+    let analysis = structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?;
+    let (nodes, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
+    let medium_analysis = if rewritten {
+        structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?
+    } else {
+        analysis.clone()
+    };
+    let body = structure::structure(&nodes, &medium_analysis, entry, options);
+    let mut types: BTreeMap<String, String> = BTreeMap::new();
+    for variable in params.iter().chain(&locals) {
+        types.insert(variable.name.clone(), variable.ty.clone());
+    }
+    let function = LiftedFunction {
+        name: name.to_string(),
+        address,
+        return_type,
+        params,
+        locals,
+        body: body.clone(),
+        frame,
+        thunk: None,
+        return_reason: None,
+    };
+    Ok(Stages {
+        chains: stage_chains,
+        low: Vec::new(),
+        medium: nodes,
+        high: body,
+        function,
+        analysis,
+        medium_analysis,
+        stack_pointer: BTreeMap::new(),
+        types,
+    })
+}
+
 /// The lift; the stages are kept when `keep`, and empty otherwise, so the
 /// pseudocode's path pays for none of their text and copies.
 #[allow(clippy::too_many_arguments)]
@@ -4606,6 +4721,46 @@ mod tests {
             refused(&[0x50, 0x89, 0x3c, 0x24, 0x58, 0xc3]),
             "not lifted yet: the 64 bits at local_8 were written in parts"
         );
+    }
+
+    #[test]
+    fn an_architectures_graph_returning_no_value_in_a_valued_function_is_refused() {
+        let node = |terminator: Terminator| Node {
+            address: 0x100,
+            statements: Vec::new(),
+            terminator,
+        };
+        let graph = |return_type: &str| crate::plugin::LiftedGraph {
+            return_type: return_type.to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            entry: 0,
+            nodes: vec![node(Terminator::Return)],
+            frame: Vec::new(),
+        };
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: Vec::new(),
+        };
+        let cfg = ProcedureCfg::default();
+        let options = Options::default();
+        let error = match lift_graph(graph("int"), &disasm, &cfg, 0x100, "f", &options) {
+            Err(error) => error,
+            Ok(_) => panic!("a function returning int with no return value lifted"),
+        };
+        assert!(
+            error
+                .reason
+                .contains("returns no value in a function returning int"),
+            "{error:?}"
+        );
+        let stages = match lift_graph(graph("void"), &disasm, &cfg, 0x100, "f", &options) {
+            Ok(stages) => stages,
+            Err(error) => panic!("the void function lifts: {error}"),
+        };
+        assert_eq!(stages.function.return_type, "void");
+        assert!(stages.low.is_empty());
+        assert_eq!(stages.chains.len(), 1);
     }
 
     #[test]

@@ -576,8 +576,9 @@ architecture, tool and rewriter registered — as text, or as JSON with `--json`
 [--project FILE] [--option N V]… [--arg name=value]…` runs a plugin's tool over the image and
 prints its answer: JSON pretty, or the text it is; a value that reads as JSON is given as
 JSON. A tool's own failure is exit code 1 with its message. The manifests, the four kinds of
-plugin — loaders, architectures, tools and rewriters, which change a function's medium-level
-graph as it is lifted — and the conversations the commands speak are in `docs/plugins.md`.
+plugin — loaders, architectures (which may recover a function's blocks and lift it whole
+themselves), tools and rewriters, which change a function's medium-level graph as it is
+lifted — and the conversations the commands speak are in `docs/plugins.md`.
 
 ## An MCP server: `ag mcp`
 
