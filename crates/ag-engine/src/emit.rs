@@ -529,8 +529,14 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
             operand(target, out, style);
         }
         AstNode::Call { callee, args } => {
-            expr(callee, out, true, style);
-            arguments(args, out, style);
+            // A call of the Objective-C runtime's dispatcher with the
+            // selector known reads as the message it sends.
+            if let Some(send) = message_send(callee, args, style) {
+                out.push_str(&send);
+            } else {
+                expr(callee, out, true, style);
+                arguments(args, out, style);
+            }
         }
         AstNode::Intrinsic { name, args } => {
             out.push_str(name);
@@ -600,6 +606,66 @@ fn operand(n: &AstNode, out: &mut String, style: &Style) {
 }
 
 /// A parenthesised, comma-separated argument list.
+/// A call of `objc_msgSend` or one of its variants, as the message send it
+/// is: `[receiver selector]`, `[receiver piece:arg piece:arg]`, the
+/// receiver a class by its name where a class reference was loaded and
+/// `super` where the dispatcher is the superclass's. `None` for any other
+/// call, and for one whose selector the lifter did not resolve, which
+/// reads as the call it is.
+fn message_send(callee: &AstNode, args: &[AstNode], style: &Style) -> Option<String> {
+    let AstNode::FunctionName { name, .. } = callee else {
+        return None;
+    };
+    let name = name.strip_prefix('_').unwrap_or(name);
+    let dispatcher = name.strip_prefix("objc_msgSend")?;
+    let (to_super, returns_struct) = match dispatcher {
+        "" | "_fpret" | "_fp2ret" => (false, false),
+        "_stret" => (false, true),
+        "Super" | "Super2" => (true, false),
+        "Super_stret" | "Super2_stret" => (true, true),
+        _ => return None,
+    };
+    // A struct-returning send carries the result's address first.
+    let skip = usize::from(returns_struct);
+    let receiver = args.get(skip)?;
+    let AstNode::StringLiteral { text: selector } = args.get(skip + 1)? else {
+        return None;
+    };
+    let rest = &args[skip + 2..];
+    let mut out = String::from("[");
+    if to_super {
+        out.push_str("super");
+    } else if let AstNode::Var { name } = receiver {
+        out.push_str(name.strip_prefix("OBJC_CLASS_$_").unwrap_or(name));
+    } else {
+        expr(receiver, &mut out, true, style);
+    }
+    out.push(' ');
+    if !selector.contains(':') {
+        out.push_str(selector);
+    } else {
+        let pieces: Vec<&str> = selector.split(':').collect();
+        let pieces = &pieces[..pieces.len() - 1];
+        let mut rest = rest.iter();
+        for (index, piece) in pieces.iter().enumerate() {
+            if index > 0 {
+                out.push(' ');
+            }
+            out.push_str(piece);
+            out.push(':');
+            if let Some(arg) = rest.next() {
+                expr(arg, &mut out, false, style);
+            }
+        }
+        for arg in rest {
+            out.push_str(", ");
+            expr(arg, &mut out, false, style);
+        }
+    }
+    out.push(']');
+    Some(out)
+}
+
 fn arguments(args: &[AstNode], out: &mut String, style: &Style) {
     out.push('(');
     for (i, a) in args.iter().enumerate() {
@@ -705,6 +771,74 @@ mod tests {
 
         let product = AstNode::binary(sum, BinaryOp::Mul, AstNode::var("c"));
         assert_eq!(emit_node(&product).trim_end(), "(a + b) * c;");
+    }
+
+    #[test]
+    fn a_call_of_the_objective_c_dispatcher_reads_as_a_message_send() {
+        let call = |callee: &str, args: Vec<AstNode>| AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: callee.to_string(),
+                address: 0x2000,
+            }),
+            args,
+        };
+        let selector = |text: &str| AstNode::StringLiteral {
+            text: text.to_string(),
+        };
+        // A class message: the class by its name.
+        let send = call(
+            "_objc_msgSend",
+            vec![AstNode::var("OBJC_CLASS_$_Base"), selector("answer")],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[Base answer];");
+        // One argument per colon; a nested send as an argument.
+        let send = call(
+            "objc_msgSend",
+            vec![
+                AstNode::var("a"),
+                selector("greet:with:"),
+                AstNode::var("c"),
+                call("_objc_msgSend", vec![AstNode::var("d"), selector("count")]),
+            ],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a greet:c with:[d count]];");
+        // An argument the lifter did not see is left blank; one past the
+        // selector's is appended.
+        let send = call(
+            "_objc_msgSend",
+            vec![
+                AstNode::var("a"),
+                selector("greet:with:"),
+                AstNode::var("c"),
+            ],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a greet:c with:];");
+        let send = call(
+            "_objc_msgSend",
+            vec![
+                AstNode::var("a"),
+                selector("format:"),
+                AstNode::var("f"),
+                AstNode::var("x"),
+            ],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a format:f, x];");
+        // The superclass's dispatcher, and the struct-returning one.
+        let send = call(
+            "_objc_msgSendSuper2",
+            vec![AstNode::var("s"), selector("init")],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[super init];");
+        let send = call(
+            "_objc_msgSend_stret",
+            vec![AstNode::var("out"), AstNode::var("a"), selector("frame")],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a frame];");
+        // A selector the lifter did not resolve: the call as it is.
+        let send = call("_objc_msgSend", vec![AstNode::var("a"), AstNode::var("b")]);
+        assert_eq!(emit_node(&send).trim_end(), "_objc_msgSend(a, b);");
+        let plain = call("printf", vec![selector("hi")]);
+        assert_eq!(emit_node(&plain).trim_end(), "printf(\"hi\");");
     }
 
     #[test]

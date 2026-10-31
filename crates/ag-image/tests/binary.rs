@@ -1173,14 +1173,21 @@ fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
 fn a_function_the_lifter_refuses_says_why_and_the_refusal_is_kept() {
     let binary = sample();
 
-    // _init calls through a register.
-    let error = binary.pseudocode(0x1000).expect_err("_init is refused");
-    assert_eq!(error.to_string(), "not lifted yet: an indirect call");
+    // register_tm_clones shifts right, which the lifter does not read.
+    let error = binary
+        .pseudocode(0x10c0)
+        .expect_err("register_tm_clones is refused");
+    assert_eq!(error.to_string(), "not lifted yet: shr");
 
     let again = binary
-        .pseudocode(0x1000)
-        .expect_err("_init is still refused");
+        .pseudocode(0x10c0)
+        .expect_err("register_tm_clones is still refused");
     assert_eq!(again, error);
+
+    // _init calls through a register loaded from a GOT slot: the call is
+    // the import's, and it lifts.
+    let init = binary.pseudocode(0x1000).expect("_init lifts").text();
+    assert!(init.contains("__gmon_start__();"), "{init}");
 }
 
 #[test]
@@ -2042,6 +2049,41 @@ fn mangled_names_are_shown_demangled_and_kept_beside_the_shown_name() {
         .functions()
         .iter()
         .all(|function| macho().mangled_name(function.address).is_none()));
+}
+
+#[test]
+fn objective_c_message_sends_read_as_message_sends() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for file in ["sample_objc", "sample_objc_chained"] {
+        let binary = Binary::open(&fixtures.join(file)).expect(file);
+        // The dispatcher is an import, through its slot.
+        assert!(
+            binary.imports().values().any(|name| name == "_objc_msgSend"),
+            "{file}: {:?}",
+            binary.imports()
+        );
+        let main = binary
+            .functions()
+            .iter()
+            .find(|function| function.name == "_main")
+            .expect("main")
+            .address;
+        let text = binary.pseudocode(main).expect("main lifts").text();
+        assert!(
+            text.contains("v2 = [0 greet:[Base answer]];\n"),
+            "{file}:\n{text}"
+        );
+        assert!(text.contains("return [0 thrice:2] + v2;\n"), "{file}:\n{text}");
+        // A method that sends itself a message: its own parameters pass on.
+        let greet = binary
+            .functions()
+            .iter()
+            .find(|function| function.name == "-[Derived greet:]")
+            .expect("greet")
+            .address;
+        let text = binary.pseudocode(greet).expect("greet lifts").text();
+        assert!(text.contains("return [a twice:c] + 1;\n"), "{file}:\n{text}");
+    }
 }
 
 #[test]

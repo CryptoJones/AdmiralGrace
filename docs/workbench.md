@@ -424,6 +424,10 @@ a class's vtable points at and no symbol names is listed as `Type.<kind>#N`
 (`sample.Base.getter#0`). `ag image FILE
 swift` prints the types, their fields and their conformances.
 
+The Pseudocode tab reads an Objective-C method's calls of the runtime's dispatcher as the
+messages they send — `[a twice:c] + 1`, `[Base answer]` — the selector resolved from the
+reference the code loads.
+
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
 `+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped
 binary is named too; `ag image FILE objc` prints the classes, categories and protocols. The

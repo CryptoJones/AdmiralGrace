@@ -133,6 +133,15 @@ beside; a vtable entry no symbol names is a function under `Type.<kind>#N` — `
 the records are decoded the same way, symbolic references followed to the descriptor they
 name.
 
+The pseudocode reads a call of the runtime's dispatcher — `objc_msgSend` and its variants, for
+the superclass and for a struct result — as the message it sends, the selector resolved from
+the selector reference the code loads: `[0 greet:[Base answer]]`, `[a twice:c] + 1`, a class
+by its name where a class reference was loaded, `super` where the superclass's dispatcher is
+called, one argument per colon of the selector. The dispatcher is reached through its import
+slot, which a Mach-O's indirect symbol table names, so a call through a register loaded from
+the slot lifts like a direct one. A send whose selector the lifter did not resolve reads as the
+call it is.
+
 `ag image FILE objc --header` writes the same as an Objective-C header — the quickest
 overview of such a binary: every protocol, class and category declared, with its properties,
 instance variables and methods under the types the runtime's encodings say (`i20@0:8i16` is

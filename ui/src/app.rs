@@ -5082,15 +5082,16 @@ mod tests {
         );
 
         // A function the lifter refuses has no body, and the problem says
-        // why: _init calls through a register.
-        let _ = app.update(Message::FunctionSelected(0x1000));
+        // why: register_tm_clones shifts right, which the lifter does not
+        // read.
+        let _ = app.update(Message::FunctionSelected(0x10c0));
         assert_eq!(app.work.pseudocode, None);
         assert!(app.work.line_addresses.is_empty());
         assert!(
             app.bottom
                 .problems
                 .iter()
-                .any(|problem| problem.message.contains("not lifted yet: an indirect call")),
+                .any(|problem| problem.message.contains("not lifted yet: shr")),
             "{:?}",
             app.bottom.problems
         );

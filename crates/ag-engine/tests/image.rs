@@ -475,6 +475,36 @@ fn an_objective_c_image_names_its_classes_categories_protocols_and_methods() {
 }
 
 #[test]
+fn an_objective_c_images_selector_and_class_references_and_import_slots_are_read() {
+    use ag_engine::image::Image;
+
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures");
+    for file in ["sample_objc_stripped", "sample_objc_chained"] {
+        let image = Image::open(&fixtures.join(file)).expect(file);
+        let objc = image.objc().expect("Objective-C");
+        let mut selectors: Vec<&str> = objc.selectors.values().map(String::as_str).collect();
+        selectors.sort_unstable();
+        assert!(selectors.contains(&"greet:"), "{file}: {selectors:?}");
+        assert!(selectors.contains(&"answer"), "{file}: {selectors:?}");
+        assert!(selectors.contains(&"thrice:"), "{file}: {selectors:?}");
+        assert!(selectors.contains(&"twice:"), "{file}: {selectors:?}");
+        let classes: Vec<&str> = objc.class_refs.values().map(String::as_str).collect();
+        assert_eq!(classes, ["Base"], "{file}");
+    }
+    // The one import slot: the dispatcher, named by the indirect symbol
+    // table whatever the fixup scheme. (The stripped twin's symbol table is
+    // emptied whole, undefined symbols included, so it names none.)
+    for file in ["sample_objc", "sample_objc_chained"] {
+        let image = Image::open(&fixtures.join(file)).expect(file);
+        let slots = image.import_slots();
+        assert_eq!(slots.len(), 1, "{file}: {slots:?}");
+        assert_eq!(slots[0].1, "_objc_msgSend", "{file}");
+        assert!(slots[0].0 >= 0x1_0000_2000, "{file}: {slots:?}");
+    }
+}
+
+#[test]
 fn an_image_with_chained_fixups_reads_the_same_objective_c() {
     use ag_engine::image::Image;
 
