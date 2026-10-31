@@ -772,8 +772,9 @@ impl Image {
     /// `mov rax, [rip+slot]; call rax`; this is what names the function at
     /// the other end. Only these two relocation kinds are read: a `COPY`
     /// relocation fills its slot with the symbol's bytes, not its address,
-    /// and a `RELATIVE` one names no symbol. Empty for every other
-    /// container and architecture.
+    /// and a `RELATIVE` one names no symbol. A Mach-O's are its symbol
+    /// pointer sections, named by the indirect symbol table. Empty for
+    /// every other container and architecture.
     pub fn import_slots(&self) -> Vec<(u64, String)> {
         if self.object().is_none() {
             return Vec::new();
@@ -889,7 +890,10 @@ impl Image {
                     continue;
                 };
                 if !name.is_empty() {
-                    slots.push((section.address() + index as u64 * 8, name.to_string()));
+                    slots.push((
+                        section.address().wrapping_add(index as u64 * 8),
+                        name.to_string(),
+                    ));
                 }
             }
         }

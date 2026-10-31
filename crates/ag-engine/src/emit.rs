@@ -605,7 +605,6 @@ fn operand(n: &AstNode, out: &mut String, style: &Style) {
     }
 }
 
-/// A parenthesised, comma-separated argument list.
 /// A call of `objc_msgSend` or one of its variants, as the message send it
 /// is: `[receiver selector]`, `[receiver piece:arg piece:arg]`, the
 /// receiver a class by its name where a class reference was loaded and
@@ -623,6 +622,9 @@ fn message_send(callee: &AstNode, args: &[AstNode], style: &Style) -> Option<Str
         "_stret" => (false, true),
         "Super" | "Super2" => (true, false),
         "Super_stret" | "Super2_stret" => (true, true),
+        // A selector stub: the selector is in its name, and the lifter put
+        // it where the argument goes.
+        stub if stub.starts_with('$') => (false, false),
         _ => return None,
     };
     // A struct-returning send carries the result's address first.
@@ -643,6 +645,10 @@ fn message_send(callee: &AstNode, args: &[AstNode], style: &Style) -> Option<Str
     out.push(' ');
     if !selector.contains(':') {
         out.push_str(selector);
+        for arg in rest {
+            out.push_str(", ");
+            expr(arg, &mut out, false, style);
+        }
     } else {
         let pieces: Vec<&str> = selector.split(':').collect();
         let pieces = &pieces[..pieces.len() - 1];
@@ -666,6 +672,7 @@ fn message_send(callee: &AstNode, args: &[AstNode], style: &Style) -> Option<Str
     Some(out)
 }
 
+/// A parenthesised, comma-separated argument list.
 fn arguments(args: &[AstNode], out: &mut String, style: &Style) {
     out.push('(');
     for (i, a) in args.iter().enumerate() {
@@ -834,6 +841,18 @@ mod tests {
             vec![AstNode::var("out"), AstNode::var("a"), selector("frame")],
         );
         assert_eq!(emit_node(&send).trim_end(), "[a frame];");
+        // An argument past a selector without a colon is appended too.
+        let send = call(
+            "_objc_msgSend",
+            vec![AstNode::var("a"), selector("count"), AstNode::var("x")],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a count, x];");
+        // A selector stub names the selector itself.
+        let send = call(
+            "_objc_msgSend$greet:",
+            vec![AstNode::var("a"), selector("greet:"), AstNode::var("c")],
+        );
+        assert_eq!(emit_node(&send).trim_end(), "[a greet:c];");
         // A selector the lifter did not resolve: the call as it is.
         let send = call("_objc_msgSend", vec![AstNode::var("a"), AstNode::var("b")]);
         assert_eq!(emit_node(&send).trim_end(), "_objc_msgSend(a, b);");

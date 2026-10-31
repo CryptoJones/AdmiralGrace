@@ -911,7 +911,7 @@ fn objc(image: &Binary, json: bool, header: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&objc_json(image))?);
         return Ok(0);
     }
-    let Some(objc) = image.objc() else {
+    let Some(objc) = image.objc().filter(|objc| !objc.declares_nothing()) else {
         println!("no Objective-C metadata");
         return Ok(0);
     };
@@ -2474,10 +2474,7 @@ mod tests {
         let report = pseudocode_json(&image, 0x10c0);
 
         assert!(!report.lifted);
-        assert_eq!(
-            report.reason.as_deref(),
-            Some("not lifted yet: shr")
-        );
+        assert_eq!(report.reason.as_deref(), Some("not lifted yet: shr"));
         assert!(report.lines.is_empty());
         assert_eq!(report.text, None);
     }

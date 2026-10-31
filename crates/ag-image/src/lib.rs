@@ -784,7 +784,10 @@ impl Binary {
     /// methods under the types their encodings say. `None` for an image
     /// without Objective-C.
     pub fn objc_header(&self) -> Option<String> {
-        self.objc.as_ref().map(ObjcMetadata::header)
+        self.objc
+            .as_ref()
+            .filter(|objc| !objc.declares_nothing())
+            .map(ObjcMetadata::header)
     }
 
     /// The Swift metadata the image carries — its types with their fields
@@ -2233,7 +2236,7 @@ impl Symbols for ImageSymbols<'_> {
                 return Some(Pointee::Selector(selector.clone()));
             }
             if let Some(class) = objc.class_refs.get(&address) {
-                return Some(Pointee::Data(format!("OBJC_CLASS_$_{class}")));
+                return Some(Pointee::ClassRef(format!("OBJC_CLASS_$_{class}")));
             }
         }
         self.0

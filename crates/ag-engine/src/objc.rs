@@ -154,13 +154,17 @@ pub struct ObjcMetadata {
 }
 
 impl ObjcMetadata {
-    /// Whether the image says nothing of Objective-C.
+    /// Whether the image says nothing of Objective-C: no declaration, and
+    /// no reference either.
     pub fn is_empty(&self) -> bool {
-        self.classes.is_empty()
-            && self.categories.is_empty()
-            && self.protocols.is_empty()
-            && self.selectors.is_empty()
-            && self.class_refs.is_empty()
+        self.declares_nothing() && self.selectors.is_empty() && self.class_refs.is_empty()
+    }
+
+    /// Whether the image declares nothing — no class, category or protocol
+    /// of its own — though it may send messages to another image's. There
+    /// is then nothing to list, and no header to write.
+    pub fn declares_nothing(&self) -> bool {
+        self.classes.is_empty() && self.categories.is_empty() && self.protocols.is_empty()
     }
 
     /// The name of each method's implementation, by its address: `-[Base

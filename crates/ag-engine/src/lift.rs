@@ -239,6 +239,10 @@ pub enum Pointee {
     /// selector reference the runtime fixes up — by the selector. A load
     /// from the slot is the selector, which a message send is sent with.
     Selector(String),
+    /// A slot that holds the address of an Objective-C class object — a
+    /// class reference — by the class object's name. A load from the slot
+    /// is the class, which a class message is sent to.
+    ClassRef(String),
 }
 
 /// Why a function was not lifted.
@@ -2267,6 +2271,10 @@ impl<'a> Lifter<'a> {
                     Some(Pointee::Selector(text)) => {
                         return Ok(Value::node(AstNode::StringLiteral { text }, bits, from));
                     }
+                    Some(Pointee::ClassRef(name)) => {
+                        self.globals.insert(name.clone());
+                        return Ok(Value::node(AstNode::var(name), bits, from));
+                    }
                     _ => {}
                 }
             }
@@ -2716,11 +2724,13 @@ impl<'a> Lifter<'a> {
                     name,
                     address: target,
                 },
-                // The address of a GOT slot or a selector reference is an
-                // address: what the slot holds is not where it is.
+                // The address of a GOT slot, a selector reference or a class
+                // reference is an address: what the slot holds is not where
+                // it is.
                 Some(Pointee::Data(_))
                 | Some(Pointee::Import(_))
                 | Some(Pointee::Selector(_))
+                | Some(Pointee::ClassRef(_))
                 | None => AstNode::constant(target, bits / 8),
             };
             Value::node(node, bits, vec![at])
@@ -2914,6 +2924,17 @@ impl<'a> Lifter<'a> {
             let mut wanted = 2;
             while args.len() < wanted.min(registers.len()) {
                 let register = registers[args.len()];
+                // A selector stub loads the selector its name carries into
+                // the second argument register itself.
+                if args.len() == 1 {
+                    if let Some(selector) = stub_selector(&name) {
+                        args.push(AstNode::StringLiteral {
+                            text: selector.to_string(),
+                        });
+                        wanted = message_arity(&name, &args).unwrap_or(wanted);
+                        continue;
+                    }
+                }
                 let value = self.read(RegisterId::new(RC_GPR, register, 64), at)?;
                 if matches!(value.sym, Sym::Unknown(_)) {
                     break;
@@ -3690,9 +3711,14 @@ fn local_name(names: SlotNames, offset: i64) -> String {
 }
 
 /// Whether `callee` is the Objective-C runtime's dispatcher, or one of its
-/// variants — the names of a message send.
+/// variants — the names of a message send — or a selector stub,
+/// `objc_msgSend$sel`, which loads the selector itself before it
+/// dispatches.
 fn is_dispatcher(callee: &str) -> bool {
     let name = callee.strip_prefix('_').unwrap_or(callee);
+    if name.strip_prefix("objc_msgSend$").is_some() {
+        return true;
+    }
     matches!(
         name.strip_prefix("objc_msgSend"),
         Some(
@@ -3705,6 +3731,13 @@ fn is_dispatcher(callee: &str) -> bool {
                 | "Super2_stret"
         )
     )
+}
+
+/// The selector a selector stub's name carries: `greet:` of
+/// `objc_msgSend$greet:`.
+fn stub_selector(callee: &str) -> Option<&str> {
+    let name = callee.strip_prefix('_').unwrap_or(callee);
+    name.strip_prefix("objc_msgSend$")
 }
 
 /// How many arguments a call of the Objective-C dispatcher takes, when the

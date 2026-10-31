@@ -725,7 +725,6 @@ mod tests {
     /// The address of `sum_to` in the sample, which has a loop.
     const SUM_TO: u64 = 0x1161;
 
-    /// The address of `_init` in the sample, which calls through a register.
     /// `register_tm_clones`: shifts right, which the lifter does not read.
     const REFUSED: u64 = 0x10c0;
 
@@ -891,10 +890,7 @@ mod tests {
 
         let problems = provider.function_problems(REFUSED);
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert_eq!(
-            problems[0].message,
-            "No pseudocode: not lifted yet: shr."
-        );
+        assert_eq!(problems[0].message, "No pseudocode: not lifted yet: shr.");
         assert_eq!(problems[0].address, Some(REFUSED));
     }
 
