@@ -397,7 +397,9 @@ pub fn hex_of_bytes(bytes: &[u8]) -> String {
 /// together, `B8 01 00 00 00` or `b801000000`. Anything else is no patch.
 pub fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
     let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if digits.is_empty() || !digits.len().is_multiple_of(2) || !digits.chars().all(|c| c.is_ascii_hexdigit())
+    if digits.is_empty()
+        || !digits.len().is_multiple_of(2)
+        || !digits.chars().all(|c| c.is_ascii_hexdigit())
     {
         return None;
     }
@@ -518,6 +520,16 @@ pub struct Annotation {
     /// instruction: `mov eax, 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_text: Option<String>,
+    /// The analyst's word at the address on the judgment calls the lift
+    /// makes there, each `true` to allow or `false` to prevent: `guard` (a
+    /// branch whose one arm never falls through is a guard the rest
+    /// follows), `fold` (a condition comparing an expression with itself
+    /// is the constant it is), `invert` (the condition turned round with
+    /// its arms), `switch` (the indirect jump reads a jump table). A kind
+    /// left out is the lift's own call. A reader that does not know the
+    /// field lifts as it always did and misreads nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, bool>,
 }
 
 impl Annotation {
@@ -545,6 +557,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -572,6 +585,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -598,6 +612,7 @@ impl Annotation {
             group: None,
             byte_type: None,
             mode: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -736,6 +751,37 @@ impl Annotation {
         self.jump_table = note.map(JumpTableNote::label);
     }
 
+    /// The kinds of judgment call an override speaks to, as the file
+    /// spells them.
+    pub const OVERRIDE_KINDS: [&'static str; 4] = ["guard", "fold", "invert", "switch"];
+
+    /// Say `on` about the judgment call `kind` at the address — `true` to
+    /// allow it, `false` to prevent it — or leave it to the lift with
+    /// `None`. False for a kind that is not one.
+    pub fn set_override(&mut self, kind: &str, on: Option<bool>) -> bool {
+        if !Self::OVERRIDE_KINDS.contains(&kind) {
+            return false;
+        }
+        match on {
+            Some(on) => {
+                self.overrides.insert(kind.to_string(), on);
+            }
+            None => {
+                self.overrides.remove(kind);
+            }
+        }
+        true
+    }
+
+    /// The overrides as text: `guard off, fold on`.
+    pub fn overrides_label(&self) -> String {
+        self.overrides
+            .iter()
+            .map(|(kind, on)| format!("{kind} {}", if *on { "on" } else { "off" }))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// The bytes the patch at the target writes, when there is one and
     /// this program reads its spelling.
     pub fn patch_bytes(&self) -> Option<Vec<u8>> {
@@ -779,6 +825,7 @@ impl Annotation {
             && self.group.is_none()
             && self.byte_type.is_none()
             && self.mode.is_none()
+            && self.overrides.is_empty()
     }
 }
 
@@ -1224,6 +1271,20 @@ impl ProjectFile {
     /// Every jump table the analyst placed, by the value of the address of
     /// the `jmp` that reads it: what an analysis is told where its own
     /// recovery fails. A note on a spaced address keys on its value.
+    /// The analyst's overrides, by the address each is at: the kind and
+    /// whether it is allowed.
+    pub fn overrides(&self) -> BTreeMap<u64, BTreeMap<String, bool>> {
+        self.places()
+            .filter_map(|a| {
+                if a.overrides.is_empty() {
+                    return None;
+                }
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, a.overrides.clone()))
+            })
+            .collect()
+    }
+
     pub fn jump_tables(&self) -> BTreeMap<u64, JumpTableNote> {
         self.places()
             .filter_map(|a| {
@@ -1409,12 +1470,8 @@ mod tests {
             raw: None,
             slice: None,
         });
-        project
-            .options
-            .insert("loop-form".into(), "while".into());
-        project
-            .annotation_mut(TargetKind::Function, "0x1000")
-            .name = Some("main".into());
+        project.options.insert("loop-form".into(), "while".into());
+        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("main".into());
         project
             .annotation_mut(TargetKind::Function, "EXTERNAL:0x1")
             .comment = Some("imported qsort".into());
@@ -1471,14 +1528,10 @@ mod tests {
     #[test]
     fn one_address_carries_one_record_whatever_the_spelling() {
         let mut project = ProjectFile::new(Target::default());
-        project
-            .annotation_mut(TargetKind::Function, "0X10")
-            .name = Some("main".into());
+        project.annotation_mut(TargetKind::Function, "0X10").name = Some("main".into());
         // A comment at the same address, spelled differently, lands on the
         // same record rather than masking the rename.
-        project
-            .annotation_mut(TargetKind::Address, "0x10")
-            .comment = Some("the entry".into());
+        project.annotation_mut(TargetKind::Address, "0x10").comment = Some("the entry".into());
         assert_eq!(project.annotations.len(), 1, "one record for one address");
         assert_eq!(project.annotations[0].address, "0x10", "stored canonical");
         let found = project.annotation_for("10").expect("any spelling finds it");
@@ -1489,9 +1542,7 @@ mod tests {
     #[test]
     fn a_spaced_address_keys_apart_from_the_bare_value() {
         let mut project = ProjectFile::new(Target::default());
-        project
-            .annotation_mut(TargetKind::Function, "0x1")
-            .name = Some("local".into());
+        project.annotation_mut(TargetKind::Function, "0x1").name = Some("local".into());
         project
             .annotation_mut(TargetKind::Function, "external:0x1")
             .name = Some("qsort".into());
@@ -1502,11 +1553,15 @@ mod tests {
             .bookmark = true;
         assert_eq!(project.annotations.len(), 2);
         assert_eq!(
-            project.annotation_for("EXTERNAL:0x1").and_then(|a| a.name.as_deref()),
+            project
+                .annotation_for("EXTERNAL:0x1")
+                .and_then(|a| a.name.as_deref()),
             Some("qsort")
         );
         assert_eq!(
-            project.annotation_for("0x1").and_then(|a| a.name.as_deref()),
+            project
+                .annotation_for("0x1")
+                .and_then(|a| a.name.as_deref()),
             Some("local")
         );
     }
@@ -1514,17 +1569,15 @@ mod tests {
     #[test]
     fn a_variable_record_does_not_share_the_address_record() {
         let mut project = ProjectFile::new(Target::default());
-        project
-            .annotation_mut(TargetKind::Function, "0x1000")
-            .name = Some("decode_frame".into());
+        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("decode_frame".into());
         // The entry label and a local of the function at that entry are
         // different things: each keeps its own name.
-        project
-            .variable_mut("0x1000", "local_10")
-            .name = Some("envelope".into());
+        project.variable_mut("0x1000", "local_10").name = Some("envelope".into());
         assert_eq!(project.annotations.len(), 2, "one address, two records");
         assert_eq!(
-            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
+            project
+                .annotation_for("0x1000")
+                .and_then(|a| a.name.as_deref()),
             Some("decode_frame"),
             "the address record is the function's"
         );
@@ -1535,7 +1588,9 @@ mod tests {
         // A second spelling of the address finds the same variable record.
         project.variable_mut("0X1000", "local_10").bookmark = true;
         assert_eq!(project.annotations.len(), 2);
-        assert!(project.variable_for("0x1000", "local_10").is_some_and(|a| a.bookmark));
+        assert!(project
+            .variable_for("0x1000", "local_10")
+            .is_some_and(|a| a.bookmark));
     }
 
     #[test]
@@ -1570,28 +1625,39 @@ mod tests {
     #[test]
     fn a_register_record_keys_on_the_register_not_the_address() {
         let mut project = ProjectFile::new(Target::default());
-        project
-            .annotation_mut(TargetKind::Function, "0x1000")
-            .name = Some("decode_frame".into());
+        project.annotation_mut(TargetKind::Function, "0x1000").name = Some("decode_frame".into());
         // The register is a third thing at the entry address: its own
         // record, keyed on the register's name.
         project.register_mut("0x1000", "rax").name = Some("result".into());
         assert_eq!(project.annotations.len(), 2, "one address, two records");
         assert_eq!(
-            project.annotation_for("0x1000").and_then(|a| a.name.as_deref()),
+            project
+                .annotation_for("0x1000")
+                .and_then(|a| a.name.as_deref()),
             Some("decode_frame"),
             "the address record is still the function's"
         );
-        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
+        assert_eq!(
+            project.register_name("0x1000", "rax").as_deref(),
+            Some("result")
+        );
         // A second spelling of the address finds the same register record.
         project.register_mut("0X1000", "rax").bookmark = true;
         assert_eq!(project.annotations.len(), 2);
-        assert!(project.register_for("0x1000", "rax").is_some_and(|a| a.bookmark));
+        assert!(project
+            .register_for("0x1000", "rax")
+            .is_some_and(|a| a.bookmark));
         // A register of another function keys apart, and so does a register
         // of the same function from another name.
         project.register_mut("0x2000", "rax").name = Some("total".into());
-        assert_eq!(project.register_name("0x1000", "rax").as_deref(), Some("result"));
-        assert_eq!(project.register_name("0x2000", "rax").as_deref(), Some("total"));
+        assert_eq!(
+            project.register_name("0x1000", "rax").as_deref(),
+            Some("result")
+        );
+        assert_eq!(
+            project.register_name("0x2000", "rax").as_deref(),
+            Some("total")
+        );
     }
 
     #[test]
@@ -1624,7 +1690,9 @@ mod tests {
         // An unmarked address is not a bookmark either.
         project.annotation_mut(TargetKind::Address, "0x999").name = Some("x".into());
         // An address that parses to no value keeps its spelling and sorts last.
-        project.annotation_mut(TargetKind::Address, "nowhere").bookmark = true;
+        project
+            .annotation_mut(TargetKind::Address, "nowhere")
+            .bookmark = true;
 
         let marked: Vec<&str> = project
             .bookmarks()
@@ -2269,5 +2337,43 @@ mod tests {
             .to_json()
             .unwrap()
             .contains("layout"));
+    }
+
+    #[test]
+    fn a_site_override_is_a_word_on_a_kind_and_the_project_lists_them() {
+        let mut record = Annotation::new(TargetKind::Address, "0x1000");
+        assert!(record.is_empty());
+        assert!(record.set_override("guard", Some(false)));
+        assert!(record.set_override("fold", Some(true)));
+        assert!(!record.set_override("tail", Some(true)), "no such kind");
+        assert!(!record.is_empty());
+        assert_eq!(record.overrides_label(), "fold on, guard off");
+        assert!(record.set_override("fold", None));
+        assert_eq!(record.overrides_label(), "guard off");
+        assert!(record.set_override("guard", None));
+        assert!(record.is_empty(), "a cleared word is no record");
+
+        let mut project = ProjectFile::new(Target::default());
+        project
+            .annotation_mut(TargetKind::Address, "0x401000")
+            .set_override("guard", Some(false));
+        project
+            .annotation_mut(TargetKind::Address, "EXTERNAL:0x10")
+            .set_override("switch", Some(false));
+        // A record on a thing at a place is not a site.
+        project
+            .variable_mut("0x401000", "x")
+            .overrides
+            .insert("fold".into(), true);
+        let overrides = project.overrides();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[&0x401000].get("guard"), Some(&false));
+        assert_eq!(overrides[&0x10].get("switch"), Some(&false));
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"overrides\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.overrides(), overrides);
+        // A record without the field reads as no word.
+        assert!(!json.contains("\"overrides\": {}"), "{json}");
     }
 }

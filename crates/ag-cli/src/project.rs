@@ -166,6 +166,22 @@ pub enum ProjectCmd {
         #[arg(long)]
         relative: bool,
     },
+    /// Allow or prevent one of the lift's judgment calls at an address: a
+    /// branch read as a guard, a condition folded to a constant, a condition
+    /// turned round, an indirect jump read as a switch.
+    Override {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The address of the instruction the call is made at — the branch,
+        /// the compare, the indirect jump — with its space when it names one.
+        address: String,
+        /// The judgment call: `guard`, `fold`, `invert` or `switch`.
+        kind: String,
+        /// `on` to allow it, `off` to prevent it, `clear` to leave it to
+        /// the lift.
+        state: String,
+    },
     /// Write bytes over the image's at an address: a patch the image is
     /// read with. The file on disk is not changed.
     Patch {
@@ -459,6 +475,27 @@ pub fn run(
                 a.set_jump_table(note)
             })
         }
+        ProjectCmd::Override {
+            file,
+            address,
+            kind,
+            state,
+        } => {
+            let kind = kind.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                Annotation::OVERRIDE_KINDS.contains(&kind.as_str()),
+                "the kind is guard, fold, invert or switch, not {kind:?}"
+            );
+            let on = match state.trim().to_ascii_lowercase().as_str() {
+                "on" | "allow" | "yes" | "true" => Some(true),
+                "off" | "prevent" | "no" | "false" => Some(false),
+                "clear" | "none" => None,
+                other => anyhow::bail!("the state is on, off or clear, not {other:?}"),
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_override(&kind, on);
+            })
+        }
         ProjectCmd::Patch {
             file,
             address,
@@ -581,27 +618,17 @@ pub fn run(
             address,
             variable,
             name,
-        } => edit_named(
-            &target,
-            &file,
-            Named::Variable,
-            &address,
-            &variable,
-            |a| a.name = Some(name),
-        ),
+        } => edit_named(&target, &file, Named::Variable, &address, &variable, |a| {
+            a.name = Some(name)
+        }),
         ProjectCmd::Reg {
             file,
             address,
             register,
             name,
-        } => edit_named(
-            &target,
-            &file,
-            Named::Register,
-            &address,
-            &register,
-            |a| a.name = Some(name),
-        ),
+        } => edit_named(&target, &file, Named::Register, &address, &register, |a| {
+            a.name = Some(name)
+        }),
     }
 }
 
@@ -1247,8 +1274,7 @@ fn edit_named(
     change: impl FnOnce(&mut Annotation),
 ) -> Result<i32> {
     let mut project = open_project(target, file)?;
-    let key = ag_corpus::project::canonical_address(address)
-        .unwrap_or_else(|| address.to_string());
+    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
     match named {
         Named::Variable => change(project.variable_mut(&key, thing)),
         Named::Register => change(project.register_mut(&key, thing)),
@@ -1404,6 +1430,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(table) = &annotation.jump_table {
         parts.push(format!("switch {table}"));
+    }
+    if !annotation.overrides.is_empty() {
+        parts.push(format!("override {}", annotation.overrides_label()));
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {

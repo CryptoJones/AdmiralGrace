@@ -34,7 +34,7 @@ pub use image::{Image, Section};
 pub use lift::{
     Abi, LiftedFunction, LowStatement, NotLifted, StageChain, Stages, Statement, StatementKind,
 };
-pub use options::{OptionError, Options};
+pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{
     Architecture, DecodedSection, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest,

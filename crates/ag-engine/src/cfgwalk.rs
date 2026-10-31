@@ -21,6 +21,13 @@ pub trait Entries {
     /// `jmp [rip+slot]` is a tail call to that import.
     fn is_import_slot(&self, slot: u64) -> bool;
 
+    /// Whether the indirect jump at `site` may read a jump table the walk
+    /// recovers or is told: the analyst's `switch off` at the site keeps
+    /// the jump as it is. Allowed unless said.
+    fn table_allowed(&self, _site: u64) -> bool {
+        true
+    }
+
     /// The little-endian value of the `width`-byte entry at `address`, when
     /// the image holds bytes there: how the walk reads a jump table. The
     /// default knows no bytes, so no table is recovered.
@@ -133,7 +140,10 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
             let ins = &disasm.instructions[i];
             // An indirect jump may read a jump table; the table is worked
             // out once, here, and its targets are the jump's.
-            if ins.flow == Flow::IndirectBranch && !tables.contains_key(&ins.address) {
+            if ins.flow == Flow::IndirectBranch
+                && !tables.contains_key(&ins.address)
+                && entries.table_allowed(ins.address)
+            {
                 if let Some(table) = recover_table(disasm, i, &by_addr, entries) {
                     tables.insert(ins.address, table);
                 }

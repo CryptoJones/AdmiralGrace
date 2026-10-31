@@ -707,6 +707,95 @@ pub struct Options {
     pub language: Language,
 }
 
+/// The analyst's word at one site — one instruction's address — on the
+/// judgment calls the lift makes there, each allowed, prevented or left to
+/// the lift: whether a branch whose one arm never falls through is a guard
+/// the rest follows unnested (`guard`), whether a condition that compares
+/// an expression with itself is folded to the constant it is (`fold`),
+/// whether the branch's condition is turned round with its arms (`invert`),
+/// and whether the indirect jump there reads a jump table the walk
+/// recovers (`switch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SiteOverride {
+    pub guard: Option<bool>,
+    pub fold: Option<bool>,
+    pub invert: Option<bool>,
+    pub switch: Option<bool>,
+}
+
+impl SiteOverride {
+    /// The kinds, as the project file and the command line spell them.
+    pub const KINDS: [&'static str; 4] = ["guard", "fold", "invert", "switch"];
+
+    /// Whether anything is said.
+    pub fn is_empty(&self) -> bool {
+        *self == SiteOverride::default()
+    }
+
+    /// The word on `kind`, when it is one of the kinds.
+    pub fn get(&self, kind: &str) -> Option<Option<bool>> {
+        match kind {
+            "guard" => Some(self.guard),
+            "fold" => Some(self.fold),
+            "invert" => Some(self.invert),
+            "switch" => Some(self.switch),
+            _ => None,
+        }
+    }
+
+    /// Say `on` about `kind`; `None` leaves it to the lift. False for a
+    /// kind that is not one.
+    pub fn set(&mut self, kind: &str, on: Option<bool>) -> bool {
+        match kind {
+            "guard" => self.guard = on,
+            "fold" => self.fold = on,
+            "invert" => self.invert = on,
+            "switch" => self.switch = on,
+            _ => return false,
+        }
+        true
+    }
+
+    /// This word with another's laid over it where the other speaks.
+    pub fn merged(self, other: SiteOverride) -> SiteOverride {
+        SiteOverride {
+            guard: other.guard.or(self.guard),
+            fold: other.fold.or(self.fold),
+            invert: other.invert.or(self.invert),
+            switch: other.switch.or(self.switch),
+        }
+    }
+}
+
+/// Where the analyst's words on the sites come from.
+pub trait Sites {
+    /// The word at `address`; nothing said unless the analyst did.
+    fn at(&self, address: u64) -> SiteOverride;
+
+    /// The words at any of `addresses`, laid over one another in order.
+    fn over(&self, addresses: &[u64]) -> SiteOverride {
+        addresses
+            .iter()
+            .fold(SiteOverride::default(), |word, address| {
+                word.merged(self.at(*address))
+            })
+    }
+}
+
+/// No words: every judgment the lift's.
+impl Sites for () {
+    fn at(&self, _address: u64) -> SiteOverride {
+        SiteOverride::default()
+    }
+}
+
+/// The words in a map, by address.
+impl Sites for std::collections::BTreeMap<u64, SiteOverride> {
+    fn at(&self, address: u64) -> SiteOverride {
+        self.get(&address).copied().unwrap_or_default()
+    }
+}
+
 /// The language the pseudocode reads as: the same lift, spelled each
 /// language's way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

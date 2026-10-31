@@ -166,7 +166,10 @@ fn a_line_comment_keeps_its_placement_in_the_file() {
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
     assert_eq!(annotations.len(), 1, "{report}");
-    assert_eq!(annotations[0]["comment"], serde_json::json!("the loop head"));
+    assert_eq!(
+        annotations[0]["comment"],
+        serde_json::json!("the loop head")
+    );
     assert_eq!(
         annotations[0]["comment_above"],
         serde_json::json!(true),
@@ -210,10 +213,19 @@ fn a_label_and_a_variable_name_their_own_records() {
 
     // A local of the function at the entry is a different thing from the
     // function: it keeps its own record beside it.
-    let (ok, stdout, stderr) =
-        project(&["var", "--file", &file.text(), "0x1149", "local_10", "envelope"]);
+    let (ok, stdout, stderr) = project(&[
+        "var",
+        "--file",
+        &file.text(),
+        "0x1149",
+        "local_10",
+        "envelope",
+    ]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("variable 0x1149::local_10 now name envelope"), "{stdout}");
+    assert!(
+        stdout.contains("variable 0x1149::local_10 now name envelope"),
+        "{stdout}"
+    );
 
     // A label at the same address shares the function's record: the entry
     // label is the function's name.
@@ -222,7 +234,11 @@ fn a_label_and_a_variable_name_their_own_records() {
 
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
-    assert_eq!(annotations.len(), 2, "one address record, one variable: {report}");
+    assert_eq!(
+        annotations.len(),
+        2,
+        "one address record, one variable: {report}"
+    );
     let address_record = annotations
         .iter()
         .find(|a| a["variable"].is_null())
@@ -248,14 +264,20 @@ fn a_register_names_its_own_record() {
 
     // A register of the function at the entry is a third thing at the
     // address: its own record, keyed on the register's name.
-    let (ok, stdout, stderr) =
-        project(&["reg", "--file", &file.text(), "0x1149", "rax", "result"]);
+    let (ok, stdout, stderr) = project(&["reg", "--file", &file.text(), "0x1149", "rax", "result"]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("register 0x1149::rax now name result"), "{stdout}");
+    assert!(
+        stdout.contains("register 0x1149::rax now name result"),
+        "{stdout}"
+    );
 
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
-    assert_eq!(annotations.len(), 2, "one address record, one register: {report}");
+    assert_eq!(
+        annotations.len(),
+        2,
+        "one address record, one register: {report}"
+    );
     let address_record = annotations
         .iter()
         .find(|a| a["variable"].is_null() && a["register"].is_null())
@@ -1586,4 +1608,166 @@ fn a_slice_flag_that_disagrees_with_the_project_is_refused_and_save_checks_the_s
     let (ok, _, stderr) = run(&["project", &fat, "save", "--out", &missing.text()]);
     assert!(!ok);
     assert!(stderr.contains("say which one with --slice"), "{stderr}");
+}
+
+#[test]
+fn a_site_override_is_recorded_and_told_to_the_image() {
+    let file = TempFile::new("override");
+    // What `ag image switch.elf COMMAND classify --project FILE` prints,
+    // and whether it succeeded: `pseudocode` fails when the lift does.
+    let classify = |file: &TempFile, command: &str| -> (bool, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("switch.elf"))
+            .args([command, "classify", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    // classify begins with a guard — `if (a > 5) return;` — and a switch.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401000",
+            "guard",
+            "off",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401000 now override guard off"),
+        "{stdout}"
+    );
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("    return;\n  } else {\n    switch ("),
+        "the else is kept: {text}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["annotations"][0]["overrides"]["guard"],
+        serde_json::json!(false)
+    );
+
+    // `invert on` turns the condition round with its arms.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401000",
+            "guard",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401000",
+            "invert",
+            "on",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x401000 now override invert on"),
+        "{stdout}"
+    );
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("if ((unsigned int)a <= 5) {\n    switch ("),
+        "the condition is turned round: {text}"
+    );
+    assert!(
+        text.contains("  } else {\n    return;\n  }"),
+        "and the lift does not turn it back into a guard: {text}"
+    );
+
+    // `switch off` at the jump keeps it from being read as a table.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401007",
+            "switch",
+            "off",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, cfg) = classify(&file, "cfg");
+    assert!(ok, "{cfg}");
+    assert!(!cfg.contains("jmp at 0x401007: table"), "{cfg}");
+    assert!(
+        cfg.contains("block 0x401005 - 0x40100e\n  successors: -\n"),
+        "{cfg}"
+    );
+    // Without the table the jump goes nowhere the lift can follow, and the
+    // lift says so rather than guess.
+    let (ok, text) = classify(&file, "pseudocode");
+    assert!(!ok, "{text}");
+    assert!(text.contains("an indirect jump at 0x401007"), "{text}");
+    assert!(!text.contains("switch ("), "{text}");
+
+    // Clearing the words takes the records off.
+    let (ok, stdout, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401007",
+            "switch",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x401007 cleared"), "{stdout}");
+    let (ok, cfg) = classify(&file, "cfg");
+    assert!(ok, "{cfg}");
+    assert!(
+        cfg.contains("jmp at 0x401007: table 0x402000, 6 entries"),
+        "{cfg}"
+    );
+
+    // A kind or a state that is not one is refused.
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &["override", "--file", &file.text(), "0x401000", "tail", "on"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("guard, fold, invert or switch"), "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401000",
+            "guard",
+            "maybe",
+        ],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("on, off or clear"), "{stderr}");
 }

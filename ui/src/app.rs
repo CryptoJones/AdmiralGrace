@@ -161,6 +161,9 @@ pub enum Message {
     EditMark(Mark),
     /// Say where the jump table the selected `jmp` reads is.
     EditSwitch,
+    /// Allow or prevent one of the lift's judgment calls at the selected
+    /// address.
+    EditOverride,
     /// Assemble an instruction over the bytes at the selection.
     EditAssemble,
     /// Fill the selected instruction with the architecture's no-op.
@@ -272,6 +275,8 @@ pub enum PromptKind {
     /// The instruction set from the selection onward: `arm`, `thumb`, or
     /// `none` to let the image say.
     Mode,
+    /// A word on a judgment call at the selection: `KIND on|off|clear`.
+    Override,
     /// The address the image is moved to, or `none`.
     Rebase,
     /// A segment to add: `NAME ADDRESS SIZE [file:OFFSET] [exec]`.
@@ -1108,6 +1113,7 @@ impl App {
             self.tell_patches();
             self.tell_modes();
             self.tell_jump_tables();
+            self.tell_overrides();
         }
         task
     }
@@ -2897,6 +2903,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
         }
         task
@@ -2981,6 +2988,31 @@ impl App {
             self.work.line_addresses = self.provider.line_addresses(function);
         }
         self.refresh_bytes();
+    }
+
+    /// Tell the analysis the analyst's words on the sites, and read the
+    /// function on screen again when that changed anything.
+    fn tell_overrides(&mut self) {
+        let overrides = self
+            .annotations
+            .overrides()
+            .into_iter()
+            .map(|(address, words)| {
+                let mut word = ag_image::SiteOverride::default();
+                for (kind, on) in &words {
+                    word.set(kind, Some(*on));
+                }
+                (address, word)
+            })
+            .collect();
+        if !self.provider.set_site_overrides(overrides) {
+            return;
+        }
+        self.refresh_listing();
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.line_addresses = self.provider.line_addresses(function);
+        }
     }
 
     /// Tell the analysis where the analyst's jump tables are, and read the
@@ -3145,6 +3177,26 @@ impl App {
                 });
             }
 
+            Message::EditOverride => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some(
+                        "Select the instruction the call is made at: the branch, the compare, the jump".into(),
+                    );
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .map(|a| a.overrides_label())
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Override,
+                    title: "Override (guard|fold|invert|switch on|off|clear)",
+                    value: current,
+                });
+            }
+
             Message::EditMark(mark) => {
                 use ag_corpus::project::{ByteType, TargetKind};
                 let Some(address) = self.selection.address() else {
@@ -3235,6 +3287,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
 
             Message::EditRedo => {
@@ -3253,6 +3306,7 @@ impl App {
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
+                self.tell_overrides();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -3640,6 +3694,7 @@ impl App {
                                     self.tell_patches();
                                     self.tell_modes();
                                     self.tell_jump_tables();
+                                    self.tell_overrides();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -4116,6 +4171,43 @@ impl App {
                                 self.annotations
                                     .write_patch(kind, &key, Some((&bytes, Some(text))));
                             }
+                        }
+                    }
+                    PromptKind::Override => {
+                        let text = prompt.value.trim().to_ascii_lowercase();
+                        if let Some(address) = self.selection.address() {
+                            let mut words = text.split_whitespace();
+                            let (Some(kind), Some(state)) = (words.next(), words.next()) else {
+                                self.notice = Some(
+                                    "An override is KIND on|off|clear: guard, fold, invert or switch".into(),
+                                );
+                                return Task::none();
+                            };
+                            let on = match state {
+                                "on" | "allow" => Some(true),
+                                "off" | "prevent" => Some(false),
+                                "clear" | "none" => None,
+                                other => {
+                                    self.notice = Some(format!("The state is on, off or clear, not {other:?}"));
+                                    return Task::none();
+                                }
+                            };
+                            let key = self.annotation_key(address);
+                            let kind_at = self.kind_at(address);
+                            if !self.annotations.annotation_mut(kind_at, &key).set_override(kind, on) {
+                                self.notice = Some(format!(
+                                    "The kind is guard, fold, invert or switch, not {kind:?}"
+                                ));
+                                self.annotations.prune();
+                                return Task::none();
+                            }
+                            self.annotations.prune();
+                            self.notice = Some(match on {
+                                Some(true) => format!("{kind} allowed at {key}"),
+                                Some(false) => format!("{kind} prevented at {key}"),
+                                None => format!("{kind} left to the lift at {key}"),
+                            });
+                            self.tell_overrides();
                         }
                     }
                     PromptKind::Switch => {

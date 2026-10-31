@@ -432,6 +432,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Tell the analysis the analyst's words on the sites — the judgment
+    /// calls to make or not make at each address — and say whether that
+    /// changed anything.
+    fn set_site_overrides(&self, _overrides: BTreeMap<u64, ag_image::SiteOverride>) -> bool {
+        false
+    }
+
     /// Read the analysis with the analyst's `patches` written over the
     /// image's bytes, by the address of each, and say whether that changed
     /// anything. A provider with no bytes of its own has nothing to patch.

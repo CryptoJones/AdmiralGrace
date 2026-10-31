@@ -741,6 +741,7 @@ pub(crate) fn open_image(
             })
             .collect();
         image.set_jump_table_hints(hints);
+        image.set_site_overrides(site_overrides(project));
     }
     Ok(image)
 }
@@ -1766,6 +1767,23 @@ fn il(
             Ok(1)
         }
     }
+}
+
+/// The analyst's words on the sites, as the image takes them.
+pub(crate) fn site_overrides(
+    project: &ag_corpus::project::ProjectFile,
+) -> std::collections::BTreeMap<u64, ag_image::SiteOverride> {
+    project
+        .overrides()
+        .into_iter()
+        .map(|(address, words)| {
+            let mut word = ag_image::SiteOverride::default();
+            for (kind, on) in &words {
+                word.set(kind, Some(*on));
+            }
+            (address, word)
+        })
+        .collect()
 }
 
 /// Write the functions as C++.

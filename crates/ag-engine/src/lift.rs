@@ -186,6 +186,13 @@ pub trait Symbols {
     /// The name of the function at `address`, when it has one.
     fn function_name(&self, address: u64) -> Option<String>;
 
+    /// The analyst's word at `address` on the judgment calls made there
+    /// ([`crate::options::SiteOverride`]); nothing said unless the analyst
+    /// did.
+    fn site(&self, _address: u64) -> crate::options::SiteOverride {
+        crate::options::SiteOverride::default()
+    }
+
     /// What the pointer to `address` lands on, when the image knows.
     fn pointee(&self, _address: u64) -> Option<Pointee> {
         None
@@ -212,6 +219,15 @@ impl<F: Fn(u64) -> Option<String>> Symbols for F {
 /// holds an import. This is how [`lift_block`] walks the way an image does.
 struct SymbolEntries<'a>(&'a dyn Symbols);
 
+/// The analyst's words on the sites, read through the symbols.
+struct SymbolSites<'a>(&'a dyn Symbols);
+
+impl crate::options::Sites for SymbolSites<'_> {
+    fn at(&self, address: u64) -> crate::options::SiteOverride {
+        self.0.site(address)
+    }
+}
+
 impl Entries for SymbolEntries<'_> {
     fn is_function(&self, address: u64) -> bool {
         self.0.function_name(address).is_some()
@@ -219,6 +235,10 @@ impl Entries for SymbolEntries<'_> {
 
     fn is_import_slot(&self, slot: u64) -> bool {
         matches!(self.0.pointee(slot), Some(Pointee::Import(_)))
+    }
+
+    fn table_allowed(&self, site: u64) -> bool {
+        self.0.site(site).switch != Some(false)
     }
 }
 
@@ -685,7 +705,7 @@ pub fn lift_graph(
     } else {
         analysis.clone()
     };
-    let body = structure::structure(&nodes, &medium_analysis, entry, options);
+    let body = structure::structure(&nodes, &medium_analysis, entry, options, &());
     let mut types: BTreeMap<String, String> = BTreeMap::new();
     for variable in params.iter().chain(&locals) {
         types.insert(variable.name.clone(), variable.ty.clone());
@@ -825,7 +845,7 @@ fn lift_inner(
         analysis.clone()
     };
     let medium = if keep { nodes.clone() } else { Vec::new() };
-    let body = structure::structure(&nodes, &medium_analysis, 0, options);
+    let body = structure::structure(&nodes, &medium_analysis, 0, options, &SymbolSites(symbols));
     let high = if keep { body.clone() } else { Vec::new() };
     let stack_pointer = if keep {
         std::mem::take(&mut lifter.stack_pointers)

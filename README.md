@@ -166,7 +166,8 @@ memory, following calls into the image, and reports what it returned and why it 
 it compiles: `transpile` writes the functions as C++, a label per block and a `goto` for every
 way out, with a `main` to run one against the program it came from. The pseudocode itself
 reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
-each language's way.
+each language's way; and the analyst has the last word at any one site — a guard, a folded
+condition, a turned-round branch, a switch — recorded in the project file.
 
 See [docs/il.md](docs/il.md).
 

@@ -162,6 +162,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+J",
                 Message::EditSwitch,
             )),
+            Item::new(item_button(
+                "Override at address…",
+                "",
+                Message::EditOverride,
+            )),
             Item::new(separator()),
             Item::new(item_button(
                 "Assemble over bytes…",

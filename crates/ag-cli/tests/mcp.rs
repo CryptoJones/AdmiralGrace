@@ -86,6 +86,11 @@ fn a_project_file_is_made_and_written_through_the_server() {
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"set_name","arguments":{{"address":"0x1149","name":"add_one"}}}}}}"#
         )
         .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"set_override","arguments":{{"address":"0x1161","kind":"guard","on":false}}}}}}"#
+        )
+        .unwrap();
     }
     let stdout = BufReader::new(child.stdout.take().expect("stdout"));
     let replies: Vec<serde_json::Value> = stdout
@@ -93,12 +98,27 @@ fn a_project_file_is_made_and_written_through_the_server() {
         .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
         .collect();
     assert!(child.wait().expect("the server ends").success());
-    assert_eq!(replies.len(), 1);
+    assert_eq!(replies.len(), 2);
     assert_eq!(replies[0]["result"]["isError"], false);
+    assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
+    assert!(
+        replies[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"guard\": false"),
+        "{:?}",
+        replies[1]
+    );
     let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
     assert_eq!(
         saved.annotation_for("0x1149").and_then(|a| a.name.clone()),
         Some("add_one".to_string())
+    );
+    assert_eq!(
+        saved
+            .annotation_for("0x1161")
+            .and_then(|a| a.overrides.get("guard").copied()),
+        Some(false)
     );
     let _ = std::fs::remove_file(&project);
 }

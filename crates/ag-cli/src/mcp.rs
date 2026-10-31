@@ -324,6 +324,19 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_override",
+            description: "Allow or prevent one of the lift's judgment calls at an address in the project file: `guard` (a branch whose one arm never falls through read as a guard the rest follows), `fold` (a condition comparing an expression with itself folded to the constant it is), `invert` (the condition turned round with its arms), `switch` (the indirect jump read as a switch through a jump table). The pseudocode is read again with the word. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "address": address,
+                    "kind": { "type": "string", "enum": ["guard", "fold", "invert", "switch"], "description": "The judgment call." },
+                    "on": { "type": ["boolean", "null"], "description": "true to allow, false to prevent, null to leave it to the lift." },
+                },
+                "required": ["address", "kind"]
+            }),
+        },
+        Tool {
             name: "set_bookmark",
             description: "Bookmark the function at an address in the project file, or take the bookmark off. The project is saved.",
             schema: json!({
@@ -959,6 +972,29 @@ impl Server {
                     address,
                 )))
             }
+            "set_override" => {
+                let address = parse_address(&text("address")?)?;
+                let kind = text("kind")?;
+                if !ag_corpus::project::Annotation::OVERRIDE_KINDS.contains(&kind.as_str()) {
+                    return Err(format!(
+                        "the kind is guard, fold, invert or switch, not {kind:?}"
+                    ));
+                }
+                let on = match arguments.get("on") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Bool(on)) => Some(*on),
+                    Some(_) => return Err("\"on\" is true, false or null".to_string()),
+                };
+                self.change(TargetKind::Address, address, |record| {
+                    record.set_override(&kind, on);
+                })?;
+                self.image
+                    .set_site_overrides(crate::image::site_overrides(&self.project()?.file));
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
             "set_bookmark" => {
                 let address = parse_address(&text("address")?)?;
                 let on = flag("on", true)?;
@@ -1586,6 +1622,7 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
             "tags": record.tags,
             "references": record.references,
             "color": record.color,
+            "overrides": record.overrides,
         })
     };
     json!({
@@ -1804,6 +1841,7 @@ mod tests {
                 "annotations",
                 "set_name",
                 "set_comment",
+                "set_override",
                 "set_bookmark",
                 "bookmarks",
                 "set_label",

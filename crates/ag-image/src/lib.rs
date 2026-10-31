@@ -71,7 +71,7 @@ pub use ag_engine::swift::{
     SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
 };
 pub use ag_engine::Bitness;
-pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode};
+pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
 pub mod graph_export;
 pub mod plugin;
@@ -434,6 +434,9 @@ pub struct Binary {
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
+    /// The analyst's words on the sites, by address: the judgment calls the
+    /// lift is to make or not make there.
+    site_overrides: Mutex<BTreeMap<u64, SiteOverride>>,
     /// The levels of the lift, by function, level and form; forgotten with
     /// the pseudocode.
     levels: Mutex<LevelCache>,
@@ -738,6 +741,7 @@ impl Binary {
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
             levels: Mutex::new(HashMap::new()),
+            site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
             plugin_stages: Mutex::new(HashMap::new()),
             graph: Mutex::new(None),
@@ -1433,6 +1437,46 @@ impl Binary {
     /// say: one hint per indirect jump, by the jump's address. The walks
     /// and the pseudocode built so far are forgotten, since the graph of
     /// a function may have grown cases.
+    /// Tell the lift the analyst's words on the sites — which judgment calls
+    /// to make or not make at each address — and say whether that changed
+    /// anything. The graphs and the pseudocode are read again after.
+    pub fn set_site_overrides(&self, overrides: BTreeMap<u64, SiteOverride>) -> bool {
+        if let Ok(mut held) = self.site_overrides.lock() {
+            if *held == overrides {
+                return false;
+            }
+            *held = overrides;
+        }
+        if let Ok(mut cache) = self.disassembly.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.cfgs.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.plugin_stages.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.graph.lock() {
+            *cache = None;
+        }
+        true
+    }
+
+    /// The analyst's word at `address`.
+    pub fn site_override(&self, address: u64) -> SiteOverride {
+        self.site_overrides
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).copied())
+            .unwrap_or_default()
+    }
+
     pub fn set_jump_table_hints(&self, hints: BTreeMap<u64, TableHint>) -> bool {
         if let Ok(mut held) = self.table_hints.lock() {
             if *held == hints {
@@ -2663,6 +2707,10 @@ impl Entries for Binary {
         self.table_hints.lock().ok()?.get(&site).copied()
     }
 
+    fn table_allowed(&self, site: u64) -> bool {
+        self.site_override(site).switch != Some(false)
+    }
+
     /// Under `branches-end-procedures yes`, a branch to an address before
     /// the entry or at or past the next function the image knows leaves
     /// the procedure.
@@ -2684,6 +2732,10 @@ struct ImageSymbols<'a>(&'a Binary);
 impl Symbols for ImageSymbols<'_> {
     fn function_name(&self, address: u64) -> Option<String> {
         self.0.code_name(address).map(str::to_string)
+    }
+
+    fn site(&self, address: u64) -> SiteOverride {
+        self.0.site_override(address)
     }
 
     /// The call graph's callers of the function, each call site decided by

@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::AstNode;
 use crate::lift::{NotLifted, Statement, StatementKind, SwitchArm};
-use crate::options::{LoopForm, Options, SharedTail};
+use crate::options::{LoopForm, Options, SharedTail, Sites};
 
 /// How a node leaves.
 #[derive(Debug, Clone)]
@@ -288,6 +288,8 @@ struct Structurer<'a> {
     nodes: &'a [Node],
     analysis: &'a Analysis,
     options: &'a Options,
+    /// The analyst's words on the sites.
+    sites: &'a dyn Sites,
     /// The nodes emitted so far.
     visited: Vec<bool>,
     /// The loop headers whose loop has been opened.
@@ -306,11 +308,44 @@ pub fn structure(
     analysis: &Analysis,
     entry: usize,
     options: &Options,
+    sites: &dyn Sites,
 ) -> Vec<Statement> {
+    // Where the analyst said a folded condition is not to be folded, the
+    // comparison it folded from is the condition again.
+    let unfolded: Vec<Node>;
+    let nodes = if nodes.iter().any(|node| {
+        matches!(
+            &node.terminator,
+            Terminator::Branch { cond: AstNode::ConstantCondition { .. }, addresses, .. }
+                if sites.over(addresses).fold == Some(false)
+        )
+    }) {
+        unfolded = nodes
+            .iter()
+            .map(|node| {
+                let mut node = node.clone();
+                if let Terminator::Branch {
+                    cond, addresses, ..
+                } = &mut node.terminator
+                {
+                    if let AstNode::ConstantCondition { compared, .. } = cond {
+                        if sites.over(addresses).fold == Some(false) {
+                            *cond = (**compared).clone();
+                        }
+                    }
+                }
+                node
+            })
+            .collect();
+        &unfolded
+    } else {
+        nodes
+    };
     let mut structurer = Structurer {
         nodes,
         analysis,
         options,
+        sites,
         visited: vec![false; nodes.len()],
         opened: vec![false; nodes.len()],
         labelled: BTreeSet::new(),
@@ -382,6 +417,7 @@ impl Structurer<'_> {
                         let then_part = self.arm(*taken, inner, ctx);
                         let else_part = self.arm(*next, inner, ctx);
                         push_if(
+                            self.sites,
                             &mut seq,
                             cond.clone(),
                             addresses.clone(),
@@ -738,12 +774,14 @@ fn label(address: u64) -> Statement {
 /// empty arm makes the other the `then` of the negated condition, and an
 /// arm that never falls through is a guard the other arm follows.
 fn push_if(
+    sites: &dyn Sites,
     seq: &mut Vec<Statement>,
     cond: AstNode,
     addresses: Vec<u64>,
     then_part: Vec<Statement>,
     else_part: Vec<Statement>,
 ) {
+    let word = sites.over(&addresses);
     let statement = |cond, then_part, else_part| Statement {
         node: cond,
         addresses: addresses.clone(),
@@ -755,14 +793,27 @@ fn push_if(
     if then_part.is_empty() && else_part.is_empty() {
         return;
     }
+    // The analyst's `invert` turns the condition round with its arms before
+    // anything else is decided.
+    let (cond, then_part, else_part) = match word.invert {
+        Some(true) if !then_part.is_empty() && !else_part.is_empty() => {
+            (cond.negated(), else_part, then_part)
+        }
+        _ => (cond, then_part, else_part),
+    };
+    // Once the analyst has spoken on the turn, the lift does not turn the
+    // condition itself: `invert on` is not undone to make a guard, and
+    // `invert off` keeps the taken arm first.
+    let may_turn = word.invert.is_none();
+    let may_guard = word.guard != Some(false);
     if then_part.is_empty() {
         seq.push(statement(cond.negated(), else_part, Vec::new()));
     } else if else_part.is_empty() {
         seq.push(statement(cond, then_part, Vec::new()));
-    } else if !falls_through(&then_part) {
+    } else if may_guard && !falls_through(&then_part) {
         seq.push(statement(cond, then_part, Vec::new()));
         seq.extend(else_part);
-    } else if !falls_through(&else_part) {
+    } else if may_guard && may_turn && !falls_through(&else_part) {
         seq.push(statement(cond.negated(), else_part, Vec::new()));
         seq.extend(then_part);
     } else {
@@ -981,12 +1032,18 @@ mod tests {
 
     /// Structure `nodes` under `options` and print the body as the C of `f`.
     fn c_with(nodes: &[Node], options: &Options) -> Result<String, NotLifted> {
+        c_at(nodes, options, &())
+    }
+
+    /// Structure `nodes` with the analyst's words on the sites and print
+    /// the body as the C of `f`.
+    fn c_at(nodes: &[Node], options: &Options, sites: &dyn Sites) -> Result<String, NotLifted> {
         let successors: Vec<Vec<usize>> = nodes
             .iter()
             .map(|node| node.terminator.successors())
             .collect();
         let analysis = analyze(&successors, 0, |n| nodes[n].address)?;
-        let body = structure(nodes, &analysis, 0, options);
+        let body = structure(nodes, &analysis, 0, options, sites);
         let function = LiftedFunction {
             name: "f".into(),
             address: 0x1000,
@@ -1156,7 +1213,7 @@ mod tests {
         assert!(analysis.dominates(1, 3));
         assert!(!analysis.dominates(2, 3));
 
-        let body = structure(&nodes, &analysis, 0, &Options::default());
+        let body = structure(&nodes, &analysis, 0, &Options::default(), &());
         assert_eq!(body.len(), 2, "the for and the return: {body:?}");
         assert!(matches!(body[0].kind, StatementKind::For { .. }));
         assert_eq!(
@@ -1435,5 +1492,105 @@ mod tests {
             c(&nodes).unwrap_err().to_string(),
             "not lifted yet: irreducible control flow at 0x1010"
         );
+    }
+
+    /// The early return of `an_early_return_is_a_guard_and_the_rest_follows_unnested`,
+    /// with the condition given.
+    fn early_return(cond: AstNode) -> Vec<Node> {
+        vec![
+            node(
+                0x1000,
+                vec![],
+                Terminator::Branch {
+                    cond,
+                    taken: 1,
+                    next: 2,
+                    addresses: vec![0x1000],
+                },
+            ),
+            node(0x1010, vec![ret("a", 0x1010)], Terminator::Return),
+            node(
+                0x1020,
+                vec![assign("x", 2, 0x1020)],
+                Terminator::Goto {
+                    target: 3,
+                    addresses: vec![],
+                },
+            ),
+            node(0x1030, vec![ret("x", 0x1030)], Terminator::Return),
+        ]
+    }
+
+    #[test]
+    fn the_analysts_word_at_the_site_keeps_the_else_turns_the_branch_round_or_keeps_the_comparison()
+    {
+        use crate::options::SiteOverride;
+        use std::collections::BTreeMap;
+        let options = Options::default();
+        let word = |kind: &str, on: bool| {
+            let mut word = SiteOverride::default();
+            assert!(word.set(kind, Some(on)));
+            BTreeMap::from([(0x1000u64, word)])
+        };
+        let nodes = early_return(cond("a", BinaryOp::Equal, 0));
+
+        // Nothing said: the guard, as before.
+        assert_eq!(
+            c_at(&nodes, &options, &BTreeMap::new()).unwrap(),
+            "int f(int a)\n{\n  if (a == 0) {\n    return a;\n  }\n  x = 2;\n  return x;\n}"
+        );
+        // `guard off` keeps the `else`.
+        assert_eq!(
+            c_at(&nodes, &options, &word("guard", false)).unwrap(),
+            "int f(int a)\n{\n  if (a == 0) {\n    return a;\n  } else {\n    x = 2;\n    return x;\n  }\n}"
+        );
+        // `invert on` turns the condition round with its arms; the arm
+        // that now comes first falls through, so the guard rule turns it
+        // back into the same text — except that the analyst chose which
+        // arm is the guard.
+        assert_eq!(
+            c_at(&nodes, &options, &word("invert", true)).unwrap(),
+            "int f(int a)\n{\n  if (a != 0) {\n    x = 2;\n    return x;\n  }\n  return a;\n}"
+        );
+        // A word at another address is not this site's.
+        let elsewhere = BTreeMap::from([(0x2000u64, word("guard", false)[&0x1000])]);
+        assert!(c_at(&nodes, &options, &elsewhere)
+            .unwrap()
+            .contains("  }\n  x = 2;"));
+
+        // A condition that compares an expression with itself is folded to
+        // the constant it is — unless the analyst says `fold off`.
+        let same = AstNode::binary(AstNode::var("a"), BinaryOp::Equal, AstNode::var("a")).folded();
+        assert!(matches!(
+            same,
+            AstNode::ConstantCondition { holds: true, .. }
+        ));
+        let nodes = early_return(same);
+        let folded = c_at(&nodes, &options, &()).unwrap();
+        assert!(folded.contains("if (1) {"), "{folded}");
+        assert!(!folded.contains("if (a == a)"), "{folded}");
+        let kept = c_at(&nodes, &options, &word("fold", false)).unwrap();
+        assert!(kept.contains("if (a == a) {"), "{kept}");
+        assert!(!kept.contains("if (1)"), "{kept}");
+    }
+
+    #[test]
+    fn a_site_override_merges_and_says_whether_it_is_empty() {
+        use crate::options::SiteOverride;
+        let mut word = SiteOverride::default();
+        assert!(word.is_empty());
+        assert!(!word.set("tail", Some(true)), "no such kind");
+        assert!(word.set("guard", Some(false)));
+        assert_eq!(word.get("guard"), Some(Some(false)));
+        assert_eq!(word.get("fold"), Some(None));
+        assert_eq!(word.get("tail"), None);
+        let mut other = SiteOverride::default();
+        other.set("guard", Some(true));
+        other.set("switch", Some(false));
+        let merged = word.merged(other);
+        assert_eq!(merged.guard, Some(true), "the later word wins");
+        assert_eq!(merged.switch, Some(false));
+        assert_eq!(merged.fold, None);
+        assert_eq!(().over(&[1, 2, 3]), SiteOverride::default());
     }
 }
