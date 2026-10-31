@@ -363,6 +363,8 @@ pub struct Binary {
     /// The width of the program, when the native decoder reads its language.
     bitness: Option<Bitness>,
     entry: Option<u64>,
+    /// The address the image is loaded at, as its format states it.
+    base: Option<u64>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
@@ -513,6 +515,7 @@ impl Binary {
             language,
             bitness,
             entry,
+            base: image.load_base(),
             sections,
             functions,
             data,
@@ -605,14 +608,18 @@ impl Binary {
         true
     }
 
-    /// The address the image is loaded at: the lowest address a mapped
-    /// section has, rounded down to the page.
+    /// The address the image is loaded at: what its format states — a PE's
+    /// image base, an ELF's first load segment — or, for an image whose
+    /// format says nothing of the kind, the page of the lowest mapped
+    /// section.
     pub fn base(&self) -> Option<u64> {
-        self.sections
-            .iter()
-            .filter(|section| section.vma != 0)
-            .map(|section| section.vma & !0xfff)
-            .min()
+        self.base.or_else(|| {
+            self.sections
+                .iter()
+                .filter(|section| section.vma != 0)
+                .map(|section| section.vma & !0xfff)
+                .min()
+        })
     }
 
     /// Read the image under `layout`, with `file` the bytes of the file it
@@ -626,7 +633,24 @@ impl Binary {
             let from = self
                 .base()
                 .context("the image has no mapped section to move")?;
-            self.rebase(base.wrapping_sub(from));
+            // Every mapped section has to land inside the address space,
+            // and not at 0, where it would count as unmapped.
+            let delta = i128::from(base) - i128::from(from);
+            for section in self.sections.iter().filter(|section| section.vma != 0) {
+                let moved = i128::from(section.vma) + delta;
+                anyhow::ensure!(
+                    moved > 0,
+                    "the base {base:#x} would move {} to {moved}, below the address space",
+                    section.name
+                );
+                anyhow::ensure!(
+                    moved + i128::from(section.size) <= i128::from(u64::MAX) + 1,
+                    "the base {base:#x} would move {} to {moved:#x}, past the top of the address space",
+                    section.name
+                );
+            }
+            self.rebase(delta as u64);
+            self.base = Some(base);
         }
         for edit in &layout.segments {
             match edit {

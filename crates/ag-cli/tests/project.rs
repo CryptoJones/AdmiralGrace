@@ -1054,6 +1054,42 @@ fn the_image_is_rebased_and_its_segments_edited_through_the_project() {
         "{report}"
     );
 
+    // Every command reads the image under the layout: a patch at a moved
+    // address, a nop over the moved instruction, and the copy written with
+    // them in it — the added segment's byte at its offset in the file.
+    let out = TempFile::new("layout-out");
+    let (ok, _, stderr) = project(&["nop", "--file", &file.text(), "0x401149"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x405000", "cc"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "write-patched",
+        "--file",
+        &file.text(),
+        "--out",
+        &out.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let original = std::fs::read(fixture("sample.elf")).expect("the target");
+    let written = std::fs::read(out.path()).expect("the copy");
+    assert_eq!(&written[0x1149..0x114d], &[0x90; 4]);
+    assert_eq!(written[0x3000], 0xcc);
+    assert_eq!(
+        (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count(),
+        5
+    );
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x405000", "none"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&["patch", "--file", &file.text(), "0x401149", "none"]);
+    assert!(ok, "{stderr}");
+
+    // An address with a space is not one of the image's.
+    let (ok, _, stderr) = project(&["rebase", "--file", &file.text(), "EXTERNAL:0x1000"]);
+    assert!(!ok);
+    assert!(stderr.contains("not an address of the image"), "{stderr}");
+
     // Put back, the image reads where the loader puts it.
     let (ok, _, stderr) = project(&["rebase", "--file", &file.text(), "none"]);
     assert!(ok, "{stderr}");

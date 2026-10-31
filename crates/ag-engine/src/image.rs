@@ -79,6 +79,22 @@ impl Image {
         &self.bytes
     }
 
+    /// The address the image is loaded at, as its format states it: a PE's
+    /// image base, else the page of the lowest segment the file holds bytes
+    /// for — an ELF's first `PT_LOAD`, a Mach-O's `__TEXT`. An image whose
+    /// format says nothing of the kind — an object file — has none.
+    pub fn load_base(&self) -> Option<u64> {
+        use object::read::{Object, ObjectSegment};
+        let file = object::File::parse(self.bytes.as_slice()).ok()?;
+        if file.format() == object::BinaryFormat::Pe {
+            return Some(file.relative_address_base());
+        }
+        file.segments()
+            .filter(|segment| segment.size() > 0 && segment.file_range().1 > 0)
+            .map(|segment| segment.address() & !0xfff)
+            .min()
+    }
+
     /// The SLEIGH language id the loader resolved, such as `x86:LE:64:default:gcc`.
     pub fn language(&self) -> String {
         String::from_utf8_lossy(self.inner.arch_id()).into_owned()

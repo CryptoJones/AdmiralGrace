@@ -868,21 +868,42 @@ impl ProjectFile {
     }
 
     /// Record `edit` to the segments, folded into the edits before it where
-    /// they are about the same segment: removing one that was added drops
-    /// the addition, renaming one that was added or renamed renames that.
+    /// that keeps their meaning in order: removing a segment the layout
+    /// added drops the addition, and renaming one it added or renamed
+    /// renames that — unless an edit since names the segment, in which
+    /// case the new edit goes at the end, as it was made.
     pub fn edit_segment(&mut self, edit: SegmentEdit) -> Result<(), String> {
+        /// Whether `name` is a segment the edits, applied in order, have
+        /// made or renamed to and not taken away since.
+        fn taken(edits: &[SegmentEdit], name: &str) -> bool {
+            let mut taken = false;
+            for earlier in edits {
+                match earlier {
+                    SegmentEdit::Add { name: added, .. } if added == name => taken = true,
+                    SegmentEdit::Rename { to, .. } if to == name => taken = true,
+                    SegmentEdit::Rename { name: from, .. } if from == name => taken = false,
+                    SegmentEdit::Remove { name: gone } if gone == name => taken = false,
+                    _ => {}
+                }
+            }
+            taken
+        }
+        /// Whether an edit after `index` names `name`, so that folding into
+        /// the edit at `index` would change what the edits mean in order.
+        fn named_after(edits: &[SegmentEdit], index: usize, name: &str) -> bool {
+            edits[index + 1..].iter().any(|later| match later {
+                SegmentEdit::Add { name: n, .. } | SegmentEdit::Remove { name: n } => n == name,
+                SegmentEdit::Rename { name: n, to } => n == name || to == name,
+            })
+        }
+
         let edits = &mut self.layout.segments;
         match &edit {
             SegmentEdit::Add { name, .. } => {
                 if name.is_empty() {
                     return Err("a segment needs a name".into());
                 }
-                let taken = edits.iter().any(|earlier| match earlier {
-                    SegmentEdit::Add { name: added, .. } => added == name,
-                    SegmentEdit::Rename { to, .. } => to == name,
-                    SegmentEdit::Remove { .. } => false,
-                });
-                if taken {
+                if taken(edits, name) {
                     return Err(format!(
                         "the layout already adds or renames a segment to {name}"
                     ));
@@ -890,14 +911,14 @@ impl ProjectFile {
                 edits.push(edit);
             }
             SegmentEdit::Remove { name } => {
-                match edits
-                    .iter()
-                    .position(|earlier| matches!(earlier, SegmentEdit::Add { name: added, .. } if added == name))
-                {
-                    Some(index) => {
+                let added = edits.iter().rposition(
+                    |earlier| matches!(earlier, SegmentEdit::Add { name: n, .. } if n == name),
+                );
+                match added {
+                    Some(index) if !named_after(edits, index, name) => {
                         edits.remove(index);
                     }
-                    None => edits.push(edit),
+                    _ => edits.push(edit),
                 }
             }
             SegmentEdit::Rename { name, to } => {
@@ -907,25 +928,28 @@ impl ProjectFile {
                 if name == to {
                     return Err(format!("{name} is already the segment's name"));
                 }
-                let earlier = edits.iter_mut().find(|earlier| match earlier {
+                let earlier = edits.iter().rposition(|earlier| match earlier {
                     SegmentEdit::Add { name: added, .. } => added == name,
                     SegmentEdit::Rename { to: renamed, .. } => renamed == name,
                     SegmentEdit::Remove { .. } => false,
                 });
                 match earlier {
-                    Some(SegmentEdit::Add { name: added, .. }) => *added = to.clone(),
-                    Some(SegmentEdit::Rename {
-                        name: original,
-                        to: renamed,
-                    }) => {
-                        if original == to {
+                    Some(index)
+                        if !named_after(edits, index, name) && !named_after(edits, index, to) =>
+                    {
+                        let put_back = matches!(
+                            &edits[index],
+                            SegmentEdit::Rename { name: original, .. } if original == to
+                        );
+                        if put_back {
                             // Renamed back to what it was: no rename at all.
-                            let original = original.clone();
-                            edits.retain(|earlier| {
-                                !matches!(earlier, SegmentEdit::Rename { name, .. } if *name == original)
-                            });
+                            edits.remove(index);
                         } else {
-                            *renamed = to.clone();
+                            match &mut edits[index] {
+                                SegmentEdit::Add { name: added, .. } => *added = to.clone(),
+                                SegmentEdit::Rename { to: renamed, .. } => *renamed = to.clone(),
+                                SegmentEdit::Remove { .. } => {}
+                            }
                         }
                     }
                     _ => edits.push(edit),
@@ -2100,6 +2124,45 @@ mod tests {
             .unwrap();
         project.edit_segment(add("extra")).unwrap();
         assert!(project.edit_segment(add("extra")).is_err());
+
+        // An edit between keeps a later one from folding into an earlier:
+        // the edits read in order as they were made, and a name taken away
+        // is free again.
+        let mut folded = ProjectFile::new(Target::default());
+        folded.edit_segment(add("x")).unwrap();
+        folded
+            .edit_segment(SegmentEdit::Remove {
+                name: ".comment".into(),
+            })
+            .unwrap();
+        folded
+            .edit_segment(SegmentEdit::Rename {
+                name: "x".into(),
+                to: ".comment".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            folded.layout.segments.len(),
+            3,
+            "{:?}",
+            folded.layout.segments
+        );
+        assert!(matches!(
+            &folded.layout.segments[2],
+            SegmentEdit::Rename { name, to } if name == "x" && to == ".comment"
+        ));
+        let mut folded = ProjectFile::new(Target::default());
+        folded
+            .edit_segment(SegmentEdit::Rename {
+                name: ".text".into(),
+                to: "a".into(),
+            })
+            .unwrap();
+        folded
+            .edit_segment(SegmentEdit::Remove { name: "a".into() })
+            .unwrap();
+        folded.edit_segment(add("a")).unwrap();
+        assert_eq!(folded.layout.segments.len(), 3);
 
         // Written and read back, at the version that carries a layout.
         let json = project.to_json().unwrap();

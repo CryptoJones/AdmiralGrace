@@ -446,9 +446,9 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
         } => {
             // The target says how wide the code is and how long the
             // instruction being replaced is; without it the patch cannot
-            // be assembled.
-            let image = ag_image::Binary::open(&target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            // be assembled. It is read under the project's layout, so a
+            // moved address is the instruction's.
+            let image = image_under(&target, &open_project(&target, &file)?)?;
             let bitness = image
                 .bitness()
                 .context("the target is not x86, so nothing is assembled for it")?;
@@ -476,9 +476,10 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
                 .map(|(value, _)| value)
                 .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
             // The image says how long the instruction is and where its
-            // section ends: a run past the end has nothing to fill.
-            let image = ag_image::Binary::open(&target)
-                .with_context(|| format!("reading {}", target.display()))?;
+            // section ends: a run past the end has nothing to fill. It is
+            // read under the project's layout, so a moved address is the
+            // instruction's.
+            let image = image_under(&target, &open_project(&target, &file)?)?;
             let len = match (len, to) {
                 (Some(len), _) => len,
                 (None, Some(to)) => {
@@ -713,13 +714,26 @@ fn number(text: &str) -> Result<u64> {
     .with_context(|| format!("{text:?} is not a number"))
 }
 
+/// Read `target` under the layout `project` records.
+fn image_under(target: &Path, project: &ProjectFile) -> Result<ag_image::Binary> {
+    let layout = layout_of(project)?;
+    ag_image::Binary::open_with_layout(target, &layout)
+        .with_context(|| format!("reading {}", target.display()))
+}
+
 /// Read `target` under the layout `project` now records, so a layout the
 /// image cannot take is refused before it is written.
 fn check_layout(target: &Path, project: &ProjectFile) -> Result<()> {
-    let layout = layout_of(project)?;
-    ag_image::Binary::open_with_layout(target, &layout)
-        .with_context(|| format!("reading {} under the layout", target.display()))?;
-    Ok(())
+    image_under(target, project).map(|_| ())
+}
+
+/// An address of the image as the command line spells it: a bare one, not
+/// one with an address space, since the layout is the image's own.
+fn image_address(text: &str) -> Result<u64> {
+    match ag_corpus::parse_addr_space(text) {
+        Ok((value, None)) => Ok(value),
+        _ => anyhow::bail!("{text:?} is not an address of the image"),
+    }
 }
 
 /// Move the image to `base`, or put it back with `none`.
@@ -727,11 +741,7 @@ fn rebase(target: &Path, file: &Path, base: &str) -> Result<i32> {
     let mut project = open_project(target, file)?;
     let base = match base {
         "none" => None,
-        text => Some(
-            ag_corpus::parse_addr_space(text)
-                .map(|(value, _)| value)
-                .map_err(|_| anyhow::anyhow!("{text:?} is not an address"))?,
-        ),
+        text => Some(image_address(text)?),
     };
     project.set_base(base);
     check_layout(target, &project)?;
@@ -758,9 +768,7 @@ fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
             file_offset,
             exec,
         } => {
-            let at = ag_corpus::parse_addr_space(&address)
-                .map(|(value, _)| value)
-                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let at = image_address(&address)?;
             let size = number(&size)?;
             let offset = file_offset.as_deref().map(number).transpose()?;
             let said = format!("segment {name} added at {at:#x}, {size} bytes");
@@ -823,8 +831,9 @@ fn write_patched(target: &Path, file: &Path, out: &Path, force: bool) -> Result<
             target.display()
         );
     }
-    let image =
-        ag_image::Binary::open(target).with_context(|| format!("reading {}", target.display()))?;
+    // Under the project's layout, so the patches' addresses are the
+    // image's and an added segment's bytes are in the file where it says.
+    let image = image_under(target, &project)?;
     let count = patches.len();
     let bytes: usize = patches.values().map(Vec::len).sum();
     image.set_patches(patches);

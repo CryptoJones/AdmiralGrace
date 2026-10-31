@@ -1518,3 +1518,74 @@ fn the_image_is_read_under_a_layout_moved_and_with_its_segments_edited() {
         .all(|function| function.name != "main"));
     assert_eq!(without.entry(), None);
 }
+
+#[test]
+fn the_base_is_the_formats_and_a_move_is_bounded_and_the_moved_image_is_written() {
+    use ag_image::{Layout, SegmentEdit};
+
+    // A PE's base is its image base, not its first section's page; moved,
+    // the sections keep their distance from it.
+    assert_eq!(pe().base(), Some(0x1_4000_0000));
+    assert_eq!(macho().base(), Some(0x1_0000_0000));
+    let moved = Binary::open_with_layout(
+        &pe_path(),
+        &Layout {
+            base: Some(0x1000_0000),
+            segments: Vec::new(),
+        },
+    )
+    .expect("the PE loads moved");
+    assert_eq!(moved.base(), Some(0x1000_0000));
+    let text = moved
+        .sections()
+        .iter()
+        .find(|section| section.name == ".text")
+        .expect(".text");
+    assert_eq!(text.vma, 0x1000_1000);
+
+    // A move that would wrap past the top of the address space is refused.
+    let refused = Binary::open_with_layout(
+        &sample_path(),
+        &Layout {
+            base: Some(0xffff_ffff_ffff_f000),
+            segments: Vec::new(),
+        },
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(
+        refused.contains("past the top of the address space"),
+        "{refused}"
+    );
+
+    // The moved image writes its patches at the same file offsets, and a
+    // patch into a segment added over the file's bytes lands at theirs.
+    let edited = Binary::open_with_layout(
+        &sample_path(),
+        &Layout {
+            base: Some(0x40_0000),
+            segments: vec![SegmentEdit::Add {
+                name: "extra".into(),
+                vma: 0x40_5000,
+                size: 16,
+                file_offset: Some(0x3000),
+                executable: false,
+            }],
+        },
+    )
+    .expect("loads");
+    let original = std::fs::read(sample_path()).expect("the sample's bytes");
+    assert!(edited.set_patches(BTreeMap::from([
+        (0x40_1149_u64, vec![0x90; 4]),
+        (0x40_5000_u64, vec![0xcc]),
+    ])));
+    let written = edited.patched_file(&original).expect("written");
+    assert_eq!(&written[0x1149..0x114d], &[0x90; 4]);
+    assert_eq!(written[0x3000], 0xcc);
+    assert_eq!(
+        (0..original.len())
+            .filter(|&i| original[i] != written[i])
+            .count(),
+        5
+    );
+}

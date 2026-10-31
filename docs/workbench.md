@@ -406,6 +406,11 @@ addresses of the moved image; `ag project rebase` and `ag project segment` recor
 for `ag image … --project` to read. The image is read again under the layout, so a layout
 change is not on the undo stack: it is taken back by its own door — `none`, a removal of what
 was added, a name put back — and a project file that carries a layout is written at format 5.
+The move is for an image the loader placed wrongly: nothing is relocated, so an absolute
+address in the code still names what it named, and the analyst's marks, patches and notes
+keep the addresses they were made at. The base offered is the one the format states — a
+PE's image base, an ELF's first load segment. A project whose layout the image cannot take
+opens all the same, read as the loader reads it, and the notice says why.
 
 Every one of these changes can be taken back:
 

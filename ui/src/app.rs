@@ -544,6 +544,9 @@ pub struct App {
     /// The file the next submit of the patched-program prompt writes over,
     /// once the analyst has been told it is there.
     pub confirm_write: Option<PathBuf>,
+    /// Why the project's layout was not applied when the program was last
+    /// read, when it was not: the program is read as the loader reads it.
+    pub layout_failed: Option<String>,
     /// The engine's options, for the pseudocode of a program image.
     pub options: ag_image::Options,
     /// The Objective-C method map currently open.
@@ -638,6 +641,7 @@ impl App {
             kuna_root: config.kuna.clone(),
             binary_path: config.binary.clone(),
             confirm_write: None,
+            layout_failed: None,
             options: config.options,
             methods_path: config.methods.clone(),
             shift: config.shift,
@@ -703,16 +707,37 @@ impl App {
         // The analyst's layout is read under when the annotations are this
         // program's; a program opened in place of another starts as the
         // loader reads it.
-        let layout = if self.annotations_root.as_deref() == Some(path) {
-            layout_of(&self.annotations).unwrap_or_default()
+        let (layout, mut layout_failed) = if self.annotations_root.as_deref() == Some(path)
+            && !self.annotations.layout.is_empty()
+        {
+            match layout_of(&self.annotations) {
+                Ok(layout) => (layout, None),
+                Err(reason) => (ag_image::Layout::default(), Some(reason)),
+            }
         } else {
-            ag_image::Layout::default()
+            (ag_image::Layout::default(), None)
         };
-        match BinaryProvider::load_with(path, self.options, &layout) {
+        let loaded = match BinaryProvider::load_with(path, self.options, &layout) {
+            // When the layout is what the image cannot take, the program
+            // is read as the loader reads it, and the analyst is told.
+            Err(error) if layout != ag_image::Layout::default() => {
+                layout_failed = Some(error.to_string());
+                BinaryProvider::load_with(path, self.options, &ag_image::Layout::default())
+            }
+            loaded => loaded,
+        };
+        self.layout_failed = layout_failed;
+        match loaded {
             Ok(provider) => {
                 let binary = provider.binary();
                 self.provider = Box::new(provider);
-                self.notice = Some(format!("Opened {}", path.display()));
+                self.notice = Some(match &self.layout_failed {
+                    Some(reason) => format!(
+                        "Opened {} as the loader reads it: the project's layout could not be applied ({reason})",
+                        path.display()
+                    ),
+                    None => format!("Opened {}", path.display()),
+                });
 
                 let adopted = self.adopt_provider();
 
@@ -2762,11 +2787,13 @@ impl App {
                                     if !self.annotations.layout.is_empty() {
                                         if let Some(binary) = self.binary_path.clone() {
                                             let task = self.load_binary(&binary);
-                                            self.notice = Some(format!(
-                                                "Opened project {} and read {} under its layout",
-                                                path.display(),
-                                                binary.display()
-                                            ));
+                                            if self.layout_failed.is_none() {
+                                                self.notice = Some(format!(
+                                                    "Opened project {} and read {} under its layout",
+                                                    path.display(),
+                                                    binary.display()
+                                                ));
+                                            }
                                             return task;
                                         }
                                     }
@@ -2797,9 +2824,10 @@ impl App {
                             None
                         } else {
                             match ag_corpus::parse_addr_space(text) {
-                                Ok((value, _)) => Some(value),
-                                Err(_) => {
-                                    self.notice = Some(format!("Not an address: {text:?}"));
+                                Ok((value, None)) => Some(value),
+                                _ => {
+                                    self.notice =
+                                        Some(format!("Not an address of the image: {text:?}"));
                                     return Task::none();
                                 }
                             }
@@ -2821,8 +2849,8 @@ impl App {
                             );
                             return Task::none();
                         };
-                        let Ok((at, _)) = ag_corpus::parse_addr_space(address) else {
-                            self.notice = Some(format!("Not an address: {address:?}"));
+                        let Ok((at, None)) = ag_corpus::parse_addr_space(address) else {
+                            self.notice = Some(format!("Not an address of the image: {address:?}"));
                             return Task::none();
                         };
                         let Some(size) = parse_number(size) else {
@@ -3317,15 +3345,16 @@ impl App {
                     self.notice = Some("Moving the image needs a program image".into());
                     return Task::none();
                 }
-                // The prompt offers the base the image has now: its lowest
-                // mapped page.
+                // The prompt offers the base the image is read at now: the
+                // one the layout says, else the one its format states.
                 let base = self
-                    .provider
-                    .segments()
-                    .iter()
-                    .filter(|segment| segment.vma != 0)
-                    .map(|segment| segment.vma & !0xfff)
-                    .min()
+                    .annotations
+                    .layout
+                    .base
+                    .as_deref()
+                    .and_then(|base| ag_corpus::parse_addr_space(base).ok())
+                    .map(|(value, _)| value)
+                    .or_else(|| self.provider.base())
                     .unwrap_or(0);
                 self.prompt = Some(Prompt {
                     kind: PromptKind::Rebase,
@@ -6948,6 +6977,38 @@ mod tests {
             .segments()
             .iter()
             .any(|segment| segment.name == "code"));
+
+        // A project whose layout the image cannot take opens all the same:
+        // the program is read as the loader reads it, and the notice says
+        // why.
+        std::fs::write(
+            &file,
+            r#"{"format": 5, "target": {}, "layout": {"segments": [{"action": "add", "name": "clash", "address": "0x1070", "size": 4}]}}"#,
+        )
+        .expect("a project with a bad layout");
+        let mut bad = App::boot(Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        })
+        .0;
+        let _ = bad.update(Message::FileOpenProject);
+        let _ = bad.update(Message::PromptChanged(file.display().to_string()));
+        let _ = bad.update(Message::PromptSubmit);
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            bad.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("could not be applied")),
+            "{:?}",
+            bad.notice
+        );
+        assert_eq!(main_at(&bad), Some(0x1198));
+        assert!(!bad
+            .provider
+            .segments()
+            .iter()
+            .any(|segment| segment.name == "clash"));
+        assert!(bad.layout_failed.is_some());
 
         // Put back, the image reads where the loader puts it.
         let _ = again.update(Message::EditRebase);

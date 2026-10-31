@@ -42,7 +42,7 @@ regenerated, and the annotations stay.
 | `target.path` | Where the target was when the project was written. |
 | `target.sha256` | The SHA-256 of the target, so a project can be checked against the binary it describes. |
 | `options` | The analysis options the run used, as name to value — the names `ag catalog` lists. |
-| `layout` | The layout the image is read under, when the analyst corrected the loader's: `base`, the address its lowest mapped page is moved to, and `segments`, the edits in order — `{ "action": "add", "name", "address", "size", "file_offset", "executable" }`, `{ "action": "remove", "name" }`, `{ "action": "rename", "name", "to" }`. Addresses are the moved image's; a reader applies the base first. Left out when it changes nothing. |
+| `layout` | The layout the image is read under, when the analyst corrected the loader's: `base`, the address its lowest mapped page is moved to, and `segments`, the edits in order — `{ "action": "add", "name", "address", "size", "file_offset", "executable" }`, `{ "action": "remove", "name" }`, `{ "action": "rename", "name", "to" }`. Addresses are the moved image's; a reader applies the base first, measuring the move from the base the format states — a PE's image base, else the page of the lowest segment the file holds bytes for. Left out when it changes nothing. |
 | `annotations` | The analyst's changes, in the order they were made. |
 
 ## An annotation

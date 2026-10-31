@@ -378,6 +378,10 @@ impl Provider for BinaryProvider {
         self.binary.instruction_length_at(address)
     }
 
+    fn base(&self) -> Option<u64> {
+        self.binary.base()
+    }
+
     fn section_end(&self, address: u64) -> Option<u64> {
         self.binary
             .section_of(address)
