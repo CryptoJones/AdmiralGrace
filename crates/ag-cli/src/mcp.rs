@@ -349,6 +349,29 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "opaque_predicates",
+            description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "targets": { "type": "array", "items": { "type": "string" }, "description": "The functions, by address or name; every function of the image when `all` is true." },
+                    "all": { "type": "boolean", "description": "Every function of the image (default false)." },
+                },
+            }),
+        },
+        Tool {
+            name: "patch_opaque_predicates",
+            description: "Patch the opaque predicates of functions out, as opaque_predicates finds them, into the project file: an always taken branch becomes a `jmp` to its target in the same bytes (`EB rel8`, or `90 E9 rel32` for a near one), a never taken one as many `nop`s. The patches are the project's like any other; the pseudocode is read again with them, and reads without the branch. With `dry_run`, the patches are said and not saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "targets": { "type": "array", "items": { "type": "string" }, "description": "The functions, by address or name; every function of the image when `all` is true." },
+                    "all": { "type": "boolean", "description": "Every function of the image (default false)." },
+                    "dry_run": { "type": "boolean", "description": "Say the patches without saving them (default false)." },
+                },
+            }),
+        },
+        Tool {
             name: "set_dead_stores",
             description: "Say whether the stores to a local variable that nothing reads are taken out of the pseudocode even when the dead code is kept: `drop` true takes them out, false leaves them in, marked. The variable is named as the pseudocode declares it, under the function that declares it. The project is saved and the pseudocode read again.",
             schema: json!({
@@ -1037,6 +1060,67 @@ impl Server {
                     &self.project()?.file,
                     address,
                 )))
+            }
+            "opaque_predicates" | "patch_opaque_predicates" => {
+                let all = flag("all", false)?;
+                let targets = match arguments.get("targets") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(str::to_string).ok_or_else(|| {
+                                format!("a target is a name or an address, not {item}")
+                            })
+                        })
+                        .collect::<Result<Vec<String>, String>>()?,
+                    Some(_) => {
+                        return Err("\"targets\" is a list of names or addresses".to_string())
+                    }
+                };
+                if !all && targets.is_empty() {
+                    return Err("name the functions to read, or set all".to_string());
+                }
+                let patch = name == "patch_opaque_predicates";
+                let dry_run = flag("dry_run", false)?;
+                if patch {
+                    // Read with the project's patches, so one made before
+                    // is not found again.
+                    self.reload()?;
+                    self.image.set_patches(self.project()?.file.patches());
+                }
+                let addresses = crate::image::opaque_functions(&self.image, &targets, all)
+                    .map_err(|error| error.to_string())?;
+                let rows = crate::image::opaque_rows(&self.image, &addresses);
+                let listed = crate::image::opaque_json(&rows);
+                if !patch {
+                    let mut answer = Answer::json(json!({ "opaque": listed }));
+                    answer.text = crate::image::opaque_text(&rows);
+                    return Ok(answer);
+                }
+                let patches: Vec<(u64, Vec<u8>, String)> = rows
+                    .iter()
+                    .filter_map(|row| {
+                        let (bytes, text) = row.patch.clone()?;
+                        Some((row.opaque.site, bytes, text))
+                    })
+                    .collect();
+                if !dry_run && !patches.is_empty() {
+                    self.change_file(|file| {
+                        for (site, bytes, text) in &patches {
+                            file.write_patch(
+                                TargetKind::Address,
+                                &format!("{site:#x}"),
+                                Some((bytes, Some(text))),
+                            );
+                        }
+                    })?;
+                    self.image.set_patches(self.project()?.file.patches());
+                }
+                Ok(Answer::json(json!({
+                    "opaque": listed,
+                    "patched": if dry_run { 0 } else { patches.len() },
+                    "saved": !dry_run && !patches.is_empty(),
+                })))
             }
             "set_dead_stores" => {
                 let address = parse_address(&text("address")?)?;
@@ -1917,6 +2001,8 @@ mod tests {
                 "set_comment",
                 "set_override",
                 "set_inline",
+                "opaque_predicates",
+                "patch_opaque_predicates",
                 "set_dead_stores",
                 "set_bookmark",
                 "bookmarks",

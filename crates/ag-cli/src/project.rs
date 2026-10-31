@@ -5,7 +5,7 @@
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
 //! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `patch`,
-//! `asm`, `nop`) so a script or an agent can build a project without editing JSON
+//! `asm`, `nop`, `opaque`) so a script or an agent can build a project without editing JSON
 //! by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
@@ -240,6 +240,25 @@ pub enum ProjectCmd {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Patch out the opaque predicates of functions: each conditional
+    /// branch decided whatever the input becomes, in the same bytes, a
+    /// `jmp` to its target when it is always taken and `nop`s when it is
+    /// never taken. The patches are the project's like any other: they
+    /// show, come off and write out the same way.
+    Opaque {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The functions: addresses such as `0x1149`, or names. Every
+        /// function of the image when `--all`.
+        functions: Vec<String>,
+        /// Every function of the image.
+        #[arg(long)]
+        all: bool,
+        /// Print the patches without saving them.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
     /// Write a copy of the target with the project's patches in it, leaving
     /// the target as it is.
     WritePatched {
@@ -382,6 +401,12 @@ pub fn run(
         ProjectCmd::Rebase { file, base } => rebase(&target, &file, &base),
         ProjectCmd::Segment { file, edit } => segment(&target, &file, edit),
         ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
+        ProjectCmd::Opaque {
+            file,
+            functions,
+            all,
+            dry_run,
+        } => patch_opaque(&target, &file, &functions, all, dry_run),
         ProjectCmd::Rename {
             file,
             address,
@@ -1162,6 +1187,77 @@ fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
     check_layout(target, &project)?;
     project.save(file)?;
     println!("{}: {said}", file.display());
+    Ok(0)
+}
+
+/// Patch the opaque predicates of the functions named, or of every one,
+/// into the project of `target`, or only say what would be patched.
+fn patch_opaque(
+    target: &Path,
+    file: &Path,
+    functions: &[String],
+    all: bool,
+    dry_run: bool,
+) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    // The image is read with the patches the project holds already, so a
+    // branch patched before is not found again.
+    let raw = RAW.with(|held| held.borrow().clone());
+    let slice = SLICE.with(|held| held.borrow().clone());
+    let image = crate::image::open_image(
+        target,
+        raw,
+        slice,
+        Some(&project),
+        ag_image::Options::default(),
+    )?;
+    let addresses = crate::image::opaque_functions(&image, functions, all)?;
+    let rows = crate::image::opaque_rows(&image, &addresses);
+    let mut patched = 0;
+    for row in &rows {
+        let site = row.opaque.site;
+        let Some((bytes, text)) = &row.patch else {
+            println!(
+                "{site:#x}  {}  {}: not patched, the target {:#x} is out of the jump's reach",
+                row.function,
+                crate::image::taken_words(row.opaque.always),
+                row.opaque.target
+            );
+            continue;
+        };
+        println!(
+            "{site:#x}  {}  {}  {}  ->  {} ({text})",
+            row.function,
+            crate::image::taken_words(row.opaque.always),
+            row.opaque.why,
+            ag_corpus::project::hex_of_bytes(bytes),
+        );
+        if !dry_run {
+            project.write_patch(
+                TargetKind::Address,
+                &format!("{site:#x}"),
+                Some((bytes, Some(text))),
+            );
+        }
+        patched += 1;
+    }
+    if rows.is_empty() {
+        println!("no opaque predicates");
+        return Ok(0);
+    }
+    if dry_run {
+        println!(
+            "{patched} patch{} not saved (--dry-run)",
+            if patched == 1 { "" } else { "es" }
+        );
+    } else if patched > 0 {
+        project.save(file)?;
+        println!(
+            "{}: {patched} opaque predicate{} patched",
+            file.display(),
+            if patched == 1 { "" } else { "s" }
+        );
+    }
     Ok(0)
 }
 

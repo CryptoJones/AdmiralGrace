@@ -185,6 +185,9 @@ pub enum Message {
     EditBytes,
     /// Fill a run of bytes from the selection with the no-op.
     EditNopRange,
+    /// Patch out the opaque predicates of the function on screen: each
+    /// branch decided whatever the input becomes a `jmp` or `nop`s.
+    EditOpaque,
     /// Show the constants in the selected instruction's operands the next
     /// way round: hex, signed, decimal, octal, as an address.
     EditOperandFormat,
@@ -2908,7 +2911,8 @@ impl App {
             Message::EditBookmark
             | Message::EditMark(_)
             | Message::EditOperandFormat
-            | Message::EditNop => true,
+            | Message::EditNop
+            | Message::EditOpaque => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -2994,6 +2998,36 @@ impl App {
         self.notice = Some(format!(
             "Filled {len} byte{} at {key} with nop",
             if len == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Patch out the opaque predicates of the function at `function`, each
+    /// through the same door as every patch, and say what was done. The
+    /// patches are one change undo takes back.
+    fn patch_opaque(&mut self, function: u64) {
+        let name = self
+            .navigator
+            .rows
+            .iter()
+            .find(|row| row.address == function)
+            .map_or_else(|| format!("{function:#x}"), |row| row.name.clone());
+        let found = self.provider.opaque_patches(function);
+        if found.is_empty() {
+            self.notice = Some(format!("No opaque predicates in {name}"));
+            return;
+        }
+        for opaque in &found {
+            let key = self.annotation_key(opaque.site);
+            let kind = self.kind_at(opaque.site);
+            self.annotations
+                .write_patch(kind, &key, Some((&opaque.bytes, Some(&opaque.text))));
+        }
+        let always = found.iter().filter(|opaque| opaque.always).count();
+        self.notice = Some(format!(
+            "Patched {} opaque predicate{} in {name}: {always} always taken, {} never",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            found.len() - always
         ));
     }
 
@@ -3217,6 +3251,14 @@ impl App {
                     return Task::none();
                 };
                 self.nop_at(address, len);
+            }
+
+            Message::EditOpaque => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function to patch its opaque predicates".into());
+                    return Task::none();
+                };
+                self.patch_opaque(function);
             }
 
             Message::EditNopRange => {
@@ -10098,6 +10140,47 @@ mod tests {
             Some("Editing bytes needs a program image")
         );
         assert!(app.prompt.is_none());
+    }
+
+    #[test]
+    fn the_opaque_predicates_of_the_function_on_screen_are_patched_out() {
+        let config = Config {
+            binary: Some(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../crates/ag-engine/tests/fixtures/opaque.elf"),
+            ),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // even_product's branch on x * (x + 1) is never taken.
+        let even_product = 0x401000;
+        let _ = app.update(Message::FunctionSelected(even_product));
+        let before = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(before.contains("if ("), "{before}");
+        let _ = app.update(Message::EditOpaque);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Patched 1 opaque predicate in even_product: 0 always taken, 1 never")
+        );
+        let record = app
+            .annotations
+            .annotation_for("0x401029")
+            .expect("the record");
+        assert_eq!(record.patch.as_deref(), Some("90 90"));
+        assert_eq!(record.patch_text.as_deref(), Some("nop x2"));
+        let after = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(!after.contains("if ("), "{after}");
+        assert_eq!(app.undo.len(), 1);
+        // Read again, it has none left; undo puts the branch back.
+        let _ = app.update(Message::EditOpaque);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("No opaque predicates in even_product")
+        );
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.annotation_for("0x401029").is_none());
+        let undone = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(undone.contains("if ("), "{undone}");
     }
 
     #[test]

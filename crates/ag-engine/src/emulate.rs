@@ -311,6 +311,41 @@ pub fn run(stages: &Stages, args: &[u64], world: &dyn World, limits: &Limits) ->
     )
 }
 
+/// The value of an expression that holds everything it reads: constants
+/// and the operators over them. `None` where it reads a variable, memory
+/// or a call, which no input decides here, or divides by zero.
+pub fn constant_value(node: &AstNode) -> Option<Val> {
+    struct Nothing;
+    impl World for Nothing {
+        fn read(&self, _address: u64, _len: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn address_of(&self, _name: &str) -> Option<u64> {
+            None
+        }
+    }
+    let limits = Limits::default();
+    let budget = Cell::new(limits.steps);
+    let mut machine = Machine {
+        variables: BTreeMap::new(),
+        types: BTreeMap::new(),
+        memory: Memory::new(),
+        world: &Nothing,
+        // As deep as calls go, so none is followed.
+        depth: limits.depth,
+        limits: &limits,
+        budget: &budget,
+        steps: Vec::new(),
+        pending_note: None,
+        return_type: (64, true),
+        returns_value: false,
+    };
+    machine
+        .eval(node)
+        .ok()
+        .filter(|value| value.value.is_some())
+}
+
 /// [`run`] as a call `depth` deep: the parameters from `args`, each cast
 /// to its type, an unknown one unknown; the `memory` the caller has
 /// written so far, which comes back in the run; and the step `budget` the

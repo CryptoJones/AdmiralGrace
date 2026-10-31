@@ -260,6 +260,23 @@ pub enum ImageCmd {
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
     },
+    /// The opaque predicates of functions: the conditional branches whose
+    /// condition is decided whatever the input, each with whether it is
+    /// always or never taken, why, and the bytes that patch it out.
+    Opaque {
+        /// The functions: addresses such as `0x1149`, or names. Every
+        /// function of the image when `--all`.
+        targets: Vec<String>,
+        /// Every function of the image.
+        #[arg(long)]
+        all: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose patches the image is read with.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
 }
 
 /// One section of the image, as JSON.
@@ -823,6 +840,7 @@ pub fn run(
         | ImageCmd::Disasm { project, .. }
         | ImageCmd::Cfg { project, .. }
         | ImageCmd::Il { project, .. }
+        | ImageCmd::Opaque { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -900,6 +918,18 @@ pub fn run(
             out.as_deref(),
         ),
         ImageCmd::Data { target, json } => data(&image, target.as_deref(), json),
+        ImageCmd::Opaque {
+            targets, all, json, ..
+        } => {
+            let addresses = opaque_functions(&image, &targets, all)?;
+            let rows = opaque_rows(&image, &addresses);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&opaque_json(&rows))?);
+            } else {
+                print!("{}", opaque_text(&rows));
+            }
+            Ok(0)
+        }
         ImageCmd::Export {
             dir,
             functions,
@@ -1869,6 +1899,115 @@ fn transpile(
         None => print!("{text}"),
     }
     Ok(0)
+}
+
+/// The functions `targets` name, or every function of the image when
+/// `all`.
+pub(crate) fn opaque_functions(image: &Binary, targets: &[String], all: bool) -> Result<Vec<u64>> {
+    anyhow::ensure!(
+        all || !targets.is_empty(),
+        "name the functions to read, or --all for every one"
+    );
+    anyhow::ensure!(
+        image.bitness().is_some(),
+        "opaque predicates are read in x86 code, and this image is {}",
+        image.language()
+    );
+    if all {
+        return Ok(image.functions().iter().map(|f| f.address).collect());
+    }
+    targets
+        .iter()
+        .map(|target| resolve(image, target))
+        .collect()
+}
+
+/// One opaque predicate, with the function it is in and its patch.
+pub(crate) struct OpaqueRow {
+    pub function: String,
+    pub function_address: u64,
+    pub opaque: ag_image::Opaque,
+    /// The bytes that patch it out and the instruction they spell, unless
+    /// the target is out of the jump's reach.
+    pub patch: Option<(Vec<u8>, String)>,
+}
+
+/// The opaque predicates of the functions at `addresses`, in address
+/// order, each branch once.
+pub(crate) fn opaque_rows(image: &Binary, addresses: &[u64]) -> Vec<OpaqueRow> {
+    let mut rows: Vec<OpaqueRow> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for &address in addresses {
+        for opaque in image.opaque_predicates(address) {
+            if !seen.insert(opaque.site) {
+                continue;
+            }
+            rows.push(OpaqueRow {
+                function: image
+                    .function_name(address)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("sub_{address:x}")),
+                function_address: address,
+                patch: image.opaque_patch(&opaque),
+                opaque,
+            });
+        }
+    }
+    rows.sort_by_key(|row| row.opaque.site);
+    rows
+}
+
+/// Whether a branch is taken, in words.
+pub(crate) fn taken_words(always: bool) -> &'static str {
+    if always {
+        "always taken"
+    } else {
+        "never taken"
+    }
+}
+
+/// The opaque predicates as text: one line each, the site, the function,
+/// always or never taken, and why.
+pub(crate) fn opaque_text(rows: &[OpaqueRow]) -> String {
+    if rows.is_empty() {
+        return "no opaque predicates\n".to_string();
+    }
+    let width = rows.iter().map(|row| row.function.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for row in rows {
+        out.push_str(&format!(
+            "{:#x}  {:width$}  {:12}  {}\n",
+            row.opaque.site,
+            row.function,
+            taken_words(row.opaque.always),
+            row.opaque.why,
+        ));
+    }
+    out
+}
+
+/// The opaque predicates as JSON.
+pub(crate) fn opaque_json(rows: &[OpaqueRow]) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                serde_json::json!({
+                    "site": row.opaque.site,
+                    "site_hex": format!("{:#x}", row.opaque.site),
+                    "target_hex": format!("{:#x}", row.opaque.target),
+                    "function": row.function,
+                    "function_address_hex": format!("{:#x}", row.function_address),
+                    "always": row.opaque.always,
+                    "taken": taken_words(row.opaque.always),
+                    "why": row.opaque.why,
+                    "patch": row.patch.as_ref().map(|(bytes, _)| {
+                        bytes.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<String>>().join(" ")
+                    }),
+                    "patch_text": row.patch.as_ref().map(|(_, text)| text.clone()),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Run one function with the arguments given and report the run.
