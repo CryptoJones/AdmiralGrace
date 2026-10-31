@@ -6683,6 +6683,91 @@ mod tests {
     }
 
     #[test]
+    fn the_listings_branches_are_arrows_to_their_targets_rows() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // register_tm_clones: two forward jumps to the return at 0x10f8,
+        // from 0x10e2 and 0x10ee.
+        let _ = app.update(Message::FunctionSelected(0x10c0));
+        assert!(!app.work.listing.is_empty());
+        let renamed = app.renames();
+        let rows: Vec<Option<u64>> = app
+            .work
+            .listing
+            .iter()
+            .flat_map(|line| {
+                let above = renamed
+                    .comment_for(line.address)
+                    .is_some_and(|comment| comment.above);
+                above
+                    .then_some(None)
+                    .into_iter()
+                    .chain(std::iter::once(Some(line.address)))
+            })
+            .collect();
+        let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph);
+        let mut jumps: Vec<(u64, u64)> = arrows
+            .arrows
+            .iter()
+            .map(|arrow| (arrow.source, arrow.target))
+            .collect();
+        jumps.sort_unstable();
+        assert_eq!(jumps, [(0x10e2, 0x10f8), (0x10ee, 0x10f8)]);
+        let target_row = rows.iter().position(|row| *row == Some(0x10f8));
+        for arrow in &arrows.arrows {
+            assert_eq!(arrow.to, target_row);
+            assert_eq!(rows[arrow.from], Some(arrow.source));
+            assert!(arrow.to > Some(arrow.from));
+        }
+        // The two overlap, so they take two lanes; the shorter one, from
+        // 0x10ee, is nearest the text.
+        assert_eq!(arrows.lanes, 2);
+        let near = arrows
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10ee)
+            .expect("the near jump");
+        assert_eq!(near.lane, 0);
+
+        // A comment above an instruction between adds a row the arrows
+        // count.
+        let _ = app.update(Message::AddressSelected(0x10e4));
+        let _ = app.update(Message::EditCommentAbove);
+        let _ = app.update(Message::PromptChanged("the second check".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let renamed = app.renames();
+        assert!(renamed
+            .comment_for(0x10e4)
+            .is_some_and(|comment| comment.above));
+        let rows: Vec<Option<u64>> = app
+            .work
+            .listing
+            .iter()
+            .flat_map(|line| {
+                let above = renamed
+                    .comment_for(line.address)
+                    .is_some_and(|comment| comment.above);
+                above
+                    .then_some(None)
+                    .into_iter()
+                    .chain(std::iter::once(Some(line.address)))
+            })
+            .collect();
+        assert_eq!(rows.iter().filter(|row| row.is_none()).count(), 1);
+        let again = crate::views::arrows::Arrows::of(&rows, &app.work.graph);
+        let far = again
+            .arrows
+            .iter()
+            .find(|arrow| arrow.source == 0x10e2)
+            .expect("the far jump");
+        assert_eq!(far.to, rows.iter().position(|row| *row == Some(0x10f8)));
+        assert_eq!(far.to.unwrap() - far.from, target_row.unwrap() - 8 + 1);
+    }
+
+    #[test]
     fn block_text_and_a_group_are_recorded_on_the_block_and_drawn() {
         let mut app = app();
         let function = 0x100084A20;

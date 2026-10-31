@@ -134,7 +134,7 @@ Filed 2026-10-26.
 - [x] Pseudocode: a toggle to show or hide dead code — [#330](https://github.com/CryptoJones/AdmiralGrace/issues/330)
 - [x] Graph tab: minimap, block grouping, block colors, editable block text, keyboard navigation — [#331](https://github.com/CryptoJones/AdmiralGrace/issues/331)
 - [x] Graph tab: export the graph as PDF and SVG — [#332](https://github.com/CryptoJones/AdmiralGrace/issues/332)
-- [ ] Listing: jump arrows in the margin — [#333](https://github.com/CryptoJones/AdmiralGrace/issues/333)
+- [x] Listing: jump arrows in the margin — [#333](https://github.com/CryptoJones/AdmiralGrace/issues/333)
 
 ### Automation
 

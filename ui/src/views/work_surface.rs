@@ -288,6 +288,26 @@ fn listing_content(app: &App) -> Element<'_, Message> {
     let renamed = app.renames();
     let mut list = Column::new().spacing(0).width(Length::Fill);
 
+    // The rows as they will stand, a comment's own row counted, so the
+    // margin's arrows know which row a branch and its target are on.
+    let rows: Vec<Option<u64>> = app
+        .work
+        .listing
+        .iter()
+        .flat_map(|line| {
+            let above = renamed
+                .comment_for(line.address)
+                .is_some_and(|comment| comment.above);
+            above
+                .then_some(None)
+                .into_iter()
+                .chain(std::iter::once(Some(line.address)))
+        })
+        .collect();
+    let arrows = crate::views::arrows::Arrows::of(&rows, &app.work.graph);
+    let selected = app.selection.address();
+    let mut row = 0;
+
     for line in &app.work.listing {
         // A comment the analyst chose to stand above the instruction gets
         // its own line, indented to where the operands start; an inline
@@ -296,13 +316,34 @@ fn listing_content(app: &App) -> Element<'_, Message> {
             .comment_for(line.address)
             .filter(|comment| comment.above)
         {
-            list = list.push(comment_row(&comment.text));
+            list = list.push(with_margin(
+                arrows.margin(row, selected),
+                comment_row(&comment.text),
+            ));
+            row += 1;
         }
-        list = list.push(listing_row(app, line, &renamed));
+        list = list.push(with_margin(
+            arrows.margin(row, selected),
+            listing_row(app, line, &renamed),
+        ));
+        row += 1;
     }
 
     scrollable(list)
         .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A row of the listing with the margin's arrows beside it. The margin
+/// fills the row's height, so the arrows run on from row to row.
+fn with_margin<'a>(
+    margin: Element<'static, Message>,
+    element: Element<'a, Message>,
+) -> Element<'a, Message> {
+    Row::new()
+        .push(margin)
+        .push(Container::new(element).width(Length::Fill))
         .width(Length::Fill)
         .into()
 }

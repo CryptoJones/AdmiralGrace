@@ -67,7 +67,9 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 That is the native path: the image is parsed by the engine's own loader, the navigator
 lists its symbols, the inspector shows its sections and entry point, and the Listing tab
 holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
-language says. The Pseudocode tab holds the engine's own lifting of the selected function:
+language says, with an arrow in the margin from every branch to its target — blue for a jump
+down the listing, amber for one back up it, so a loop reads as a loop — the shortest arrows
+nearest the text and a jump out of the function a stub off the left edge. The Pseudocode tab holds the engine's own lifting of the selected function:
 its calls, branches and loops as C, structured into `if`/`else`, `while`, `for` and early
 `return`. Each function opens with a comment that says what decided its return type —
 `// returns int: main reads eax after the call`, `// void: no caller reads the result` — since
@@ -179,7 +181,7 @@ What the workbench reads:
 | The sections of the image | The Segments section of the navigator, and the inspector's image card, with the flag that says which of them hold code. |
 | The function symbols | The function list of the navigator. |
 | The data symbols | The Data part of the Segments section of the navigator, and the search results. |
-| The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found. |
+| The disassembly of a function | The Listing tab: the instructions of the blocks the control-flow walk found, with the margin's arrows from each branch to its target — blue down the listing, amber back up it, bright for the selected instruction's, and a stub off the left for a jump out of the function. |
 | The blocks of the control-flow walk | The Graph tab: a box for every block, with the arrows that join them. |
 | The bytes of the file | The Bytes tab and the lower Bytes panel: the bytes around the selection. |
 | The calls of a function | The References tab and the inspector: what the function calls, and what calls it. A `jmp` that leaves the function — a PLT stub's jump through its GOT slot, a forwarding stub's jump to another function — is in CALLS too, marked `(tail call)`, so the stub names the import it stands for. |
