@@ -20,6 +20,7 @@ The images the image tests read, and how they were made.
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
 | `sample_cpp.elf`, `sample_cpp.macho`, `sample_cpp.exe` | A C++ program built from `sample.cpp` for the three containers, with no runtime library: a namespace, a class with a constructor, two methods and a static member, two overloads of a free function and two instances of a template — every common shape of a mangled name, Itanium in the ELF and the Mach-O, Microsoft in the PE's export table. |
+| `sample_swift_x86`, `sample_swift_arm64`, `sample_swift_x86_stripped` | A Swift program built from `sample.swift` for x86-64 and arm64 macOS 12, and the x86-64 image with its symbol table emptied by `strip_symtab.py`: a protocol, a struct, an enum with payloads, a class and a subclass with properties and methods, a generic function and a closure, with the `__swift5_*` metadata the runtime reads and every symbol the compiler kept. `crates/ag-engine/tests/fixtures/swift_names.tsv` holds every mangled name of the x86-64 image beside what the Swift toolchain's own demangler says of it. |
 | `sample_objc_chained` | The same source linked for macOS 12 with chained fixups (`LC_DYLD_CHAINED_FIXUPS`): every pointer slot of the metadata holds a packed fixup, not an address, as every Mach-O linked for macOS 12 or iOS 15 and later does. |
 | `sample.m` | The Objective-C source of the two. |
 | `strip_symtab.py` | Empties a Mach-O's symbol table in place, for hosts without `strip` for Mach-O. |
@@ -187,6 +188,17 @@ clang++ -target x86_64-apple-darwin -fno-exceptions -fno-rtti -O0 -c sample.cpp 
 ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -o sample_cpp.macho sample_cpp.o -e _main
 clang++ -target x86_64-pc-windows-msvc -fno-exceptions -fno-rtti -O0 -c sample.cpp -o sample_cpp.obj
 lld-link /entry:main /subsystem:console /out:sample_cpp.exe /nodefaultlib /noimplib sample_cpp.obj
+```
+
+The Swift program was built on a Mac with the Swift 6.4 toolchain (no Swift compiler runs
+here), and its names were demangled there for the oracle:
+
+```sh
+xcrun swiftc -O -module-name sample -target x86_64-apple-macos12 sample.swift -o sample_swift_x86
+xcrun swiftc -O -module-name sample -target arm64-apple-macos12 sample.swift -o sample_swift_arm64
+nm sample_swift_x86 | awk '{print $3}' | grep '^_\$s' | sort -u > names.txt
+xcrun swift-demangle < names.txt | paste names.txt - > swift_names.tsv
+python3 strip_symtab.py sample_swift_x86 sample_swift_x86_stripped
 ```
 
 The Objective-C program was built with clang and lld, with no Foundation and no runtime

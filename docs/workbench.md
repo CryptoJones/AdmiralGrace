@@ -413,6 +413,11 @@ graph; the pseudocode, where a name stands in code, uses the scope and the name 
 (`geometry::area(2, 3)`); the inspector's **Mangled** row shows what the symbol table spelled,
 for a function and for a piece of data alike.
 
+A Swift Mach-O's functions are listed under their demangled names — `sample.Derived.greet(times:
+Swift.Int) -> Swift.Int` — the mangled `$s…` name in the inspector's **Mangled** row; a method
+a class's vtable points at and no symbol names is listed as `Type.method#N`. `ag image FILE
+swift` prints the types, their fields and their conformances.
+
 An Objective-C Mach-O's methods are listed under their runtime names — `-[Class sel]`,
 `+[Class sel]`, `-[Class(Category) sel]` — read from the image's own metadata, so a stripped
 binary is named too; `ag image FILE objc` prints the classes, categories and protocols. The

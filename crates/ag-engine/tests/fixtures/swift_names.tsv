@@ -1,0 +1,95 @@
+_$s6sample1dAA7DerivedCvp	sample.d : sample.Derived
+_$s6sample4BaseC5countACSi_tcfc	sample.Base.init(count: Swift.Int) -> sample.Base
+_$s6sample4BaseC5countACSi_tcfC	sample.Base.__allocating_init(count: Swift.Int) -> sample.Base
+_$s6sample4BaseC5countACSi_tcfCTq	method descriptor for sample.Base.__allocating_init(count: Swift.Int) -> sample.Base
+_$s6sample4BaseC5countSivg	sample.Base.count.getter : Swift.Int
+_$s6sample4BaseC5countSivgTq	method descriptor for sample.Base.count.getter : Swift.Int
+_$s6sample4BaseC5countSivM	sample.Base.count.modify : Swift.Int
+_$s6sample4BaseC5countSivM.resume.0	sample.Base.count.modify : Swift.Int with unmangled suffix ".resume.0"
+_$s6sample4BaseC5countSivMTq	method descriptor for sample.Base.count.modify : Swift.Int
+_$s6sample4BaseC5countSivpfi	variable initialization expression of sample.Base.count : Swift.Int
+_$s6sample4BaseC5countSivpMV	property descriptor for sample.Base.count : Swift.Int
+_$s6sample4BaseC5countSivpWvd	direct field offset for sample.Base.count : Swift.Int
+_$s6sample4BaseC5countSivs	sample.Base.count.setter : Swift.Int
+_$s6sample4BaseC5countSivsTq	method descriptor for sample.Base.count.setter : Swift.Int
+_$s6sample4BaseC5twiceyS2iF	sample.Base.twice(Swift.Int) -> Swift.Int
+_$s6sample4BaseC5twiceyS2iFTq	method descriptor for sample.Base.twice(Swift.Int) -> Swift.Int
+_$s6sample4BaseC6answerSiyFZ	static sample.Base.answer() -> Swift.Int
+_$s6sample4BaseC6answerSiyFZTq	method descriptor for static sample.Base.answer() -> Swift.Int
+_$s6sample4BaseCfd	sample.Base.deinit
+_$s6sample4BaseCfD	sample.Base.__deallocating_deinit
+_$s6sample4BaseCMa	type metadata accessor for sample.Base
+_$s6sample4BaseCMf	full type metadata for sample.Base
+_$s6sample4BaseCMF	reflection metadata field descriptor sample.Base
+_$s6sample4BaseCMm	metaclass for sample.Base
+_$s6sample4BaseCMn	nominal type descriptor for sample.Base
+_$s6sample4BaseCN	type metadata for sample.Base
+_$s6sample5apply_2toS3iXE_SitF	sample.apply(_: (Swift.Int) -> Swift.Int, to: Swift.Int) -> Swift.Int
+_$s6sample5apply_2toS3iXE_SitF17$s6sampleS2iXEfU_Tf1cn_n	function signature specialization <Arg[0] = [Closure Propagated : $s6sampleS2iXEfU_, Argument Types : []> of sample.apply(_: (Swift.Int) -> Swift.Int, to: Swift.Int) -> Swift.Int
+_$s6sample5PointV1x1yACSi_SitcfC	sample.Point.init(x: Swift.Int, y: Swift.Int) -> sample.Point
+_$s6sample5PointV1xSivg	sample.Point.x.getter : Swift.Int
+_$s6sample5PointV1xSivM	sample.Point.x.modify : Swift.Int
+_$s6sample5PointV1xSivM.resume.0	sample.Point.x.modify : Swift.Int with unmangled suffix ".resume.0"
+_$s6sample5PointV1xSivpMV	property descriptor for sample.Point.x : Swift.Int
+_$s6sample5PointV1xSivs	sample.Point.x.setter : Swift.Int
+_$s6sample5PointV1ySivg	sample.Point.y.getter : Swift.Int
+_$s6sample5PointV1ySivM	sample.Point.y.modify : Swift.Int
+_$s6sample5PointV1ySivM.resume.0	sample.Point.y.modify : Swift.Int with unmangled suffix ".resume.0"
+_$s6sample5PointV1ySivpMV	property descriptor for sample.Point.y : Swift.Int
+_$s6sample5PointV1ySivs	sample.Point.y.setter : Swift.Int
+_$s6sample5PointV9manhattanSiyF	sample.Point.manhattan() -> Swift.Int
+_$s6sample5PointVMa	type metadata accessor for sample.Point
+_$s6sample5PointVMf	full type metadata for sample.Point
+_$s6sample5PointVMF	reflection metadata field descriptor sample.Point
+_$s6sample5PointVMn	nominal type descriptor for sample.Point
+_$s6sample5PointVN	type metadata for sample.Point
+_$s6sample5PointVwet	getEnumTagSinglePayload value witness for sample.Point
+_$s6sample5PointVwst	storeEnumTagSinglePayload value witness for sample.Point
+_$s6sample5PointVWV	value witness table for sample.Point
+_$s6sample5ShapeOMa	type metadata accessor for sample.Shape
+_$s6sample5ShapeOMB	reflection metadata builtin descriptor sample.Shape
+_$s6sample5ShapeOMf	full type metadata for sample.Shape
+_$s6sample5ShapeOMF	reflection metadata field descriptor sample.Shape
+_$s6sample5ShapeOMn	nominal type descriptor for sample.Shape
+_$s6sample5ShapeON	type metadata for sample.Shape
+_$s6sample5ShapeOwet	getEnumTagSinglePayload value witness for sample.Shape
+_$s6sample5ShapeOwst	storeEnumTagSinglePayload value witness for sample.Shape
+_$s6sample5ShapeOwug	getEnumTag value witness for sample.Shape
+_$s6sample5ShapeOwui	destructiveInjectEnumTag value witness for sample.Shape
+_$s6sample5ShapeOwup	destructiveProjectEnumData value witness for sample.Shape
+_$s6sample5ShapeOWV	value witness table for sample.Shape
+_$s6sample5totalSivp	sample.total : Swift.Int
+_$s6sample5twiceyxxSjRzlF	sample.twice<A where A: Swift.Numeric>(A) -> A
+_$s6sample7DerivedC4area2ofSiAA5ShapeO_tF	sample.Derived.area(of: sample.Shape) -> Swift.Int
+_$s6sample7DerivedC5countACSi_tcfc	sample.Derived.init(count: Swift.Int) -> sample.Derived
+_$s6sample7DerivedC5countACSi_tcfC	sample.Derived.__allocating_init(count: Swift.Int) -> sample.Derived
+_$s6sample7DerivedC5greet5timesS2i_tF	sample.Derived.greet(times: Swift.Int) -> Swift.Int
+_$s6sample7DerivedC5shapeAA5ShapeOvg	sample.Derived.shape.getter : sample.Shape
+_$s6sample7DerivedC5shapeAA5ShapeOvM	sample.Derived.shape.modify : sample.Shape
+_$s6sample7DerivedC5shapeAA5ShapeOvM.resume.0	sample.Derived.shape.modify : sample.Shape with unmangled suffix ".resume.0"
+_$s6sample7DerivedC5shapeAA5ShapeOvpfi	variable initialization expression of sample.Derived.shape : sample.Shape
+_$s6sample7DerivedC5shapeAA5ShapeOvpMV	property descriptor for sample.Derived.shape : sample.Shape
+_$s6sample7DerivedC5shapeAA5ShapeOvpWvd	direct field offset for sample.Derived.shape : sample.Shape
+_$s6sample7DerivedC5shapeAA5ShapeOvs	sample.Derived.shape.setter : sample.Shape
+_$s6sample7DerivedC6originAA5PointVvg	sample.Derived.origin.getter : sample.Point
+_$s6sample7DerivedC6originAA5PointVvM	sample.Derived.origin.modify : sample.Point
+_$s6sample7DerivedC6originAA5PointVvM.resume.0	sample.Derived.origin.modify : sample.Point with unmangled suffix ".resume.0"
+_$s6sample7DerivedC6originAA5PointVvpfi	variable initialization expression of sample.Derived.origin : sample.Point
+_$s6sample7DerivedC6originAA5PointVvpMV	property descriptor for sample.Derived.origin : sample.Point
+_$s6sample7DerivedC6originAA5PointVvpWvd	direct field offset for sample.Derived.origin : sample.Point
+_$s6sample7DerivedC6originAA5PointVvs	sample.Derived.origin.setter : sample.Point
+_$s6sample7DerivedCAA8GreetingA2aDP5greet5timesS2i_tFTW	protocol witness for sample.Greeting.greet(times: Swift.Int) -> Swift.Int in conformance sample.Derived : sample.Greeting in sample
+_$s6sample7DerivedCAA8GreetingAAMc	protocol conformance descriptor for sample.Derived : sample.Greeting in sample
+_$s6sample7DerivedCAA8GreetingAAWP	protocol witness table for sample.Derived : sample.Greeting in sample
+_$s6sample7DerivedCfd	sample.Derived.deinit
+_$s6sample7DerivedCfD	sample.Derived.__deallocating_deinit
+_$s6sample7DerivedCMa	type metadata accessor for sample.Derived
+_$s6sample7DerivedCMf	full type metadata for sample.Derived
+_$s6sample7DerivedCMF	reflection metadata field descriptor sample.Derived
+_$s6sample7DerivedCMm	metaclass for sample.Derived
+_$s6sample7DerivedCMn	nominal type descriptor for sample.Derived
+_$s6sample7DerivedCN	type metadata for sample.Derived
+_$s6sample8Greeting_pMF	reflection metadata field descriptor sample.Greeting
+_$s6sample8GreetingMp	protocol descriptor for sample.Greeting
+_$s6sample8GreetingTL	protocol requirements base descriptor for sample.Greeting
+_$s6sampleMXM	module descriptor sample

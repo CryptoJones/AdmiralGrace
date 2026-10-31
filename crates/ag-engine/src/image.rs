@@ -43,6 +43,8 @@ pub struct Image {
     /// The mangled names the symbol table spells, by address, with what
     /// each demangles to; read once when asked.
     mangled: std::cell::OnceCell<BTreeMap<u64, MangledName>>,
+    /// The Swift metadata the image carries, read once when asked.
+    swift: std::cell::OnceCell<Option<crate::swift::SwiftMetadata>>,
 }
 
 /// A mangled name the symbol table spells, and what it demangles to.
@@ -294,6 +296,7 @@ impl Image {
             slice: None,
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
+            swift: std::cell::OnceCell::new(),
         })
     }
 
@@ -364,6 +367,7 @@ impl Image {
             slice: None,
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
+            swift: std::cell::OnceCell::new(),
         })
     }
 
@@ -372,6 +376,14 @@ impl Image {
     pub fn objc(&self) -> Option<&crate::objc::ObjcMetadata> {
         self.objc
             .get_or_init(|| self.object().and_then(|_| crate::objc::read(&self.bytes)))
+            .as_ref()
+    }
+
+    /// The Swift metadata the image carries — its types with their fields
+    /// and methods, its protocols — when it is a Mach-O with any.
+    pub fn swift(&self) -> Option<&crate::swift::SwiftMetadata> {
+        self.swift
+            .get_or_init(|| self.object().and_then(|_| crate::swift::read(&self.bytes)))
             .as_ref()
     }
 
@@ -554,6 +566,27 @@ impl Image {
                 .map(|section| (section.vma, section.vma.saturating_add(section.size)))
                 .collect();
             for (imp, name) in objc.method_names() {
+                let in_code = code
+                    .iter()
+                    .any(|(start, end)| (*start..*end).contains(&imp));
+                if in_code && !named.contains(&imp) {
+                    symbols.push((imp, name));
+                }
+            }
+            symbols.sort_by_key(|(address, _)| *address);
+        }
+        // A Swift class's vtable names each implementation by its type and
+        // its place, where no symbol names it, as in a stripped image.
+        if let Some(swift) = self.swift() {
+            let named: std::collections::HashSet<u64> =
+                symbols.iter().map(|(address, _)| *address).collect();
+            let code: Vec<(u64, u64)> = self
+                .sections()
+                .into_iter()
+                .filter(|section| section.executable)
+                .map(|section| (section.vma, section.vma.saturating_add(section.size)))
+                .collect();
+            for (imp, name) in swift.method_names() {
                 let in_code = code
                     .iter()
                     .any(|(start, end)| (*start..*end).contains(&imp));

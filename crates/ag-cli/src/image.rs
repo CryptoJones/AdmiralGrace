@@ -24,6 +24,14 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The Swift the image describes: its types with their kind, module,
+    /// superclass, fields or cases, conformances and vtable methods; its
+    /// protocols.
+    Swift {
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The Objective-C the image describes: its classes with their
     /// superclass, protocols, properties, methods and instance variables;
     /// its categories; its protocols.
@@ -698,6 +706,7 @@ pub fn run(
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
         ImageCmd::Objc { json, header } => objc(&image, json, header),
+        ImageCmd::Swift { json } => swift(&image, json),
         // Answered above, before any image was read.
         ImageCmd::Slices { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
@@ -718,6 +727,114 @@ pub fn run(
             ..
         } => crate::export::run(&image, binary, &dir, functions.as_deref(), force),
     }
+}
+
+/// The Swift the image describes, as `swift --json` prints it: empty lists
+/// for an image without any.
+pub(crate) fn swift_json(image: &Binary) -> serde_json::Value {
+    let Some(swift) = image.swift() else {
+        return serde_json::json!({ "types": [], "protocols": [] });
+    };
+    serde_json::json!({
+        "types": swift.types.iter().map(|ty| serde_json::json!({
+            "name": ty.name,
+            "kind": ty.kind.keyword(),
+            "module": ty.module,
+            "address": format!("{:#x}", ty.address),
+            "generic": ty.generic,
+            "superclass": ty.superclass,
+            "protocols": ty.protocols,
+            "fields": ty.fields.iter().map(|field| serde_json::json!({
+                "name": field.name,
+                "type": field.type_name,
+                "var": field.is_var,
+            })).collect::<Vec<_>>(),
+            "methods": ty.methods.iter().map(|method| serde_json::json!({
+                "kind": method.kind,
+                "instance": method.is_instance,
+                "imp": method.imp.map(|imp| format!("{imp:#x}")),
+                "name": method.imp.and_then(|imp| image.function_name(imp)),
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "protocols": swift.protocols.iter().map(|protocol| serde_json::json!({
+            "name": protocol.name,
+            "address": format!("{:#x}", protocol.address),
+            "requirements": protocol.requirements,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Print the Swift the image describes, as text or as JSON.
+fn swift(image: &Binary, json: bool) -> Result<i32> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&swift_json(image))?);
+        return Ok(0);
+    }
+    let Some(swift) = image.swift() else {
+        println!("no Swift metadata");
+        return Ok(0);
+    };
+    println!("types: {}", swift.types.len());
+    for ty in &swift.types {
+        let superclass = ty
+            .superclass
+            .as_deref()
+            .map(|superclass| format!(" : {superclass}"))
+            .unwrap_or_default();
+        let protocols = if ty.protocols.is_empty() {
+            String::new()
+        } else {
+            format!(" <{}>", ty.protocols.join(", "))
+        };
+        let generic = if ty.generic { " generic" } else { "" };
+        println!(
+            "  {}{generic} {}{superclass}{protocols}  {:#x}",
+            ty.kind.keyword(),
+            ty.name,
+            ty.address
+        );
+        for field in &ty.fields {
+            let keyword = match (ty.kind, field.is_var) {
+                (ag_image::SwiftKind::Enum, true) => "indirect case",
+                (ag_image::SwiftKind::Enum, false) => "case",
+                (_, true) => "var",
+                (_, false) => "let",
+            };
+            println!(
+                "    {keyword} {}{}",
+                field.name,
+                field
+                    .type_name
+                    .as_deref()
+                    .map(|type_name| format!(": {type_name}"))
+                    .unwrap_or_default()
+            );
+        }
+        for (index, method) in ty.methods.iter().enumerate() {
+            let name = method
+                .imp
+                .and_then(|imp| image.function_name(imp))
+                .map(|name| format!("  {name}"))
+                .unwrap_or_default();
+            println!(
+                "    {}{} #{index}{}{name}",
+                if method.is_instance { "" } else { "class " },
+                method.kind,
+                method
+                    .imp
+                    .map(|imp| format!("  {imp:#x}"))
+                    .unwrap_or_else(|| "  inherited".to_string())
+            );
+        }
+    }
+    println!("protocols: {}", swift.protocols.len());
+    for protocol in &swift.protocols {
+        println!(
+            "  {}  {:#x}  {} requirements",
+            protocol.name, protocol.address, protocol.requirements
+        );
+    }
+    Ok(0)
 }
 
 /// The Objective-C the image describes, as `objc --json` prints it: empty

@@ -124,7 +124,7 @@ Filed 2026-10-26.
 
 - [x] Read Objective-C metadata from the binary — [#324](https://github.com/CryptoJones/AdmiralGrace/issues/324)
 - [x] Generate an Objective-C header from a binary — [#325](https://github.com/CryptoJones/AdmiralGrace/issues/325)
-- [ ] Read Swift metadata and demangle Swift names — [#326](https://github.com/CryptoJones/AdmiralGrace/issues/326)
+- [x] Read Swift metadata and demangle Swift names — [#326](https://github.com/CryptoJones/AdmiralGrace/issues/326)
 - [x] Demangle C++ names — [#327](https://github.com/CryptoJones/AdmiralGrace/issues/327)
 - [ ] Find functions from exception and unwind data — [#328](https://github.com/CryptoJones/AdmiralGrace/issues/328)
 
