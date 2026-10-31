@@ -452,9 +452,7 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             let bitness = image
                 .bitness()
                 .context("the target is not x86, so nothing is assembled for it")?;
-            let at = ag_corpus::parse_addr_space(&address)
-                .map(|(value, _)| value)
-                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let at = image_address(&address)?;
             let bytes = ag_image::assemble(&text, at, bitness)?;
             if let Some(replaced) = image.instruction_length_at(at) {
                 if bytes.len() > replaced {
@@ -472,9 +470,7 @@ pub fn run(target: PathBuf, cmd: ProjectCmd) -> Result<i32> {
             len,
             to,
         } => {
-            let at = ag_corpus::parse_addr_space(&address)
-                .map(|(value, _)| value)
-                .map_err(|_| anyhow::anyhow!("{address:?} is not an address"))?;
+            let at = image_address(&address)?;
             // The image says how long the instruction is and where its
             // section ends: a run past the end has nothing to fill. It is
             // read under the project's layout, so a moved address is the

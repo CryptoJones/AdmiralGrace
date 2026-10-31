@@ -410,7 +410,8 @@ The move is for an image the loader placed wrongly: nothing is relocated, so an 
 address in the code still names what it named, and the analyst's marks, patches and notes
 keep the addresses they were made at. The base offered is the one the format states — a
 PE's image base, an ELF's first load segment. A project whose layout the image cannot take
-opens all the same, read as the loader reads it, and the notice says why.
+opens all the same, read as the loader reads it, and the notice says why; the layout stays
+recorded, so it is mended by its own doors — taking the edit away, or `none` for the base.
 
 Every one of these changes can be taken back:
 

@@ -1554,7 +1554,46 @@ fn the_base_is_the_formats_and_a_move_is_bounded_and_the_moved_image_is_written(
     .expect_err("refused")
     .to_string();
     assert!(
-        refused.contains("past the top of the address space"),
+        refused.contains("past the top of the program's address space"),
+        "{refused}"
+    );
+    let elf32 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample32.elf");
+    assert_eq!(
+        Binary::open(&elf32).expect("loads").base(),
+        Some(0x804_8000)
+    );
+    for base in [0xffff_f000_u64, 0x1_0000_0000] {
+        let refused = Binary::open_with_layout(
+            &elf32,
+            &Layout {
+                base: Some(base),
+                segments: Vec::new(),
+            },
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("past the top of the program's address space"),
+            "{refused}"
+        );
+    }
+    let refused = Binary::open_with_layout(
+        &elf32,
+        &Layout {
+            base: None,
+            segments: vec![SegmentEdit::Add {
+                name: "high".into(),
+                vma: 0xffff_fff0,
+                size: 0x20,
+                file_offset: None,
+                executable: false,
+            }],
+        },
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(
+        refused.contains("past the top of the program's address space"),
         "{refused}"
     );
 

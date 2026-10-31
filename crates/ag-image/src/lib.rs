@@ -644,8 +644,8 @@ impl Binary {
                     section.name
                 );
                 anyhow::ensure!(
-                    moved + i128::from(section.size) <= i128::from(u64::MAX) + 1,
-                    "the base {base:#x} would move {} to {moved:#x}, past the top of the address space",
+                    moved + i128::from(section.size) <= self.address_top(),
+                    "the base {base:#x} would move {} to {moved:#x}, past the top of the program's address space",
                     section.name
                 );
             }
@@ -671,6 +671,16 @@ impl Binary {
         self.strings = strings;
         self.wide_strings = wide_strings;
         Ok(())
+    }
+
+    /// One past the last address of the program: the top of the address
+    /// space its language's width names, or of the whole 64-bit space when
+    /// the language names no width.
+    fn address_top(&self) -> i128 {
+        match Bitness::of_language(&self.language) {
+            Some(width) => 1i128 << width.bits(),
+            None => 1i128 << 64,
+        }
     }
 
     /// Move every address of the image by `delta`. Nothing has been decoded
@@ -713,9 +723,12 @@ impl Binary {
         anyhow::ensure!(!name.is_empty(), "a segment needs a name");
         anyhow::ensure!(vma != 0, "a segment at address 0 would not be mapped");
         anyhow::ensure!(size > 0, "the segment {name} has no size");
-        let end = vma.checked_add(size).with_context(|| {
-            format!("the segment {name} runs past the end of the address space")
-        })?;
+        let end = vma
+            .checked_add(size)
+            .filter(|end| i128::from(*end) <= self.address_top())
+            .with_context(|| {
+                format!("the segment {name} runs past the top of the program's address space")
+            })?;
         anyhow::ensure!(
             !self.sections.iter().any(|section| section.name == name),
             "the image already has a segment named {name}"
