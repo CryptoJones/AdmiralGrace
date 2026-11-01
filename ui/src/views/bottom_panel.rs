@@ -393,9 +393,10 @@ fn types(app: &App) -> Element<'_, Message> {
 
 /// The Variables tab: a row a variable of the function on screen — its
 /// name, the analyst's when renamed with the lift's beside it, its type,
-/// where it lives, and how many statements assign and read it. Clicking a
-/// row selects the first line of the pseudocode that names it; its button
-/// renames it.
+/// where it lives, how many statements assign and read it, and where its
+/// type came from — `analyst`, or type propagation's source, `from
+/// strlen's parameter 1`. Clicking a row selects the first line of the
+/// pseudocode that names it; its button renames it.
 fn variables(app: &App) -> Element<'_, Message> {
     let rows = app.shown_variables();
     if rows.is_empty() {
@@ -428,6 +429,13 @@ fn variables(app: &App) -> Element<'_, Message> {
         )
         .push(cell("defs".into(), 40.0, color::MUTED))
         .push(cell("uses".into(), 40.0, color::MUTED))
+        .push(
+            Text::new("type from")
+                .size(12)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fill),
+        )
         .push(Space::new().width(Length::Fixed(64.0)));
     let mut list = Column::new().spacing(0).width(Length::Fill).push(header);
     for (index, row) in rows.into_iter().enumerate() {
@@ -452,6 +460,13 @@ fn variables(app: &App) -> Element<'_, Message> {
             )
             .push(cell(row.defined_at.len().to_string(), 40.0, color::TEXT))
             .push(cell(row.used_at.len().to_string(), 40.0, color::TEXT))
+            .push(
+                Text::new(row.source.clone().unwrap_or_else(|| "-".to_string()))
+                    .size(12)
+                    .color(color::MUTED)
+                    .font(MONO)
+                    .width(Length::Fill),
+            )
             .push(
                 button::Button::new(Text::new("Rename").size(11).color(color::MUTED))
                     .on_press(Message::VariableRename(row.lift_name.clone()))

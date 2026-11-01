@@ -1128,6 +1128,7 @@ mod tests {
             stack_pointer: Map::new(),
             types: Map::new(),
             slots: Default::default(),
+            inferred: Default::default(),
         }
     }
 

@@ -3274,17 +3274,20 @@ pub(crate) fn variables_text(
         .max(4);
     let placement_width = placements.iter().map(String::len).max().unwrap_or(0).max(9);
     out.push_str(&format!(
-        "{:name_width$}  {:ty_width$}  {:5}  {:placement_width$}  defs  uses\n",
+        "{:name_width$}  {:ty_width$}  {:5}  {:placement_width$}  defs  uses  source\n",
         "name", "type", "kind", "placement"
     ));
     for ((variable, shown), placement) in variables.iter().zip(&names).zip(&placements) {
-        out.push_str(&format!(
-            "{shown:name_width$}  {:ty_width$}  {:5}  {placement:placement_width$}  {:4}  {:4}\n",
+        let line = format!(
+            "{shown:name_width$}  {:ty_width$}  {:5}  {placement:placement_width$}  {:4}  {:4}  {}",
             variable.ty,
             variable.kind.name(),
             variable.defined_at.len(),
             variable.used_at.len(),
-        ));
+            variable.source.as_deref().unwrap_or("-"),
+        );
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
     out
 }
@@ -3337,6 +3340,7 @@ pub(crate) fn variables_json(
                 "uses": v.used_at.len(),
                 "defined_at": hex(&v.defined_at),
                 "used_at": hex(&v.used_at),
+                "type_source": v.source,
             })
         })
         .collect();

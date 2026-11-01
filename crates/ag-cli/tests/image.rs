@@ -640,7 +640,7 @@ fn a_conditional_tail_call_through_a_register_is_lifted() {
          // void: no caller reads the result\n\
          void deregister_tm_clones(void)\n\
          {\n\
-         \x20 long rax;\n\
+         \x20 void *rax;\n\
          \n\
          \x20 rax = &completed.0;\n\
          \x20 if (0) { // constant: &completed.0 != &completed.0\n\
@@ -2452,29 +2452,31 @@ fn the_variables_of_a_function_say_where_each_lives() {
     assert_eq!(
         image("sample.elf", &["variables", "sum_to"]),
         "// variables of sum_to at 0x1161\n\
-         name      type  kind   placement          defs  uses\n\
-         a         int   param  edi (in rdi)          0     1\n\
-         local_10  long  local  [sp-0x10] 8 bytes     2     2\n\
-         local_14  int   local  [sp-0x14] 4 bytes     2     3\n"
+         name      type  kind   placement          defs  uses  source\n\
+         a         int   param  edi (in rdi)          0     1  -\n\
+         local_10  long  local  [sp-0x10] 8 bytes     2     2  -\n\
+         local_14  int   local  [sp-0x14] 4 bytes     2     3  -\n"
     );
     let main = image("sample.elf", &["variables", "main"]);
     assert!(
-        main.contains("b     long  param  rsi              0     0\n"),
+        main.contains("b     long  param  rsi              0     0  -\n"),
         "{main}"
     );
     assert!(
-        main.contains("v2    long  local  rax              1     2\n"),
+        main.contains("v2    long  local  rax              1     2  -\n"),
         "{main}"
     );
     // A register two paths leave different lives in it.
     let ping = image("inline.elf", &["variables", "ping"]);
     assert!(
-        ping.contains("eax      int   local  eax (in rax)         2     1\n"),
+        ping.contains("eax      int   local  eax (in rax)         2     1  -\n"),
         "{ping}"
     );
     let classify = image("switch.elf", &["variables", "classify"]);
     assert!(
-        classify.ends_with("a     int   param  edi (in rdi)     0     2\n"),
+        classify.ends_with(
+            "a     unsigned int  param  edi (in rdi)     0     2  used unsigned at 0x401003\n"
+        ),
         "{classify}"
     );
 
@@ -2675,4 +2677,47 @@ fn the_platform_types_follow_the_images_data_model() {
         assert_eq!(long_size, long, "{fixture_name}");
         assert_eq!(report["types"], serde_json::json!([]));
     }
+}
+
+#[test]
+fn the_types_propagation_infers_are_declared_and_listed_with_where_they_came_from() {
+    let measure = image("propagate.elf", &["pseudocode", "measure"]);
+    assert!(measure.contains("void measure(char *a)"), "{measure}");
+    let greet = image("propagate.elf", &["pseudocode", "greet"]);
+    assert!(greet.contains("measure(\"hello\");"), "{greet}");
+    let sum = image("propagate.elf", &["pseudocode", "sum"]);
+    assert!(sum.contains("  int local_38[8];\n"), "{sum}");
+    assert_eq!(
+        image("propagate.elf", &["variables", "line"]),
+        "// variables of line at 0x40117c\n\
+         name      type      kind   placement           defs  uses  source\n\
+         a         FILE *    param  rdi                    0     1  from fgets's parameter 3\n\
+         local_48  char[64]  local  [sp-0x48] 64 bytes     0     1  from fgets's parameter 1, 0x40 bytes at 0x40119c\n"
+    );
+    let report = image_json("propagate.elf", &["variables", "measure"]);
+    assert_eq!(report["variables"][0]["type"], "char *");
+    assert_eq!(
+        report["variables"][0]["type_source"],
+        "from strlen's parameter 1"
+    );
+    // Off, the lift's own integers, and no source.
+    let off = image(
+        "propagate.elf",
+        &[
+            "pseudocode",
+            "measure",
+            "--option",
+            "type-propagation",
+            "off",
+        ],
+    );
+    assert!(off.contains("void measure(long a)"), "{off}");
+    let drafted = image(
+        "propagate.elf",
+        &["pseudocode", "pairs", "--option", "auto-structs", "on"],
+    );
+    assert!(
+        drafted.contains("struct struct_pairs_local_18 local_18;"),
+        "{drafted}"
+    );
 }

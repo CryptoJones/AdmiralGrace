@@ -247,6 +247,17 @@ pub trait Symbols {
     fn result_uses(&self, _address: u64) -> Vec<CallSiteUse> {
         Vec::new()
     }
+
+    /// The types propagation gives the function whose facts are `facts`,
+    /// solved with the functions about it in the call graph
+    /// ([`crate::propagate::solve`]). `None` when the image solves nothing
+    /// across functions, and the lift solves the function alone.
+    fn propagated(
+        &self,
+        _facts: &crate::propagate::Facts,
+    ) -> Option<crate::propagate::FunctionTypes> {
+        None
+    }
 }
 
 impl<F: Fn(u64) -> Option<String>> Symbols for F {
@@ -816,6 +827,23 @@ pub struct Stages {
     /// the prologue's `sub rsp, N`, and the analyst's variables it made.
     /// Empty for a thunk and a plugin's lift.
     pub slots: crate::frame::SlotFacts,
+    /// What type propagation made of the function: the types it gave, the
+    /// stack variables it made, with where each came from, and the facts
+    /// it read ([`crate::propagate`]). Empty under `type-propagation off`.
+    pub inferred: crate::propagate::Inferred,
+}
+
+impl Stages {
+    /// The function's parameters and locals, as [`LiftedFunction::variables`]
+    /// lists them, each with where its type came from: `analyst`, the
+    /// inference's source, or none for the lift's own.
+    pub fn variables(&self) -> Vec<crate::variables::VariableInfo> {
+        let mut variables = self.function.variables();
+        for variable in &mut variables {
+            variable.source = self.inferred.source_of(&variable.lift_name);
+        }
+        variables
+    }
 }
 
 /// One chain of a lift: a run of blocks the lift reads as one.
@@ -982,11 +1010,16 @@ pub fn lift_graph(
         stack_pointer: BTreeMap::new(),
         types,
         slots: crate::frame::SlotFacts::default(),
+        inferred: crate::propagate::Inferred::default(),
     })
 }
 
 /// The lift; the stages are kept when `keep`, and empty otherwise, so the
-/// pseudocode's path pays for none of their text and copies.
+/// pseudocode's path pays for none of their text and copies. Under
+/// `type-propagation on` the first lift looks for the arrays and
+/// structures in the frame ([`crate::propagate::detect`]); when it finds
+/// some, the function is lifted again with them made, and should that
+/// lift fail, once more without them.
 #[allow(clippy::too_many_arguments)]
 fn lift_inner(
     disasm: &Disasm,
@@ -999,6 +1032,46 @@ fn lift_inner(
     options: &Options,
     keep: bool,
 ) -> Result<Stages, NotLifted> {
+    let pass = |auto: &[crate::propagate::AutoVar], detect: bool| {
+        lift_pass(
+            disasm, cfg, entry, name, bitness, abi, symbols, options, keep, auto, detect,
+        )
+    };
+    match pass(&[], options.type_propagation)? {
+        Pass::Done(stages) => Ok(*stages),
+        Pass::Again(auto) => match pass(&auto, false) {
+            Ok(Pass::Done(stages)) => Ok(*stages),
+            _ => match pass(&[], false)? {
+                Pass::Done(stages) => Ok(*stages),
+                Pass::Again(_) => Err(NotLifted::new("the frame's variables did not settle")),
+            },
+        },
+    }
+}
+
+/// What one lift ended in: the stages, or the stack variables propagation
+/// found, which the function is to be lifted again with.
+enum Pass {
+    Done(Box<Stages>),
+    Again(Vec<crate::propagate::AutoVar>),
+}
+
+/// One lift, with the stack variables `auto` propagation made beside the
+/// analyst's; when `detect`, the frame is looked at for more.
+#[allow(clippy::too_many_arguments)]
+fn lift_pass(
+    disasm: &Disasm,
+    cfg: &ProcedureCfg,
+    entry: u64,
+    name: &str,
+    bitness: Bitness,
+    abi: Abi,
+    symbols: &dyn Symbols,
+    options: &Options,
+    keep: bool,
+    auto: &[crate::propagate::AutoVar],
+    detect: bool,
+) -> Result<Pass, NotLifted> {
     if bitness != Bitness::Bits64 {
         return Err(NotLifted::new(format!("{bitness} code")));
     }
@@ -1022,9 +1095,26 @@ fn lift_inner(
             crate::types::DataModel::of_abi(abi),
         ))
     });
-    let (made, refused) =
-        crate::stack_vars::accept(&edits.stack_vars, options.stack_slot_names, &store);
+    // Under type propagation the library's types are known too, and the
+    // structures drafted for the frame.
+    let store = if options.type_propagation {
+        let mut with = crate::propagate::with_library(&store);
+        for definition in auto.iter().filter_map(|a| a.definition.as_ref()) {
+            let _ = crate::ctype::parse_into(&mut with, &definition.c);
+        }
+        std::sync::Arc::new(with)
+    } else {
+        store
+    };
+    let words: Vec<crate::stack_vars::StackVar> = edits
+        .stack_vars
+        .iter()
+        .cloned()
+        .chain(auto.iter().map(|a| a.var.clone()))
+        .collect();
+    let (made, refused) = crate::stack_vars::accept(&words, options.stack_slot_names, &store);
     lifter.covered = made.clone();
+    lifter.index_stack = options.type_propagation;
     if let Some(callee) = lifter.thunk(&chains)? {
         let function = LiftedFunction {
             name: name.to_string(),
@@ -1045,7 +1135,7 @@ fn lift_inner(
             return_reason: None,
         };
         let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
-        return Ok(Stages {
+        return Ok(Pass::Done(Box::new(Stages {
             chains: stage_chains,
             low: Vec::new(),
             medium: Vec::new(),
@@ -1056,7 +1146,8 @@ fn lift_inner(
             stack_pointer: BTreeMap::new(),
             types: BTreeMap::new(),
             slots: crate::frame::SlotFacts::default(),
-        });
+            inferred: crate::propagate::Inferred::default(),
+        })));
     }
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
     let lifted = lifter.lift_chains(&chains, &analysis)?;
@@ -1152,6 +1243,87 @@ fn lift_inner(
     slots.made = crate::stack_vars::make(&mut function, &made, &store);
     // The types the analyst gave the lift's variables, by their lift names.
     crate::typed::apply_var_types(&mut function, &edits.var_types, &store, &slots.made, abi);
+    let mut inferred = crate::propagate::Inferred::default();
+    if options.type_propagation && function.thunk.is_none() {
+        let strings = |address: u64| match symbols.pointee(address) {
+            Some(Pointee::String(text)) => Some(text),
+            _ => None,
+        };
+        if detect {
+            // The arrays and structures in the frame; the analyst's types of
+            // a callee's parameters are by their lift names, `a`, `b`, ….
+            let callee_param = |callee: u64, index: usize| {
+                let param = parameter_name(index);
+                let words = symbols.variable_edits(callee).var_types;
+                let (_, text) = words.iter().find(|(v, _)| *v == param)?;
+                crate::ctype::parse_type(&store, text).ok()
+            };
+            let frame = crate::propagate::Frame {
+                accesses: &slots.accesses,
+                address_taken: &slots.address_taken,
+                saved: &slots.saved,
+                analyst: &edits.stack_vars,
+                names: options.stack_slot_names,
+                auto_structs: options.auto_structs,
+            };
+            let found = crate::propagate::detect(&function, &frame, &store, &callee_param);
+            if !found.is_empty() {
+                return Ok(Pass::Again(found));
+            }
+        }
+        let fixed: BTreeSet<String> = edits.var_types.iter().map(|(v, _)| v.clone()).collect();
+        // A structure drafted for this frame is no type another function
+        // knows: its address passed says only that it is a pointer.
+        let known: Vec<crate::stack_vars::StackVar> = slots
+            .made
+            .iter()
+            .filter(|var| {
+                !auto
+                    .iter()
+                    .any(|a| a.var.offset == var.offset && a.definition.is_some())
+            })
+            .cloned()
+            .collect();
+        let facts = crate::propagate::facts(&function, &store, &fixed, &known, &strings);
+        let mut types = symbols.propagated(&facts).unwrap_or_else(|| {
+            crate::propagate::solve(&[&facts], &store)
+                .remove(&entry)
+                .unwrap_or_default()
+        });
+        // A variable the analyst pins values of keeps its sign: the values
+        // are read as its type reads them.
+        types.variables.retain(|name, (_, source)| {
+            !(source.starts_with("used unsigned")
+                && edits.values.iter().any(|v| v.variable == *name))
+        });
+        inferred =
+            crate::propagate::apply(&mut function, &types, &store, &fixed, &slots.made, &strings);
+        for var in &slots.made {
+            if let Some(found) = auto.iter().find(|a| a.var.offset == var.offset) {
+                inferred
+                    .stack_vars
+                    .push((var.clone(), found.source.clone()));
+            }
+        }
+        inferred.definitions = auto.iter().filter_map(|a| a.definition.clone()).collect();
+        inferred.facts = Some(std::sync::Arc::new(facts));
+        let auto_names: BTreeSet<String> = inferred
+            .stack_vars
+            .iter()
+            .filter_map(|(var, _)| var.name.clone())
+            .collect();
+        crate::propagate::tidy(&mut function, &slots.made, &auto_names, &store);
+    }
+    // The variables whose types are the analyst's: those typed, and those
+    // made in the frame.
+    inferred.analyst = edits.var_types.iter().map(|(v, _)| v.clone()).collect();
+    for var in &slots.made {
+        if let Some(made_name) = &var.name {
+            if !auto.iter().any(|a| a.var.offset == var.offset) {
+                inferred.analyst.insert(made_name.clone());
+            }
+        }
+    }
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
@@ -1197,7 +1369,7 @@ fn lift_inner(
             types.insert(variable.name.clone(), variable.ty.clone());
         }
     }
-    Ok(Stages {
+    Ok(Pass::Done(Box::new(Stages {
         chains: if keep { stage_chains } else { Vec::new() },
         low,
         medium,
@@ -1208,7 +1380,8 @@ fn lift_inner(
         stack_pointer,
         types,
         slots,
-    })
+        inferred,
+    })))
 }
 
 /// A chain's end as a low-level statement, when it says more than the
@@ -2420,6 +2593,12 @@ struct Lifter<'a> {
     /// The analyst's variables in the frame: every slot starting inside one
     /// is a variable, its stores kept and its loads read from memory.
     covered: Vec<crate::stack_vars::Made>,
+    /// Whether a slot's address plus a value the lift computes — an index,
+    /// `rbp + rax*4 - 0x30` — is read as that sum, `(long)&local_38 +
+    /// (long)i * 4`, wherever the slot is: type propagation's first look
+    /// at the frame, which finds the arrays. Inside a variable made in the
+    /// frame the sum is read so either way.
+    index_stack: bool,
     /// What the walk saw of the frame, for its layout.
     slot_facts: crate::frame::SlotFacts,
 }
@@ -2448,6 +2627,7 @@ impl<'a> Lifter<'a> {
             return_reason: String::new(),
             declared: Vec::new(),
             covered: Vec::new(),
+            index_stack: false,
             slot_facts: crate::frame::SlotFacts::default(),
         }
     }
@@ -3587,6 +3767,15 @@ impl<'a> Lifter<'a> {
         } else {
             return Err(NotLifted::new("a memory operand with a segment base"));
         };
+        // A slot indexed, `[rbp + rax*4 - 0x30]`: the displacement moves
+        // the slot, and the index is added to its address.
+        let mut disp = disp;
+        if index.class != RC_NONE {
+            if let Sym::Stack(offset) = address.sym {
+                address = Value::new(Sym::Stack(offset + disp), bits, address.from.clone());
+                disp = 0;
+            }
+        }
         if index.class != RC_NONE {
             if index.class != RC_GPR {
                 return Err(NotLifted::new(
@@ -3779,6 +3968,31 @@ impl<'a> Lifter<'a> {
         match (&lhs.sym, &rhs.sym) {
             (Sym::Unknown(reason), _) | (_, Sym::Unknown(reason)) => {
                 return Ok(Value::unknown(reason.clone(), bits))
+            }
+            // A slot's address and an index: the address, as the integer
+            // it is, plus the index.
+            (Sym::Stack(offset), Sym::Node(_) | Sym::Temp(_))
+            | (Sym::Node(_) | Sym::Temp(_), Sym::Stack(offset))
+                if op == BinaryOp::Add
+                    && bits == 64
+                    && (self.index_stack || self.is_covered(*offset)) =>
+            {
+                let offset = *offset;
+                let other = if matches!(lhs.sym, Sym::Stack(_)) {
+                    &rhs
+                } else {
+                    &lhs
+                };
+                let index = self.node_of(other)?;
+                let base = AstNode::Cast {
+                    ty: "long".to_string(),
+                    target: Box::new(self.take_address(offset)),
+                };
+                return Ok(Value::node(
+                    AstNode::binary(base, BinaryOp::Add, index),
+                    bits,
+                    from,
+                ));
             }
             (Sym::Stack(_), _) | (_, Sym::Stack(_)) => {
                 return Ok(Value::unknown(
@@ -6607,12 +6821,12 @@ mod tests {
         // movsx eax, byte [rdi]; ret
         assert_eq!(
             c(&[0x0f, 0xbe, 0x07, 0xc3]),
-            "int f(long a)\n{\n  return (int)*(char *)a;\n}"
+            "int f(char *a)\n{\n  return (int)*a;\n}"
         );
         // movzx eax, byte [rdi]; ret
         assert_eq!(
             c(&[0x0f, 0xb6, 0x07, 0xc3]),
-            "int f(long a)\n{\n  return (unsigned int)(unsigned char)*(char *)a;\n}"
+            "int f(char *a)\n{\n  return (unsigned int)(unsigned char)*a;\n}"
         );
     }
 
@@ -6994,7 +7208,7 @@ mod tests {
         // mov eax, edi; mov rdx, rax; mov rax, rdx; ret
         assert_eq!(
             c(&[0x89, 0xf8, 0x48, 0x89, 0xc2, 0x48, 0x89, 0xd0, 0xc3]),
-            "long f(int a)\n{\n  return (unsigned long)(unsigned int)a;\n}"
+            "long f(unsigned int a)\n{\n  return (unsigned long)(unsigned int)a;\n}"
         );
         // mov rdx, rdi; mov eax, edx; ret
         assert_eq!(
@@ -7239,10 +7453,7 @@ mod tests {
     #[test]
     fn a_load_through_a_pointer_is_a_typed_dereference() {
         // mov eax, [rdi]; ret
-        assert_eq!(
-            c(&[0x8b, 0x07, 0xc3]),
-            "int f(long a)\n{\n  return *(int *)a;\n}"
-        );
+        assert_eq!(c(&[0x8b, 0x07, 0xc3]), "int f(int *a)\n{\n  return *a;\n}");
         // mov eax, [rip+0x10]; ret: an address the image does not name.
         assert_eq!(
             c(&[0x8b, 0x05, 0x10, 0, 0, 0, 0xc3]),
@@ -7251,7 +7462,7 @@ mod tests {
         // mov eax, [rdi+rsi*4+8]; ret
         assert_eq!(
             c(&[0x8b, 0x44, 0xb7, 0x08, 0xc3]),
-            "int f(long a, long b)\n{\n  return *(int *)((a + (b * 4)) + 8);\n}"
+            "int f(int *a, long b)\n{\n  return a[b + 2];\n}"
         );
     }
 
@@ -7260,7 +7471,7 @@ mod tests {
         // mov [rdi], esi; ret
         assert_eq!(
             c(&[0x89, 0x37, 0xc3]),
-            "void f(long a, int b)\n{\n  *(int *)a = b;\n  return;\n}"
+            "void f(int *a, int b)\n{\n  *a = b;\n  return;\n}"
         );
     }
 
@@ -7869,9 +8080,9 @@ mod tests {
         ];
         assert_eq!(
             c_with_image(&code),
-            "long f(void)\n\
+            "void *f(void)\n\
              {\n\
-             \x20 long rax;\n\
+             \x20 void *rax;\n\
              \n\
              \x20 rax = &counter;\n\
              \x20 if (0) { // constant: &counter != &counter\n\

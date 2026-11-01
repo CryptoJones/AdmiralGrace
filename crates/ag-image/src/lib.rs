@@ -454,6 +454,10 @@ impl CallGraph {
 /// parameter names it is stated in.
 type NoReturnFacts = Vec<(Vec<String>, AstNode)>;
 
+/// The most functions about one in the call graph whose facts type
+/// propagation solves it with.
+pub const PROPAGATION_REACH: usize = 48;
+
 /// A program image, read.
 pub struct Binary {
     language: String,
@@ -572,6 +576,14 @@ pub struct Binary {
     graph: Mutex<Option<Arc<CallGraph>>>,
     string_users: Mutex<Option<Arc<Users>>>,
     data_users: Mutex<Option<Arc<Users>>>,
+    /// The facts type propagation reads off each function's lift, by
+    /// entry — `None` for one that does not lift; forgotten with the
+    /// pseudocode.
+    type_facts: Mutex<HashMap<u64, Option<Arc<ag_engine::propagate::Facts>>>>,
+    /// The threads gathering the facts of a function's neighbours, whose
+    /// lifts solve each function alone, so that a lift inside another is
+    /// no cycle.
+    propagating: Mutex<HashSet<std::thread::ThreadId>>,
 }
 
 /// The analyst's words on the global pointer's value.
@@ -893,6 +905,8 @@ impl Binary {
             graph: Mutex::new(None),
             string_users: Mutex::new(None),
             data_users: Mutex::new(None),
+            type_facts: Mutex::new(HashMap::new()),
+            propagating: Mutex::new(HashSet::new()),
         }
     }
 
@@ -907,6 +921,9 @@ impl Binary {
             || options.code_sections != self.options.code_sections;
         self.options = options;
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -1247,6 +1264,9 @@ impl Binary {
             cache.clear();
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -1814,6 +1834,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_facts.lock() {
+            cache.clear();
+        }
         if let Ok(mut cache) = self.levels.lock() {
             cache.clear();
         }
@@ -1868,6 +1891,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_facts.lock() {
+            cache.clear();
+        }
         true
     }
 
@@ -1884,6 +1910,9 @@ impl Binary {
             *held = inlines;
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -1941,6 +1970,9 @@ impl Binary {
             }
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -2027,6 +2059,9 @@ impl Binary {
             return Ok(false);
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -2215,6 +2250,9 @@ impl Binary {
             cache.clear();
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
         if let Ok(mut cache) = self.levels.lock() {
@@ -2680,7 +2718,7 @@ impl Binary {
     /// lift's: a rename is the analyst's, kept in the project. See
     /// `ag_engine::variables`.
     pub fn variables(&self, address: u64) -> Result<Vec<VariableInfo>, NotLifted> {
-        Ok(self.stages(address)?.function.variables())
+        Ok(self.stages(address)?.variables())
     }
 
     /// The loads and stores through the pointer `variable` of the function
@@ -3095,6 +3133,77 @@ impl Binary {
         cfg
     }
 
+    /// The facts type propagation reads off the lift of the function at
+    /// `address`, made once and kept until the pseudocode is forgotten;
+    /// `None` for one that does not lift. See `ag_engine::propagate`.
+    pub fn type_facts(&self, address: u64) -> Option<Arc<ag_engine::propagate::Facts>> {
+        if let Some(known) = self
+            .type_facts
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+        {
+            return known;
+        }
+        let facts = self
+            .stages(address)
+            .ok()
+            .and_then(|stages| stages.inferred.facts.clone());
+        if let Ok(mut held) = self.type_facts.lock() {
+            held.insert(address, facts.clone());
+        }
+        facts
+    }
+
+    /// The types propagation gives the function whose facts are `facts`,
+    /// solved with the functions about it in the call graph: its callers
+    /// and callees, and theirs, [`PROPAGATION_REACH`] functions at most,
+    /// the nearest first. `None` while this thread is gathering another
+    /// function's neighbours, whose own lifts solve each function alone.
+    pub fn propagated(
+        &self,
+        facts: &ag_engine::propagate::Facts,
+    ) -> Option<ag_engine::propagate::FunctionTypes> {
+        let thread = std::thread::current().id();
+        if !self.propagating.lock().ok()?.insert(thread) {
+            return None;
+        }
+        struct Done<'a>(&'a Binary, std::thread::ThreadId);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut held) = self.0.propagating.lock() {
+                    held.remove(&self.1);
+                }
+            }
+        }
+        let _done = Done(self, thread);
+        let graph = self.call_graph();
+        let mut seen: BTreeSet<u64> = BTreeSet::from([facts.address]);
+        let mut frontier = vec![facts.address];
+        let mut near = Vec::new();
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            for at in frontier {
+                for &other in graph.callers(at).iter().chain(graph.calls(at)) {
+                    if near.len() < PROPAGATION_REACH
+                        && self.code_at(other).is_some()
+                        && seen.insert(other)
+                    {
+                        near.push(other);
+                        next.push(other);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        let gathered: Vec<Arc<ag_engine::propagate::Facts>> =
+            near.iter().filter_map(|&at| self.type_facts(at)).collect();
+        let mut program: Vec<&ag_engine::propagate::Facts> = vec![facts];
+        program.extend(gathered.iter().map(|f| f.as_ref()));
+        let store = ag_engine::propagate::with_library(&self.types());
+        ag_engine::propagate::solve(&program, &store).remove(&facts.address)
+    }
+
     /// Every stage of the lift of the function at `address`: the chains, the
     /// levels, the function, by the engine's lifter or by a plugin
     /// architecture that lifts its own language.
@@ -3276,7 +3385,17 @@ impl Binary {
                                             .stages(at)
                                             .ok()
                                             .filter(|stages| stages.function.thunk.is_none())
-                                            .map(|stages| ag_engine::transpile::signature(&stages));
+                                            .map(|stages| {
+                                                (
+                                                    ag_engine::transpile::signature(&stages),
+                                                    stages
+                                                        .function
+                                                        .params
+                                                        .iter()
+                                                        .map(|p| p.ty.clone())
+                                                        .collect(),
+                                                )
+                                            });
                                         push_external(&mut externals, callee, None, signature);
                                     }
                                 } else {
@@ -3350,7 +3469,19 @@ impl Binary {
                 .find(|(at, _)| *at == address)
                 .map(|(_, stages)| stages.as_ref())
         });
-        let types = self.types();
+        // Under type propagation the variables name the library's types
+        // and the structures drafted for the frames.
+        let types = if self.options.type_propagation {
+            let mut with = ag_engine::propagate::with_library(&self.types());
+            for (_, stages) in &lifted {
+                for definition in &stages.inferred.definitions {
+                    let _ = ag_engine::ctype::parse_into(&mut with, &definition.c);
+                }
+            }
+            Arc::new(with)
+        } else {
+            self.types()
+        };
         Ok(ag_engine::transpile::program(&Program {
             functions,
             externals,
@@ -3904,6 +4035,14 @@ impl Symbols for ImageSymbols<'_> {
     /// the engine's walk of the caller's code after the call.
     fn result_uses(&self, address: u64) -> Vec<CallSiteUse> {
         self.0.result_uses(address)
+    }
+
+    /// The function's types, solved with its neighbours in the call graph.
+    fn propagated(
+        &self,
+        facts: &ag_engine::propagate::Facts,
+    ) -> Option<ag_engine::propagate::FunctionTypes> {
+        self.0.propagated(facts)
     }
 
     /// A pointer into a string is that string from the pointer to its NUL,
@@ -4470,12 +4609,13 @@ fn collect_calls(node: &ag_engine::AstNode, found: &mut dyn FnMut(&str, u64)) {
     }
 }
 
-/// Add an external once, by name; a reason or a signature given is kept.
+/// Add an external once, by name; a reason or a signature given — with
+/// its parameters' types — is kept.
 fn push_external(
     externals: &mut Vec<ag_engine::transpile::External>,
     name: &str,
     reason: Option<String>,
-    signature: Option<String>,
+    signature: Option<(String, Vec<String>)>,
 ) {
     match externals.iter_mut().find(|external| external.name == name) {
         Some(external) => {
@@ -4483,14 +4623,24 @@ fn push_external(
                 external.reason = reason;
             }
             if external.signature.is_none() {
-                external.signature = signature;
+                if let Some((signature, params)) = signature {
+                    external.signature = Some(signature);
+                    external.params = params;
+                }
             }
         }
-        None => externals.push(ag_engine::transpile::External {
-            name: name.to_string(),
-            reason,
-            signature,
-        }),
+        None => {
+            let (signature, params) = match signature {
+                Some((signature, params)) => (Some(signature), params),
+                None => (None, Vec::new()),
+            };
+            externals.push(ag_engine::transpile::External {
+                name: name.to_string(),
+                reason,
+                signature,
+                params,
+            });
+        }
     }
 }
 
@@ -5078,7 +5228,7 @@ mod tests {
             "// void: no caller reads the result\n\
              void deregister_tm_clones(void)\n\
              {\n\
-             \x20 long rax;\n\
+             \x20 void *rax;\n\
              \n\
              \x20 rax = &completed.0;\n\
              \x20 if (0) { // constant: &completed.0 != &completed.0\n\

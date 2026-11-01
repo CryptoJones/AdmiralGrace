@@ -56,6 +56,11 @@ pub struct VariableInfo {
     /// The first address of each statement that reads it, in the same
     /// order.
     pub used_at: Vec<u64>,
+    /// Where its type came from: `analyst` for a type or a stack variable
+    /// the analyst gave, type propagation's source for one it inferred —
+    /// `from strlen's parameter 1` — and `None` for the lift's own
+    /// ([`crate::lift::Stages::variables`]).
+    pub source: Option<String>,
 }
 
 impl VariableInfo {
@@ -120,6 +125,7 @@ impl LiftedFunction {
                     placements: variable.placements.clone(),
                     defined_at,
                     used_at,
+                    source: None,
                 }
             })
             .collect()

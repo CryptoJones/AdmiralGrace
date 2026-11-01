@@ -26,6 +26,7 @@ pub mod opaque;
 pub mod options;
 pub mod pipeline;
 pub mod plugin;
+pub mod propagate;
 pub mod procedure;
 pub mod pvs;
 pub mod register;

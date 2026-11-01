@@ -37,6 +37,10 @@ a `cmp` in the listing that the C says nothing about | `--option dead-compares k
 `void f(…)` with `// void: no caller reads the result` on a function you know returns a value, whose callers in the image all discard it | `--option return-liveness presence`
 `long f(void)` and `return g();` on a function whose source is `void`, the value only what the callee left in `rax` | `--option return-liveness callers`
 `not lifted yet: returns a value at one ret and nothing at another` on glue such as `__do_global_dtors_aux` | `--option return-liveness callers`
+`long a` on a parameter the function passes to `strlen`, or `*(int *)(a + (long)i * 4)` where an array was meant | `--option type-propagation on`
+a type or an array you do not trust, where the plain integers and slots are wanted | `--option type-propagation off`
+`long local_18; long local_10;` beside `f(&local_18)`, where a structure on the stack was meant | `--option auto-structs on`
+a `struct struct_main_local_18` you did not write | `--option auto-structs off`
 a `for` whose step is not the increment you expected, or whose init is a statement that belongs before the loop | `--option loop-form while`
 `i = 0; while (i < n) { …; i = i + 1; }` where a `for` would read better | `--option loop-form for`
 `goto label_…;` to a `return` a few lines up | `--option shared-tail duplicate`
@@ -81,6 +85,8 @@ Option | Tier | Takes | Default | What it decides
 `dead-compares` | transform | `drop` \| `keep` | `drop` | A `cmp` or `test` whose flags no branch reads: dropped, or kept as the statement `__cmp(a, b);` or `__test(a, b);`.
 `tail-calls` | transform | `return` \| `refuse` | `return` | A `jmp` to another function with the stack as it was at entry: lifted as the call and the return it stands for, `return callee(args);` — a function that is only the jump is a thunk, printed as `// thunk for callee` — or refused, naming the callee.
 `return-liveness` | analysis | `callers` \| `presence` | `callers` | Whether a function returns a value, and at what width: from use — a caller that reads `eax`/`rax` after the call decides it, and with no caller in the image only a value the function wrote itself counts, not a callee's leftover — or from presence, `rax` written on the way to a `ret`, whatever reads it.
+`type-propagation` | analysis | `on` \| `off` | `on` | Whether the lift types the variables the analyst left untyped from what the code says of them (`docs/types.md`, Propagation): the prototypes of the C library's and Windows' functions it calls, strings, allocations, dereferences and unsigned uses, carried through copies, call arguments and returns across the call graph; and whether a run of stack slots indexed as an array, or whose address is passed where a prototype takes a buffer of a constant length or a known structure, is made one stack variable, `int local_38[8]`, `char local_48[64]`, `struct timeval local_18`. The analyst's types and stack variables always win. Off, the variables keep the integer of their width and the slots stay one local each.
+`auto-structs` | analysis | `off` \| `on` | `off` | Whether, under `type-propagation on`, a run of stack slots whose address is taken and which no known prototype types is drafted as a structure — as `struct-from` drafts one, `struct struct_<function>_<slot>` with members `field_<hex>` — and made a stack variable of it. Off by default: the draft is a guess at a layout the analyst has not seen, and its name and members are new words in the output; `ag project … struct-from` makes one the analyst keeps.
 
 ## Structure
 

@@ -13483,7 +13483,7 @@ mod tests {
         let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
         // make_conn fills what malloc gave it.
         let _ = app.update(Message::FunctionSelected(0x40109e));
-        assert!(body(&app).contains("long v1;"), "{}", body(&app));
+        assert!(body(&app).contains("void *v1;"), "{}", body(&app));
         let _ = app.update(Message::EditStructFromPointer);
         let prompt = app.prompt.clone().expect("a prompt");
         assert_eq!(prompt.kind, PromptKind::StructFromPointer);
@@ -13534,10 +13534,12 @@ mod tests {
             Some("This function declares no variable zz")
         );
 
-        // Undo takes the update back, then the structure.
+        // Undo takes the update back, then the structure. The pointer
+        // make_conn returns, typed by the analyst, reaches read_conn's `a`
+        // through open_conn.
         let _ = app.update(Message::EditUndo);
         assert!(
-            body(&app).contains("long read_conn(long a, long b)"),
+            body(&app).contains("long read_conn(struct conn *a, long b)"),
             "{}",
             body(&app)
         );
@@ -13547,7 +13549,7 @@ mod tests {
         let _ = app.update(Message::EditUndo);
         assert!(app.annotations.types.is_empty());
         let _ = app.update(Message::FunctionSelected(0x40109e));
-        assert!(body(&app).contains("long v1;"), "{}", body(&app));
+        assert!(body(&app).contains("void *v1;"), "{}", body(&app));
         let _ = app.update(Message::EditRedo);
         assert!(body(&app).contains("v1->field_0 = a;"), "{}", body(&app));
     }
@@ -13598,6 +13600,48 @@ mod tests {
         assert!(parse_stack_variable("-16").is_err());
         assert!(parse_stack_variable("-16 0").is_err());
         assert!(parse_stack_variable("-16 8 x int[0]").is_err());
+    }
+
+    #[test]
+    fn the_variables_pane_says_where_each_type_came_from() {
+        let config = Config {
+            binary: Some(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../crates/ag-engine/tests/fixtures/propagate.elf"),
+            ),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // measure at 0x401132 passes its parameter to strlen; sum at
+        // 0x4011ab fills an array in a loop.
+        let _ = app.update(Message::FunctionSelected(0x401132));
+        let _ = app.update(Message::ViewVariables);
+        let rows = |app: &App| -> Vec<(String, String, Option<String>)> {
+            app.shown_variables()
+                .into_iter()
+                .map(|v| (v.name, v.ty, v.source))
+                .collect()
+        };
+        assert_eq!(
+            rows(&app),
+            vec![(
+                "a".to_string(),
+                "char *".to_string(),
+                Some("from strlen's parameter 1".to_string())
+            )]
+        );
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(body.contains("void measure(char *a)"), "{body}");
+        let _ = app.update(Message::FunctionSelected(0x4011ab));
+        assert!(
+            rows(&app).contains(&(
+                "local_38".to_string(),
+                "int[8]".to_string(),
+                Some("indexed as an array at 0x4011cd".to_string())
+            )),
+            "{:?}",
+            rows(&app)
+        );
     }
 
     #[test]
