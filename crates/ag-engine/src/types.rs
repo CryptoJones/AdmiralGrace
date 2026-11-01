@@ -948,6 +948,192 @@ impl TypeStore {
         (offset == 0 && size == whole).then(|| ty.clone())
     }
 
+    /// Where the member or element `path` leads inside `ty`: its offset in
+    /// bytes and its type — the inverse of [`TypeStore::field_at`]. A
+    /// member is reached through anonymous members as C reaches it.
+    pub fn path_offset(&self, ty: &Type, path: &[Step]) -> Option<(u64, Type)> {
+        let mut offset = 0u64;
+        let mut ty = ty.clone();
+        for step in path {
+            let (at, inner) = match step {
+                Step::Field(name) => self.member_offset(&ty, name, 0)?,
+                Step::Index(index) => {
+                    let Type::Array(element, _) = self.resolve(&ty) else {
+                        return None;
+                    };
+                    let each = self.size_of(element).ok()?;
+                    (each.checked_mul(*index)?, (**element).clone())
+                }
+            };
+            offset = offset.checked_add(at)?;
+            ty = inner;
+        }
+        Some((offset, ty))
+    }
+
+    /// The offset and type of the member `name` of the structure or union
+    /// `ty`, through its anonymous members.
+    fn member_offset(&self, ty: &Type, name: &str, depth: usize) -> Option<(u64, Type)> {
+        if depth > 32 {
+            return None;
+        }
+        let (_, layout, _) = self.composite(ty)?;
+        for field in &layout.fields {
+            match &field.name {
+                Some(own) if own == name && field.bits.is_none() => {
+                    return Some((field.offset, field.ty.clone()));
+                }
+                None if field.bits.is_none() => {
+                    if let Some((at, inner)) = self.member_offset(&field.ty, name, depth + 1) {
+                        return Some((field.offset + at, inner));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The members `[offset, offset + size)` of `ty` holds a byte of: each
+    /// scalar member, inside nested structures and arrays, as its path
+    /// spells it without the leading dot — `x`, `inner.g`, `a[2]` — in
+    /// order. A union's members all lie at 0; each is named.
+    pub fn members_in(&self, ty: &Type, offset: u64, size: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_members(ty, offset, size, "", &mut out, 0);
+        out
+    }
+
+    fn collect_members(
+        &self,
+        ty: &Type,
+        offset: u64,
+        size: u64,
+        prefix: &str,
+        out: &mut Vec<String>,
+        depth: usize,
+    ) {
+        if depth > 32 || size == 0 {
+            return;
+        }
+        let resolved = self.resolve(ty);
+        match resolved {
+            Type::Array(element, count) => {
+                let Some(each) = self.size_of(element).ok().filter(|&each| each > 0) else {
+                    return;
+                };
+                let first = offset / each;
+                let mut last = (offset + size - 1) / each;
+                if let Some(count) = count {
+                    if *count == 0 {
+                        return;
+                    }
+                    last = last.min(count - 1);
+                }
+                for index in first..=last {
+                    let start = index * each;
+                    let from = offset.max(start) - start;
+                    let to = (offset + size).min(start + each) - start;
+                    let path = format!("{prefix}[{index}]");
+                    self.collect_members(element, from, to - from, &path, out, depth + 1);
+                }
+            }
+            Type::Named(_) if self.composite(resolved).is_some() => {
+                let (_, layout, _) = self.composite(resolved).expect("checked above");
+                for field in &layout.fields {
+                    let end = field.offset + field.size.max(1);
+                    if end <= offset || offset + size <= field.offset {
+                        continue;
+                    }
+                    let path = match &field.name {
+                        Some(name) if prefix.is_empty() => name.clone(),
+                        Some(name) => format!("{prefix}.{name}"),
+                        None if field.bits.is_some() => continue,
+                        None => prefix.to_string(),
+                    };
+                    if field.bits.is_some() {
+                        if !out.contains(&path) {
+                            out.push(path);
+                        }
+                        continue;
+                    }
+                    let from = offset.max(field.offset) - field.offset;
+                    let to = (offset + size).min(field.offset + field.size) - field.offset;
+                    self.collect_members(
+                        &field.ty,
+                        from,
+                        to.saturating_sub(from),
+                        &path,
+                        out,
+                        depth + 1,
+                    );
+                }
+            }
+            _ => {
+                if !prefix.is_empty() && !out.iter().any(|p| p == prefix) {
+                    out.push(prefix.to_string());
+                }
+            }
+        }
+    }
+
+    /// The size of the structure or union `ty` when the System V x86-64
+    /// convention passes and returns it in general registers — the
+    /// INTEGER class: at most 16 bytes, every member an integer, an
+    /// enumeration or a pointer at its natural alignment — or why it does
+    /// not: a member of floating type is passed in vector registers, and a
+    /// larger structure, or one with a member out of its alignment, in
+    /// memory.
+    pub fn integer_class(&self, ty: &Type) -> Result<u64, String> {
+        let spelled = ty.spelled(self);
+        if self.composite(ty).is_none() {
+            return Err(format!("{spelled} is no structure or union"));
+        }
+        let size = self.size_of(ty)?;
+        if size > 16 {
+            return Err(format!(
+                "{spelled} is {size} bytes, which System V passes in memory"
+            ));
+        }
+        self.integer_members(ty, &spelled, 0)?;
+        Ok(size)
+    }
+
+    fn integer_members(&self, ty: &Type, spelled: &str, depth: usize) -> Result<(), String> {
+        if depth > 32 {
+            return Err(format!("{spelled} nests too deeply"));
+        }
+        match self.resolve(ty) {
+            Type::Prim(p) if p.is_integer() => Ok(()),
+            Type::Prim(_) => Err(format!(
+                "{spelled} has a member of floating type, which System V passes in vector registers"
+            )),
+            Type::Pointer(_) => Ok(()),
+            Type::Array(element, _) => self.integer_members(element, spelled, depth + 1),
+            resolved @ Type::Named(_) => {
+                if self.enumeration(resolved).is_some() {
+                    return Ok(());
+                }
+                let Some((_, layout, _)) = self.composite(resolved) else {
+                    return Err(format!("{spelled} has a member of no known layout"));
+                };
+                for field in &layout.fields {
+                    if field.bits.is_none() {
+                        let align = self.align_of(&field.ty)?;
+                        if align > 0 && field.offset % align != 0 {
+                            return Err(format!(
+                                "{spelled} has a member out of its alignment, which System V passes in memory"
+                            ));
+                        }
+                    }
+                    self.integer_members(&field.ty, spelled, depth + 1)?;
+                }
+                Ok(())
+            }
+            Type::Function { .. } => Err(format!("{spelled} has a member of function type")),
+        }
+    }
+
     /// The type of the member `name` of the structure or union `ty`,
     /// reached through anonymous members as C reaches it.
     pub fn member_type(&self, ty: &Type, name: &str) -> Option<Type> {
@@ -1661,6 +1847,52 @@ mod tests {
         assert_eq!(path(4, 8), None);
         let (_, leaf) = s.field_at(&outer, 12, 4).unwrap();
         assert_eq!(leaf, Type::Prim(Prim::Int));
+    }
+
+    #[test]
+    fn a_range_of_bytes_names_its_members_and_a_path_its_offset() {
+        let s = store(
+            DataModel::LP64,
+            "struct inner { int g; int h; };\n\
+             struct outer { long id; struct inner inner; short a[4]; \
+             union { int x; float y; }; };\n\
+             struct pair { int x; int y; };\n\
+             struct span { long lo; long hi; };\n\
+             struct mixed { int n; float f; };\n\
+             struct big { long a, b, c; };\n\
+             struct __attribute__((packed)) odd { char c; int n; };",
+        );
+        let named = |key: &str| Type::Named(key.to_string());
+        let outer = named("struct outer");
+        assert_eq!(s.members_in(&outer, 4, 8), ["id", "inner.g"]);
+        assert_eq!(s.members_in(&outer, 20, 4), ["a[2]", "a[3]"]);
+        assert_eq!(s.members_in(&outer, 24, 4), ["x", "y"]);
+        let path = |text: &[Step]| s.path_offset(&outer, text).map(|(at, _)| at);
+        assert_eq!(
+            path(&[Step::Field("inner".into()), Step::Field("h".into())]),
+            Some(12)
+        );
+        assert_eq!(path(&[Step::Field("a".into()), Step::Index(3)]), Some(22));
+        assert_eq!(path(&[Step::Field("x".into())]), Some(24));
+        assert_eq!(path(&[Step::Field("nothing".into())]), None);
+        // System V passes the INTEGER class in registers, and the rest not.
+        assert_eq!(s.integer_class(&named("struct pair")), Ok(8));
+        assert_eq!(s.integer_class(&named("struct span")), Ok(16));
+        assert_eq!(
+            s.integer_class(&named("struct mixed")),
+            Err("struct mixed has a member of floating type, which System V passes in vector registers".to_string())
+        );
+        assert_eq!(
+            s.integer_class(&named("struct big")),
+            Err("struct big is 24 bytes, which System V passes in memory".to_string())
+        );
+        assert_eq!(
+            s.integer_class(&named("struct odd")),
+            Err(
+                "struct odd has a member out of its alignment, which System V passes in memory"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

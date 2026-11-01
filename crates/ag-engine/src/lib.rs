@@ -11,6 +11,7 @@ pub mod defuse;
 pub mod demangle;
 pub mod emit;
 pub mod emulate;
+pub mod fragments;
 pub mod frame;
 pub mod global_pointer;
 pub mod il;

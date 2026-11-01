@@ -386,7 +386,10 @@ impl Inliner<'_> {
             let reads = Reads::of(&body, value.as_ref(), &param.name);
             let simple = arg.is_atom() || arg.is_constant();
             let once_in_order = reads.total == 1 && !reads.in_loop && !reads.late;
-            let bind = reads.written
+            // A structure passed by value is a local of its own, which its
+            // members are read through.
+            let bind = param.fragment.is_some()
+                || reads.written
                 || (!simple && reads.total > 0 && !once_in_order)
                 || (!simple && reads.total == 0 && effects(arg));
             if !bind {
@@ -404,6 +407,7 @@ impl Inliner<'_> {
                 ty: param.ty.clone(),
                 name: fresh.clone(),
                 placements: inlined_placements(param, &callee.name),
+                fragment: param.fragment.clone(),
             });
             bound.push(Statement::plain(
                 AstNode::Assign {
@@ -420,8 +424,21 @@ impl Inliner<'_> {
                 ty: local.ty.clone(),
                 name: fresh.clone(),
                 placements: inlined_placements(local, &callee.name),
+                fragment: local.fragment.clone(),
             });
             renames.insert(local.name.clone(), AstNode::var(fresh));
+        }
+        // The structure a fragment is of is named as the caller names it.
+        for variable in &mut self.declared {
+            if let Some(fragment) = &mut variable.fragment {
+                if let Some(AstNode::Var { name }) = fragment
+                    .within
+                    .as_ref()
+                    .and_then(|within| renames.get(within))
+                {
+                    fragment.within = Some(name.clone());
+                }
+            }
         }
         // Every name at once: an argument that reads a name the callee
         // also has is not renamed again.
@@ -864,6 +881,111 @@ pub(crate) fn map(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNo
     f(node)
 }
 
+/// Call `f` on each node directly inside `node`.
+pub(crate) fn each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+    map_children(node.clone(), &mut |child| {
+        f(&child);
+        child
+    });
+}
+
+/// `node` with `f` applied to it first and, where `f` leaves a node as it
+/// is — returns `None` — to the nodes inside it, outermost first. What `f`
+/// returns is not looked into again.
+pub(crate) fn map_outer(node: AstNode, f: &mut dyn FnMut(&AstNode) -> Option<AstNode>) -> AstNode {
+    if let Some(done) = f(&node) {
+        return done;
+    }
+    map_children(node, &mut |child| map_outer(child, f))
+}
+
+/// `node` with `f` applied to each node directly inside it, and not to
+/// the node itself.
+fn map_children(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNode {
+    let sub = |node: Box<AstNode>, f: &mut dyn FnMut(AstNode) -> AstNode| Box::new(f(*node));
+    match node {
+        AstNode::Binary { lhs, op, rhs } => AstNode::Binary {
+            lhs: sub(lhs, f),
+            op,
+            rhs: sub(rhs, f),
+        },
+        AstNode::Assign { lhs, rhs } => AstNode::Assign {
+            lhs: sub(lhs, f),
+            rhs: sub(rhs, f),
+        },
+        AstNode::Deref { target } => AstNode::Deref {
+            target: sub(target, f),
+        },
+        AstNode::AddressOf { target } => AstNode::AddressOf {
+            target: sub(target, f),
+        },
+        AstNode::Cast { ty, target } => AstNode::Cast {
+            ty,
+            target: sub(target, f),
+        },
+        AstNode::Call { callee, args } => AstNode::Call {
+            callee: sub(callee, f),
+            args: args.into_iter().map(&mut *f).collect(),
+        },
+        AstNode::Intrinsic { name, args } => AstNode::Intrinsic {
+            name,
+            args: args.into_iter().map(&mut *f).collect(),
+        },
+        AstNode::StructInit { fields } => AstNode::StructInit {
+            fields: fields
+                .into_iter()
+                .map(|field| StructField {
+                    ty: field.ty,
+                    offset: field.offset,
+                    value: f(field.value),
+                })
+                .collect(),
+        },
+        AstNode::Return { value } => AstNode::Return {
+            value: value.map(|value| sub(value, f)),
+        },
+        AstNode::If {
+            cond,
+            then_part,
+            else_part,
+            if_type,
+        } => AstNode::If {
+            cond: sub(cond, f),
+            then_part: sub(then_part, f),
+            else_part: else_part.map(|else_part| sub(else_part, f)),
+            if_type,
+        },
+        AstNode::IfGoto {
+            cond,
+            label,
+            negated,
+        } => AstNode::IfGoto {
+            cond: sub(cond, f),
+            label,
+            negated,
+        },
+        AstNode::Loop { cond, body, kind } => AstNode::Loop {
+            cond: cond.map(|cond| sub(cond, f)),
+            body: sub(body, f),
+            kind,
+        },
+        AstNode::ConstantCondition { holds, compared } => AstNode::ConstantCondition {
+            holds,
+            compared: sub(compared, f),
+        },
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => AstNode::Ternary {
+            cond: sub(cond, f),
+            then: sub(then, f),
+            otherwise: sub(otherwise, f),
+        },
+        leaf => leaf,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +1008,7 @@ mod tests {
             ty: "int".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         }
     }
 

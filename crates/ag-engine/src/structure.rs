@@ -1061,6 +1061,7 @@ mod tests {
                 ty: "int".into(),
                 name: "a".into(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: Vec::new(),
             body,

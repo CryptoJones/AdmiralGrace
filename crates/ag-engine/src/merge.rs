@@ -565,6 +565,7 @@ fn declare(
         ty: declared.ty.clone(),
         name: fresh,
         placements: declared.placements.clone(),
+        fragment: declared.fragment.clone(),
     };
     match function.locals.iter().position(|v| v.name == variable) {
         Some(i) if emptied => function.locals[i] = fresh,
@@ -942,6 +943,7 @@ mod tests {
             ty: "long".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         };
         LiftedFunction {
             name: "f".to_string(),
@@ -1428,6 +1430,7 @@ mod tests {
             ty: "long".to_string(),
             name: "count".to_string(),
             placements: Vec::new(),
+            fragment: None,
         });
         apply_edits(
             &mut merged,

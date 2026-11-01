@@ -1173,15 +1173,13 @@ fn the_main_of_the_pe_and_the_macho_is_a_for_loop_over_add() {
 fn a_function_the_lifter_refuses_says_why_and_the_refusal_is_kept() {
     let binary = sample();
 
-    // register_tm_clones shifts right, which the lifter does not read.
-    let error = binary
-        .pseudocode(0x10c0)
-        .expect_err("register_tm_clones is refused");
-    assert_eq!(error.to_string(), "not lifted yet: shr");
+    // _start ends in hlt, which the lifter has no reading of.
+    let error = binary.pseudocode(0x1060).expect_err("_start is refused");
+    assert_eq!(error.to_string(), "not lifted yet: the block ends in hlt");
 
     let again = binary
-        .pseudocode(0x10c0)
-        .expect_err("register_tm_clones is still refused");
+        .pseudocode(0x1060)
+        .expect_err("_start is still refused");
     assert_eq!(again, error);
 
     // _init calls through a register loaded from a GOT slot: the call is

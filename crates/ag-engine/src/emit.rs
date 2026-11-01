@@ -18,7 +18,7 @@ use std::fmt::Write;
 
 use crate::ast::{AstNode, BinaryOp, LoopKind};
 use crate::cfg::HighLevelProcedure;
-use crate::lift::{CallNote, signed, LiftedFunction, Statement, StatementKind};
+use crate::lift::{signed, CallNote, LiftedFunction, Statement, StatementKind, Variable};
 use crate::options::{
     BraceStyle, CallHints, ConstantConditions, ConstantStyle, Language, Options, Ternaries,
 };
@@ -309,6 +309,23 @@ pub fn emit_function_valued(
     emit_marked(function, options, removable, callees, slice, Some(words))
 }
 
+/// The type a variable is declared with: a structure where it holds the
+/// whole of one or is the parameter one is passed in, its own C type
+/// otherwise; `None` for a parameter that carries the rest of another's
+/// structure, which the other's declaration stands for.
+fn declared_type(variable: &Variable, params: &[Variable]) -> Option<String> {
+    let Some(fragment) = &variable.fragment else {
+        return Some(variable.ty.clone());
+    };
+    if fragment.whole || fragment.within.as_deref() == Some(variable.name.as_str()) {
+        return Some(fragment.of.clone());
+    }
+    match &fragment.within {
+        Some(within) if params.iter().any(|p| p.name == *within) => None,
+        _ => Some(variable.ty.clone()),
+    }
+}
+
 fn emit_marked(
     function: &LiftedFunction,
     options: &Options,
@@ -417,7 +434,10 @@ fn emit_marked(
                 function
                     .params
                     .iter()
-                    .map(|param| crate::stack_vars::declarator(&param.ty, &param.name))
+                    .filter_map(|param| {
+                        declared_type(param, &function.params)
+                            .map(|ty| crate::stack_vars::declarator(&ty, &param.name))
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -434,7 +454,10 @@ fn emit_marked(
                     text: format!(
                         "{}{};",
                         style.indent,
-                        crate::stack_vars::declarator(&local.ty, &local.name)
+                        crate::stack_vars::declarator(
+                            &declared_type(local, &[]).unwrap_or_else(|| local.ty.clone()),
+                            &local.name
+                        )
                     ),
                     addresses: Vec::new(),
                 });
@@ -1698,12 +1721,28 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
                     operand(base, out, style);
                     out.push_str(").");
                 }
+                // A call's result is a postfix expression already: `f().y`.
+                _ if matches!(base, AstNode::Call { .. }) => {
+                    expr(base, out, false, style);
+                    out.push('.');
+                }
                 _ => {
                     operand(base, out, style);
                     out.push('.');
                 }
             }
             out.push_str(field);
+        }
+        // The bytes of several members, with the members in a comment.
+        AstNode::Intrinsic { .. } if crate::fragments::annotation_of(n).is_some() => {
+            let (value, members) = crate::fragments::annotation_of(n).expect("checked above");
+            expr(value, out, false, style);
+            match style.language {
+                Language::Python => {}
+                _ => {
+                    let _ = write!(out, " /* {members} */");
+                }
+            }
         }
         // An enumerator, by its name.
         AstNode::Intrinsic { .. } if crate::typed::enumerator_of(n).is_some() => {
@@ -2027,17 +2066,20 @@ mod tests {
                 ty: "int".to_string(),
                 name: "a".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "i".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
                 Variable {
                     ty: "long".to_string(),
                     name: "total".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
             ],
             body: vec![
@@ -2217,6 +2259,7 @@ mod tests {
                 ty: "int".to_string(),
                 name: "a".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: Vec::new(),
             body: vec![
@@ -2456,6 +2499,7 @@ mod tests {
                 ty: "int".into(),
                 name: "x".into(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             body: vec![Statement {
                 node: AstNode::binary(AstNode::var("x"), BinaryOp::Less, AstNode::constant(3, 4)),
@@ -2632,17 +2676,20 @@ mod tests {
                 ty: "int".to_string(),
                 name: "a".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "x".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
                 Variable {
                     ty: "int".to_string(),
                     name: "y".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
             ],
             body: vec![
@@ -2726,6 +2773,7 @@ mod tests {
             ty: "int".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         };
         // switch (a) { case 0: y = a; break; case 1: y = 1; break; }
         // x = 1 (overwritten); if (1) { x = a; } else { y = 3; } return x + y.
@@ -3092,17 +3140,20 @@ mod tests {
                 ty: "int".to_string(),
                 name: "a".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "x".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
                 Variable {
                     ty: "int".to_string(),
                     name: "y".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 },
             ],
             body: vec![
@@ -3210,6 +3261,7 @@ mod tests {
             ty: "int".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         };
         let assign = |name: &str, rhs: AstNode, at: u64| {
             Statement::plain(

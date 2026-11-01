@@ -290,6 +290,7 @@ impl Architecture for ToyLifting {
                 ty: "int".to_string(),
                 name: "flag".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             entry: 0,
             nodes,

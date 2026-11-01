@@ -1099,17 +1099,20 @@ mod tests {
                     ty: "int".to_string(),
                     name: "a".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 }],
                 locals: vec![
                     Variable {
                         ty: "long".to_string(),
                         name: "total".to_string(),
                         placements: Vec::new(),
+                        fragment: None,
                     },
                     Variable {
                         ty: "int".to_string(),
                         name: "i".to_string(),
                         placements: Vec::new(),
+                        fragment: None,
                     },
                 ],
                 body: Vec::new(),
@@ -1224,11 +1227,13 @@ mod tests {
                 ty: "long".to_string(),
                 name: "p".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             },
             Variable {
                 ty: "int".to_string(),
                 name: "x".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             },
         ];
         stages.medium = vec![Node {
@@ -1420,11 +1425,13 @@ mod tests {
                 ty: "int".to_string(),
                 name: "x".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             },
             Variable {
                 ty: "int".to_string(),
                 name: "y".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             },
         ];
         let run = super::run(&stages, &[], &Bytes, &Limits::default());

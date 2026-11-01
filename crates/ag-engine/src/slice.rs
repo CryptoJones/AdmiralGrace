@@ -1197,6 +1197,7 @@ mod tests {
             ty: "long".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         };
         LiftedFunction {
             name: "f".to_string(),

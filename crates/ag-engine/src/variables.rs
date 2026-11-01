@@ -42,7 +42,9 @@ pub struct VariableInfo {
     pub name: String,
     /// The name the lift declares it by, which the analyst's words key on.
     pub lift_name: String,
-    /// The C type.
+    /// The C type; for a variable that holds bytes of a structure, the
+    /// structure and the bytes, `struct point [4..8) (y)`
+    /// ([`crate::lift::Variable::shown_type`]).
     pub ty: String,
     /// Whether it is a parameter or a local.
     pub kind: VariableKind,
@@ -113,7 +115,7 @@ impl LiftedFunction {
                 VariableInfo {
                     name: variable.name.clone(),
                     lift_name: variable.name.clone(),
-                    ty: variable.ty.clone(),
+                    ty: variable.shown_type(),
                     kind,
                     placements: variable.placements.clone(),
                     defined_at,

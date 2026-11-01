@@ -106,9 +106,10 @@ pub fn enumerator_of(node: &AstNode) -> Option<&str> {
     }
 }
 
-/// Whether the intrinsic `name` is a value, not a call: an enumerator.
+/// Whether the intrinsic `name` is a value, not a call: an enumerator,
+/// or the bytes of several members annotated.
 pub fn is_value(name: &str) -> bool {
-    name == ENUMERATOR
+    name == ENUMERATOR || name == crate::fragments::FRAGMENT
 }
 
 /// Give the variables of `function` the analyst's types, `(variable,
@@ -119,12 +120,31 @@ pub(crate) fn apply_var_types(
     words: &[(String, String)],
     store: &TypeStore,
     made: &[StackVar],
+    abi: crate::lift::Abi,
 ) {
     let mut notes = Vec::new();
     for (variable, text) in words {
         let text = text.trim();
         let refuse = |why: String| format!("{variable} is not typed {text}: {why}");
         let declares = function.name.clone();
+        // The value the function returns, which its callers read.
+        if variable == RETURN {
+            if let Err(why) = return_type(store, text, abi) {
+                notes.push(format!("the return is not typed {text}: {why}"));
+            }
+            continue;
+        }
+        // A structure passed by value, in its registers.
+        if let Some(index) = function.params.iter().position(|v| v.name == *variable) {
+            if let Ok(ty) = crate::ctype::parse_type(store, text) {
+                if store.composite(&ty).is_some() {
+                    if let Some(note) = by_value(function, index, &ty, store, abi) {
+                        notes.push(refuse(note));
+                    }
+                    continue;
+                }
+            }
+        }
         let Some(held) = function
             .params
             .iter_mut()
@@ -168,7 +188,19 @@ pub(crate) fn apply_var_types(
             .ok()
             .and_then(|old| store.size_of(&old).ok());
         match holds {
-            Some(holds) if holds == size => held.ty = spelled,
+            Some(holds) if holds == size => {
+                held.ty = spelled;
+                // A structure said of the variable before is said no more.
+                if held.fragment.take().is_some() {
+                    for param in &mut function.params {
+                        if param.fragment.as_ref().and_then(|f| f.within.as_deref())
+                            == Some(variable.as_str())
+                        {
+                            param.fragment = None;
+                        }
+                    }
+                }
+            }
             Some(holds) => notes.push(refuse(format!(
                 "{spelled} is {size} bytes, {variable} holds {holds}"
             ))),
@@ -176,6 +208,83 @@ pub(crate) fn apply_var_types(
         }
     }
     function.notes.extend(notes);
+}
+
+/// The name a function's returned value is typed by in `var_types`: a C
+/// keyword, so no variable's.
+pub const RETURN: &str = "return";
+
+/// The structure `text` a function returns, as its callers read it: in
+/// `rax`, at most eight bytes of it — under System V a structure of the
+/// INTEGER class, under Microsoft x64 one of 1, 2, 4 or 8 bytes.
+pub(crate) fn return_type(
+    store: &TypeStore,
+    text: &str,
+    abi: crate::lift::Abi,
+) -> Result<Type, String> {
+    let ty = crate::ctype::parse_type(store, text).map_err(|error| error.message)?;
+    let spelled = ty.spelled(store);
+    if store.composite(&ty).is_none() {
+        return Err(format!(
+            "only a structure or union is read at the calls, and {spelled} is neither"
+        ));
+    }
+    let size = match abi {
+        crate::lift::Abi::SystemV => store.integer_class(&ty)?,
+        crate::lift::Abi::Win64 => {
+            let size = store.size_of(&ty)?;
+            if !matches!(size, 1 | 2 | 4 | 8) {
+                return Err(format!(
+                    "Microsoft x64 returns {spelled}, of {size} bytes, through memory the caller passes"
+                ));
+            }
+            size
+        }
+    };
+    if size > 8 {
+        return Err(format!(
+            "{spelled} is {size} bytes, returned in rax and rdx, and the calls read rax alone"
+        ));
+    }
+    Ok(ty)
+}
+
+/// The structure `ty` passed by value in the parameter `index`: in its
+/// registers as the convention passes it, or — under Microsoft x64, for a
+/// size other than 1, 2, 4 or 8 bytes — by its address, the parameter a
+/// pointer to it. Why it is not, when it is not.
+fn by_value(
+    function: &mut LiftedFunction,
+    index: usize,
+    ty: &Type,
+    store: &TypeStore,
+    abi: crate::lift::Abi,
+) -> Option<String> {
+    let spelled = ty.spelled(store);
+    match abi {
+        crate::lift::Abi::SystemV => {
+            if let Err(why) = store.integer_class(ty) {
+                return Some(why);
+            }
+        }
+        crate::lift::Abi::Win64 => {
+            let size = match store.size_of(ty) {
+                Ok(size) => size,
+                Err(why) => return Some(why),
+            };
+            if !matches!(size, 1 | 2 | 4 | 8) {
+                let param = &mut function.params[index];
+                param.ty = Type::pointer(ty.clone()).spelled(store);
+                function.notes.push(format!(
+                    "{} is {}: Microsoft x64 passes {spelled}, of {size} bytes, by its address",
+                    param.name, param.ty
+                ));
+                return None;
+            }
+        }
+    }
+    let registers = crate::fragments::argument_registers(abi);
+    crate::fragments::pass_by_value(function, index, ty, store, registers).err()
 }
 
 /// What the types say of the function's variables: the pointee of each
@@ -188,8 +297,26 @@ struct Typed<'a> {
 
 /// Read the types of the variables of `function` into its body: the
 /// members and elements through its typed pointers, the enumerators of its
-/// enumerations' variables.
-pub(crate) fn read_types(function: &mut LiftedFunction, store: &TypeStore) {
+/// enumerations' variables, and the fragments of structures its values and
+/// variables hold ([`crate::fragments`]) — `returns` the structures the
+/// functions it calls return, by address. A variable a fragment gives a
+/// pointer's or an enumeration's type is read through it in turn.
+pub(crate) fn read_types(
+    function: &mut LiftedFunction,
+    store: &TypeStore,
+    returns: &BTreeMap<u64, Type>,
+) {
+    for _ in 0..3 {
+        read_pointers(function, store);
+        if !crate::fragments::read(function, store, returns) {
+            break;
+        }
+    }
+}
+
+/// The members, elements and enumerators the typed pointers and
+/// enumerations of `function` make of its body.
+fn read_pointers(function: &mut LiftedFunction, store: &TypeStore) {
     let mut typed = Typed {
         store,
         pointers: BTreeMap::new(),
@@ -659,6 +786,7 @@ mod tests {
         types: Arc<TypeStore>,
         stack_vars: Vec<StackVar>,
         var_types: Vec<(String, String)>,
+        versions: Vec<(String, u64)>,
     }
 
     impl Symbols for World {
@@ -670,6 +798,7 @@ mod tests {
             VariableEdits {
                 stack_vars: self.stack_vars.clone(),
                 var_types: self.var_types.clone(),
+                versions: self.versions.clone(),
                 ..VariableEdits::default()
             }
         }
@@ -687,7 +816,8 @@ mod tests {
         struct point { int x; int y; long tag; };\n\
         struct counts { long n; int a[4]; };\n\
         enum state { S_IDLE, S_READY, S_DONE };\n\
-        enum mode { M_READ = 1, M_WRITE = 2, M_EXEC = 4 };";
+        enum mode { M_READ = 1, M_WRITE = 2, M_EXEC = 4 };\n\
+        struct node { struct node *next; int v; };";
 
     /// The pseudocode of `bytes` lifted as `f` under `TYPES`, with the
     /// analyst's stack variables and variable types, without the comment
@@ -697,6 +827,18 @@ mod tests {
         stack_vars: &[(i64, u32, &str, &str)],
         var_types: &[(&str, &str)],
     ) -> String {
+        let (text, _) = lifted(bytes, stack_vars, var_types, &[]);
+        text
+    }
+
+    /// [`c`], with the analyst's new versions, and the variables as the
+    /// listing gives them: name and type.
+    fn lifted(
+        bytes: &[u8],
+        stack_vars: &[(i64, u32, &str, &str)],
+        var_types: &[(&str, &str)],
+        versions: &[(&str, u64)],
+    ) -> (String, Vec<(String, String)>) {
         let mut store = TypeStore::new(DataModel::LP64);
         crate::ctype::parse_into(&mut store, TYPES).unwrap();
         let world = World {
@@ -714,6 +856,10 @@ mod tests {
                 .iter()
                 .map(|(v, t)| (v.to_string(), t.to_string()))
                 .collect(),
+            versions: versions
+                .iter()
+                .map(|(v, at)| (v.to_string(), *at))
+                .collect(),
         };
         let mut ctx = X86IcedContext::default();
         let disasm = Disasm::decode(&mut ctx, bytes, BASE).expect("the code decodes");
@@ -729,13 +875,20 @@ mod tests {
             &Options::default(),
         )
         .expect("the code lifts");
-        emit_function(&stages.function, &Options::default())
+        let text = emit_function(&stages.function, &Options::default())
             .lines
             .iter()
             .map(|line| line.text.as_str())
             .filter(|text| !(text.starts_with("// void: ") || text.starts_with("// returns ")))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        let variables = stages
+            .function
+            .variables()
+            .into_iter()
+            .map(|v| (v.name, v.ty))
+            .collect();
+        (text, variables)
     }
 
     /// push rbp; mov rbp, rsp; mov dword [rbp-0x10], 1; mov dword
@@ -862,7 +1015,7 @@ mod tests {
             &[],
             &[
                 ("a", "int"),
-                ("a", "struct point"),
+                ("a", "union word"),
                 ("zz", "int"),
                 ("a", "struct nowhere *"),
             ],
@@ -873,7 +1026,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "// a is not typed struct point: struct point is no scalar: a structure, union or array on the stack is a stack variable"
+                "// a is not typed union word: union word has a member of floating type, which System V passes in vector registers"
             ),
             "{text}"
         );
@@ -884,5 +1037,260 @@ mod tests {
         // A pointer to a structure the types do not define is a pointer.
         assert!(text.contains("int f(struct nowhere *a)"), "{text}");
         assert!(text.contains("return *(int *)((char *)a + 4);"), "{text}");
+    }
+
+    /// push rbp; mov rbp, rsp; mov dword [rbp-0x10], 1; mov dword
+    /// [rbp-0xc], 2: a `struct pair p` at [sp-0x18] filled.
+    const FILL: [u8; 18] = [
+        0x55, 0x48, 0x89, 0xe5, 0xc7, 0x45, 0xf0, 0x01, 0x00, 0x00, 0x00, 0xc7, 0x45, 0xf4, 0x02,
+        0x00, 0x00, 0x00,
+    ];
+
+    /// `FILL`, then `tail`.
+    fn filled(tail: &[u8]) -> Vec<u8> {
+        [&FILL[..], tail].concat()
+    }
+
+    const P: (i64, u32, &str, &str) = (-0x18, 8, "p", "struct pair");
+    const Q: (i64, u32, &str, &str) = (-0x20, 8, "q", "struct pair");
+
+    #[test]
+    fn a_member_loaded_into_a_register_reads_as_the_member() {
+        // mov ebx, [rbp-0xc]; call; mov eax, ebx; add eax, ebx; pop rbp; ret
+        let code = filled(&[
+            0x8b, 0x5d, 0xf4, 0xe8, 0x00, 0x01, 0x00, 0x00, 0x89, 0xd8, 0x01, 0xd8, 0x5d, 0xc3,
+        ]);
+        let text = c(&code, &[P], &[]);
+        assert!(text.contains("return p.b + p.b;"), "{text}");
+        // test esi, esi; je +5; mov rax, [rdi]; jmp +3; mov rax, [rdi]; mov
+        // eax, [rax+8]; ret: the member is a pointer, which the register
+        // both paths load it into takes as its type, and reads through.
+        let code = [
+            0x85, 0xf6, 0x74, 0x05, 0x48, 0x8b, 0x07, 0xeb, 0x03, 0x48, 0x8b, 0x07, 0x8b, 0x40,
+            0x08, 0xc3,
+        ];
+        let text = c(&code, &[], &[("a", "struct node *")]);
+        assert!(text.contains("return a->next->v;"), "{text}");
+        // A register that holds the member, through a call: `b = a->next;
+        // g(); return *(int *)(b + 8);` — the register takes the member's
+        // type, and reads through it.
+        use crate::ast::AstNode;
+        use crate::lift::{LiftedFunction, Placement, Statement, Variable};
+        let mut store = TypeStore::new(DataModel::LP64);
+        crate::ctype::parse_into(&mut store, TYPES).unwrap();
+        let var = AstNode::var;
+        let next = crate::typed::member(var("a"), "next", true);
+        let body = vec![
+            Statement::plain(
+                AstNode::Assign {
+                    lhs: Box::new(var("b")),
+                    rhs: Box::new(next),
+                },
+                vec![0x1000],
+            ),
+            Statement::plain(
+                AstNode::Call {
+                    callee: Box::new(var("g")),
+                    args: Vec::new(),
+                },
+                vec![0x1004],
+            ),
+            Statement::plain(
+                AstNode::Return {
+                    value: Some(Box::new(AstNode::Deref {
+                        target: Box::new(AstNode::Cast {
+                            ty: "int *".to_string(),
+                            target: Box::new(AstNode::binary(
+                                var("b"),
+                                crate::ast::BinaryOp::Add,
+                                AstNode::constant(8, 8),
+                            )),
+                        }),
+                    })),
+                },
+                vec![0x1009],
+            ),
+        ];
+        let mut function = LiftedFunction {
+            name: "f".to_string(),
+            address: 0x1000,
+            return_type: "int".to_string(),
+            params: vec![Variable::new("struct node *", "a").placed(Placement::register(7, 64))],
+            locals: vec![Variable::new("long", "b").placed(Placement::register(3, 64))],
+            body,
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        super::read_types(&mut function, &store, &Default::default());
+        assert_eq!(function.locals[0].ty, "struct node *");
+        let text = emit_function(&function, &Options::default())
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("  b = a->next;\n"), "{text}");
+        assert!(text.contains("  return b->v;"), "{text}");
+    }
+
+    #[test]
+    fn eight_bytes_shifted_right_by_32_are_the_second_member() {
+        // mov rax, [rbp-0x10]; shr rax, 32; pop rbp; ret
+        let code = filled(&[0x48, 0x8b, 0x45, 0xf0, 0x48, 0xc1, 0xe8, 0x20, 0x5d, 0xc3]);
+        assert_eq!(
+            c(&code, &[P], &[]),
+            "long f(void)\n{\n  struct pair p;\n\n  p.a = 1;\n  p.b = 2;\n  return (unsigned long)(unsigned int)p.b;\n}"
+        );
+        // sar: the member with its sign.
+        let code = filled(&[0x48, 0x8b, 0x45, 0xf0, 0x48, 0xc1, 0xf8, 0x20, 0x5d, 0xc3]);
+        assert!(c(&code, &[P], &[]).contains("return (long)p.b;"));
+        // Through a pointer: mov rax, [rdi]; shr rax, 32; mov eax, eax... as
+        // the low half of the result.
+        let code = [0x48, 0x8b, 0x07, 0x48, 0xc1, 0xe8, 0x20, 0xc3];
+        assert!(c(&code, &[], &[("a", "struct pair *")])
+            .contains("return (unsigned long)(unsigned int)a->b;"));
+    }
+
+    #[test]
+    fn a_truncation_is_the_first_member() {
+        // mov rax, [rbp-0x10]; mov [rbp-0x14], eax; mov eax, [rbp-0x14]
+        let code = filled(&[
+            0x48, 0x8b, 0x45, 0xf0, 0x89, 0x45, 0xec, 0x8b, 0x45, 0xec, 0x5d, 0xc3,
+        ]);
+        assert!(c(&code, &[P], &[]).contains("return p.a;"));
+        // mov rax, [rbp-0x10]; and eax, 0xffffffff... as a mask: and rax,
+        // 0xffff keeps the low two bytes, which are no member's.
+        let code = filled(&[
+            0x48, 0x8b, 0x45, 0xf0, 0x48, 0x25, 0xff, 0xff, 0x00, 0x00, 0x5d, 0xc3,
+        ]);
+        assert!(c(&code, &[P], &[]).contains("return p & 0xffff;"));
+    }
+
+    #[test]
+    fn a_fragment_stored_into_a_structure_is_a_member_assigned_and_a_run_a_copy() {
+        // mov rax, [rbp-0x10]; shr rax, 32; mov [rbp-0x14], eax; mov eax,
+        // [rbp-0x18]
+        let code = filled(&[
+            0x48, 0x8b, 0x45, 0xf0, 0x48, 0xc1, 0xe8, 0x20, 0x89, 0x45, 0xec, 0x8b, 0x45, 0xe8,
+            0x5d, 0xc3,
+        ]);
+        assert!(c(&code, &[P, Q], &[]).contains("  q.b = p.b;\n"));
+        // mov eax, [rbp-0x10]; mov [rbp-0x18], eax; mov eax, [rbp-0xc];
+        // mov [rbp-0x14], eax: two members in order, a copy.
+        let code = filled(&[
+            0x8b, 0x45, 0xf0, 0x89, 0x45, 0xe8, 0x8b, 0x45, 0xf4, 0x89, 0x45, 0xec, 0x8b, 0x45,
+            0xe8, 0x5d, 0xc3,
+        ]);
+        assert_eq!(
+            c(&code, &[P, Q], &[]),
+            "int f(void)\n{\n  struct pair p;\n  struct pair q;\n\n  p.a = 1;\n  p.b = 2;\n  q = p;\n  return q.a;\n}"
+        );
+        // The members in the other order are two stores.
+        let code = filled(&[
+            0x8b, 0x45, 0xf4, 0x89, 0x45, 0xec, 0x8b, 0x45, 0xf0, 0x89, 0x45, 0xe8, 0x8b, 0x45,
+            0xe8, 0x5d, 0xc3,
+        ]);
+        assert!(c(&code, &[P, Q], &[]).contains("q.b = p.b;\n  q.a = p.a;"));
+        // Through pointers: mov eax, [rsi]; mov [rdi], eax; mov eax,
+        // [rsi+4]; mov [rdi+4], eax; xor eax, eax; ret
+        let code = [
+            0x8b, 0x06, 0x89, 0x07, 0x8b, 0x46, 0x04, 0x89, 0x47, 0x04, 0x31, 0xc0, 0xc3,
+        ];
+        let text = c(
+            &code,
+            &[],
+            &[("a", "struct pair *"), ("b", "struct pair *")],
+        );
+        assert!(text.contains("  *a = *b;\n"), "{text}");
+    }
+
+    #[test]
+    fn two_members_joined_in_a_register_and_shifted_out_are_the_member() {
+        // mov edx, [rsi+4]; shl rdx, 32; mov eax, [rsi]; or rax, rdx; sar
+        // rax, 32; mov [rdi+4], eax; xor eax, eax; ret — GCC's copy of y.
+        let code = [
+            0x8b, 0x56, 0x04, 0x48, 0xc1, 0xe2, 0x20, 0x8b, 0x06, 0x48, 0x09, 0xd0, 0x48, 0xc1,
+            0xf8, 0x20, 0x89, 0x47, 0x04, 0x31, 0xc0, 0xc3,
+        ];
+        let text = c(
+            &code,
+            &[],
+            &[("a", "struct pair *"), ("b", "struct pair *")],
+        );
+        assert!(text.contains("  a->b = b->b;\n"), "{text}");
+    }
+
+    #[test]
+    fn a_structure_passed_by_value_reads_its_members_from_its_registers() {
+        // mov rax, rdi; sar rax, 32; lea eax, [rax+rax*2]; add eax, edi; ret
+        let code = [
+            0x48, 0x89, 0xf8, 0x48, 0xc1, 0xf8, 0x20, 0x8d, 0x04, 0x40, 0x01, 0xf8, 0xc3,
+        ];
+        let (text, variables) = lifted(&code, &[], &[("a", "struct pair")], &[]);
+        assert_eq!(
+            text,
+            "int f(struct pair a)\n{\n  return (a.b + (a.b * 2)) + a.a;\n}"
+        );
+        assert_eq!(variables, [("a".to_string(), "struct pair".to_string())]);
+        // Sixteen bytes in rdi and rsi: mov rax, rdi; shr rax, 32; add eax,
+        // edi; add rax, rsi; ret
+        let code = [
+            0x48, 0x89, 0xf8, 0x48, 0xc1, 0xe8, 0x20, 0x01, 0xf8, 0x48, 0x01, 0xf0, 0xc3,
+        ];
+        let (text, variables) = lifted(&code, &[], &[("a", "struct point")], &[]);
+        assert!(text.starts_with("long f(struct point a)\n"), "{text}");
+        assert!(
+            text.contains("(a.y + a.x)") && text.contains("+ a.tag;"),
+            "{text}"
+        );
+        assert_eq!(
+            variables,
+            [
+                ("a".to_string(), "struct point [0..8) (x, y)".to_string()),
+                ("b".to_string(), "struct point [8..16) (tag)".to_string()),
+            ]
+        );
+        // A new version of the parameter holds its bytes too.
+        let (text, variables) = lifted(&code, &[], &[("a", "struct point")], &[("a", BASE + 7)]);
+        assert!(text.contains("a_2 = a;"), "{text}");
+        assert!(
+            variables.contains(&("a_2".to_string(), "struct point [0..8) (x, y)".to_string())),
+            "{variables:?}"
+        );
+    }
+
+    #[test]
+    fn a_structure_returned_in_rax_is_read_as_its_member_at_the_call() {
+        // call 0x100a; shr rax, 32; ret; mov eax, edi; ret
+        let code = [
+            0xe8, 0x05, 0x00, 0x00, 0x00, 0x48, 0xc1, 0xe8, 0x20, 0xc3, 0x89, 0xf8, 0xc3,
+        ];
+        let text = c(&code, &[], &[("return", "struct pair")]);
+        assert!(text.contains("sub_100a().b"), "{text}");
+        // A return of floating members is not read, and says why.
+        let text = c(&code, &[], &[("return", "union word")]);
+        assert!(
+            text.contains(
+                "// the return is not typed union word: union word has a member of floating type"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn bytes_of_several_members_read_from_the_first_with_the_members_in_a_comment() {
+        // mov qword [rbp-8], 7; mov rax, [rbp-0x10]; pop rbp; ret
+        let code = filled(&[
+            0x48, 0xc7, 0x45, 0xf8, 0x07, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x45, 0xf0, 0x5d, 0xc3,
+        ]);
+        let text = c(&code, &[(-0x18, 16, "p", "struct point")], &[]);
+        assert!(
+            text.contains("return *(long *)&p.x /* p.x, p.y */;"),
+            "{text}"
+        );
     }
 }

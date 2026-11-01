@@ -5076,11 +5076,8 @@ mod tests {
             binary.pseudocode(0x1060).unwrap_err().to_string(),
             "not lifted yet: the block ends in hlt"
         );
-        // register_tm_clones shifts, which the lifter does not read yet.
-        assert_eq!(
-            binary.pseudocode(0x10c0).unwrap_err().to_string(),
-            "not lifted yet: shr"
-        );
+        // register_tm_clones shifts, which the lifter reads.
+        assert!(binary.pseudocode(0x10c0).is_ok());
     }
 
     #[test]

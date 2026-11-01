@@ -148,9 +148,9 @@
 //! (`jumps to 0x…`), or through a register or memory that holds no function
 //! the lifter can name (`an indirect jump at 0x…`), or with the stack not
 //! back at its entry value; any mnemonic outside `mov`, `movsx`, `movsxd`,
-//! `movzx`, `cdqe`, `add`, `sub`, `and`, `or`, `xor`, `inc`, `dec`, `imul`,
-//! `lea`, `push`, `pop`, `leave`, `call`, `ret`, `cmp`, `test`, `jmp`, the
-//! conditional jumps, `nop` and `endbr64`; an indirect call; a branch whose
+//! `movzx`, `cdqe`, `add`, `sub`, `and`, `or`, `xor`, `shl`, `shr` and `sar`
+//! by a constant, `inc`, `dec`, `imul`, `lea`, `push`, `pop`, `leave`,
+//! `call`, `ret`, `cmp`, `test`, `jmp`, the conditional jumps, `nop` and `endbr64`; an indirect call; a branch whose
 //! flags are not tracked; a stack the lifter loses track of or that differs
 //! between paths; `ret`s that disagree; and a value that reaches a
 //! statement without being known — a register read before it is written
@@ -399,6 +399,11 @@ pub struct Variable {
     /// made it from — more than one for a variable another was merged
     /// into, none where the lift does not say.
     pub placements: Vec<Placement>,
+    /// The bytes of a structure the variable holds, when it holds some:
+    /// a structure passed by value in its register, or read into it from
+    /// one ([`crate::fragments`]). `ty` stays the integer the machine
+    /// holds them in.
+    pub fragment: Option<Fragment>,
 }
 
 impl Variable {
@@ -408,6 +413,17 @@ impl Variable {
             ty: ty.into(),
             name: name.into(),
             placements: Vec::new(),
+            fragment: None,
+        }
+    }
+
+    /// The type as the variables listing spells it: the C type, or the
+    /// structure and the bytes of it the variable holds, `struct point
+    /// [4..8) (y)`, `struct point` for the whole.
+    pub fn shown_type(&self) -> String {
+        match &self.fragment {
+            Some(fragment) => fragment.spelled(),
+            None => self.ty.clone(),
         }
     }
 
@@ -415,6 +431,54 @@ impl Variable {
     pub fn placed(mut self, placement: Placement) -> Self {
         self.placements.push(placement);
         self
+    }
+}
+
+/// The bytes `[offset, offset + size)` of a structure or union held in a
+/// variable: a type fragment. `struct point [4..8) (y)` is the member `y`
+/// of a `struct point { int x; int y; }`, `[0..8)` the whole of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment {
+    /// The structure or union, as C spells it: `struct point`.
+    pub of: String,
+    /// The first byte held, from the start of the structure.
+    pub offset: u64,
+    /// How many bytes are held.
+    pub size: u64,
+    /// The members the bytes are, wholly or in part, as their paths spell
+    /// them: `y`, `inner.g`, `a[2]`.
+    pub members: Vec<String>,
+    /// Whether the bytes are all of the structure.
+    pub whole: bool,
+    /// The structure the bytes are of, where it is named and the variable
+    /// stands for its bytes wherever it is read: the parameter a
+    /// structure passed by value is, of the register that carries its
+    /// second eight bytes.
+    pub within: Option<String>,
+    /// Whether the variable, wider than the bytes, holds them with their
+    /// sign — after `sar` — rather than with zeros.
+    pub signed: bool,
+}
+
+impl Fragment {
+    /// The fragment as the variables listing spells it: `struct point
+    /// [4..8) (y)`, `struct point [0..8) (x, y)`, and the structure alone
+    /// for the whole of it.
+    pub fn spelled(&self) -> String {
+        if self.whole {
+            return self.of.clone();
+        }
+        let members = if self.members.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", self.members.join(", "))
+        };
+        format!(
+            "{} [{}..{}){members}",
+            self.of,
+            self.offset,
+            self.offset + self.size
+        )
     }
 }
 
@@ -1087,7 +1151,7 @@ fn lift_inner(
     function.notes.extend(refused);
     slots.made = crate::stack_vars::make(&mut function, &made, &store);
     // The types the analyst gave the lift's variables, by their lift names.
-    crate::typed::apply_var_types(&mut function, &edits.var_types, &store, &slots.made);
+    crate::typed::apply_var_types(&mut function, &edits.var_types, &store, &slots.made, abi);
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
@@ -1101,7 +1165,20 @@ fn lift_inner(
         .collect();
     crate::merge::apply_edits_with(&mut function, &edits, &SymbolSites(symbols), &tables);
     // The members, elements and enumerators the types make of the body.
-    crate::typed::read_types(&mut function, &store);
+    // The structures the callees return, by the analyst's word on each.
+    let returns: BTreeMap<u64, crate::types::Type> = call_sites
+        .values()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|&callee| {
+            let words = symbols.variable_edits(callee).var_types;
+            let (_, text) = words.iter().find(|(v, _)| v == crate::typed::RETURN)?;
+            crate::typed::return_type(&store, text, abi)
+                .ok()
+                .map(|ty| (callee, ty))
+        })
+        .collect();
+    crate::typed::read_types(&mut function, &store, &returns);
     let high = if keep {
         function.body.clone()
     } else {
@@ -2009,6 +2086,17 @@ enum Producer {
     Result(Value),
     /// `bt value, index`: the carry is the bit.
     Bit(Value, Value),
+}
+
+/// The direction and kind of a shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shift {
+    /// `shl`: towards the high bits, zeros in.
+    Left,
+    /// `shr`: towards the low bits, zeros in.
+    Logical,
+    /// `sar`: towards the low bits, the sign in.
+    Arithmetic,
 }
 
 /// The flags one instruction wrote: what set them, at what width, where,
@@ -3186,13 +3274,25 @@ impl<'a> Lifter<'a> {
                 bits,
             );
         }
-        // Never written here: the slot is a variable, read as it is.
-        self.locals.entry(offset).or_insert(bits);
-        let value = Value::node(
-            AstNode::var(local_name(self.options.stack_slot_names, offset)),
-            bits,
-            vec![at],
-        );
+        // Never written here: the slot is a variable, read as it is — and
+        // inside an analyst's variable, read at another width than the
+        // slot's first, as the bytes at its address, which the variable
+        // reads as the part they are.
+        let declared = *self.locals.entry(offset).or_insert(bits);
+        let name = AstNode::var(local_name(self.options.stack_slot_names, offset));
+        let node = if declared != bits && self.is_covered(offset) {
+            AstNode::Deref {
+                target: Box::new(AstNode::Cast {
+                    ty: format!("{} *", type_name(bits)),
+                    target: Box::new(AstNode::AddressOf {
+                        target: Box::new(name),
+                    }),
+                }),
+            }
+        } else {
+            name
+        };
+        let value = Value::node(node, bits, vec![at]);
         self.state.stack.insert(
             offset,
             Slot {
@@ -3750,6 +3850,9 @@ impl<'a> Lifter<'a> {
             Mnemonic::And => self.binary_op(BinaryOp::And, ins),
             Mnemonic::Or => self.binary_op(BinaryOp::Or, ins),
             Mnemonic::Xor => self.binary_op(BinaryOp::Xor, ins),
+            Mnemonic::Shl | Mnemonic::Sal => self.shift(Shift::Left, ins),
+            Mnemonic::Shr => self.shift(Shift::Logical, ins),
+            Mnemonic::Sar => self.shift(Shift::Arithmetic, ins),
             Mnemonic::Imul => self.imul(ins),
             Mnemonic::Inc => self.step_by(BinaryOp::Add, ins),
             Mnemonic::Dec => self.step_by(BinaryOp::Sub, ins),
@@ -3889,6 +3992,76 @@ impl<'a> Lifter<'a> {
             bits,
             ins,
         );
+        self.assign(dest, bits, result, ins)
+    }
+
+    /// `shl`, `shr` and `sar` by a constant count: `a << 3`, `(unsigned
+    /// long)a >> 32` — a logical shift is the unsigned type's — and `a >>
+    /// 2` of the signed type of the width. The count is masked as the
+    /// machine masks it; a count of 0 writes the value back and leaves the
+    /// flags, and another sets the zero and sign flags from the result. A
+    /// count in `cl` is not lifted yet.
+    fn shift(&mut self, kind: Shift, ins: &DecodedInsn) -> Result<(), NotLifted> {
+        let (dest, src, bits) = self.two(ins)?;
+        let Operand::Imm(count) = src else {
+            return Err(NotLifted::new(format!(
+                "{} by a register",
+                mnemonic_name(ins)
+            )));
+        };
+        let count = (*count as u32) & if bits == 64 { 63 } else { 31 };
+        let value = self.value_of(dest, bits, ins)?;
+        if count == 0 {
+            let value = value.also_from(ins.address);
+            return self.assign(dest, bits, value, ins);
+        }
+        let from = sorted(value.from.iter().copied().chain([ins.address]));
+        let result = match &value.sym {
+            Sym::Unknown(reason) => Value::unknown(reason.clone(), bits),
+            Sym::Stack(_) => Value::unknown(
+                format!("a shift of the stack pointer at {:#x}", ins.address),
+                bits,
+            ),
+            Sym::Node(AstNode::Constant { value: k, .. }) => {
+                let k = *k & mask(bits);
+                let shifted = match kind {
+                    Shift::Left => k << count,
+                    Shift::Logical => k >> count,
+                    Shift::Arithmetic => (signed(k, bits) >> count) as u64,
+                };
+                Value::node(constant(i128::from(shifted & mask(bits)), bits), bits, from)
+            }
+            _ => {
+                let node = self.node_of(&value)?;
+                let operand = match kind {
+                    Shift::Left => node,
+                    Shift::Logical => AstNode::Cast {
+                        ty: unsigned_type_name(bits).to_string(),
+                        target: Box::new(node),
+                    },
+                    // Signed already: a variable of the width, or a cast to
+                    // its signed type.
+                    Shift::Arithmetic => match &node {
+                        AstNode::Var { .. } => node,
+                        AstNode::Cast { ty, .. } if ty == type_name(bits) => node,
+                        _ => AstNode::Cast {
+                            ty: type_name(bits).to_string(),
+                            target: Box::new(node),
+                        },
+                    },
+                };
+                let op = match kind {
+                    Shift::Left => BinaryOp::Shl,
+                    Shift::Logical | Shift::Arithmetic => BinaryOp::Shr,
+                };
+                Value::node(
+                    AstNode::binary(operand, op, constant(i128::from(count), 8)),
+                    bits,
+                    from,
+                )
+            }
+        };
+        self.set_flags(Producer::Result(result.clone()), bits, ins);
         self.assign(dest, bits, result, ins)
     }
 
