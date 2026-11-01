@@ -495,6 +495,13 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// The parameters and locals of the function at `address`, each with
+    /// where it lives and the statements that assign and read it, by the
+    /// names the lift declares. None from a provider that does not lift.
+    fn variables(&self, _address: u64) -> Vec<ag_image::VariableInfo> {
+        Vec::new()
+    }
+
     /// Bytes around an address, when available.
     ///
     /// The rows hold the bytes of the file around the address, sixteen to a

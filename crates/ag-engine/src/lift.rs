@@ -386,6 +386,94 @@ pub struct Variable {
     pub ty: String,
     /// The name.
     pub name: String,
+    /// Where the variable lives: the register, stack slot or flag the lift
+    /// made it from — more than one for a variable another was merged
+    /// into, none where the lift does not say.
+    pub placements: Vec<Placement>,
+}
+
+impl Variable {
+    /// A variable of type `ty` named `name`, with no placement.
+    pub fn new(ty: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            ty: ty.into(),
+            name: name.into(),
+            placements: Vec::new(),
+        }
+    }
+
+    /// The variable, living in `placement`.
+    pub fn placed(mut self, placement: Placement) -> Self {
+        self.placements.push(placement);
+        self
+    }
+}
+
+/// Where a variable of a lifted function lives.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Placement {
+    /// A general register at a width: `name` as the width spells it,
+    /// `eax`, and `full` the whole register it is part of, `rax`.
+    Register { name: String, full: String },
+    /// A stack slot: its offset from the stack pointer at the function's
+    /// entry, and its size in bytes.
+    Stack { offset: i64, size: u32 },
+    /// A flag of the flags register, `zf`, `cf`. The x86 lift reads its
+    /// flags as conditions and keeps no flag variable; a plugin's lift may.
+    Flag(String),
+    /// No register or slot of its own: a value the lift saved before what
+    /// it was computed from changed.
+    Temporary,
+    /// A variable of the function `callee`, inlined here: where it lives
+    /// in the callee's own frame.
+    Inlined {
+        callee: String,
+        placement: Box<Placement>,
+    },
+}
+
+impl Placement {
+    /// The general register `index` at the width `bits`.
+    pub(crate) fn register(index: u32, bits: u32) -> Self {
+        Placement::Register {
+            name: gpr_name(index, bits),
+            full: gpr_name(index, 64),
+        }
+    }
+
+    /// The placement as the variables listing spells it: `rdi`, `eax (in
+    /// rax)`, `[sp-0x14] 4 bytes`, `zf`, `temporary`, and `rdi, inlined
+    /// from f` for a callee's.
+    pub fn spelled(&self) -> String {
+        match self {
+            Placement::Register { name, full } if name == full => name.clone(),
+            Placement::Register { name, full } => format!("{name} (in {full})"),
+            Placement::Stack { offset, size } => {
+                let sign = if *offset < 0 { '-' } else { '+' };
+                let bytes = if *size == 1 { "byte" } else { "bytes" };
+                format!("[sp{sign}{:#x}] {size} {bytes}", offset.unsigned_abs())
+            }
+            Placement::Flag(name) => name.clone(),
+            Placement::Temporary => "temporary".to_string(),
+            Placement::Inlined { callee, placement } => {
+                format!("{}, inlined from {callee}", placement.spelled())
+            }
+        }
+    }
+
+    /// The placement of a variable of `callee` inlined into a caller.
+    pub fn inlined_from(&self, callee: &str) -> Self {
+        Placement::Inlined {
+            callee: callee.to_string(),
+            placement: Box::new(self.clone()),
+        }
+    }
+}
+
+impl std::fmt::Display for Placement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.spelled())
+    }
 }
 
 /// One statement of a lifted function, with the instructions it came from.
@@ -3133,10 +3221,9 @@ impl<'a> Lifter<'a> {
         for offset in stale {
             let slot = self.state.stack.get(&offset).expect("found above").clone();
             let temp = format!("v{}", self.temps.len() + self.saved.len() + 1);
-            self.saved.push(Variable {
-                ty: type_name(slot.bits).to_string(),
-                name: temp.clone(),
-            });
+            self.saved.push(
+                Variable::new(type_name(slot.bits), temp.clone()).placed(Placement::Temporary),
+            );
             self.statements.push(Stmt::Assign {
                 lhs: AstNode::var(temp.clone()),
                 value: slot.value.clone(),
@@ -4990,10 +5077,11 @@ impl<'a> Lifter<'a> {
                             pending = Some((temp, node, addresses));
                         } else {
                             let bits = self.temps[temp].bits.unwrap_or(64);
-                            declared.push(Variable {
-                                ty: type_name(bits).to_string(),
-                                name: name.clone(),
-                            });
+                            // A call's result, held in the accumulator.
+                            declared.push(
+                                Variable::new(type_name(bits), name.clone())
+                                    .placed(Placement::register(RAX, bits)),
+                            );
                             body.push(Statement::plain(
                                 AstNode::Assign {
                                     lhs: Box::new(AstNode::var(name)),
@@ -5027,14 +5115,16 @@ impl<'a> Lifter<'a> {
             Parameters::LastRead => self.params.keys().next_back().map_or(0, |last| last + 1),
             Parameters::Convention => self.abi.argument_registers().len(),
         };
+        let registers = self.abi.argument_registers();
         let params = (0..count)
-            .map(|position| Variable {
-                ty: self
-                    .params
-                    .get(&position)
-                    .map_or("long", |&bits| type_name(bits))
-                    .to_string(),
-                name: parameter_name(position),
+            .map(|position| {
+                let bits = self.params.get(&position).copied();
+                let variable =
+                    Variable::new(bits.map_or("long", type_name), parameter_name(position));
+                match registers.get(position) {
+                    Some(&index) => variable.placed(Placement::register(index, bits.unwrap_or(64))),
+                    None => variable,
+                }
             })
             .collect();
 
@@ -5045,20 +5135,30 @@ impl<'a> Lifter<'a> {
             .locals
             .iter()
             .rev()
-            .map(|(&offset, &bits)| Variable {
-                ty: type_name(bits).to_string(),
-                name: local_name(self.options.stack_slot_names, offset),
+            .map(|(&offset, &bits)| {
+                Variable::new(
+                    type_name(bits),
+                    local_name(self.options.stack_slot_names, offset),
+                )
+                .placed(Placement::Stack {
+                    offset,
+                    size: bits / 8,
+                })
             })
             .collect();
-        let mut merged: Vec<&Merged> = self.merged.values().collect();
-        merged.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut merged: Vec<(u32, &Merged)> = self
+            .merged
+            .iter()
+            .map(|(&(_, index), merged)| (index, merged))
+            .collect();
+        merged.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
         locals.extend(
             merged
                 .into_iter()
-                .filter(|merged| mentioned(&merged.name))
-                .map(|merged| Variable {
-                    ty: type_name(merged.bits).to_string(),
-                    name: merged.name.clone(),
+                .filter(|(_, merged)| mentioned(&merged.name))
+                .map(|(index, merged)| {
+                    Variable::new(type_name(merged.bits), merged.name.clone())
+                        .placed(Placement::register(index, merged.bits))
                 }),
         );
         let mut temporaries: Vec<Variable> = self.declared.clone();

@@ -1,4 +1,5 @@
-//! The bottom workspace: search results, problems, analysis log, patch history.
+//! The bottom workspace: search results, problems, analysis log, patch
+//! history, and the variables of the function on screen.
 
 use iced::widget::{
     button, container, mouse_area, scrollable, Column, Container, Row, Space, Text,
@@ -22,15 +23,18 @@ pub enum BottomTab {
     AnalysisLog,
     /// Patch history.
     PatchHistory,
+    /// The variables of the function on screen, with where each lives.
+    Variables,
 }
 
 impl BottomTab {
     /// Every tab, in display order.
-    pub const ALL: [BottomTab; 4] = [
+    pub const ALL: [BottomTab; 5] = [
         BottomTab::SearchResults,
         BottomTab::Problems,
         BottomTab::AnalysisLog,
         BottomTab::PatchHistory,
+        BottomTab::Variables,
     ];
 
     /// The tab label.
@@ -40,6 +44,7 @@ impl BottomTab {
             BottomTab::Problems => "Problems",
             BottomTab::AnalysisLog => "Analysis Log",
             BottomTab::PatchHistory => "Patch History",
+            BottomTab::Variables => "Variables",
         }
     }
 }
@@ -78,6 +83,7 @@ fn tab_strip(app: &App) -> Element<'_, Message> {
             BottomTab::Problems => app.bottom.problems.len(),
             BottomTab::AnalysisLog => app.bottom.log.len(),
             BottomTab::PatchHistory => app.annotations.patch_records().len(),
+            BottomTab::Variables => app.shown_variables().len(),
         };
 
         let active = app.bottom.tab == tab;
@@ -273,5 +279,107 @@ fn content(app: &App) -> Element<'_, Message> {
                 .width(Length::Fill)
                 .into()
         }
+        BottomTab::Variables => variables(app),
     }
+}
+
+/// The Variables tab: a row a variable of the function on screen — its
+/// name, the analyst's when renamed with the lift's beside it, its type,
+/// where it lives, and how many statements assign and read it. Clicking a
+/// row selects the first line of the pseudocode that names it; its button
+/// renames it.
+fn variables(app: &App) -> Element<'_, Message> {
+    let rows = app.shown_variables();
+    if rows.is_empty() {
+        return subtle(if app.work.listing_of.is_some() {
+            "This function declares no variables, or was not lifted."
+        } else {
+            "Open a function to list its variables."
+        })
+        .into();
+    }
+    let cell = |text: String, width: f32, tint: iced::Color| {
+        Text::new(text)
+            .size(12)
+            .color(tint)
+            .font(MONO)
+            .width(Length::Fixed(width))
+    };
+    let header = Row::new()
+        .spacing(12)
+        .padding([2, 8])
+        .push(cell("name".into(), 200.0, color::MUTED))
+        .push(cell("type".into(), 110.0, color::MUTED))
+        .push(cell("kind".into(), 50.0, color::MUTED))
+        .push(
+            Text::new("placement")
+                .size(12)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fill),
+        )
+        .push(cell("defs".into(), 40.0, color::MUTED))
+        .push(cell("uses".into(), 40.0, color::MUTED))
+        .push(Space::new().width(Length::Fixed(64.0)));
+    let mut list = Column::new().spacing(0).width(Length::Fill).push(header);
+    for (index, row) in rows.into_iter().enumerate() {
+        let selected = app.bottom.selected_variable.as_deref() == Some(row.lift_name.as_str());
+        let name = if row.name == row.lift_name {
+            row.name.clone()
+        } else {
+            format!("{} ({})", row.name, row.lift_name)
+        };
+        let line = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .push(cell(name, 200.0, color::TEXT))
+            .push(cell(row.ty.clone(), 110.0, color::TEXT))
+            .push(cell(row.kind.name().to_string(), 50.0, color::MUTED))
+            .push(
+                Text::new(row.placement_text())
+                    .size(12)
+                    .color(color::ADDR)
+                    .font(MONO)
+                    .width(Length::Fill),
+            )
+            .push(cell(row.defined_at.len().to_string(), 40.0, color::TEXT))
+            .push(cell(row.used_at.len().to_string(), 40.0, color::TEXT))
+            .push(
+                button::Button::new(Text::new("Rename").size(11).color(color::MUTED))
+                    .on_press(Message::VariableRename(row.lift_name.clone()))
+                    .padding([2, 8])
+                    .width(Length::Fixed(64.0))
+                    .style(|_, status| button::Style {
+                        background: match status {
+                            button::Status::Hovered | button::Status::Pressed => {
+                                Some(Background::Color(color::PANEL_ALT))
+                            }
+                            _ => None,
+                        },
+                        text_color: color::MUTED,
+                        border: Border {
+                            color: color::LINE,
+                            width: 1.0,
+                            radius: 5.0.into(),
+                        },
+                        ..button::Style::default()
+                    }),
+            );
+        list = list.push(
+            mouse_area(
+                Container::new(line)
+                    .padding([2, 8])
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: selected.then_some(Background::Color(color::FOCUS_BG)),
+                        ..container::Style::default()
+                    }),
+            )
+            .on_press(Message::VariableSelected(index)),
+        );
+    }
+    scrollable(list)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }

@@ -695,6 +695,7 @@ mod tests {
         let variable = |name: &&str| Variable {
             ty: "int".to_string(),
             name: name.to_string(),
+            placements: Vec::new(),
         };
         LiftedFunction {
             name: "f".to_string(),

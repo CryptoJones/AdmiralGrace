@@ -2316,3 +2316,64 @@ fn the_possible_values_are_listed_and_end_the_pseudocodes_lines() {
         "{error}"
     );
 }
+
+#[test]
+fn the_variables_of_a_function_say_where_each_lives() {
+    // The parameters in their argument registers, at the width read; the
+    // locals in their stack slots, by the offset from the entry's stack
+    // pointer; a call's result kept in the accumulator.
+    assert_eq!(
+        image("sample.elf", &["variables", "sum_to"]),
+        "// variables of sum_to at 0x1161\n\
+         name      type  kind   placement          defs  uses\n\
+         a         int   param  edi (in rdi)          0     1\n\
+         local_10  long  local  [sp-0x10] 8 bytes     2     2\n\
+         local_14  int   local  [sp-0x14] 4 bytes     2     3\n"
+    );
+    let main = image("sample.elf", &["variables", "main"]);
+    assert!(
+        main.contains("b     long  param  rsi              0     0\n"),
+        "{main}"
+    );
+    assert!(
+        main.contains("v2    long  local  rax              1     2\n"),
+        "{main}"
+    );
+    // A register two paths leave different lives in it.
+    let ping = image("inline.elf", &["variables", "ping"]);
+    assert!(
+        ping.contains("eax      int   local  eax (in rax)         2     1\n"),
+        "{ping}"
+    );
+    let classify = image("switch.elf", &["variables", "classify"]);
+    assert!(
+        classify.ends_with("a     int   param  edi (in rdi)     0     2\n"),
+        "{classify}"
+    );
+
+    // As JSON, with the parts of each placement and the addresses.
+    let report = image_json("sample.elf", &["variables", "sum_to"]);
+    assert_eq!(report["function"], "sum_to");
+    assert_eq!(report["address"], "0x1161");
+    let local = &report["variables"][1];
+    assert_eq!(local["name"], "local_10");
+    assert_eq!(local["lift_name"], "local_10");
+    assert_eq!(local["kind"], "local");
+    assert_eq!(
+        local["placements"],
+        serde_json::json!([
+            { "kind": "stack", "offset": -16, "size": 8, "text": "[sp-0x10] 8 bytes" }
+        ])
+    );
+    assert_eq!(local["definitions"], 2);
+    assert_eq!(local["defined_at"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        report["variables"][0]["placements"][0],
+        serde_json::json!({ "kind": "register", "register": "edi", "in": "rdi", "text": "edi (in rdi)" })
+    );
+
+    // A function the lifter refuses says why.
+    let (ok, _, error) = image_result("inline.elf", &["variables", "tangle"]);
+    assert!(!ok);
+    assert!(error.contains("tangle at 0x401067: irreducible"), "{error}");
+}

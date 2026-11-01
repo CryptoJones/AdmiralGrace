@@ -369,6 +369,11 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
+            name: "variables",
+            description: "A function's parameters and locals, each with its type, its kind (`param` or `local`) and where it lives: a register at its width (`rdi`, `eax (in rax)`), a stack slot at its offset from the stack pointer at the function's entry and its size (`[sp-0x14] 4 bytes`), a flag (`zf`), or `temporary` for a value the lift saved before what it was computed from changed. A variable a merge kept lives where both did, so it can have more than one placement; the piece a split or a new version makes lives where its origin does; a variable an inlined callee brings keeps its place in the callee's frame, `rdi, inlined from f`. Each variable also gives the addresses of the statements that assign it and read it. `name` is the analyst's rename where the project has one, `lift_name` the name the lift declares, which the analyst's words key on. Read over the lift with the project's merges, splits and versions made.",
+            schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
+        },
+        Tool {
             name: "possible_values",
             description: "The possible values of a function's variables at each statement: for every statement, by its addresses, each variable it reads with what it can hold there and each it writes with what it can hold after — `5`, a set `{1, 3, 7}`, a range `0..=9`, a strided range `0..=36 step 4`, `undetermined` on a path no value takes, or `any`. Found forward from the entry through the arithmetic, joined where paths meet and widened at loop heads, and narrowed by each branch's condition on its arm (`a < 10`, `a + 1 < 10`, `a == 3`, a `switch` case); arithmetic wraps as the machine's does. The analyst's pinned values seed it. Only integer and pointer variables are followed; one whose address is taken, and a global, are not. Each set is also given as `kind` (constant, set, range, undetermined, any) with its numbers.",
             schema: json!({
@@ -1235,6 +1240,19 @@ impl Server {
                     &name,
                     address,
                     &candidates,
+                )))
+            }
+            "variables" => {
+                let address = self.function(&text("target")?)?;
+                let name = self
+                    .image
+                    .function_name(address)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("sub_{address:x}"));
+                let project = self.project.as_ref().map(|project| &project.file);
+                let variables = crate::image::variables_of(&self.image, address, project)?;
+                Ok(Answer::json(crate::image::variables_json(
+                    &name, address, &variables,
                 )))
             }
             "possible_values" => {
@@ -2318,6 +2336,7 @@ mod tests {
                 "set_override",
                 "set_inline",
                 "merge_candidates",
+                "variables",
                 "possible_values",
                 "merge_variables",
                 "unmerge_variable",

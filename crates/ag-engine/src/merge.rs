@@ -69,7 +69,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::AstNode;
-use crate::lift::{LiftedFunction, Statement, StatementKind, Variable};
+use crate::lift::{LiftedFunction, Placement, Statement, StatementKind, Variable};
 use crate::slice::{strip_casts, Bits, Flow, Graph, Part, ENTRY};
 
 /// The analyst's words on one function's variables: the merges, each the
@@ -357,6 +357,25 @@ fn merge(function: &mut LiftedFunction, keep: &str, gone: &str) -> Result<(), St
         *node = crate::inline::map(std::mem::replace(node, AstNode::Break), &mut rename);
     });
     drop_self_copies(&mut function.body);
+    // The variable kept lives where both did.
+    let moved: Vec<Placement> = function
+        .locals
+        .iter()
+        .filter(|local| local.name == gone)
+        .flat_map(|local| local.placements.clone())
+        .collect();
+    if let Some(kept) = function
+        .params
+        .iter_mut()
+        .chain(function.locals.iter_mut())
+        .find(|v| v.name == keep)
+    {
+        for placement in moved {
+            if !kept.placements.contains(&placement) {
+                kept.placements.push(placement);
+            }
+        }
+    }
     function.locals.retain(|local| local.name != gone);
     Ok(())
 }
@@ -514,9 +533,11 @@ fn declare(
     fresh: String,
     emptied: bool,
 ) {
+    // The fresh name lives where the variable it is made from does.
     let fresh = Variable {
         ty: declared.ty.clone(),
         name: fresh,
+        placements: declared.placements.clone(),
     };
     match function.locals.iter().position(|v| v.name == variable) {
         Some(i) if emptied => function.locals[i] = fresh,
@@ -893,6 +914,7 @@ mod tests {
         let variable = |name: &&str| Variable {
             ty: "long".to_string(),
             name: name.to_string(),
+            placements: Vec::new(),
         };
         LiftedFunction {
             name: "f".to_string(),
@@ -1378,6 +1400,7 @@ mod tests {
         merged.locals.push(Variable {
             ty: "long".to_string(),
             name: "count".to_string(),
+            placements: Vec::new(),
         });
         apply_edits(
             &mut merged,

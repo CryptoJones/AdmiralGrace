@@ -288,6 +288,7 @@ impl Architecture for ToyLifting {
             locals: vec![ag_engine::lift::Variable {
                 ty: "int".to_string(),
                 name: "flag".to_string(),
+                placements: Vec::new(),
             }],
             entry: 0,
             nodes,
