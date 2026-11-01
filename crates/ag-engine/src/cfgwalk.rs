@@ -226,6 +226,9 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
     let mut tail_calls: Vec<TailCall> = Vec::new();
     let mut tables: BTreeMap<u64, JumpTable> = BTreeMap::new();
     let mut halts: Vec<Halt> = Vec::new();
+    // The delay slots walked with their branches, each in its branch's
+    // block.
+    let mut absorbed: BTreeSet<u64> = BTreeSet::new();
     let code = Code {
         disasm,
         by_addr: &by_addr,
@@ -244,6 +247,14 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
                 break;
             }
             let ins = &disasm.instructions[i];
+            // A branch with a delay slot is walked as one with its slot:
+            // the slot runs before the branch goes anywhere.
+            let joined = with_delay_slot(disasm, &by_addr, i);
+            if joined.is_some() {
+                reachable.insert(ins.address + ins.length as u64);
+                absorbed.insert(ins.address + ins.length as u64);
+            }
+            let ins = joined.as_ref().unwrap_or(ins);
             // An indirect jump may read a jump table; the table is worked
             // out once, here, and its targets are the jump's.
             if ins.flow == Flow::IndirectBranch
@@ -291,7 +302,15 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
     let mut open: Option<BasicBlock> = None;
 
     for &addr in &reachable {
-        let ins = &disasm.instructions[by_addr[&addr]];
+        // A delay slot is in its branch's block, unless something branches
+        // to it outright.
+        if absorbed.contains(&addr) && !leaders.contains(&addr) {
+            continue;
+        }
+        let joined = with_delay_slot(disasm, &by_addr, by_addr[&addr]);
+        let ins = joined
+            .as_ref()
+            .unwrap_or(&disasm.instructions[by_addr[&addr]]);
         let next = ins.address + ins.length as u64;
 
         if leaders.contains(&addr) {
@@ -347,6 +366,30 @@ pub fn resolve_branches_among(disasm: &Disasm, entry: u64, entries: &dyn Entries
         halts,
         ..ProcedureCfg::default()
     }
+}
+
+/// The branch at `at` (an index into the disassembly) taken together with
+/// its delay slot, when it has one and the slot decodes: one instruction
+/// as long as the two, with the branch's flow — what the walk reads, so
+/// the block ends after the slot and the fall-through is the instruction
+/// after it.
+fn with_delay_slot(
+    disasm: &Disasm,
+    by_addr: &BTreeMap<u64, usize>,
+    at: usize,
+) -> Option<DecodedInsn> {
+    let ins = &disasm.instructions[at];
+    if !ins.delay_slot {
+        return None;
+    }
+    let slot = &disasm.instructions[*by_addr.get(&(ins.address + ins.length as u64))?];
+    if slot.flow == Flow::Invalid {
+        return None;
+    }
+    Some(DecodedInsn {
+        length: ins.length + slot.length,
+        ..ins.clone()
+    })
 }
 
 /// The jump table the indirect `jmp` at `at` (an index into the

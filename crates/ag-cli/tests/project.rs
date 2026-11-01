@@ -2806,3 +2806,86 @@ fn a_stack_variable_the_analyst_makes_is_read_by_the_lift_and_taken_back() {
         "{after}"
     );
 }
+
+#[test]
+fn the_analysts_global_pointer_changes_what_the_operands_name() {
+    let file = TempFile::new("global-pointer");
+    let listing = |function: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("mips_nopic.elf"))
+            .args(["disasm", function, "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let set = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec!["global-pointer", "--file", file.path().to_str().unwrap()];
+        all.extend_from_slice(args);
+        project_with("mips_nopic.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("mips_nopic.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(listing("sum").contains("; [0x22100] counter"));
+
+    let (ok, stdout, stderr) = set(&["0x30000"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("the global pointer is 0x30000 in every function"),
+        "{stdout}"
+    );
+    assert!(
+        listing("sum").contains("sw v0, -0x7fe0(gp)  ; [0x28020]\n"),
+        "{}",
+        listing("sum")
+    );
+
+    // One function over the image's word, by name.
+    let (ok, stdout, stderr) = set(&["0x2a0e8", "--function", "main"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x20088 now global pointer 0x2a0e8"),
+        "{stdout}"
+    );
+    assert!(
+        listing("main").contains("addiu a0, gp, -0x7fe8  ; 0x22100 counter"),
+        "{}",
+        listing("main")
+    );
+    let report = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("mips_nopic.elf"))
+        .args(["global-pointer", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    let report = String::from_utf8_lossy(&report.stdout).into_owned();
+    assert!(report.contains("main       0x2a0e8  analyst\n"), "{report}");
+    assert!(
+        report.contains("sum        0x30000  analyst (image)\n"),
+        "{report}"
+    );
+
+    // Cleared, the image says again.
+    let (ok, _, stderr) = set(&["clear"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = set(&["clear", "--function", "main"]);
+    assert!(ok, "{stderr}");
+    assert!(listing("sum").contains("; [0x22100] counter"));
+    let saved = ag_corpus::project::ProjectFile::load(file.path()).expect("saved");
+    assert_eq!(saved.global_pointer, None);
+    assert!(saved.global_pointers().is_empty());
+
+    // An image with no global pointer refuses the word; so does a value
+    // that is no address.
+    let other = TempFile::new("global-pointer-x86");
+    let (ok, _, stderr) = project(&["global-pointer", "--file", &other.text(), "0x1000"]);
+    assert!(!ok);
+    assert!(stderr.contains("keeps no global pointer"), "{stderr}");
+    let (ok, _, _) = set(&["gp"]);
+    assert!(!ok);
+}

@@ -527,6 +527,24 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Tell the analysis what the global pointer register (MIPS's `gp`)
+    /// holds — in every function, and in single functions by their entry —
+    /// over what the image says, and say whether that changed anything. A
+    /// provider whose architecture keeps no global pointer changes nothing.
+    fn set_global_pointer_words(
+        &self,
+        _image: Option<u64>,
+        _functions: BTreeMap<u64, u64>,
+    ) -> bool {
+        false
+    }
+
+    /// Whether the image's architecture keeps a global pointer the analysis
+    /// follows.
+    fn has_global_pointer(&self) -> bool {
+        false
+    }
+
     /// Tell the analysis which variables of each function are merged, where
     /// one is split or has a new version, and what values one holds — by
     /// the function's entry, the merges as `(keep, gone)`, the splits and

@@ -2143,3 +2143,260 @@ fn an_objective_c_images_methods_are_functions_under_their_runtime_names() {
             .wrapping_add(moved_greet.wrapping_sub(greet))
     );
 }
+
+/// A MIPS fixture: `mips_pic.elf`, little-endian position-independent code
+/// with its `_gp`, its GOT and an import; `mips_pic_nogp.elf`, the same
+/// with no `_gp`; `mips_nopic.elf`, big-endian code that is not
+/// position-independent.
+fn mips(name: &str) -> Binary {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    Binary::open(&path).expect("the MIPS fixture loads")
+}
+
+/// The instructions of the function at `address`, in its blocks' order.
+fn listing(binary: &Binary, address: u64) -> Vec<Instruction> {
+    binary
+        .disassembly(address)
+        .expect("disassembled")
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.clone())
+        .collect()
+}
+
+/// What the listing resolves at `site`, as it says it.
+fn resolved_at(binary: &Binary, function: u64, site: u64) -> Option<String> {
+    listing(binary, function)
+        .into_iter()
+        .find(|instruction| instruction.address == site)
+        .and_then(|instruction| instruction.resolved.map(|resolved| resolved.text()))
+}
+
+#[test]
+fn a_mips_image_is_decoded_walked_and_its_global_pointer_found_by_symbol_and_prologue() {
+    use ag_image::GlobalPointerSource;
+
+    let binary = mips("mips_pic.elf");
+    assert!(
+        binary.language().starts_with("MIPS:LE:32"),
+        "{}",
+        binary.language()
+    );
+    assert!(binary.supports_disassembly());
+    assert!(!binary.supports_pseudocode());
+    assert_eq!(
+        binary.global_pointer_convention().map(|conv| conv.name),
+        Some("gp")
+    );
+    let (add, sum, main, gcc) = (0x2_0000, 0x2_0008, 0x2_0084, 0x2_00d0);
+    let gp = 0x2_a210;
+
+    // add sets nothing: the `_gp` symbol says. The others compute it from
+    // their own address — Clang's into s0, GCC's `.cpload` into gp.
+    let found = |address| binary.global_pointer(address).expect("a global pointer");
+    assert_eq!(found(add).value, gp);
+    assert_eq!(found(add).source, GlobalPointerSource::Symbol);
+    assert_eq!(
+        found(sum).source,
+        GlobalPointerSource::Prologue {
+            at: 0x2_0028,
+            pic: true
+        }
+    );
+    assert_eq!(found(main).value, gp);
+    assert_eq!(
+        found(gcc).source,
+        GlobalPointerSource::Prologue {
+            at: 0x2_00d8,
+            pic: true
+        }
+    );
+
+    // The loads through the copy in s0 name their GOT slots: the import's,
+    // and the local entries for the functions and the datum.
+    assert_eq!(
+        resolved_at(&binary, main, 0x2_00a4).as_deref(),
+        Some("[0x2223c] = puts")
+    );
+    assert_eq!(
+        resolved_at(&binary, main, 0x2_00a8).as_deref(),
+        Some("[0x2223c] = puts")
+    );
+    assert_eq!(
+        resolved_at(&binary, main, 0x2_00a0).as_deref(),
+        Some("0x21209 \"hello\"")
+    );
+    assert_eq!(
+        resolved_at(&binary, sum, 0x2_0064).as_deref(),
+        Some("[0x22234] = &counter")
+    );
+    assert_eq!(
+        resolved_at(&binary, sum, 0x2_0068).as_deref(),
+        Some("[0x22240] counter")
+    );
+    assert_eq!(
+        resolved_at(&binary, gcc, 0x2_00dc).as_deref(),
+        Some("[0x2223c] = puts")
+    );
+    assert_eq!(binary.import_at(0x2_223c), Some("puts"));
+
+    // The calls through the GOT are calls: main calls puts through its
+    // slot, and sum; sum calls add; the import's slot is data read.
+    let disassembly = binary.disassembly(main).expect("disassembled");
+    let calls: Vec<(u64, Option<&str>, Option<u64>)> = disassembly
+        .calls
+        .iter()
+        .map(|call| (call.target, call.name.as_deref(), call.slot))
+        .collect();
+    assert!(
+        calls.contains(&(0x2_223c, Some("puts"), Some(0x2_223c))),
+        "{calls:?}"
+    );
+    assert!(calls.contains(&(sum, Some("sum"), None)), "{calls:?}");
+    assert!(binary.call_graph().calls(sum).contains(&add));
+    assert!(binary.call_graph().calls(gcc).contains(&0x2_223c));
+    assert!(binary
+        .string_references(main)
+        .iter()
+        .any(|reference| reference.text == "hello"));
+    assert!(binary
+        .data_references(sum)
+        .iter()
+        .any(|reference| reference.name.as_deref() == Some("counter")));
+
+    // The branch and its delay slot end one block: main's `jalr t9` and
+    // the `move gp, s0` after it, then the code after the slot.
+    let blocks: Vec<(u64, u64)> = disassembly
+        .blocks
+        .iter()
+        .map(|block| (block.from, block.to))
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            (0x2_0084, 0x2_00b0),
+            (0x2_00b0, 0x2_00c0),
+            (0x2_00c0, 0x2_00d0)
+        ]
+    );
+    assert!(
+        !binary.never_returns(add),
+        "add returns through its delay slot"
+    );
+}
+
+#[test]
+fn a_mips_image_without_its_symbol_reads_the_pointer_past_the_got_and_big_endian_sets_it_at_its_start(
+) {
+    use ag_image::GlobalPointerSource;
+
+    // No `_gp`: add, which sets nothing, has the ABI's value past the GOT.
+    let binary = mips("mips_pic_nogp.elf");
+    let add = binary.global_pointer(0x2_0000).expect("a global pointer");
+    assert_eq!(
+        (add.value, add.source),
+        (0x2_a210, GlobalPointerSource::Got)
+    );
+    assert_eq!(
+        binary.global_pointer(0x2_0008).map(|found| found.source),
+        Some(GlobalPointerSource::Prologue {
+            at: 0x2_0028,
+            pic: true
+        })
+    );
+
+    // Big-endian, not position-independent: `__start` sets gp from
+    // constants; the rest read the symbol, and their small data through it.
+    let binary = mips("mips_nopic.elf");
+    assert!(
+        binary.language().starts_with("MIPS:BE:32"),
+        "{}",
+        binary.language()
+    );
+    let start = binary.global_pointer(0x2_0000).expect("a global pointer");
+    assert_eq!(
+        (start.value, start.source),
+        (
+            0x2_a0e0,
+            GlobalPointerSource::Prologue {
+                at: 0x2_0004,
+                pic: false
+            }
+        )
+    );
+    assert_eq!(
+        binary.global_pointer(0x2_0028).map(|found| found.source),
+        Some(GlobalPointerSource::Symbol)
+    );
+    assert_eq!(
+        resolved_at(&binary, 0x2_0028, 0x2_0084).as_deref(),
+        Some("[0x22100] counter")
+    );
+    assert_eq!(
+        resolved_at(&binary, 0x2_0088, 0x2_0094).as_deref(),
+        Some("0x220f8 \"hello\"")
+    );
+    let calls: Vec<u64> = binary
+        .disassembly(0x2_0088)
+        .expect("disassembled")
+        .calls
+        .iter()
+        .map(|call| call.target)
+        .collect();
+    assert_eq!(calls, [0x2_00b0, 0x2_0028], "main calls puts and sum");
+}
+
+#[test]
+fn the_analysts_global_pointer_stands_over_the_images_and_changes_what_the_operands_name() {
+    use ag_image::{GlobalPointerSource, GlobalPointerWords};
+
+    let binary = mips("mips_nopic.elf");
+    let (sum, main) = (0x2_0028, 0x2_0088);
+    assert_eq!(
+        resolved_at(&binary, sum, 0x2_0084).as_deref(),
+        Some("[0x22100] counter")
+    );
+
+    // The whole image, then one function over it.
+    let words = GlobalPointerWords {
+        image: Some(0x3_0000),
+        functions: BTreeMap::from([(main, 0x2_a0e8)]),
+    };
+    assert!(binary.set_global_pointer_words(words.clone()));
+    assert!(
+        !binary.set_global_pointer_words(words.clone()),
+        "the same words change nothing"
+    );
+    assert_eq!(binary.global_pointer_words(), words);
+    let found = binary.global_pointer(sum).expect("a global pointer");
+    assert_eq!(
+        (found.value, found.source),
+        (0x3_0000, GlobalPointerSource::Analyst { function: false })
+    );
+    assert_eq!(
+        resolved_at(&binary, sum, 0x2_0084).as_deref(),
+        Some("[0x28020]")
+    );
+    let found = binary.global_pointer(main).expect("a global pointer");
+    assert_eq!(
+        found.source,
+        GlobalPointerSource::Analyst { function: true }
+    );
+    assert_eq!(
+        resolved_at(&binary, main, 0x2_0094).as_deref(),
+        Some("0x22100 counter")
+    );
+
+    // Taken back, the image says again.
+    assert!(binary.set_global_pointer_words(GlobalPointerWords::default()));
+    assert_eq!(
+        resolved_at(&binary, sum, 0x2_0084).as_deref(),
+        Some("[0x22100] counter")
+    );
+
+    // An image with no global pointer takes no word.
+    assert!(sample().global_pointer_convention().is_none());
+    assert!(!sample().set_global_pointer_words(words));
+}

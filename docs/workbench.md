@@ -633,8 +633,22 @@ themselves (`blx` to an address switches it), and from the analyst:
   other. `ag project mode` records the same for `ag image … --project` to read.
 
 An AArch64 image is decoded the same way, under its own specification; it has one instruction
-set, so there is no mode to choose. ARM and AArch64 are decoded, walked and listed; they are
-not lifted to pseudocode yet, and the assembler and the no-op fill are x86's. The decode reads each section once from its start, so a `blx` that
+set, so there is no mode to choose. So is a 32-bit MIPS image, of either byte order: a branch's
+block ends after its delay slot, and the listing reads the operands through the global pointer,
+`gp` — `lw t9, -0x7fd4(s0)` followed by `; [0x2223c] = puts` where the disassembler's comment
+goes, the GOT slot and the import it holds. The value comes from the function's prologue, the
+image's `_gp` symbol, or the GOT's start and 0x7ff0 (`ag image … global-pointer` says which),
+and from the analyst:
+
+- **Set global pointer…** (Edit menu) says what `gp` holds in the function on screen —
+  `0x2a1f0`, or `clear` to let the image say — or, as `image 0x2a1f0` and `image clear`, in
+  every function the analyst said nothing more of. The prompt offers the word that stands now.
+  The listing, the references and the calls are read again with it, and undo covers it like
+  every other word; the image's word is kept as the project's `global_pointer`, a function's
+  on its record.
+
+ARM, AArch64 and MIPS are decoded, walked and listed; they are not lifted to pseudocode yet,
+and the assembler and the no-op fill are x86's. The ARM decode reads each section once from its start, so a `blx` that
 reaches backwards, or into another section, does not switch what was already read; the
 prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/
 `tbh` table branch is an indirect branch whose table is not read yet, so the cases after it

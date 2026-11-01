@@ -184,6 +184,9 @@ pub enum Message {
     /// Say whether the function on screen is inlined into its callers'
     /// pseudocode.
     EditInline,
+    /// Say what the global pointer register holds in the function on
+    /// screen, or in every function.
+    EditGlobalPointer,
     /// Merge two variables of the function on screen.
     EditMergeVariables,
     /// Take back a merge of a variable of the function on screen.
@@ -349,6 +352,10 @@ pub enum PromptKind {
     /// Whether the function on screen is inlined into its callers:
     /// `on`, `off` or `clear`.
     Inline,
+    /// What the global pointer register holds in the function on screen:
+    /// `VALUE` or `clear`, and `image VALUE` or `image clear` for every
+    /// function.
+    GlobalPointer,
     /// Two variables of the function on screen to merge: `KEEP GONE`.
     MergeVariables,
     /// A variable of the function on screen merged away: `GONE`.
@@ -995,6 +1002,9 @@ pub struct Change {
     before: Vec<ag_corpus::project::Annotation>,
     /// The annotations after it.
     after: Vec<ag_corpus::project::Annotation>,
+    /// The project's own global pointer word before the change and after
+    /// it: the one word of the project's that lies outside a record.
+    global_pointer: (Option<String>, Option<String>),
 }
 
 /// How many changes undo remembers.
@@ -1284,6 +1294,7 @@ impl App {
             self.tell_dead_stores();
             self.tell_inlines();
             self.tell_variable_edits();
+            self.tell_global_pointer();
         }
         task
     }
@@ -3101,6 +3112,7 @@ impl App {
                         | PromptKind::Switch
                         | PromptKind::Override
                         | PromptKind::Inline
+                        | PromptKind::GlobalPointer
                         | PromptKind::MergeVariables
                         | PromptKind::UnmergeVariable
                         | PromptKind::SplitVariable
@@ -3116,11 +3128,18 @@ impl App {
             }),
             _ => false,
         };
-        let before = edits.then(|| self.annotations.annotations.clone());
+        let before = edits.then(|| {
+            (
+                self.annotations.annotations.clone(),
+                self.annotations.global_pointer.clone(),
+            )
+        });
         let task = self.apply(message);
-        if let Some(before) = before {
-            if before != self.annotations.annotations {
-                self.record_change(before);
+        if let Some((before, global_pointer)) = before {
+            if before != self.annotations.annotations
+                || global_pointer != self.annotations.global_pointer
+            {
+                self.record_change(before, global_pointer);
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
@@ -3128,6 +3147,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_global_pointer();
             }
         }
         task
@@ -3520,6 +3540,19 @@ impl App {
         }
     }
 
+    /// Tell the analysis the analyst's words on the global pointer, and
+    /// read the function on screen again when that changed anything: its
+    /// operands through the pointer may name other addresses now.
+    fn tell_global_pointer(&mut self) {
+        if !self.provider.set_global_pointer_words(
+            self.annotations.image_global_pointer(),
+            self.annotations.global_pointers(),
+        ) {
+            return;
+        }
+        self.refresh_listing();
+    }
+
     /// Tell the analysis the analyst's merges and splits of each
     /// function's variables, and read the function on screen again when
     /// that changed anything.
@@ -3664,11 +3697,16 @@ impl App {
     /// Remember the change that took the annotations from `before` to what
     /// they are now, and forget the changes taken back: they led from a
     /// state that is gone.
-    fn record_change(&mut self, before: Vec<ag_corpus::project::Annotation>) {
+    fn record_change(
+        &mut self,
+        before: Vec<ag_corpus::project::Annotation>,
+        global_pointer: Option<String>,
+    ) {
         self.undo.push(Change {
             label: self.notice.clone().unwrap_or_else(|| "Edit".into()),
             before,
             after: self.annotations.annotations.clone(),
+            global_pointer: (global_pointer, self.annotations.global_pointer.clone()),
         });
         if self.undo.len() > UNDO_DEPTH {
             let overflow = self.undo.len() - UNDO_DEPTH;
@@ -3885,6 +3923,35 @@ impl App {
                 });
             }
 
+            Message::EditGlobalPointer => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose global pointer to set".into());
+                    return Task::none();
+                };
+                if !self.provider.has_global_pointer() {
+                    self.notice =
+                        Some("This image's architecture keeps no global pointer".into());
+                    return Task::none();
+                }
+                let key = self.annotation_key(function);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.global_pointer.clone())
+                    .or_else(|| {
+                        self.annotations
+                            .global_pointer
+                            .as_ref()
+                            .map(|value| format!("image {value}"))
+                    })
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::GlobalPointer,
+                    title: "Global pointer (VALUE|clear for this function, image VALUE|clear for all)",
+                    value: current,
+                });
+            }
+
             Message::EditMergeVariables => {
                 let Some(function) = self.work.listing_of else {
                     self.notice = Some("Open the function whose variables to merge".into());
@@ -4054,6 +4121,7 @@ impl App {
                     return Task::none();
                 };
                 self.annotations.annotations = change.before.clone();
+                self.annotations.global_pointer = change.global_pointer.0.clone();
                 self.notice = Some(format!("Undid: {}", change.label));
                 self.redo.push(change);
                 self.refresh_functions();
@@ -4065,6 +4133,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_global_pointer();
             }
 
             Message::EditRedo => {
@@ -4076,6 +4145,7 @@ impl App {
                     return Task::none();
                 };
                 self.annotations.annotations = change.after.clone();
+                self.annotations.global_pointer = change.global_pointer.1.clone();
                 self.notice = Some(format!("Redid: {}", change.label));
                 self.undo.push(change);
                 self.refresh_functions();
@@ -4087,6 +4157,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_global_pointer();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -4667,6 +4738,7 @@ impl App {
                                     self.tell_dead_stores();
                                     self.tell_inlines();
                                     self.tell_variable_edits();
+                                    self.tell_global_pointer();
                                     self.refresh_functions();
                                     self.notice =
                                         Some(format!("Opened project {}", path.display()));
@@ -5303,6 +5375,47 @@ impl App {
                         });
                         self.tell_inlines();
                         self.tell_variable_edits();
+                        self.tell_global_pointer();
+                    }
+                    PromptKind::GlobalPointer => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let text = prompt.value.trim().to_ascii_lowercase();
+                        let (image, word) = match text.strip_prefix("image") {
+                            Some(rest) => (true, rest.trim().to_string()),
+                            None => (false, text.clone()),
+                        };
+                        let value = match word.as_str() {
+                            "clear" | "" => None,
+                            spelled => match ag_corpus::parse_addr(spelled) {
+                                Ok(value) => Some(format!("{value:#x}")),
+                                Err(_) => {
+                                    self.notice = Some(format!(
+                                        "The global pointer is an address or clear, not {spelled:?}"
+                                    ));
+                                    return Task::none();
+                                }
+                            },
+                        };
+                        let key = self.annotation_key(function);
+                        self.notice = Some(match (&value, image) {
+                            (Some(value), true) => {
+                                format!("The global pointer is {value} in every function")
+                            }
+                            (None, true) => "The global pointer is the image's own".to_string(),
+                            (Some(value), false) => format!("The global pointer is {value} in {key}"),
+                            (None, false) => format!("The global pointer of {key} is the image's"),
+                        });
+                        if image {
+                            self.annotations.global_pointer = value;
+                        } else {
+                            self.annotations
+                                .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                                .global_pointer = value;
+                            self.annotations.prune();
+                        }
+                        self.tell_global_pointer();
                     }
                     PromptKind::MergeVariables => {
                         let Some(function) = self.work.listing_of else {
@@ -12065,6 +12178,105 @@ mod tests {
             Some("fold off, guard off".to_string())
         );
         assert!(!folded(&app), "{:?}", app.work.pseudocode);
+    }
+
+    #[test]
+    fn the_global_pointer_is_set_for_a_function_or_the_image_and_undo_takes_it_back() {
+        let config = Config {
+            binary: Some(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../crates/ag-image/tests/fixtures/mips_nopic.elf"),
+            ),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let comment = |app: &App, address: u64| {
+            app.work
+                .listing
+                .iter()
+                .find(|line| line.address == address)
+                .and_then(|line| line.comment.clone())
+                .unwrap_or_default()
+        };
+        // sum stores to counter through gp, at 0x20084.
+        let _ = app.update(Message::FunctionSelected(0x2_0028));
+        assert!(
+            comment(&app, 0x2_0084).ends_with("[0x22100] counter"),
+            "{:?}",
+            comment(&app, 0x2_0084)
+        );
+        let _ = crate::views::work_surface::view(&app);
+
+        // The whole image's value.
+        let _ = app.update(Message::EditGlobalPointer);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").kind,
+            PromptKind::GlobalPointer
+        );
+        let _ = app.update(Message::PromptChanged("image 0x30000".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(app.annotations.global_pointer.as_deref(), Some("0x30000"));
+        assert!(
+            comment(&app, 0x2_0084).ends_with("[0x28020]"),
+            "{:?}",
+            comment(&app, 0x2_0084)
+        );
+
+        // The function's own, over it; the prompt reads it back.
+        let _ = app.update(Message::EditGlobalPointer);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").value,
+            "image 0x30000"
+        );
+        let _ = app.update(Message::PromptChanged("0x2a0e0".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x20028")
+                .and_then(|a| a.global_pointer.clone()),
+            Some("0x2a0e0".to_string())
+        );
+        assert!(comment(&app, 0x2_0084).ends_with("[0x22100] counter"));
+        let _ = app.update(Message::EditGlobalPointer);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "0x2a0e0");
+        let _ = app.update(Message::PromptChanged("gp".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("not \"gp\"")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x20028")
+                .and_then(|a| a.global_pointer.clone()),
+            Some("0x2a0e0".to_string()),
+            "a word that is no address changes nothing"
+        );
+
+        // Undo takes the function's word back, then the image's.
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.annotation_for("0x20028").is_none());
+        assert!(comment(&app, 0x2_0084).ends_with("[0x28020]"));
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.annotations.global_pointer, None);
+        assert!(comment(&app, 0x2_0084).ends_with("[0x22100] counter"));
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(app.annotations.global_pointer.as_deref(), Some("0x30000"));
+        assert!(comment(&app, 0x2_0084).ends_with("[0x28020]"));
+
+        // An image with no global pointer has no prompt for it.
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let _ = app.update(Message::EditGlobalPointer);
+        assert!(app.prompt.is_none());
     }
 
     #[test]

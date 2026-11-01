@@ -94,6 +94,7 @@ impl Architecture for ToyCpu {
                 flags_read: 0,
                 flags_written: 0,
                 rep: false,
+                delay_slot: false,
             });
             decoded
                 .text

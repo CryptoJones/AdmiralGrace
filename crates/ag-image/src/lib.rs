@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex};
 use iced_x86::Formatter as _;
 
 use ag_engine::arm::ArmVariant;
+use ag_engine::global_pointer::{self as gp, Convention, ImageHints, InsnFacts};
+use ag_engine::mips::MipsVariant;
 use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
@@ -79,6 +81,9 @@ pub use ag_engine::swift::{
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
+pub use ag_engine::global_pointer::{
+    GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
+};
 pub use ag_engine::stack_offsets::StackOffset;
 pub use ag_engine::defuse::{
     DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
@@ -220,6 +225,41 @@ pub struct Instruction {
     /// value at the function's entry: the listing's stack-offset column.
     /// None in an image the x86 decoder does not read.
     pub stack_offset: Option<StackOffset>,
+    /// The address a register-relative operand names, when the register's
+    /// value is known — the global pointer's, or a copy of it — with the
+    /// name of what is there: `lw t9, -0x7fd4(gp)` reads the GOT slot of
+    /// `puts`. None where nothing is resolved.
+    pub resolved: Option<ResolvedOperand>,
+}
+
+/// What a register-relative operand names once the register's value is
+/// known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOperand {
+    /// The address, and how the instruction uses it.
+    pub resolved: ResolvedAddress,
+    /// What the image calls the thing there: the import a GOT slot holds,
+    /// the function whose address it holds, the data symbol the address
+    /// falls in (`counter`, `table+0x8`), or the string there.
+    pub name: Option<String>,
+}
+
+impl ResolvedOperand {
+    /// The resolution as the listing says it beside the instruction:
+    /// `[0x2221c] = puts` for a slot holding an import or a function's
+    /// address, `[0x22240] counter` for data read or written, `0x21209
+    /// "hello"` for an address computed.
+    pub fn text(&self) -> String {
+        let address = self.resolved.address();
+        let place = match self.resolved {
+            ResolvedAddress::Address(_) => format!("{address:#x}"),
+            _ => format!("[{address:#x}]"),
+        };
+        match &self.name {
+            Some(name) => format!("{place} {name}"),
+            None => place,
+        }
+    }
 }
 
 /// One basic block of a function.
@@ -416,6 +456,15 @@ pub struct Binary {
     /// Which ARM specification the image decodes under, when it is ARM —
     /// 32-bit, or AArch64: the x86 decoder does not read it, SLEIGH does.
     arm: Option<ArmVariant>,
+    /// Which MIPS specification the image decodes under, when it is 32-bit
+    /// MIPS: SLEIGH reads it, as it does ARM.
+    mips: Option<MipsVariant>,
+    /// What the image says about its global pointer outside its code: the
+    /// linker's symbol for it, and the GOT's start.
+    gp_hints: ImageHints,
+    /// The analyst's words on the global pointer: the value for the whole
+    /// image, and the value for each function, by its entry.
+    gp_words: Mutex<GlobalPointerWords>,
     /// The instruction set each function's address starts in, as the
     /// image's symbols say: a Thumb function's symbol has its low bit set.
     symbol_modes: BTreeMap<u64, ArmMode>,
@@ -513,6 +562,15 @@ pub struct Binary {
     data_users: Mutex<Option<Arc<Users>>>,
 }
 
+/// The analyst's words on the global pointer's value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalPointerWords {
+    /// The value for every function the analyst said nothing more of.
+    pub image: Option<u64>,
+    /// The value for each function, by its entry.
+    pub functions: BTreeMap<u64, u64>,
+}
+
 /// The functions that use each thing — a string, a piece of data — by the
 /// thing's address.
 type Users = BTreeMap<u64, Vec<u64>>;
@@ -591,8 +649,10 @@ impl Binary {
         // function's symbol carries its mode in its low bit, which is not
         // part of its address.
         let arm = ArmVariant::of_language(&language);
-        // A language neither decoder reads may be a registered plugin's.
-        let plugin_arch = if bitness.is_none() && arm.is_none() {
+        // So is 32-bit MIPS.
+        let mips = MipsVariant::of_language(&language);
+        // A language no decoder reads may be a registered plugin's.
+        let plugin_arch = if bitness.is_none() && arm.is_none() && mips.is_none() {
             ag_engine::plugin::architecture_for(&language)
         } else {
             None
@@ -774,6 +834,13 @@ impl Binary {
             plugin_arch,
             bitness,
             arm,
+            mips,
+            gp_hints: if mips.is_some() {
+                image.global_pointer_hints(gp::MIPS.symbol)
+            } else {
+                ImageHints::default()
+            },
+            gp_words: Mutex::new(GlobalPointerWords::default()),
             symbol_modes,
             entry,
             base: image.load_base(),
@@ -943,6 +1010,188 @@ impl Binary {
         true
     }
 
+    /// The global pointer convention of the image's architecture, when it
+    /// has one the engine follows: MIPS's `gp`.
+    pub fn global_pointer_convention(&self) -> Option<&'static Convention> {
+        self.mips.map(|_| &gp::MIPS)
+    }
+
+    /// Say what the global pointer's value is — for the whole image, and
+    /// for single functions by their entry — over what the image says, and
+    /// say whether that changed anything. Every operand read through the
+    /// pointer may name another address now, and with it the references,
+    /// the calls and the walks, so what was decoded and walked is
+    /// forgotten. An image whose architecture keeps no global pointer the
+    /// engine follows takes no word.
+    pub fn set_global_pointer_words(&self, words: GlobalPointerWords) -> bool {
+        if self.global_pointer_convention().is_none() {
+            return false;
+        }
+        if let Ok(mut held) = self.gp_words.lock() {
+            if *held == words {
+                return false;
+            }
+            *held = words;
+        }
+        self.forget_decoded();
+        true
+    }
+
+    /// The analyst's words on the global pointer, as they stand.
+    pub fn global_pointer_words(&self) -> GlobalPointerWords {
+        self.gp_words
+            .lock()
+            .map(|held| held.clone())
+            .unwrap_or_default()
+    }
+
+    /// The global pointer of the function at `address` — its value, and
+    /// where that came from — when the image's architecture keeps one and
+    /// something says what it is: the analyst's word on the function, the
+    /// analyst's word on the image, the function's own prologue, the
+    /// image's `_gp` symbol, or the GOT's start and 0x7ff0.
+    pub fn global_pointer(&self, address: u64) -> Option<GlobalPointer> {
+        self.global_pointer_convention()?;
+        let code = self.code_at(address)?;
+        let decoded = self.decoded_of(code);
+        decoded.global_pointers.get(&address).copied()
+    }
+
+    /// Follow the global pointer through the decoded section `decoded`:
+    /// find each function's value, then resolve every operand read through
+    /// it, and every address computed from it, to the address it names.
+    ///
+    /// A resolved memory operand, or an address computed, becomes the
+    /// instruction's absolute address, so the references read it as they
+    /// read an x86 one; an indirect call or jump through a register loaded
+    /// from a GOT slot reads the slot, so a call to an import through the
+    /// GOT is a call to the import.
+    fn follow_global_pointer(&self, decoded: &mut Decoded, code: &FileSection) {
+        let Some(conv) = self.global_pointer_convention() else {
+            return;
+        };
+        let words = self.global_pointer_words();
+        let start = code.section.vma;
+        let end = start.saturating_add(code.section.size);
+        let entries: Vec<u64> = self
+            .functions
+            .iter()
+            .map(|function| function.address)
+            .filter(|address| (start..end).contains(address))
+            .collect();
+        let instructions = &decoded.disasm.instructions;
+        let steps: Vec<gp::Step> = instructions
+            .iter()
+            .map(|ins| gp::Step {
+                address: ins.address,
+                facts: decoded.facts.get(&ins.address),
+                call: matches!(ins.flow, Flow::Call(_) | Flow::IndirectCall),
+                ends: matches!(
+                    ins.flow,
+                    Flow::Return
+                        | Flow::UnconditionalBranch(_)
+                        | Flow::IndirectBranch
+                        | Flow::Trap
+                        | Flow::Halt
+                        | Flow::Invalid
+                ),
+                delay_slot: ins.delay_slot,
+            })
+            .collect();
+        let mut pointers = BTreeMap::new();
+        let mut resolved = HashMap::new();
+        for (index, &entry) in entries.iter().enumerate() {
+            let next = entries.get(index + 1).copied().unwrap_or(end);
+            let first = instructions.partition_point(|ins| ins.address < entry);
+            let last = instructions.partition_point(|ins| ins.address < next);
+            let body = &steps[first..last];
+            let prologue = gp::from_prologue(conv, entry, body);
+            let Some(pointer) = gp::choose(
+                conv,
+                words.functions.get(&entry).copied(),
+                words.image,
+                prologue,
+                &self.gp_hints,
+            ) else {
+                continue;
+            };
+            pointers.insert(entry, pointer);
+            let read = |slot: u64| self.got_word(slot);
+            resolved.extend(gp::resolve(conv, pointer.value, entry, body, &read));
+        }
+        for ins in &mut decoded.disasm.instructions {
+            if let Some(found) = resolved.get(&ins.address) {
+                ins.absolute_address = Some(found.address());
+            }
+        }
+        decoded.resolved = resolved;
+        decoded.global_pointers = pointers;
+    }
+
+    /// The word of the program at `address`, in the image's byte order,
+    /// when the file holds its bytes: what a GOT slot holds before the
+    /// loader runs.
+    fn word_at(&self, address: u64) -> Option<u64> {
+        let bytes = self.bytes_at(address, 4)?;
+        let bytes: [u8; 4] = bytes.as_slice().try_into().ok()?;
+        Some(u64::from(match self.mips {
+            Some(variant) => variant.word(bytes),
+            None => u32::from_le_bytes(bytes),
+        }))
+    }
+
+    /// The word a GOT slot holds in the file, when `address` is in the
+    /// image's `.got`: the address of the function or the datum a local or
+    /// a defined global entry is for, which the loader leaves as it is in
+    /// an image loaded where it was linked.
+    fn got_word(&self, address: u64) -> Option<u64> {
+        if self.section_of(address)?.name != ".got" {
+            return None;
+        }
+        self.word_at(address)
+    }
+
+    /// The name of what a resolved address names: the import a slot holds,
+    /// the function or the datum whose address a GOT slot holds, a function
+    /// at the address, the data symbol it falls in, or the string there.
+    fn resolved_name(&self, resolved: ResolvedAddress) -> Option<String> {
+        let address = resolved.address();
+        let slot = !matches!(resolved, ResolvedAddress::Address(_));
+        if slot {
+            if let Some(import) = self.import_at(address) {
+                return Some(format!("= {import}"));
+            }
+            if let Some(word) = self.got_word(address) {
+                if let Some(name) = self.function_name(word) {
+                    return Some(format!("= {name}"));
+                }
+                if let Some(symbol) = self
+                    .data_symbol_of(word)
+                    .filter(|found| found.address == word)
+                {
+                    return Some(format!("= &{}", symbol.name));
+                }
+            }
+        }
+        if let Some(name) = self.function_name(address) {
+            return Some(name.to_string());
+        }
+        if let Some(string) = self
+            .string_at(address)
+            .filter(|string| string.address == address)
+        {
+            return Some(format!("{:?}", string.text));
+        }
+        self.data_symbol_of(address).map(|symbol| {
+            let offset = address - symbol.address;
+            if offset == 0 {
+                symbol.name.clone()
+            } else {
+                format!("{}+{offset:#x}", symbol.name)
+            }
+        })
+    }
+
     /// The instruction set `address` decodes in, when the image is ARM: the
     /// nearest mark at or before it, the image's or the analyst's — the
     /// analyst's where the two meet — else the image's own default. What
@@ -997,6 +1246,13 @@ impl Binary {
         }
         if let Ok(mut held) = self.graph.lock() {
             *held = None;
+        }
+        // Whether a function returns is read off its walk.
+        if let Ok(mut held) = self.noreturn.lock() {
+            held.clear();
+        }
+        if let Ok(mut held) = self.noreturn_facts.lock() {
+            held.clear();
         }
     }
 
@@ -1115,6 +1371,8 @@ impl Binary {
             .map(|(start, end)| (shift(start), shift(end)))
             .collect();
         self.entry = self.entry.map(shift);
+        self.gp_hints.symbol = self.gp_hints.symbol.map(shift);
+        self.gp_hints.got = self.gp_hints.got.map(shift);
         if let Some(objc) = &mut self.objc {
             objc.shift(delta);
         }
@@ -1365,6 +1623,15 @@ impl Binary {
             }
             return decoded;
         }
+        if let Some(variant) = self.mips {
+            let mut decoded = decode_mips_section(variant, &bytes, code.section.vma);
+            self.follow_global_pointer(&mut decoded, code);
+            let decoded = Arc::new(decoded);
+            if let Ok(mut held) = code.decoded.lock() {
+                *held = Some(Arc::clone(&decoded));
+            }
+            return decoded;
+        }
         let decoded = Arc::new(match self.arm {
             Some(variant) => {
                 let marks = self
@@ -1484,7 +1751,14 @@ impl Binary {
             while at < decoded.disasm.instructions.len() {
                 let ins = &decoded.disasm.instructions[at];
                 at += 1;
-                if covered.contains(&ins.address) || is_padding(ins) {
+                // SLEIGH's decoders number no mnemonic; their `nop` is
+                // read off the text.
+                let sleigh_nop = ins.mnemonic == ag_engine::arm::MNEMONIC
+                    && decoded
+                        .text
+                        .get(&ins.address)
+                        .is_some_and(|(mnemonic, _, _)| mnemonic == "nop");
+                if covered.contains(&ins.address) || is_padding(ins) || sleigh_nop {
                     continue;
                 }
                 functions.push(Function {
@@ -1794,12 +2068,7 @@ impl Binary {
             return false;
         }
         for block in &cfg.blocks {
-            let Some(last) = decoded
-                .disasm
-                .instructions
-                .iter()
-                .find(|ins| ins.address + ins.length as u64 == block.to)
-            else {
+            let Some(last) = last_of_block(&decoded.disasm, block.to) else {
                 return false;
             };
             // A tail call — a `jmp` to another function, or a fall into the
@@ -1852,11 +2121,7 @@ impl Binary {
         let cfg = self.walk(&decoded.disasm, address);
         cfg.blocks.iter().any(|block| {
             block.successor_addresses.is_empty()
-                && decoded
-                    .disasm
-                    .instructions
-                    .iter()
-                    .find(|ins| ins.address + ins.length as u64 == block.to)
+                && last_of_block(&decoded.disasm, block.to)
                     .is_some_and(|last| matches!(last.flow, Flow::Call(_) | Flow::IndirectCall))
         })
     }
@@ -2226,7 +2491,10 @@ impl Binary {
     /// and AArch64; an image of another architecture is read and reported,
     /// but not disassembled.
     pub fn supports_disassembly(&self) -> bool {
-        self.bitness.is_some() || self.arm.is_some() || self.plugin_arch.is_some()
+        self.bitness.is_some()
+            || self.arm.is_some()
+            || self.mips.is_some()
+            || self.plugin_arch.is_some()
     }
 
     /// The name of the plugin's architecture decoding the image, when one
@@ -3121,6 +3389,40 @@ impl Binary {
             // the site, listed in the same order.
             let target = match instruction.flow {
                 Flow::Call(target) => target,
+                // A call through a register loaded from a GOT slot the
+                // global pointer resolves — `lw t9, -0x7fd4(gp); jalr t9`
+                // — is a call to the import the slot holds, or to the
+                // function whose address it holds.
+                Flow::IndirectCall
+                    if decoded.resolved.contains_key(&site)
+                        && instruction.memory_address().is_some() =>
+                {
+                    let slot = instruction.memory_address().expect("checked above");
+                    let call = match self.import_at(slot) {
+                        Some(import) => Some(Call {
+                            site,
+                            target: slot,
+                            name: Some(import.to_string()),
+                            tail: false,
+                            slot: Some(slot),
+                        }),
+                        None => self
+                            .got_word(slot)
+                            .filter(|word| self.function_name(*word).is_some())
+                            .map(|word| Call {
+                                site,
+                                target: word,
+                                name: self.function_name(word).map(str::to_string),
+                                tail: false,
+                                slot: Some(slot),
+                            }),
+                    };
+                    if let Some(call) = call {
+                        call_at.insert(site, call.clone());
+                        calls.push(call);
+                    }
+                    continue;
+                }
                 _ => match cfg.call_targets.get(index) {
                     Some(target) => *target,
                     None => continue,
@@ -3225,6 +3527,12 @@ impl Binary {
                     },
                     call: call_at.get(&instruction.address).cloned(),
                     stack_offset: stack_offsets.get(&instruction.address).copied(),
+                    resolved: decoded.resolved.get(&instruction.address).map(|resolved| {
+                        ResolvedOperand {
+                            resolved: *resolved,
+                            name: self.resolved_name(*resolved),
+                        }
+                    }),
                 });
             }
 
@@ -3861,6 +4169,16 @@ struct Decoded {
     bytes: Vec<u8>,
     /// The address the section's first byte sits at.
     base: u64,
+    /// What each instruction does to the general registers, by address,
+    /// where the decoder says: MIPS's, which the global pointer is followed
+    /// through.
+    facts: HashMap<u64, InsnFacts>,
+    /// The address each instruction's register-relative operand names, by
+    /// the instruction's address, where the global pointer resolves one.
+    resolved: HashMap<u64, ag_engine::global_pointer::Resolved>,
+    /// The global pointer of each function in the section, by its entry,
+    /// where one is known.
+    global_pointers: BTreeMap<u64, GlobalPointer>,
 }
 
 impl Decoded {
@@ -3901,6 +4219,9 @@ fn decode_section(bytes: &[u8], base: u64, bitness: Bitness) -> Decoded {
         text: context.text,
         bytes: bytes.to_vec(),
         base,
+        facts: HashMap::new(),
+        resolved: HashMap::new(),
+        global_pointers: BTreeMap::new(),
     }
 }
 
@@ -3927,6 +4248,9 @@ fn decode_arm_section(
                 .collect(),
             bytes: bytes.to_vec(),
             base,
+            facts: HashMap::new(),
+            resolved: HashMap::new(),
+            global_pointers: BTreeMap::new(),
         },
         Err(error) => {
             eprintln!("warning: the ARM section at {base:#x} did not decode: {error:#}");
@@ -3938,6 +4262,67 @@ fn decode_arm_section(
                 text: HashMap::new(),
                 bytes: bytes.to_vec(),
                 base,
+                facts: HashMap::new(),
+                resolved: HashMap::new(),
+                global_pointers: BTreeMap::new(),
+            }
+        }
+    }
+}
+
+/// The instruction that ends a block ending at `to`: the one whose last
+/// byte is the block's, or — when that one is a delay slot — the branch
+/// before it, whose flow the block ends in.
+fn last_of_block(disasm: &Disasm, to: u64) -> Option<&DecodedInsn> {
+    let at = disasm
+        .instructions
+        .iter()
+        .position(|ins| ins.address + ins.length as u64 == to)?;
+    let last = &disasm.instructions[at];
+    match at.checked_sub(1).map(|before| &disasm.instructions[before]) {
+        Some(branch)
+            if branch.delay_slot && branch.address + branch.length as u64 == last.address =>
+        {
+            Some(branch)
+        }
+        _ => Some(last),
+    }
+}
+
+/// Decode the bytes of a 32-bit MIPS section into instructions, their text,
+/// and what each does to the general registers.
+///
+/// SLEIGH prints the text as it decodes, as it does ARM's; the registers
+/// an instruction names are not picked out for the rename, so each line
+/// names none.
+fn decode_mips_section(variant: MipsVariant, bytes: &[u8], base: u64) -> Decoded {
+    match ag_engine::mips::decode_section(variant, bytes, base) {
+        Ok(decoded) => Decoded {
+            disasm: decoded.disasm,
+            text: decoded
+                .text
+                .into_iter()
+                .map(|(address, (mnemonic, operands))| (address, (mnemonic, operands, Vec::new())))
+                .collect(),
+            bytes: bytes.to_vec(),
+            base,
+            facts: decoded.facts,
+            resolved: HashMap::new(),
+            global_pointers: BTreeMap::new(),
+        },
+        Err(error) => {
+            eprintln!("warning: the MIPS section at {base:#x} did not decode: {error:#}");
+            Decoded {
+                disasm: Disasm {
+                    file_offset_of_segment: 0,
+                    instructions: Vec::new(),
+                },
+                text: HashMap::new(),
+                bytes: bytes.to_vec(),
+                base,
+                facts: HashMap::new(),
+                resolved: HashMap::new(),
+                global_pointers: BTreeMap::new(),
             }
         }
     }
@@ -4183,6 +4568,9 @@ fn decode_plugin_section(
             text: decoded.text,
             bytes: bytes.to_vec(),
             base,
+            facts: HashMap::new(),
+            resolved: HashMap::new(),
+            global_pointers: BTreeMap::new(),
         },
         Err(error) => {
             eprintln!(
@@ -4197,6 +4585,9 @@ fn decode_plugin_section(
                 text: HashMap::new(),
                 bytes: bytes.to_vec(),
                 base,
+                facts: HashMap::new(),
+                resolved: HashMap::new(),
+                global_pointers: BTreeMap::new(),
             }
         }
     }

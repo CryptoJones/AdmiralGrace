@@ -178,6 +178,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditInline,
             )),
             Item::new(item_button(
+                "Set global pointer…",
+                "",
+                Message::EditGlobalPointer,
+            )),
+            Item::new(item_button(
                 "Merge variables…",
                 "",
                 Message::EditMergeVariables,

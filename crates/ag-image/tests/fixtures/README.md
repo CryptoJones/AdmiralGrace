@@ -15,6 +15,10 @@ The images the image tests read, and how they were made.
 | `arm_flows_stripped.elf` | The same with every symbol removed: only the entry point's low bit says the mode. |
 | `arm_flows.s` | The source of the two. |
 | `arm64.elf` | An AArch64 ELF executable built from `arm_sample.c`, statically linked with no C library. |
+| `mips_pic.elf` | A 32-bit little-endian MIPS ELF executable linked against a shared library: `mips_sample.c` built position-independent, so each function computes the global pointer from its own address (Clang's prologue, into `s0`) and calls through the GOT, and `mips_cpload.s`'s `gcc_style` with GCC's `.cpload $25` prologue, into `gp`. It has its `_gp` symbol, a `.got` and the import `puts`. |
+| `mips_pic_nogp.elf` | The same with every symbol but the four functions removed: no `_gp`, so a function that sets no global pointer reads the GOT's start and 0x7ff0. |
+| `mips_nopic.elf` | A 32-bit big-endian MIPS ELF executable, statically linked: `mips_sample.c` built not position-independent, with small data reached through `gp`, `mips_stub.c`'s `puts`, and `mips_start.s`'s `__start`, which sets `gp` from `_gp` by `lui`/`addiu`. |
+| `mips_sample.c`, `mips_cpload.s`, `mips_start.s`, `mips_stub.c` | The sources of the three MIPS executables. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
@@ -168,6 +172,29 @@ clang --target=armv7a-none-eabi -nostdlib -static -fuse-ld=lld -Wl,-e,_start \
 clang --target=armv7a-none-eabi -nostdlib -static -fuse-ld=lld -Wl,-e,_start -Wl,-s \
       -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code -Wl,-Ttext=0x20000 arm_flows.o -o arm_flows_stripped.elf
 ```
+
+The MIPS executables were linked with clang and lld (21.1.8), the import's shared library
+built from `mips_stub.c` beside them and not kept:
+
+```sh
+LD="ld.lld-21 -z max-page-size=4096 -z noseparate-code -Ttext=0x20000"
+clang --target=mipsel-linux-gnu -fPIC -O1 -c mips_stub.c -o stub.o
+ld.lld-21 -shared -soname libstub.so stub.o -o libstub.so
+clang --target=mipsel-linux-gnu -fPIC -O1 -fno-inline -c mips_sample.c -o pic.o
+clang --target=mipsel-linux-gnu -fPIC -c mips_cpload.s -o cpload.o
+$LD -e main --dynamic-linker=/lib/ld.so.1 pic.o cpload.o libstub.so -o mips_pic.elf
+llvm-objcopy-21 --strip-all --keep-symbol=add --keep-symbol=sum --keep-symbol=main \
+      --keep-symbol=gcc_style mips_pic.elf mips_pic_nogp.elf
+clang --target=mips-linux-gnu -fno-pic -mno-abicalls -G 8 -O1 -fno-inline -c mips_sample.c -o nopic.o
+clang --target=mips-linux-gnu -fno-pic -mno-abicalls -G 8 -O1 -c mips_stub.c -o stub_be.o
+clang --target=mips-linux-gnu -fno-pic -mno-abicalls -c mips_start.s -o start.o
+$LD -e __start start.o nopic.o stub_be.o -o mips_nopic.elf
+```
+
+In `mips_pic.elf` `_gp` is `0x2a210`, 0x7ff0 past the `.got` at `0x22220`, whose seven local
+entries are followed by the global one for `puts` at `0x2223c`; lld relaxed the local calls
+through the GOT to `bal`. In `mips_nopic.elf` `_gp` is `0x2a0e0`, and `counter` and the string
+are reached as `-0x7fe0(gp)` and `gp - 0x7fe8`.
 
 A Thumb function's symbol has its low bit set (`add` is `0x20001` in `arm_thumb.elf`), the
 entry point's low bit says the same, and the assembler's `$t`/`$a` mapping symbols mark where

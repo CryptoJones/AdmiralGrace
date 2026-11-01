@@ -201,6 +201,21 @@ pub enum ProjectCmd {
         /// analysis, which inlines nothing by itself.
         state: String,
     },
+    /// Say what the global pointer register — MIPS's `gp` — holds: in every
+    /// function, or in one with `--function`, over what the image says (a
+    /// function's prologue, the `_gp` symbol, the GOT). The operands read
+    /// through it name the addresses it makes them.
+    GlobalPointer {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The value, such as `0x418ff0`, or `clear` to take the word back.
+        value: String,
+        /// The function the value is for: its name, or its address. Every
+        /// function the analyst said nothing more of when left out.
+        #[arg(long)]
+        function: Option<String>,
+    },
     /// Merge two of a function's variables: every occurrence of `GONE`
     /// reads `KEEP`, and `GONE` is no longer declared. A merge that changes
     /// the meaning is made, and the function says so.
@@ -702,6 +717,11 @@ pub fn run(
                 a.inline = on;
             })
         }
+        ProjectCmd::GlobalPointer {
+            file,
+            value,
+            function,
+        } => global_pointer(&target, &file, &value, function.as_deref()),
         ProjectCmd::Merge {
             file,
             function,
@@ -1425,6 +1445,47 @@ fn image_address(text: &str) -> Result<u64> {
     }
 }
 
+/// Say the global pointer's value, for the whole image or for one
+/// function, or take the word back with `clear`.
+fn global_pointer(target: &Path, file: &Path, value: &str, function: Option<&str>) -> Result<i32> {
+    let value = match value.trim() {
+        "clear" | "none" => None,
+        text => Some(format!("{:#x}", image_address(text)?)),
+    };
+    if value.is_some() {
+        let image = image_under(target, &open_project(target, file)?)?;
+        anyhow::ensure!(
+            image.global_pointer_convention().is_some(),
+            "{} keeps no global pointer the engine follows: only 32-bit MIPS's gp is",
+            image.language()
+        );
+    }
+    match function {
+        Some(function) => {
+            let address = function_key(target, file, function)?;
+            edit(target, file, TargetKind::Function, &address, |a| {
+                a.global_pointer = value;
+            })
+        }
+        None => {
+            let mut project = open_project(target, file)?;
+            project.global_pointer = value.clone();
+            project.save(file)?;
+            match value {
+                Some(value) => println!(
+                    "{}: the global pointer is {value} in every function the project says nothing more of",
+                    file.display()
+                ),
+                None => println!(
+                    "{}: the global pointer is what the image says",
+                    file.display()
+                ),
+            }
+            Ok(0)
+        }
+    }
+}
+
 /// Move the image to `base`, or put it back with `none`.
 fn rebase(target: &Path, file: &Path, base: &str) -> Result<i32> {
     let mut project = open_project(target, file)?;
@@ -1968,6 +2029,9 @@ fn summarize(annotation: &Annotation) -> String {
         Some(true) => parts.push("inline on".to_string()),
         Some(false) => parts.push("inline off".to_string()),
         None => {}
+    }
+    if let Some(value) = &annotation.global_pointer {
+        parts.push(format!("global pointer {value}"));
     }
     for (keep, gone) in &annotation.merges {
         parts.push(format!("merge {gone} into {keep}"));

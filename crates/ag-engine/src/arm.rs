@@ -183,9 +183,9 @@ impl ArmVariant {
 /// A section's bytes, served to SLEIGH by address. Bytes outside the section
 /// read as zero, as they would from an unmapped page: SLEIGH reads a few
 /// bytes past an instruction to tell its length.
-struct SectionImage {
-    base: u64,
-    bytes: Vec<u8>,
+pub(crate) struct SectionImage {
+    pub(crate) base: u64,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl LoadImage for SectionImage {
@@ -214,9 +214,9 @@ impl LoadImage for SectionImage {
 
 /// The text SLEIGH prints for one instruction.
 #[derive(Default)]
-struct Text {
-    mnemonic: String,
-    operands: String,
+pub(crate) struct Text {
+    pub(crate) mnemonic: String,
+    pub(crate) operands: String,
 }
 
 impl AssemblyEmit for Text {
@@ -228,15 +228,15 @@ impl AssemblyEmit for Text {
 
 /// One operation of an instruction's p-code: what it does, what it writes,
 /// and what it reads.
-struct Op {
-    opcode: OpCode,
-    out: Option<VarnodeData>,
-    inputs: Vec<VarnodeData>,
+pub(crate) struct Op {
+    pub(crate) opcode: OpCode,
+    pub(crate) out: Option<VarnodeData>,
+    pub(crate) inputs: Vec<VarnodeData>,
 }
 
 /// The p-code of one instruction.
 #[derive(Default)]
-struct Ops(Vec<Op>);
+pub(crate) struct Ops(pub(crate) Vec<Op>);
 
 impl PcodeEmit for Ops {
     fn dump(
@@ -455,6 +455,7 @@ fn decode_with(
                     flags_read: 0,
                     flags_written: 0,
                     rep: false,
+                    delay_slot: false,
                 });
                 decoded.text.insert(cursor, (printed.mnemonic, operands));
                 cursor = next;
@@ -491,6 +492,7 @@ fn decode_with(
                     flags_read: 0,
                     flags_written: 0,
                     rep: false,
+                    delay_slot: false,
                 });
                 decoded.text.insert(
                     cursor,
@@ -547,7 +549,7 @@ fn mode_in_context(sleigh: &mut Sleigh, address: &Address) -> Option<Mode> {
 /// A literal-pool load reads a word of the program outright — SLEIGH folds
 /// the address into a ram varnode — or through a pointer the instruction
 /// computes in a temporary from constants, which are followed to the load.
-fn read_ops(ops: &[Op], next: u64, ram: &Rc<AddrSpace>) -> (Flow, Option<u64>) {
+pub(crate) fn read_ops(ops: &[Op], next: u64, ram: &Rc<AddrSpace>) -> (Flow, Option<u64>) {
     let in_ram = |varnode: &VarnodeData| {
         varnode
             .space

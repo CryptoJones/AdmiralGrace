@@ -849,3 +849,75 @@ fn the_stack_frame_and_the_analysts_stack_variables_go_through_the_server() {
     assert_eq!(json(7), before);
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn the_global_pointer_is_set_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-gp-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mips =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/mips_nopic.elf");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(&mips)
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"disassemble","arguments":{"target":"sum"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_global_pointer","arguments":{"value":"0x30000"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_global_pointer","arguments":{"value":"0x2a0e0","function":"main"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"disassemble","arguments":{"target":"sum"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"set_global_pointer","arguments":{"value":null}}}"#,
+        ] {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 5);
+    let text = |index: usize| {
+        replies[index]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        text(0).contains("sw v0, -0x7fe0(gp)  ; [0x22100] counter"),
+        "{}",
+        text(0)
+    );
+    assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
+    let answer: serde_json::Value = serde_json::from_str(&text(1)).unwrap();
+    assert_eq!(answer["global_pointer"], "0x30000");
+    assert!(answer["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["source"] == "analyst"));
+    let answer: serde_json::Value = serde_json::from_str(&text(2)).unwrap();
+    assert_eq!(answer["functions"][0]["name"], "main");
+    assert_eq!(answer["functions"][0]["own"], true);
+    assert!(
+        text(3).contains("sw v0, -0x7fe0(gp)  ; [0x28020]"),
+        "{}",
+        text(3)
+    );
+    let saved = ag_corpus::project::ProjectFile::load(&project).expect("the project was saved");
+    assert_eq!(saved.image_global_pointer(), None, "taken back");
+    assert_eq!(saved.global_pointers().get(&0x2_0088), Some(&0x2_a0e0));
+    let _ = std::fs::remove_file(&project);
+}

@@ -902,8 +902,9 @@ impl Image {
     /// the other end. Only these two relocation kinds are read: a `COPY`
     /// relocation fills its slot with the symbol's bytes, not its address,
     /// and a `RELATIVE` one names no symbol. A Mach-O's are its symbol
-    /// pointer sections, named by the indirect symbol table. Empty for
-    /// every other container and architecture.
+    /// pointer sections, named by the indirect symbol table; a MIPS ELF's
+    /// are the global entries of its GOT. Empty for every other container
+    /// and architecture.
     pub fn import_slots(&self) -> Vec<(u64, String)> {
         if let Loaded::Plugin(loaded) = &self.inner {
             return loaded.imports.clone();
@@ -919,6 +920,9 @@ impl Image {
         };
         if file.format() == object::BinaryFormat::MachO {
             return self.macho_import_slots();
+        }
+        if file.architecture() == Architecture::Mips {
+            return self.mips_import_slots();
         }
         if !matches!(
             file.architecture(),
@@ -961,6 +965,129 @@ impl Image {
         }
         slots.sort_by_key(|(slot, _)| *slot);
         slots
+    }
+
+    /// A 32-bit MIPS ELF's import slots: the global entries of its GOT.
+    ///
+    /// MIPS names no slot by relocation. The GOT starts at `DT_PLTGOT`
+    /// with `DT_MIPS_LOCAL_GOTNO` local entries, and after them one entry
+    /// for each dynamic symbol from `DT_MIPS_GOTSYM` to `DT_MIPS_SYMTABNO`,
+    /// in order, four bytes each. An undefined one is an import; a defined
+    /// one holds the address of a function or a datum of the image, and is
+    /// no import.
+    fn mips_import_slots(&self) -> Vec<(u64, String)> {
+        use object::read::{Object, ObjectSymbol, ObjectSymbolTable};
+        use object::SymbolIndex;
+
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let dynamic = self.elf32_dynamic();
+        let tag = |wanted: i64| {
+            dynamic
+                .iter()
+                .find(|(found, _)| i64::from(*found) == wanted)
+                .map(|(_, value)| u64::from(*value))
+        };
+        let (Some(got), Some(local), Some(first), Some(count), Some(symbols)) = (
+            tag(object::elf::DT_PLTGOT),
+            tag(object::elf::DT_MIPS_LOCAL_GOTNO),
+            tag(object::elf::DT_MIPS_GOTSYM),
+            tag(object::elf::DT_MIPS_SYMTABNO),
+            file.dynamic_symbol_table(),
+        ) else {
+            return Vec::new();
+        };
+        let mut slots = Vec::new();
+        for index in first..count {
+            let Ok(symbol) = symbols.symbol_by_index(SymbolIndex(index as usize)) else {
+                continue;
+            };
+            if !symbol.is_undefined() {
+                continue;
+            }
+            let Ok(name) = symbol.name() else {
+                continue;
+            };
+            if !name.is_empty() {
+                let slot = got.wrapping_add(4 * (local + index - first));
+                slots.push((slot, name.to_string()));
+            }
+        }
+        slots
+    }
+
+    /// The entries of a 32-bit ELF's dynamic section, as `(tag, value)`, in
+    /// the file's byte order; empty for any other file, or an ELF without
+    /// one.
+    fn elf32_dynamic(&self) -> Vec<(u32, u32)> {
+        use object::read::{Object, ObjectSection};
+
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        if file.format() != object::BinaryFormat::Elf || file.is_64() {
+            return Vec::new();
+        }
+        let Some(data) = file
+            .section_by_name(".dynamic")
+            .and_then(|section| section.data().ok())
+        else {
+            return Vec::new();
+        };
+        let little = file.is_little_endian();
+        let word = |bytes: &[u8]| {
+            let bytes: [u8; 4] = bytes.try_into().expect("four bytes");
+            if little {
+                u32::from_le_bytes(bytes)
+            } else {
+                u32::from_be_bytes(bytes)
+            }
+        };
+        data.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|entry| (word(&entry[..4]), word(&entry[4..])))
+            .take_while(|(tag, _)| i64::from(*tag) != object::elf::DT_NULL)
+            .collect()
+    }
+
+    /// What the image says about its global pointer outside its code: the
+    /// value of the symbol `symbol` names (MIPS's `_gp`), when the symbol
+    /// table defines it, and where the GOT starts — the `.got` section, or
+    /// `DT_PLTGOT` when no section is named so. Nothing for an image that
+    /// is not an ELF.
+    pub fn global_pointer_hints(&self, symbol: &str) -> crate::global_pointer::ImageHints {
+        use object::read::{Object, ObjectSection, ObjectSymbol};
+
+        let mut hints = crate::global_pointer::ImageHints::default();
+        if self.object().is_none() {
+            return hints;
+        }
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return hints;
+        };
+        if file.format() != object::BinaryFormat::Elf
+            || file.kind() == object::ObjectKind::Relocatable
+        {
+            return hints;
+        }
+        hints.symbol = file
+            .symbols()
+            .chain(file.dynamic_symbols())
+            .find(|found| !found.is_undefined() && found.name() == Ok(symbol))
+            .map(|found| found.address());
+        hints.got = file
+            .section_by_name(".got")
+            .map(|section| section.address())
+            .filter(|address| *address != 0)
+            .or_else(|| {
+                self.elf32_dynamic()
+                    .iter()
+                    .find(|(tag, _)| i64::from(*tag) == object::elf::DT_PLTGOT)
+                    .map(|(_, value)| u64::from(*value))
+            });
+        hints
     }
 
     /// A 64-bit Mach-O's import slots: the entries of its lazy and non-lazy
