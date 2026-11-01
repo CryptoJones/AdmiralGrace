@@ -54,11 +54,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ast::{AstNode, BinaryOp};
+use crate::ast::AstNode;
 use crate::emulate::type_of;
 use crate::lift::{LiftedFunction, Statement, StatementKind};
 use crate::merge::nodes_of;
 use crate::options::Sites;
+use crate::pvs::{convert, full, Range, Ty};
 use crate::slice::{strip_casts, Flow, Graph, Part, ENTRY};
 
 /// A variable's value or inclusive range, pinned by the analyst, for the
@@ -130,267 +131,14 @@ pub fn spelled(min: i64, max: i64) -> String {
 /// word's index. It is no call, and is gone before the body is printed.
 pub const PINNED: &str = "__pinned";
 
-/// A range of values, as numbers rather than bits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Range {
-    lo: i128,
-    hi: i128,
-}
-
-impl Range {
-    fn one(value: i128) -> Self {
-        Self {
-            lo: value,
-            hi: value,
-        }
-    }
-
-    fn hull(self, other: Self) -> Self {
-        Self {
-            lo: self.lo.min(other.lo),
-            hi: self.hi.max(other.hi),
-        }
-    }
-
-    fn contains(self, value: i128) -> bool {
-        self.lo <= value && value <= self.hi
-    }
-
-    /// Whether a value in the range is true: always, never, or either.
-    fn truth(self) -> Option<bool> {
-        if !self.contains(0) {
-            Some(true)
-        } else if self.lo == 0 && self.hi == 0 {
-            Some(false)
-        } else {
-            None
-        }
-    }
-}
-
-/// A width in bits and a signedness, as [`type_of`] reads a C type.
-type Ty = (u32, bool);
-
-/// The values a type holds.
-fn full(ty: Ty) -> Range {
-    let bits = ty.0.clamp(1, 64);
-    if ty.1 {
-        Range {
-            lo: -(1i128 << (bits - 1)),
-            hi: (1i128 << (bits - 1)) - 1,
-        }
-    } else {
-        Range {
-            lo: 0,
-            hi: (1i128 << bits) - 1,
-        }
-    }
-}
-
-/// The range converted to `ty` as C converts a value: modulo the type's
-/// size, so a range that does not wrap in it stays whole, and one that
-/// does is unknown.
-fn convert(range: Range, ty: Ty) -> Option<Range> {
-    let bounds = full(ty);
-    if bounds.contains(range.lo) && bounds.contains(range.hi) {
-        return Some(range);
-    }
-    let size = bounds.hi - bounds.lo + 1;
-    if range.hi - range.lo >= size {
-        return None;
-    }
-    let wrap = |value: i128| (value - bounds.lo).rem_euclid(size) + bounds.lo;
-    let (lo, hi) = (wrap(range.lo), wrap(range.hi));
-    (hi - lo == range.hi - range.lo).then_some(Range { lo, hi })
-}
-
 /// A value's range and its type.
 type Known = (Range, Ty);
 
-/// A comparison's or a logical operator's result: `int`, 0 or 1.
-const TRUTH: Ty = (32, true);
-
 /// What `node` evaluates to, given what is known of the variables it
-/// reads, when that is known.
+/// reads, when that is known: the arithmetic [`crate::pvs`] follows, over
+/// ranges.
 fn eval(node: &AstNode, known: &dyn Fn(&str) -> Option<Known>) -> Option<Known> {
-    let truth = |holds: Option<bool>| -> Known {
-        let range = match holds {
-            Some(true) => Range::one(1),
-            Some(false) => Range::one(0),
-            None => Range { lo: 0, hi: 1 },
-        };
-        (range, TRUTH)
-    };
-    match node {
-        AstNode::Constant { value, width_bytes } => {
-            let bits = (width_bytes * 8).clamp(8, 64);
-            let shift = 64 - bits;
-            let signed = ((*value << shift) as i64) >> shift;
-            Some((Range::one(signed as i128), (bits, true)))
-        }
-        AstNode::Var { name } => known(name),
-        AstNode::Cast { ty, target } => {
-            let ty = type_of(ty);
-            let (range, _) = eval(target, known)?;
-            Some((convert(range, ty)?, ty))
-        }
-        AstNode::ConditionTrue => Some(truth(Some(true))),
-        AstNode::ConditionFalse => Some(truth(Some(false))),
-        AstNode::ConstantCondition { holds, .. } => Some(truth(Some(*holds))),
-        AstNode::Ternary {
-            cond,
-            then,
-            otherwise,
-        } => match eval(cond, known).and_then(|(range, _)| range.truth()) {
-            Some(true) => eval(then, known),
-            Some(false) => eval(otherwise, known),
-            None => {
-                let (a, ty) = eval(then, known)?;
-                let (b, _) = eval(otherwise, known)?;
-                Some((a.hull(b), ty))
-            }
-        },
-        AstNode::Binary { lhs, op, rhs } => {
-            let side = |node: &AstNode| eval(node, known);
-            match op {
-                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
-                    let a = side(lhs).and_then(|(range, _)| range.truth());
-                    let b = side(rhs).and_then(|(range, _)| range.truth());
-                    let and = *op == BinaryOp::LogicalAnd;
-                    let holds = match (a, b) {
-                        (Some(x), _) | (_, Some(x)) if x != and => Some(!and),
-                        (Some(_), Some(_)) => Some(and),
-                        _ => None,
-                    };
-                    Some(truth(holds))
-                }
-                BinaryOp::Equal
-                | BinaryOp::NotEqual
-                | BinaryOp::Less
-                | BinaryOp::LessEqual
-                | BinaryOp::Greater
-                | BinaryOp::GreaterEqual => {
-                    let holds = (|| {
-                        let (a, b) = common(side(lhs)?, side(rhs)?)?;
-                        compare(*op, a, b)
-                    })();
-                    Some(truth(holds))
-                }
-                BinaryOp::Shl | BinaryOp::Shr => {
-                    // A shift has its left operand's type.
-                    let (a, ty) = side(lhs)?;
-                    let (count, _) = side(rhs)?;
-                    if count.lo != count.hi || count.lo < 0 || count.lo >= i128::from(ty.0) {
-                        return None;
-                    }
-                    let k = count.lo as u32;
-                    let range = if *op == BinaryOp::Shl {
-                        Range {
-                            lo: a.lo.checked_shl(k)?,
-                            hi: a.hi.checked_shl(k)?,
-                        }
-                    } else {
-                        Range {
-                            lo: a.lo >> k,
-                            hi: a.hi >> k,
-                        }
-                    };
-                    Some((convert(range, ty)?, ty))
-                }
-                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::And => {
-                    let ((a, ty), (b, _)) = usual(side(lhs)?, side(rhs)?)?;
-                    let range = match op {
-                        BinaryOp::Add => Range {
-                            lo: a.lo.checked_add(b.lo)?,
-                            hi: a.hi.checked_add(b.hi)?,
-                        },
-                        BinaryOp::Sub => Range {
-                            lo: a.lo.checked_sub(b.hi)?,
-                            hi: a.hi.checked_sub(b.lo)?,
-                        },
-                        BinaryOp::Mul => {
-                            let products = [
-                                a.lo.checked_mul(b.lo)?,
-                                a.lo.checked_mul(b.hi)?,
-                                a.hi.checked_mul(b.lo)?,
-                                a.hi.checked_mul(b.hi)?,
-                            ];
-                            Range {
-                                lo: *products.iter().min()?,
-                                hi: *products.iter().max()?,
-                            }
-                        }
-                        _ => {
-                            // `&` of two values that are not negative is no
-                            // more than either.
-                            if a.lo < 0 || b.lo < 0 {
-                                return None;
-                            }
-                            if a.lo == a.hi && b.lo == b.hi {
-                                Range::one(a.lo & b.lo)
-                            } else {
-                                Range {
-                                    lo: 0,
-                                    hi: a.hi.min(b.hi),
-                                }
-                            }
-                        }
-                    };
-                    Some((convert(range, ty)?, ty))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// The two operands in the type the usual conversions give them: the
-/// wider one's, and when the widths are the same, unsigned if either is.
-fn usual(a: Known, b: Known) -> Option<(Known, Known)> {
-    let (ta, tb) = (a.1, b.1);
-    let ty = match ta.0.cmp(&tb.0) {
-        std::cmp::Ordering::Greater => ta,
-        std::cmp::Ordering::Less => tb,
-        std::cmp::Ordering::Equal => (ta.0, ta.1 && tb.1),
-    };
-    Some(((convert(a.0, ty)?, ty), (convert(b.0, ty)?, ty)))
-}
-
-/// The two sides of a comparison in their common type.
-fn common(a: Known, b: Known) -> Option<(Range, Range)> {
-    let ((a, _), (b, _)) = usual(a, b)?;
-    Some((a, b))
-}
-
-/// Whether `op` holds of every pair of values from the two ranges, of none,
-/// or of some.
-fn compare(op: BinaryOp, a: Range, b: Range) -> Option<bool> {
-    let less = |a: Range, b: Range| {
-        if a.hi < b.lo {
-            Some(true)
-        } else if a.lo >= b.hi {
-            Some(false)
-        } else {
-            None
-        }
-    };
-    let equal = if a.lo == a.hi && b.lo == b.hi && a.lo == b.lo {
-        Some(true)
-    } else if a.hi < b.lo || b.hi < a.lo {
-        Some(false)
-    } else {
-        None
-    };
-    match op {
-        BinaryOp::Less => less(a, b),
-        BinaryOp::GreaterEqual => less(a, b).map(|holds| !holds),
-        BinaryOp::Greater => less(b, a),
-        BinaryOp::LessEqual => less(b, a).map(|holds| !holds),
-        BinaryOp::Equal => equal,
-        BinaryOp::NotEqual => equal.map(|holds| !holds),
-        _ => None,
-    }
+    crate::pvs::eval_ranges(node, known)
 }
 
 /// Follow the analyst's words on the variables of `function` through its
@@ -793,7 +541,7 @@ fn switch_at(statements: &[Statement], at: u64) -> Option<&Statement> {
 
 /// The index of the word an analyst's definition `v = __pinned(v, i)` is
 /// of, when the node is one.
-fn pin_index(node: &AstNode) -> Option<usize> {
+pub(crate) fn pin_index(node: &AstNode) -> Option<usize> {
     let AstNode::Assign { rhs, .. } = node else {
         return None;
     };
@@ -810,7 +558,12 @@ fn pin_index(node: &AstNode) -> Option<usize> {
 /// statement, in the order the pseudocode reads, whose line carries `at` —
 /// after it, where it is a label or assigns the variable, so the word is of
 /// the value it gives — and say whether there was one.
-fn insert_pin(statements: &mut Vec<Statement>, at: u64, variable: &str, pin: &Statement) -> bool {
+pub(crate) fn insert_pin(
+    statements: &mut Vec<Statement>,
+    at: u64,
+    variable: &str,
+    pin: &Statement,
+) -> bool {
     for i in 0..statements.len() {
         if statements[i].addresses.contains(&at) {
             let after = matches!(statements[i].kind, StatementKind::Plain)
@@ -878,6 +631,7 @@ fn rewrite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::BinaryOp;
     use crate::lift::{SwitchArm, Variable};
 
     fn var(name: &str) -> AstNode {

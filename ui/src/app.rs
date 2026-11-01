@@ -87,6 +87,9 @@ pub enum Message {
     ViewToggleRainbowBraces,
     /// Draw a guide down each indented block of the pseudocode, or stop.
     ViewToggleIndentGuides,
+    /// End the pseudocode's lines with the possible values of what each
+    /// reads, or stop.
+    ViewTogglePossibleValues,
     /// Show, or stop showing, one of the notes beside a level's items.
     ViewToggleIlOption(IlOption),
     /// Run the program under the debugger, stopped at its first instruction.
@@ -612,6 +615,9 @@ pub struct WorkSurface {
     /// the selection is still one of its addresses: which of the lines
     /// sharing an instruction the analyst meant.
     pub selected_line: Option<usize>,
+    /// The possible values of what the selected pseudocode line reads, as
+    /// the status bar says them: `a: 0..=5`.
+    pub line_values: Option<String>,
     /// The addresses each line of the pseudocode came from.
     ///
     /// The keys are line numbers counted from zero, so they line up with the
@@ -860,6 +866,9 @@ pub struct App {
     pub rainbow_braces: bool,
     /// Whether a guide is drawn down each indented block of the pseudocode.
     pub indent_guides: bool,
+    /// Whether the pseudocode's lines end with the possible values of what
+    /// each reads, `// a: 0..=9`.
+    pub show_values: bool,
     /// An open path prompt, when one is active.
     pub prompt: Option<Prompt>,
     /// The corpus directory currently open.
@@ -973,6 +982,7 @@ impl App {
             show_about: false,
             rainbow_braces: false,
             indent_guides: false,
+            show_values: false,
             prompt: None,
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
@@ -2459,7 +2469,8 @@ impl App {
             .or_else(|| self.marked_function_detail(address));
         self.work.listing_of = Some(address);
         self.refresh_listing();
-        self.work.pseudocode = self.provider.pseudocode(address);
+        self.work.pseudocode = self.pseudocode_of(address);
+        self.work.line_values = None;
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
         self.work.line_addresses = self.provider.line_addresses(address);
@@ -3112,7 +3123,7 @@ impl App {
         self.refresh_functions();
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3130,12 +3141,24 @@ impl App {
         self.refresh_functions();
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
         }
         self.refresh_bytes();
+    }
+
+    /// The pseudocode of `function` as the pane shows it: with the possible
+    /// values at the ends of its lines when they are shown and the
+    /// provider can say them.
+    fn pseudocode_of(&self, function: u64) -> Option<String> {
+        if self.show_values {
+            if let Some(text) = self.provider.valued_pseudocode(function) {
+                return Some(text);
+            }
+        }
+        self.provider.pseudocode(function)
     }
 
     /// Take the slice on screen again over the pseudocode as it now reads;
@@ -3266,7 +3289,7 @@ impl App {
             return;
         }
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3281,7 +3304,7 @@ impl App {
             return;
         }
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3299,7 +3322,7 @@ impl App {
             return;
         }
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3387,7 +3410,7 @@ impl App {
         }
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3419,7 +3442,7 @@ impl App {
         }
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
-            self.work.pseudocode = self.provider.pseudocode(function);
+            self.work.pseudocode = self.pseudocode_of(function);
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3873,6 +3896,10 @@ impl App {
 
             Message::PseudocodeLineSelected(line, address) => {
                 self.work.selected_line = Some(line);
+                self.work.line_values = self.work.listing_of.and_then(|function| {
+                    let addresses = self.work.line_addresses.get(&line)?;
+                    self.provider.line_values(function, addresses)
+                });
                 return self.update(Message::AddressSelected(address));
             }
 
@@ -5887,6 +5914,18 @@ impl App {
 
             Message::ViewToggleRainbowBraces => {
                 self.rainbow_braces = !self.rainbow_braces;
+            }
+
+            Message::ViewTogglePossibleValues => {
+                self.show_values = !self.show_values;
+                if let Some(function) = self.work.listing_of {
+                    self.work.pseudocode = self.pseudocode_of(function);
+                }
+                self.notice = Some(if self.show_values {
+                    "The pseudocode's lines end with the possible values they read".into()
+                } else {
+                    "The possible values are hidden".into()
+                });
             }
 
             Message::ViewToggleIndentGuides => {
@@ -11546,6 +11585,48 @@ mod tests {
         assert!(app.annotations.annotation_for("0x1149").is_none());
         let _ = app.update(Message::FunctionSelected(0x1198));
         assert!(main(&app).contains("sum_to(add(a, 3))"), "{}", main(&app));
+    }
+
+    #[test]
+    fn the_view_menu_shows_the_possible_values_and_a_line_says_its_own() {
+        let config = Config {
+            binary: Some(switch_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x401000));
+        let plain = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(!plain.contains("// a: 0..=5"), "{plain}");
+        let switch = plain
+            .lines()
+            .position(|line| line.contains("switch ("))
+            .unwrap_or_else(|| panic!("a switch in {plain}"));
+
+        // Selecting the switch's line says what it reads in the status bar.
+        let address = app.work.line_addresses[&switch][0];
+        let _ = app.update(Message::PseudocodeLineSelected(switch, address));
+        assert_eq!(app.work.line_values.as_deref(), Some("a: 0..=5"));
+
+        // Shown, the lines end with them, and the lines are the same lines.
+        let _ = app.update(Message::ViewTogglePossibleValues);
+        assert!(app.show_values);
+        let shown = app.work.pseudocode.clone().unwrap_or_default();
+        assert!(
+            shown.contains("switch ((unsigned long)(unsigned int)a) { // a: 0..=5"),
+            "{shown}"
+        );
+        assert_eq!(shown.lines().count(), plain.lines().count());
+        // They follow the pseudocode as it is read again.
+        let _ = app.update(Message::FunctionSelected(0x401000));
+        assert!(app
+            .work
+            .pseudocode
+            .as_deref()
+            .is_some_and(|text| text.contains("// a: 0..=5")));
+        assert!(app.work.line_values.is_none());
+
+        let _ = app.update(Message::ViewTogglePossibleValues);
+        assert_eq!(app.work.pseudocode.as_deref(), Some(plain.as_str()));
     }
 
     #[test]

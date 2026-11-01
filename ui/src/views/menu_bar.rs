@@ -309,6 +309,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     "",
                     Message::ViewToggleIndentGuides,
                 )),
+                Item::new(item_button(
+                    if app.show_values {
+                        "Show possible values: on"
+                    } else {
+                        "Show possible values: off"
+                    },
+                    "",
+                    Message::ViewTogglePossibleValues,
+                )),
                 Item::new(separator()),
             ]
             .into_iter()

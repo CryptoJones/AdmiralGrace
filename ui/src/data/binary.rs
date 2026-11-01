@@ -399,6 +399,25 @@ impl Provider for BinaryProvider {
         Ok(pseudocode.slice_lines.unwrap_or_default())
     }
 
+    fn valued_pseudocode(&self, address: u64) -> Option<String> {
+        self.binary
+            .valued_pseudocode(address, None)
+            .ok()
+            .map(|pseudocode| pseudocode.text())
+    }
+
+    fn line_values(&self, function: u64, addresses: &[u64]) -> Option<String> {
+        let notes: Vec<String> = self
+            .binary
+            .possible_values(function)
+            .ok()?
+            .iter()
+            .filter(|statement| addresses.iter().any(|at| statement.addresses.contains(at)))
+            .filter_map(|statement| statement.note())
+            .collect();
+        (!notes.is_empty()).then(|| notes.join("; "))
+    }
+
     fn set_removable_stores(&self, removable: BTreeMap<u64, Vec<String>>) -> bool {
         self.binary.set_removable_stores(removable)
     }

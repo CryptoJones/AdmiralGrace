@@ -49,6 +49,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .size(11)
                     .color(color::MUTED),
             )
+            .push(match &app.work.line_values {
+                Some(values) => Text::new(format!("Values: {values}"))
+                    .size(11)
+                    .color(color::MUTED),
+                None => Text::new(""),
+            })
             .push(Space::new().width(Length::Fill))
             .push(match &app.notice {
                 Some(notice) => Text::new(notice.clone()).size(11).color(color::AMBER),

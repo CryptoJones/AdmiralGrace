@@ -291,6 +291,17 @@ not. `NAME off` or `NAME@ADDRESS off` takes the word back. The words are kept on
 function's record in the project file, by the names the lift declares, and undo takes them
 back.
 
+## Possible values
+
+Selecting a pseudocode line says in the status bar what the variables it reads can hold
+there — `Values: a: 0..=5` — the ones that can be any value left out. **View ▸ Show
+possible values** ends every line with the same, `switch ((unsigned long)(unsigned int)a) {
+// a: 0..=5`, on the lines as they are, so a slice, the dead lines and a click still land
+where they did; it follows the pseudocode as it is read again, and the toggle takes the
+notes off. The sets are `ag image values`'s (`docs/cli.md`): the constants, sets and ranges
+found forward from the entry and narrowed by the branch conditions on the way, seeded with
+the values the analyst pinned.
+
 ## Debugging
 
 Some behavior only shows when the code runs, so the workbench drives a debugger — GDB, or
