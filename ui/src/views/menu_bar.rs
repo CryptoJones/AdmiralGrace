@@ -207,6 +207,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::EditVariableValue,
             )),
+            Item::new(item_button(
+                "Set variable type…",
+                "",
+                Message::EditVariableType,
+            )),
+            Item::new(item_button("New type from C…", "", Message::EditNewType)),
+            Item::new(item_button("Edit type…", "", Message::EditEditType)),
+            Item::new(item_button("Delete type", "", Message::EditDeleteType)),
             Item::new(separator()),
             Item::new(item_button(
                 "Assemble over bytes…",
@@ -274,6 +282,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 )),
                 Item::new(item_button("Variables", "", Message::ViewVariables)),
                 Item::new(item_button("Stack layout", "", Message::ViewStack)),
+                Item::new(item_button("Types", "", Message::ViewTypes)),
                 Item::new(separator()),
                 Item::new(item_button(
                     "Cycle the pane's level",

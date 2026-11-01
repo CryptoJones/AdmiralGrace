@@ -5,12 +5,18 @@
 //! its command line, so a lifter's reading of the machine can be built
 //! with a compiler and run beside the program it came from. The spelling
 //! is the pseudocode's: the lift's own types and casts, which are C.
+//!
+//! A variable the analyst typed is declared with its type, the project's
+//! definitions it needs written ahead of the functions; the medium level
+//! reads it as the integer the machine held, so each read of it is cast to
+//! the integer of its width and each value stored to it cast to its type.
 
 use std::collections::BTreeSet;
 
 use crate::ast::{AstNode, BinaryOp};
 use crate::lift::Stages;
 use crate::structure::Terminator;
+use crate::types::{Type, TypeStore};
 
 /// A function the program declares and does not define: an import, or a
 /// function the lifter refused.
@@ -44,6 +50,9 @@ pub struct Program<'a> {
     /// The function `main` calls with the numbers on the command line,
     /// printing what it returns.
     pub harness: Option<&'a Stages>,
+    /// The project's types, which the variables' types name; `None` for
+    /// the platform's primitives alone.
+    pub types: Option<&'a TypeStore>,
 }
 
 /// The functions the program declares exactly for its own use — the
@@ -100,6 +109,14 @@ pub fn program(program: &Program) -> String {
     if declared {
         out.push('\n');
     }
+    let platform = TypeStore::default();
+    let store = program.types.unwrap_or(&platform);
+    let definitions = definitions(&program.functions, store);
+    if !definitions.is_empty() {
+        out.push_str("// The types the functions' variables are declared with.\n");
+        out.push_str(&definitions);
+        out.push('\n');
+    }
     if program.functions.len() > 1 {
         for stages in &program.functions {
             out.push_str(&signature(stages));
@@ -108,7 +125,7 @@ pub fn program(program: &Program) -> String {
         out.push('\n');
     }
     for stages in &program.functions {
-        out.push_str(&function(stages));
+        out.push_str(&function_with(stages, store));
         out.push('\n');
     }
     if let Some(stages) = program.harness {
@@ -117,13 +134,135 @@ pub fn program(program: &Program) -> String {
     out
 }
 
+/// The definitions of the project's types the functions' variables and
+/// returns name, in an order C reads them in, as C.
+fn definitions(functions: &[&Stages], store: &TypeStore) -> String {
+    let types: Vec<Type> = functions
+        .iter()
+        .flat_map(|stages| {
+            let function = &stages.function;
+            function
+                .params
+                .iter()
+                .chain(&function.locals)
+                .map(|v| v.ty.as_str())
+                .chain([function.return_type.as_str()])
+        })
+        .filter_map(|ty| crate::ctype::parse_type(store, ty).ok())
+        .collect();
+    let mut out = String::new();
+    for key in store.needed_by(&types) {
+        if store.is_anonymous(&key) {
+            continue;
+        }
+        if let Some(text) = store.definition_text(&key, false) {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The variables of a function the analyst typed, as the medium level
+/// reads them: each with the integer of its width.
+fn retyped(
+    stages: &Stages,
+    store: &TypeStore,
+) -> std::collections::BTreeMap<String, (String, String)> {
+    let mut out = std::collections::BTreeMap::new();
+    for variable in stages.function.params.iter().chain(&stages.function.locals) {
+        let Ok(ty) = crate::ctype::parse_type(store, &variable.ty) else {
+            continue;
+        };
+        if matches!(store.resolve(&ty), Type::Prim(p) if p.is_integer()) || !store.is_scalar(&ty) {
+            continue;
+        }
+        let Ok(size) = store.size_of(&ty) else {
+            continue;
+        };
+        let integer = crate::lift::type_name(u32::try_from(size * 8).unwrap_or(64));
+        out.insert(
+            identifier(&variable.name),
+            (integer.to_string(), ty.spelled(store)),
+        );
+    }
+    out
+}
+
+/// `node` with each read of a typed variable cast to its integer, and each
+/// value stored to one cast to its type.
+fn cast_retyped(
+    node: &AstNode,
+    retyped: &std::collections::BTreeMap<String, (String, String)>,
+) -> AstNode {
+    if retyped.is_empty() {
+        return node.clone();
+    }
+    let read = |node: AstNode| {
+        crate::inline::map(node, &mut |n| match n {
+            AstNode::Var { name } => match retyped.get(&identifier(&name)) {
+                Some((integer, _)) => AstNode::Cast {
+                    ty: integer.clone(),
+                    target: Box::new(AstNode::Var { name }),
+                },
+                None => AstNode::Var { name },
+            },
+            // `&a` takes the variable's own address.
+            AstNode::AddressOf { target } => match *target {
+                AstNode::Cast { target: inner, ty } if matches!(inner.as_ref(), AstNode::Var { name } if retyped.contains_key(&identifier(name))) =>
+                {
+                    let _ = ty;
+                    AstNode::AddressOf { target: inner }
+                }
+                other => AstNode::AddressOf {
+                    target: Box::new(other),
+                },
+            },
+            other => other,
+        })
+    };
+    match node {
+        AstNode::Assign { lhs, rhs } => match lhs.as_ref() {
+            AstNode::Var { name } if retyped.contains_key(&identifier(name)) => {
+                let (_, ty) = &retyped[&identifier(name)];
+                AstNode::Assign {
+                    lhs: lhs.clone(),
+                    rhs: Box::new(AstNode::Cast {
+                        ty: ty.clone(),
+                        target: Box::new(read((**rhs).clone())),
+                    }),
+                }
+            }
+            _ => AstNode::Assign {
+                lhs: Box::new(read((**lhs).clone())),
+                rhs: Box::new(read((**rhs).clone())),
+            },
+        },
+        other => read(other.clone()),
+    }
+}
+
 /// One function as C++: its signature, its locals, then each block of its
 /// medium level under its label, ending in the `goto`s of its terminator.
 pub fn function(stages: &Stages) -> String {
+    function_with(stages, &TypeStore::default())
+}
+
+/// [`function`], the variables' types read against `store`.
+pub fn function_with(stages: &Stages, store: &TypeStore) -> String {
+    let retyped = retyped(stages, store);
     let mut out = signature(stages);
     out.push_str("\n{\n");
     for local in &stages.function.locals {
-        out.push_str(&format!("  {} {};\n", local.ty, identifier(&local.name)));
+        out.push_str(&format!(
+            "  {};\n",
+            crate::types::declaration(
+                &crate::ctype::parse_type(store, &local.ty)
+                    .unwrap_or_else(|_| Type::Named(local.ty.clone())),
+                &identifier(&local.name),
+                store
+            )
+        ));
     }
     if !stages.function.locals.is_empty() {
         out.push('\n');
@@ -145,7 +284,10 @@ pub fn function(stages: &Stages) -> String {
         let mut returned = false;
         for statement in &node.statements {
             returned = matches!(statement.node, AstNode::Return { .. });
-            out.push_str(&format!("  {};\n", statement_text(&statement.node)));
+            out.push_str(&format!(
+                "  {};\n",
+                statement_text(&cast_retyped(&statement.node, &retyped))
+            ));
         }
         match &node.terminator {
             Terminator::Return => {
@@ -163,7 +305,7 @@ pub fn function(stages: &Stages) -> String {
             Terminator::Branch {
                 cond, taken, next, ..
             } => {
-                let cond = text_of(cond);
+                let cond = text_of(&cast_retyped(cond, &retyped));
                 out.push_str(&format!(
                     "  if ({cond}) goto {}; else goto {};\n",
                     label(stages, *taken),
@@ -171,7 +313,7 @@ pub fn function(stages: &Stages) -> String {
                 ));
             }
             Terminator::Switch { index, cases, .. } => {
-                let index = text_of(index);
+                let index = text_of(&cast_retyped(index, &retyped));
                 out.push_str(&format!("  switch ({index}) {{\n"));
                 for (values, target) in cases {
                     for value in values {
@@ -385,7 +527,7 @@ pub fn signature(stages: &Stages) -> String {
             .function
             .params
             .iter()
-            .map(|param| format!("{} {}", param.ty, identifier(&param.name)))
+            .map(|param| crate::stack_vars::declarator(&param.ty, &identifier(&param.name)))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -767,6 +909,7 @@ mod tests {
                 },
             ],
             harness: Some(&stages()),
+            types: None,
         });
         assert!(program.contains("#include <cstdint>"), "{program}");
         assert!(

@@ -2784,9 +2784,9 @@ fn a_stack_variable_the_analyst_makes_is_read_by_the_lift_and_taken_back() {
         "{text}"
     );
     // A type that is not C is refused before it is kept.
-    let (ok, _, stderr) = word(&["sum_to", "-0x20", "8", "--type", "int[2][2]"]);
+    let (ok, _, stderr) = word(&["sum_to", "-0x20", "8", "--type", "int[2"]);
     assert!(!ok);
-    assert!(stderr.contains("an array of arrays"), "{stderr}");
+    assert!(stderr.contains("expected ] after the count"), "{stderr}");
 
     // Cleared, the lift's own locals come back.
     for offset in ["-0x14", "-0x18", "-0x10"] {
@@ -2888,4 +2888,172 @@ fn the_analysts_global_pointer_changes_what_the_operands_name() {
     assert!(stderr.contains("keeps no global pointer"), "{stderr}");
     let (ok, _, _) = set(&["gp"]);
     assert!(!ok);
+}
+
+#[test]
+fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
+    let file = TempFile::new("types");
+    let types = |args: &[&str]| -> (bool, String, String) {
+        let text = file.text();
+        let mut all = vec!["types", "--file", &text];
+        all.extend(args);
+        project_with("structs.elf", &all)
+    };
+    let image = |target: &str, args: &[&str]| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture(target))
+            .args(args)
+            .args(["--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let (ok, stdout, stderr) = types(&[
+        "add",
+        "struct point { int x; int y; long tag; };\ntypedef struct node { struct node *next; const struct point *at; } node_t;",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point, node_t defined"), "{stdout}");
+    assert!(
+        stderr.contains("const, volatile and restrict are dropped"),
+        "{stderr}"
+    );
+    let (ok, stdout, stderr) = types(&["show", "node"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        stdout,
+        "struct node {\n    /* 0x00 */ struct node *next;\n    /* 0x08 */ struct point *at;\n}; /* size 0x10, align 8 */\n"
+    );
+    let (ok, stdout, _) = types(&["show", "--json"]);
+    assert!(ok);
+    let shown: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(shown[0]["members"][2]["offset"], 8);
+    let (ok, stdout, _) = types(&["search", "TAG", "--in", "member"]);
+    assert!(ok);
+    assert_eq!(stdout, "struct point  (struct, 0x10 bytes)\n");
+    let (ok, _, stderr) = types(&["add", "struct point { long x; };"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("1:14: struct point is defined already"),
+        "{stderr}"
+    );
+
+    // init's pointer is a struct point: its stores are the members.
+    let (ok, stdout, stderr) = project_with(
+        "structs.elf",
+        &[
+            "var-type",
+            "--file",
+            &file.text(),
+            "init",
+            "a",
+            "struct point*",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("variable a of type struct point *"),
+        "{stdout}"
+    );
+    let text = image("structs.elf", &["pseudocode", "init"]);
+    assert!(text.contains("void init(struct point *a, int b)"), "{text}");
+    assert!(
+        text.contains("  a->x = b;\n  a->y = 2;\n  a->tag = 0x1122334455667788;\n"),
+        "{text}"
+    );
+    // The C++ declares the type ahead of the function.
+    let program = image("structs.elf", &["transpile", "init", "--no-follow"]);
+    assert!(program.contains("struct point {\n    int x;"), "{program}");
+    assert!(
+        program.contains("void init(struct point *a, int b)"),
+        "{program}"
+    );
+    // A type that does not fit the variable is refused in the pseudocode.
+    let (ok, _, stderr) = project_with(
+        "structs.elf",
+        &["var-type", "--file", &file.text(), "init", "b", "char *"],
+    );
+    assert!(ok, "{stderr}");
+    let text = image("structs.elf", &["pseudocode", "init"]);
+    assert!(
+        text.contains("// b is not typed char *: char * is 8 bytes, b holds 4"),
+        "{text}"
+    );
+    // A definition in use is not removed, and says what uses it.
+    let (ok, _, stderr) = types(&["remove", "point"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("struct point is not removed: struct node and a of init refer to it"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = types(&["replace", "point", "struct point { long x, y; long tag; };"]);
+    assert!(ok, "{stderr}");
+    let text = image("structs.elf", &["pseudocode", "init"]);
+    // `x` is a long now: the int store at 0 is no member's, and the
+    // stores stay the lift's initializer.
+    assert!(
+        text.contains("*(struct { int at_0; int at_4; long at_8; } *)a = {"),
+        "{text}"
+    );
+    let listed = image("structs.elf", &["types"]);
+    assert!(listed.starts_with("data model LP64\n"), "{listed}");
+    assert!(listed.contains("/* 0x10 */ long tag;"), "{listed}");
+    for word in ["a", "b"] {
+        let (ok, _, stderr) = project_with(
+            "structs.elf",
+            &["var-type", "--file", &file.text(), "init", word, "clear"],
+        );
+        assert!(ok, "{stderr}");
+    }
+    let (ok, _, stderr) = types(&["remove", "node_t"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = types(&["remove", "point"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point removed"), "{stdout}");
+    let text = image("structs.elf", &["pseudocode", "init"]);
+    assert!(text.contains("void init(long a, int b)"), "{text}");
+}
+
+#[test]
+fn an_enumerations_variable_reads_its_constants_as_enumerators() {
+    let file = TempFile::new("enum");
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "types",
+            "--file",
+            &file.text(),
+            "add",
+            "enum code { C_ZERO, C_ONE, C_TWO, C_THREE, C_FOUR, C_FIVE };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "switch.elf",
+        &[
+            "var-type",
+            "--file",
+            &file.text(),
+            "classify",
+            "a",
+            "enum code",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("switch.elf"))
+        .args(["pseudocode", "classify", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("classify(enum code a)"), "{text}");
+    assert!(text.contains("  case C_TWO:\n"), "{text}");
+    assert!(!text.contains("case 2:"), "{text}");
 }

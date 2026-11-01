@@ -417,7 +417,7 @@ fn emit_marked(
                 function
                     .params
                     .iter()
-                    .map(|param| format!("{} {}", param.ty, param.name))
+                    .map(|param| crate::stack_vars::declarator(&param.ty, &param.name))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -1093,7 +1093,7 @@ fn emit_statements(
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
-                        for value in &arm.values {
+                        for value in arm.spelled() {
                             lines.push(Line {
                                 text: format!("{pad}case {value}:"),
                                 addresses: Vec::new(),
@@ -1113,8 +1113,7 @@ fn emit_statements(
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
-                        let values: Vec<String> =
-                            arm.values.iter().map(|v| v.to_string()).collect();
+                        let values: Vec<String> = arm.spelled();
                         let inner = without_trailing_break(&arm.body);
                         if inner.is_empty() {
                             lines.push(Line {
@@ -1149,16 +1148,9 @@ fn emit_statements(
                 Language::Python => {
                     let index = expression(&statement.node, style);
                     for (which, arm) in arms.iter().enumerate() {
-                        let test = match arm.values.as_slice() {
+                        let test = match arm.spelled().as_slice() {
                             [value] => format!("{index} == {value}"),
-                            values => format!(
-                                "{index} in ({})",
-                                values
-                                    .iter()
-                                    .map(|v| v.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
+                            values => format!("{index} in ({})", values.join(", ")),
                         };
                         let note = if which == 0 {
                             head_note(&statement.node, style, mark)
@@ -1693,6 +1685,30 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
             expr(index, out, false, style);
             out.push(']');
         }
+        // A member, `v.f` or `p->f`; Rust reads through the pointer first.
+        AstNode::Intrinsic { .. } if crate::typed::member_of(n).is_some() => {
+            let (base, field, arrow) = crate::typed::member_of(n).expect("checked above");
+            match (arrow, style.language) {
+                (true, Language::C | Language::ObjC) => {
+                    operand(base, out, style);
+                    out.push_str("->");
+                }
+                (true, Language::Rust) => {
+                    out.push_str("(*");
+                    operand(base, out, style);
+                    out.push_str(").");
+                }
+                _ => {
+                    operand(base, out, style);
+                    out.push('.');
+                }
+            }
+            out.push_str(field);
+        }
+        // An enumerator, by its name.
+        AstNode::Intrinsic { .. } if crate::typed::enumerator_of(n).is_some() => {
+            out.push_str(crate::typed::enumerator_of(n).expect("checked above"));
+        }
         AstNode::Intrinsic { name, args } => {
             out.push_str(name);
             arguments(args, out, style);
@@ -1782,6 +1798,8 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
 fn operand(n: &AstNode, out: &mut String, style: &Style) {
     if n.is_atom()
         || crate::stack_vars::indexed(n).is_some()
+        || crate::typed::member_of(n).is_some()
+        || crate::typed::enumerator_of(n).is_some()
         || matches!(
             n,
             AstNode::Cast { .. } | AstNode::Deref { .. } | AstNode::AddressOf { .. }
@@ -2080,6 +2098,7 @@ mod tests {
                     kind: StatementKind::Switch {
                         arms: vec![
                             SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![1, 2],
                                 body: vec![
                                     plain(assign("total", AstNode::constant(1, 8)), 0x54),
@@ -2087,6 +2106,7 @@ mod tests {
                                 ],
                             },
                             SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![3],
                                 body: vec![plain(AstNode::Break, 0x58)],
                             },
@@ -2210,10 +2230,12 @@ mod tests {
                             kind: StatementKind::Switch {
                                 arms: vec![
                                     SwitchArm {
+                                        labels: Vec::new(),
                                         values: vec![1],
                                         body: vec![goto("block_40", 0x28)],
                                     },
                                     SwitchArm {
+                                        labels: Vec::new(),
                                         values: vec![2],
                                         body: vec![goto("block_60", 0x2c)],
                                     },
@@ -2720,6 +2742,7 @@ mod tests {
                     kind: StatementKind::Switch {
                         arms: vec![
                             SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![0],
                                 body: vec![
                                     plain(assign("y", var("a")), 0x24),
@@ -2727,6 +2750,7 @@ mod tests {
                                 ],
                             },
                             SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![1],
                                 body: vec![
                                     plain(assign("y", AstNode::constant(1, 4)), 0x28),
@@ -2734,6 +2758,7 @@ mod tests {
                                 ],
                             },
                             SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![2],
                                 body: vec![plain(AstNode::Break, 0x2c)],
                             },

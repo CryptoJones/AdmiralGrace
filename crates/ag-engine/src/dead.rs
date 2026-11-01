@@ -473,7 +473,11 @@ fn overwritten_before_read(rest: &[Statement], name: &str, escaped: bool) -> boo
 /// Whether a statement calls something or stores through a pointer: what
 /// may read a variable whose address was taken.
 fn may_touch_memory(node: &AstNode) -> bool {
-    if node.any(&|n| matches!(n, AstNode::Call { .. } | AstNode::Intrinsic { .. })) {
+    if node.any(&|n| match n {
+        AstNode::Call { .. } => true,
+        AstNode::Intrinsic { name, .. } => !crate::typed::is_value(name),
+        _ => false,
+    }) {
         return true;
     }
     matches!(node, AstNode::Assign { lhs, .. } if matches!(lhs.as_ref(), AstNode::Deref { .. }))
@@ -538,7 +542,11 @@ fn collect_escapes(statement: &Statement, escaped: &mut Vec<String>) {
 /// The call an expression holds, when it holds one: what keeps a dropped
 /// assignment's side effect.
 fn call_in(node: AstNode) -> Option<AstNode> {
-    if node.any(&|n| matches!(n, AstNode::Call { .. } | AstNode::Intrinsic { .. })) {
+    if node.any(&|n| match n {
+        AstNode::Call { .. } => true,
+        AstNode::Intrinsic { name, .. } => !crate::typed::is_value(name),
+        _ => false,
+    }) {
         Some(node)
     } else {
         None

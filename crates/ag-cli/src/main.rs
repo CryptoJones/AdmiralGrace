@@ -16,6 +16,7 @@ mod plugins;
 mod project;
 mod run;
 mod skill;
+mod types;
 
 #[derive(Parser)]
 #[command(name = "ag", version, about = "AdmiralGrace decompiler toolchain")]

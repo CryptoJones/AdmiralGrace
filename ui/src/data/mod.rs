@@ -419,13 +419,15 @@ pub use kuna::is_kuna_export;
 
 /// One function's merges, `(keep, gone)`, splits, `(variable, at)`, new
 /// versions, `(variable, at)`, pinned values, `(variable, at, min, max)`,
-/// and stack variables, `(offset, size, name, type)`.
+/// stack variables, `(offset, size, name, type)`, and the types given its
+/// variables, `(variable, type)`.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<(String, Option<u64>, i64, i64)>,
     Vec<(i64, u32, Option<String>, Option<String>)>,
+    Vec<(String, String)>,
 );
 
 /// Read access to the open project.
@@ -553,6 +555,22 @@ pub trait Provider: Send + Sync {
     /// anything.
     fn set_variable_edits(&self, _edits: BTreeMap<u64, VariableWords>) -> bool {
         false
+    }
+
+    /// Tell the analysis the analyst's type definitions, each a name and
+    /// its C, in the project's order, and say whether that changed
+    /// anything; a definition that does not read is refused with what was
+    /// wrong, and the types read before are kept. A provider that does not
+    /// lift keeps no types.
+    fn set_type_definitions(&self, _definitions: &[ag_image::TypeText]) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// The types the analysis reads the variables with — the platform's
+    /// primitives and the analyst's definitions — under the image's data
+    /// model. None from a provider that does not lift.
+    fn types(&self) -> Option<std::sync::Arc<ag_image::TypeStore>> {
+        None
     }
 
     /// The pairs of the variables of the function at `address` that could

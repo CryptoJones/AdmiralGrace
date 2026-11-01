@@ -256,6 +256,10 @@ pub enum ImageCmd {
         /// Write the C++ here instead of standard output.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// A project file whose words the functions are lifted with — its
+        /// types declared ahead of them.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The data the image holds, and the functions that use it.
     Data {
@@ -327,6 +331,19 @@ pub enum ImageCmd {
         /// variables.
         #[arg(long)]
         project: Option<PathBuf>,
+    },
+    /// The types the image's functions are read with: the platform's
+    /// primitives under its data model — LP64, LLP64 or ILP32 — and the
+    /// project's structures, unions, enumerations and typedefs, each as C
+    /// with its layout: every member's offset, the padding, the size and
+    /// the alignment
+    Types {
+        /// A project file whose types are shown.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// The stack frame of a function, from the top down: the caller's
     /// slots, the return address, the saved registers and the locals, each
@@ -969,6 +986,9 @@ pub(crate) fn open_image(
         image.set_removable_stores(project.removable_stores());
         image.set_inlines(project.inlines());
         image.set_variable_edits(variable_edits(project));
+        if let Err(why) = image.set_type_definitions(&crate::types::texts(project)) {
+            eprintln!("note: the project's types are not read: {why}");
+        }
         let words = global_pointer_words(project);
         if words != ag_image::GlobalPointerWords::default() && !image.set_global_pointer_words(words) {
             eprintln!(
@@ -1164,6 +1184,8 @@ pub fn run(
         | ImageCmd::Merges { project, .. }
         | ImageCmd::Variables { project, .. }
         | ImageCmd::Stack { project, .. }
+        | ImageCmd::Types { project, .. }
+        | ImageCmd::Transpile { project, .. }
         | ImageCmd::GlobalPointer { project, .. }
         | ImageCmd::Values { project, .. }
         | ImageCmd::Defuse { project, .. }
@@ -1262,6 +1284,7 @@ pub fn run(
             no_follow,
             harness,
             out,
+            ..
         } => transpile(
             &image,
             &targets,
@@ -1288,6 +1311,7 @@ pub fn run(
             variables(&image, &target, json, project.as_ref())
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
+        ImageCmd::Types { json, .. } => types(&image, json),
         ImageCmd::GlobalPointer {
             functions, json, ..
         } => global_pointer(&image, &functions, json),
@@ -2923,6 +2947,41 @@ pub(crate) fn stack_frame_of(
 }
 
 /// `ag image FILE stack FUNCTION`: the function's frame, slot by slot.
+/// `ag image FILE types`: the platform's primitives and the project's
+/// definitions, with their layouts.
+fn types(image: &Binary, json: bool) -> Result<i32> {
+    let store = image.types();
+    if json {
+        let defined: Vec<serde_json::Value> = store
+            .names()
+            .into_iter()
+            .map(|key| crate::types::type_json(&store, key))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "data_model": store.model().name,
+                "pointer": store.model().pointer,
+                "primitives": crate::types::primitives_json(&store),
+                "types": defined,
+            }))?
+        );
+        return Ok(0);
+    }
+    print!("{}", crate::types::primitives_text(&store));
+    let names = store.names();
+    if names.is_empty() {
+        println!("no types are defined");
+    }
+    for key in names {
+        println!();
+        if let Some(text) = store.definition_text(key, true) {
+            println!("{text}");
+        }
+    }
+    Ok(0)
+}
+
 fn stack(
     image: &Binary,
     target: &str,

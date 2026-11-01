@@ -245,3 +245,75 @@ fn the_guarded_calls_transpile_to_c_plus_plus_a_compiler_reads() {
         String::from_utf8_lossy(&checked.stderr)
     );
 }
+
+#[test]
+fn the_analysts_types_transpile_ahead_of_the_functions_a_compiler_reads() {
+    let compiler = ["c++", "g++", "clang++"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    });
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let image = Binary::open(&root.join("../ag-engine/tests/fixtures/structs.elf"))
+        .expect("the fixture opens");
+    let init = address_of(&image, "init");
+    let definitions = [ag_image::TypeText {
+        name: "point_t".to_string(),
+        c: "typedef struct point { int x; int y; long tag; } point_t;".to_string(),
+    }];
+    assert_eq!(image.set_type_definitions(&definitions), Ok(true));
+    assert_eq!(image.set_type_definitions(&definitions), Ok(false));
+    let edits = ag_image::VariableEdits {
+        var_types: vec![("a".to_string(), "point_t *".to_string())],
+        ..Default::default()
+    };
+    image.set_variable_edits(std::collections::BTreeMap::from([(init, edits)]));
+    let pseudocode = image.pseudocode(init).expect("init lifts");
+    let text: Vec<&str> = pseudocode.lines.iter().map(|l| l.text.as_str()).collect();
+    assert!(text.contains(&"  a->tag = 0x1122334455667788;"), "{text:?}");
+    let program = image.transpile(&[init], false, None).expect("init lifts");
+    assert!(
+        program.contains(
+            "struct point {\n    int x;\n    int y;\n    long tag;\n};\ntypedef struct point point_t;\n"
+        ),
+        "{program}"
+    );
+    assert!(
+        program.contains("void init(point_t *a, int b)"),
+        "{program}"
+    );
+    // A definition that does not read keeps the types read before.
+    let broken = [ag_image::TypeText {
+        name: "bad".to_string(),
+        c: "struct bad { int x }".to_string(),
+    }];
+    assert!(image
+        .set_type_definitions(&broken)
+        .unwrap_err()
+        .starts_with("bad: 1:"));
+    assert!(image.types().get("point_t").is_some());
+    let Some(compiler) = compiler else {
+        eprintln!("no C++ compiler on this machine: the text is not compiled");
+        return;
+    };
+    let dir = Scratch(std::env::temp_dir().join(format!(
+        "ag-transpile-types-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let source = dir.0.join("types.cpp");
+    std::fs::write(&source, &program).unwrap();
+    let checked = Command::new(compiler)
+        .args(["-fsyntax-only", "-x", "c++"])
+        .arg(&source)
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        checked.status.success(),
+        "{}\n{program}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}

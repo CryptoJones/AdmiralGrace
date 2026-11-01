@@ -422,8 +422,12 @@ fn read(node: &AstNode, effects: &mut Effects) {
                 read(arg, effects);
             }
         }
-        // An element of an analyst's array is memory, read.
-        AstNode::Intrinsic { name, args } if name == crate::stack_vars::INDEX => {
+        // An element of an analyst's array, or a member, is memory, read.
+        AstNode::Intrinsic { name, args }
+            if name == crate::stack_vars::INDEX
+                || name == crate::typed::MEMBER
+                || name == crate::typed::ARROW =>
+        {
             effects.reads_memory = true;
             for arg in args {
                 read(arg, effects);
@@ -437,6 +441,7 @@ fn read(node: &AstNode, effects: &mut Effects) {
                 && name != crate::lift::UNREACHABLE
                 && name != crate::merge::NEW_VERSION
                 && name != crate::values::PINNED
+                && !crate::typed::is_value(name)
             {
                 effects.calls = true;
             }
@@ -513,11 +518,11 @@ fn collect_names(node: &AstNode, names: &mut BTreeSet<String>, escaped: &mut BTr
                     found.borrow_mut().1.push(name.clone());
                 }
             }
-            // An array the analyst made is memory, as a variable whose
-            // address is taken is.
-            n if crate::stack_vars::indexed(n).is_some() => {
-                if let Some((AstNode::Var { name }, _)) = crate::stack_vars::indexed(n) {
-                    found.borrow_mut().1.push(name.clone());
+            // An array or a structure the analyst made is memory, as a
+            // variable whose address is taken is.
+            n if crate::stack_vars::is_part(n) => {
+                if let Some(name) = crate::stack_vars::part_root(n) {
+                    found.borrow_mut().1.push(name.to_string());
                 }
             }
             _ => {}
@@ -1516,6 +1521,7 @@ mod tests {
                     kind: StatementKind::Switch {
                         arms: vec![
                             crate::lift::SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![1],
                                 body: vec![
                                     assign("x", c(1), 0x14),
@@ -1523,6 +1529,7 @@ mod tests {
                                 ],
                             },
                             crate::lift::SwitchArm {
+                                labels: Vec::new(),
                                 values: vec![2],
                                 body: vec![
                                     Statement {

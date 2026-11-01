@@ -336,6 +336,38 @@ rsp` of a register, or where two paths meet at two depths. The column is off at 
 toggle takes it off again, and a lifted level's rows leave it blank. The depths are `ag image
 disasm --stack-offsets`'s (`docs/cli.md`).
 
+## Types
+
+**View ▸ Types** opens the bottom workspace on its Types tab, or closes it when the tab is
+showing: the structures, unions, enumerations and typedefs the project defines, each with its
+kind and its size under the image's data model, and beside the list the one clicked written
+out as C with its layout — each member's offset before it, `/* 0x08 */ long tag;`, the padding
+between, `/* 0x04: 4 bytes of padding */`, and the size and alignment after, `/* size 0x10,
+align 8 */`. The search box filters the list by any of a definition's name, its members' and
+enumerators' names and its C; the button beside it narrows the search to one of them, `in:
+name`, `in: member`, `in: text`, and back to `in: any`.
+
+- **New type from C…** (Edit menu, or **New…** on the tab) reads C declarations from the
+  prompt — one line, each ending in `;`: `struct point { int x; int y; long tag; }; enum
+  state { S_IDLE, S_READY };`. A `#pragma pack(…)` is put on a line of its own. Each
+  declaration is a definition of the project's; one that does not read, or names a type
+  defined already, is refused with its line and column.
+- **Edit type…** opens the prompt on the C of the type selected, on one line, and the C typed
+  replaces it.
+- **Delete type** takes the type selected away — refused while another definition, a type
+  given a variable or a stack variable's type names it, saying which: `struct point is not
+  removed: a of init refers to it`.
+- **Set variable type…** gives a variable of the function on screen a C type, `VAR TYPE` —
+  `a struct point *`, the variable by the name the lift declares it with — or takes it back,
+  `a clear`; the prompt opens on the variable selected in the Variables tab. The pseudocode
+  declares it so, `void init(struct point *a, int b)`, and reads the accesses through it as
+  members, `a->x = b;`; a type that does not fit the variable is refused in its leading
+  comments.
+
+The definitions are the project's `types`, and the variables' types its functions' `var_types`
+(`docs/project-format.md`); undo takes each change back. The C subset the definitions are read
+in and the layout rules are in `docs/types.md`.
+
 ## A register's value
 
 Each register in a listing row's operands is a target of its own. Clicking one highlights the
