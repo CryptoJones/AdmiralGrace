@@ -107,6 +107,10 @@ struct Style {
     /// What is known of the calls, for the end of their lines: that a
     /// callee does not return when the arguments are such.
     call_notes: Vec<CallNote>,
+    /// The possible values of what each statement reads, `a: 0..=9`, by
+    /// its index in the walk, for the end of its line, when the
+    /// pseudocode is printed with them.
+    values: BTreeMap<usize, String>,
 }
 
 impl Style {
@@ -122,6 +126,7 @@ impl Style {
             wrap: usize::from(options.wrap),
             hints: BTreeMap::new(),
             call_notes: Vec::new(),
+            values: BTreeMap::new(),
         }
     }
 
@@ -257,7 +262,7 @@ pub fn emit_function_in(
     removable: &[String],
     callees: &dyn Callees,
 ) -> Pseudocode {
-    emit_marked(function, options, removable, callees, None)
+    emit_marked(function, options, removable, callees, None, None)
         .expect("a pseudocode without a slice is always printed")
 }
 
@@ -279,7 +284,25 @@ pub fn emit_function_sliced(
         removable,
         callees,
         Some((criterion, direction)),
+        None,
     )
+}
+
+/// [`emit_function_in`], sliced when `slice` says how, with the possible
+/// values of what each statement reads at the end of its line — `// a:
+/// 0..=9; b: 5`, the variables that can be any value left out — the
+/// analysis ([`crate::pvs`]) taken over the body as it is printed and
+/// seeded with the analyst's `words`. The lines are the unannotated
+/// pseudocode's, so the line numbers of the one are the other's.
+pub fn emit_function_valued(
+    function: &LiftedFunction,
+    options: &Options,
+    removable: &[String],
+    callees: &dyn Callees,
+    slice: Option<(&crate::slice::Criterion, crate::slice::Direction)>,
+    words: &[crate::values::PinnedValue],
+) -> Result<Pseudocode, String> {
+    emit_marked(function, options, removable, callees, slice, Some(words))
 }
 
 fn emit_marked(
@@ -288,6 +311,7 @@ fn emit_marked(
     removable: &[String],
     callees: &dyn Callees,
     slice: Option<(&crate::slice::Criterion, crate::slice::Direction)>,
+    words: Option<&[crate::values::PinnedValue]>,
 ) -> Result<Pseudocode, String> {
     // Under `dead-code drop` the body is pruned first: the statements whose
     // results nothing uses go, and the locals nothing names after them.
@@ -326,6 +350,12 @@ fn emit_marked(
         style.hints = parameter_names_of(function, callees);
     }
     style.call_notes = function.call_notes.clone();
+    if let Some(words) = words {
+        style.values = crate::pvs::possible_values(function, words)
+            .into_iter()
+            .filter_map(|statement| Some((statement.index, statement.note()?)))
+            .collect();
+    }
     let mut lines = Vec::new();
 
     let mut signature_addresses = vec![function.address];
@@ -1005,6 +1035,10 @@ fn emit_statements(
                         version = format!("new version of {of}");
                         notes.push(&version);
                     }
+                    // What the statement reads can be, when asked.
+                    if let Some(values) = style.values.get(&mark) {
+                        notes.push(values);
+                    }
                     {
                         if let (false, Some(last)) = (notes.is_empty(), lines.last_mut()) {
                             last.text.push_str("  ");
@@ -1022,7 +1056,7 @@ fn emit_statements(
                     format!(
                         "{pad}{}{}",
                         style.head("if", &condition(&statement.node, style)),
-                        constant_note(&statement.node, style)
+                        head_note(&statement.node, style, mark)
                     ),
                     &statement.addresses,
                 );
@@ -1043,7 +1077,11 @@ fn emit_statements(
             StatementKind::Switch { arms } => match language {
                 Language::C | Language::ObjC => {
                     lines.push(Line {
-                        text: format!("{pad}switch ({}) {{", expression(&statement.node, style)),
+                        text: format!(
+                            "{pad}switch ({}) {{{}",
+                            expression(&statement.node, style),
+                            head_note(&statement.node, style, mark)
+                        ),
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
@@ -1059,7 +1097,11 @@ fn emit_statements(
                 }
                 Language::Rust => {
                     lines.push(Line {
-                        text: format!("{pad}match {} {{", expression(&statement.node, style)),
+                        text: format!(
+                            "{pad}match {} {{{}",
+                            expression(&statement.node, style),
+                            head_note(&statement.node, style, mark)
+                        ),
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
@@ -1110,9 +1152,14 @@ fn emit_statements(
                                     .join(", ")
                             ),
                         };
+                        let note = if which == 0 {
+                            head_note(&statement.node, style, mark)
+                        } else {
+                            String::new()
+                        };
                         lines.push(Line {
                             text: format!(
-                                "{pad}{} {test}:",
+                                "{pad}{} {test}:{note}",
                                 if which == 0 { "if" } else { "elif" }
                             ),
                             addresses: if which == 0 {
@@ -1136,7 +1183,7 @@ fn emit_statements(
                     _ => style.head("while", &cond),
                 };
                 lines.push(Line {
-                    text: format!("{pad}{head}{}", constant_note(&statement.node, style)),
+                    text: format!("{pad}{head}{}", head_note(&statement.node, style, mark)),
                     addresses: statement.addresses.clone(),
                 });
                 body(inner, lines, after, marks);
@@ -1153,7 +1200,7 @@ fn emit_statements(
                         text: format!(
                             "{pad}}} while ({});{}",
                             condition(&statement.node, style),
-                            constant_note(&statement.node, style)
+                            head_note(&statement.node, style, mark)
                         ),
                         addresses: statement.addresses.clone(),
                     });
@@ -1169,7 +1216,7 @@ fn emit_statements(
                             "{pad}{}if !({}) {{ break; }}{}",
                             style.indent,
                             condition(&statement.node, style),
-                            constant_note(&statement.node, style)
+                            head_note(&statement.node, style, mark)
                         ),
                         addresses: statement.addresses.clone(),
                     });
@@ -1186,7 +1233,7 @@ fn emit_statements(
                             "{pad}{}if not ({}):{}",
                             style.indent,
                             condition(&statement.node, style),
-                            constant_note(&statement.node, style)
+                            head_note(&statement.node, style, mark)
                         ),
                         addresses: statement.addresses.clone(),
                     });
@@ -1208,7 +1255,7 @@ fn emit_statements(
                             expression(&init.node, style),
                             condition(&statement.node, style),
                             expression(&step.node, style),
-                            constant_note(&statement.node, style)
+                            head_note(&statement.node, style, mark)
                         ),
                         addresses: statement.addresses.clone(),
                     });
@@ -1226,7 +1273,7 @@ fn emit_statements(
                         text: format!(
                             "{pad}{}{}",
                             style.head("while", &condition(&statement.node, style)),
-                            constant_note(&statement.node, style)
+                            head_note(&statement.node, style, mark)
                         ),
                         addresses: statement.addresses.clone(),
                     });
@@ -1294,15 +1341,28 @@ fn condition(node: &AstNode, style: &Style) -> String {
 /// made, so the reader sees what `if (0)` stands for; empty for every other
 /// condition, and under `constant-conditions expression`, where the
 /// comparison is printed in its place.
-fn constant_note(node: &AstNode, style: &Style) -> String {
+fn constant_note(node: &AstNode, style: &Style) -> Option<String> {
     match (node, style.constant_conditions) {
         (AstNode::ConstantCondition { compared, .. }, ConstantConditions::Fold) => {
-            format!(
-                " {}",
-                style.comment(&format!("constant: {}", expression(compared, style)))
-            )
+            Some(format!("constant: {}", expression(compared, style)))
         }
-        _ => String::new(),
+        _ => None,
+    }
+}
+
+/// The comment at the end of a control statement's head, the statement
+/// `mark` in the walk: the comparison a constant condition folded from,
+/// and the possible values of what the head reads, when the pseudocode is
+/// printed with them.
+fn head_note(node: &AstNode, style: &Style, mark: usize) -> String {
+    let notes: Vec<String> = constant_note(node, style)
+        .into_iter()
+        .chain(style.values.get(&mark).cloned())
+        .collect();
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", style.comment(&notes.join("; ")))
     }
 }
 

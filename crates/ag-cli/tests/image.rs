@@ -2247,3 +2247,72 @@ fn functions_that_do_not_return_end_their_paths_and_are_noted() {
     );
     assert!(!caller.contains("__builtin_unreachable"), "{caller}");
 }
+
+#[test]
+fn the_possible_values_are_listed_and_end_the_pseudocodes_lines() {
+    // classify's guard leaves `a` in 0..=5 for the switch.
+    let report = image("switch.elf", &["values", "classify"]);
+    assert_eq!(
+        report,
+        "// possible values of classify at 0x401000\n\
+         0x401000  reads a: any\n\
+         0x401005  reads a: 0..=5\n"
+    );
+    let report = image(
+        "switch.elf",
+        &["values", "classify", "--at", "0x401005", "--variable", "a"],
+    );
+    assert!(report.ends_with("0x401005  reads a: 0..=5\n"), "{report}");
+    let report = image("switch.elf", &["pseudocode", "classify", "--values"]);
+    assert!(
+        report.contains("  if ((unsigned int)a > 5) {\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains("  switch ((unsigned long)(unsigned int)a) { // a: 0..=5\n"),
+        "{report}"
+    );
+    // The lines are the pseudocode's own, with the notes at their ends.
+    let plain = image("switch.elf", &["pseudocode", "classify"]);
+    assert_eq!(report.lines().count(), plain.lines().count());
+
+    // sum_to's loop: the counter starts at 1, and nothing bounds `a`.
+    let report = image(
+        "sample.elf",
+        &["values", "sum_to", "--variable", "local_14"],
+    );
+    assert!(report.contains("  writes local_14: any\n"), "{report}");
+    let report = image_json("sample.elf", &["values", "sum_to"]);
+    assert_eq!(report["function"], "sum_to");
+    let first = &report["statements"][0];
+    assert_eq!(
+        first["writes"][0],
+        serde_json::json!({
+            "variable": "local_10",
+            "values": { "kind": "constant", "value": 0, "text": "0" },
+        })
+    );
+
+    // The arm a constant condition never takes is on no path.
+    let report = image("opaque.elf", &["values", "zeroed"]);
+    assert!(
+        report.contains("0x4010ee  writes eax: undetermined\n"),
+        "{report}"
+    );
+    let report = image_json("opaque.elf", &["pseudocode", "zeroed", "--values"]);
+    assert_eq!(report["lifted"], true);
+
+    // A statement or a variable the function lacks is said.
+    let (ok, _, error) = image_result("switch.elf", &["values", "classify", "--at", "0x1"]);
+    assert!(!ok);
+    assert!(
+        error.contains("classify has no statement at 0x1"),
+        "{error}"
+    );
+    let (ok, _, error) = image_result("switch.elf", &["values", "classify", "--variable", "b"]);
+    assert!(!ok);
+    assert!(
+        error.contains("classify reads and writes no variable b"),
+        "{error}"
+    );
+}

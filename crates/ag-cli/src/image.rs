@@ -162,6 +162,10 @@ pub enum ImageCmd {
         /// Leave the lines outside the slice out, rather than as comments.
         #[arg(long = "slice-hide", requires = "slice")]
         slice_hide: bool,
+        /// End each line with the possible values of the variables it
+        /// reads, `// a: 0..=9`, the ones that can be any value left out.
+        #[arg(long)]
+        values: bool,
     },
     /// The function at one level of the lift: the machine's instructions
     /// (`lifted`), the lifter's statements over temporaries (`low`), the
@@ -301,6 +305,29 @@ pub enum ImageCmd {
         json: bool,
         /// A project file whose words the function is lifted with: its
         /// merges and splits made.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// The possible values of a function's variables at each statement:
+    /// the constants, sets and ranges each can hold where the statement
+    /// reads or writes it, narrowed by the conditions on the way there.
+    Values {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// The statement at this address only: any of its addresses.
+        #[arg(long, value_name = "ADDRESS")]
+        at: Option<String>,
+        /// This variable only, as the pseudocode declares it.
+        #[arg(long, value_name = "VAR")]
+        variable: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Set an engine option. May be repeated; `ag catalog` lists them.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// A project file whose words the function is lifted with: its
+        /// edits made, and its pinned values seeding the analysis.
         #[arg(long)]
         project: Option<PathBuf>,
     },
@@ -873,6 +900,7 @@ pub fn run(
         | ImageCmd::Calls { options, .. }
         | ImageCmd::Pseudocode { options, .. }
         | ImageCmd::Il { options, .. }
+        | ImageCmd::Values { options, .. }
         | ImageCmd::Export { options, .. } => {
             Options::from_flat(options).map_err(|error| anyhow::anyhow!("{error}"))?
         }
@@ -889,6 +917,7 @@ pub fn run(
         | ImageCmd::Il { project, .. }
         | ImageCmd::Opaque { project, .. }
         | ImageCmd::Merges { project, .. }
+        | ImageCmd::Values { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -924,6 +953,7 @@ pub fn run(
             slice,
             forward,
             slice_hide,
+            values,
             ..
         } => {
             let slice = slice
@@ -938,7 +968,7 @@ pub fn run(
                         .map_err(|error| anyhow::anyhow!("{error}"))
                 })
                 .transpose()?;
-            pseudocode(&image, &target, json, slice)
+            pseudocode(&image, &target, json, slice, values)
         }
         ImageCmd::Il {
             target,
@@ -1000,6 +1030,16 @@ pub fn run(
             Ok(0)
         }
         ImageCmd::Merges { target, json, .. } => merges(&image, &target, json),
+        ImageCmd::Values {
+            target,
+            at,
+            variable,
+            json,
+            ..
+        } => {
+            let at = at.as_deref().map(parse_address).transpose()?;
+            values(&image, &target, at, variable.as_deref(), json)
+        }
         ImageCmd::Export {
             dir,
             functions,
@@ -1791,6 +1831,7 @@ fn pseudocode(
     target: &str,
     json: bool,
     slice: Option<(ag_image::SliceCriterion, ag_image::SliceDirection, bool)>,
+    values: bool,
 ) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
@@ -1800,6 +1841,14 @@ fn pseudocode(
 
     let address = resolve(image, target)?;
     let report = match &slice {
+        _ if values => valued_json(
+            image,
+            address,
+            slice
+                .as_ref()
+                .map(|(criterion, direction, _)| (criterion, *direction)),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?,
         Some((criterion, direction, _)) => sliced_json(image, address, criterion, *direction)
             .map_err(|error| anyhow::anyhow!("{error}"))?,
         None => pseudocode_json(image, address),
@@ -1891,6 +1940,207 @@ pub(crate) fn sliced_json(
         direction: direction.name(),
     };
     Ok(lifted_json(image, address, &pseudocode, Some(slice)))
+}
+
+/// The pseudocode of one function with the possible values at the end of
+/// its lines, sliced when `slice` says how, or the reason it has none; or,
+/// when it has, why the criterion is no criterion of it.
+pub(crate) fn valued_json(
+    image: &Binary,
+    address: u64,
+    slice: Option<(&ag_image::SliceCriterion, ag_image::SliceDirection)>,
+) -> std::result::Result<PseudocodeJson, String> {
+    if let Err(error) = image.pseudocode(address) {
+        return Ok(refused_json(image, address, &error));
+    }
+    let pseudocode = image
+        .valued_pseudocode(address, slice)
+        .map_err(|error| error.reason)?;
+    let slice = slice.map(|(criterion, direction)| SliceJson {
+        variable: criterion.variable.clone(),
+        address: criterion.at,
+        address_hex: criterion.at.map(|at| format!("{at:#x}")),
+        direction: direction.name(),
+    });
+    Ok(lifted_json(image, address, &pseudocode, slice))
+}
+
+/// An address as the flags give it: hex with `0x`, or decimal.
+fn parse_address(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => text.parse(),
+    };
+    parsed.map_err(|_| anyhow::anyhow!("{text:?} is not an address such as 0x1149"))
+}
+
+/// The possible values of one function's statements, those at `at` and of
+/// `variable` alone when they are given; or why there are none to give.
+pub(crate) fn possible_values_of(
+    image: &Binary,
+    address: u64,
+    at: Option<u64>,
+    variable: Option<&str>,
+) -> std::result::Result<Vec<ag_image::StatementValues>, String> {
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    let mut statements = image
+        .possible_values(address)
+        .map_err(|error| format!("{name} at {address:#x}: {}", error.reason))?;
+    if let Some(at) = at {
+        statements.retain(|statement| statement.addresses.contains(&at));
+        if statements.is_empty() {
+            return Err(format!(
+                "{name} has no statement at {at:#x} that reads or writes a variable"
+            ));
+        }
+    }
+    if let Some(variable) = variable {
+        let named = |list: &[(String, ag_image::PossibleValues)]| {
+            list.iter().any(|(held, _)| held == variable)
+        };
+        if !statements
+            .iter()
+            .any(|s| named(&s.reads) || named(&s.writes))
+            && at.is_none()
+        {
+            return Err(format!("{name} reads and writes no variable {variable}"));
+        }
+        for statement in &mut statements {
+            statement.reads.retain(|(held, _)| held == variable);
+            statement.writes.retain(|(held, _)| held == variable);
+        }
+        statements.retain(|s| !s.reads.is_empty() || !s.writes.is_empty());
+    }
+    Ok(statements)
+}
+
+/// Report the possible values of one function's variables.
+fn values(
+    image: &Binary,
+    target: &str,
+    at: Option<u64>,
+    variable: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
+        image.language()
+    );
+    let address = resolve(image, target)?;
+    let statements =
+        possible_values_of(image, address, at, variable).map_err(|error| anyhow::anyhow!(error))?;
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&values_json(&name, address, &statements))?
+        );
+    } else {
+        print!("{}", values_text(&name, address, &statements));
+    }
+    Ok(0)
+}
+
+/// The possible values as text: a line a statement, its first address,
+/// what it reads and what it writes.
+pub(crate) fn values_text(
+    name: &str,
+    address: u64,
+    statements: &[ag_image::StatementValues],
+) -> String {
+    let mut out = format!("// possible values of {name} at {address:#x}\n");
+    if statements.is_empty() {
+        out.push_str("no statement reads or writes a variable followed\n");
+    }
+    let said = |list: &[(String, ag_image::PossibleValues)]| {
+        list.iter()
+            .map(|(name, values)| format!("{name}: {values}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for statement in statements {
+        let at = statement.addresses.first().copied().unwrap_or(address);
+        let mut parts = Vec::new();
+        if !statement.reads.is_empty() {
+            parts.push(format!("reads {}", said(&statement.reads)));
+        }
+        if !statement.writes.is_empty() {
+            parts.push(format!("writes {}", said(&statement.writes)));
+        }
+        out.push_str(&format!("{at:#x}  {}\n", parts.join("  ")));
+    }
+    out
+}
+
+/// A number of a possible-value set as JSON: within `i64` or `u64`.
+fn number_json(value: i128) -> serde_json::Value {
+    match (i64::try_from(value), u64::try_from(value)) {
+        (Ok(value), _) => serde_json::json!(value),
+        (_, Ok(value)) => serde_json::json!(value),
+        _ => serde_json::json!(value.to_string()),
+    }
+}
+
+/// One possible-value set as JSON: its kind, its numbers, and how it is
+/// spelled.
+pub(crate) fn possible_json(values: &ag_image::PossibleValues) -> serde_json::Value {
+    use ag_image::PossibleValues as V;
+    let mut out = match values {
+        V::Undetermined => serde_json::json!({ "kind": "undetermined" }),
+        V::Constant(value) => {
+            serde_json::json!({ "kind": "constant", "value": number_json(*value) })
+        }
+        V::Set(set) => serde_json::json!({
+            "kind": "set",
+            "values": set.iter().map(|v| number_json(*v)).collect::<Vec<_>>(),
+        }),
+        V::Range { min, max, step } => serde_json::json!({
+            "kind": "range",
+            "min": number_json(*min),
+            "max": number_json(*max),
+            "step": number_json(*step),
+        }),
+        V::Top => serde_json::json!({ "kind": "any" }),
+    };
+    out["text"] = serde_json::json!(values.to_string());
+    out
+}
+
+/// The possible values as JSON: the function, and each statement with
+/// its addresses, what it reads and what it writes.
+pub(crate) fn values_json(
+    name: &str,
+    address: u64,
+    statements: &[ag_image::StatementValues],
+) -> serde_json::Value {
+    let list = |list: &[(String, ag_image::PossibleValues)]| {
+        list.iter()
+            .map(|(name, values)| {
+                serde_json::json!({ "variable": name, "values": possible_json(values) })
+            })
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "function": name,
+        "address": format!("{address:#x}"),
+        "statements": statements
+            .iter()
+            .map(|statement| serde_json::json!({
+                "index": statement.index,
+                "addresses": statement.addresses.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
+                "reads": list(&statement.reads),
+                "writes": list(&statement.writes),
+            }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// The JSON of a function the lifter read.
@@ -3298,6 +3548,7 @@ mod tests {
                 slice: None,
                 forward: false,
                 slice_hide: false,
+                values: false,
             },
         )
         .expect_err("a bad value is refused");
@@ -3317,6 +3568,7 @@ mod tests {
                 slice: None,
                 forward: false,
                 slice_hide: false,
+                values: false,
             },
         )
         .expect_err("an unknown name is refused");

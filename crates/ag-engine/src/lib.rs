@@ -21,6 +21,7 @@ pub mod options;
 pub mod pipeline;
 pub mod plugin;
 pub mod procedure;
+pub mod pvs;
 pub mod register;
 pub mod slice;
 pub mod structure;

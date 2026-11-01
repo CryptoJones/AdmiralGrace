@@ -369,6 +369,19 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
+            name: "possible_values",
+            description: "The possible values of a function's variables at each statement: for every statement, by its addresses, each variable it reads with what it can hold there and each it writes with what it can hold after — `5`, a set `{1, 3, 7}`, a range `0..=9`, a strided range `0..=36 step 4`, `undetermined` on a path no value takes, or `any`. Found forward from the entry through the arithmetic, joined where paths meet and widened at loop heads, and narrowed by each branch's condition on its arm (`a < 10`, `a + 1 < 10`, `a == 3`, a `switch` case); arithmetic wraps as the machine's does. The analyst's pinned values seed it. Only integer and pointer variables are followed; one whose address is taken, and a global, are not. Each set is also given as `kind` (constant, set, range, undetermined, any) with its numbers.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "address": { "type": "string", "description": "The statement at this address only: any of its addresses." },
+                    "variable": { "type": "string", "description": "This variable only, as the pseudocode declares it." },
+                },
+                "required": ["target"]
+            }),
+        },
+        Tool {
             name: "merge_variables",
             description: "Merge two of a function's variables, by the names the lift declares them with (before the analyst's renames): every occurrence of `gone` reads `keep`, `gone` is no longer declared, and a copy `keep = keep;` left is dropped. An unsound merge is made, and the function's leading comments say `v1 and v2 are merged though both are live at 0x401020`; one of a parameter merged away, a name the function does not declare, or two types is refused there with why. A word already on `gone` is replaced. The pseudocode is read again with the word. The project is saved.",
             schema: json!({
@@ -1222,6 +1235,29 @@ impl Server {
                     &name,
                     address,
                     &candidates,
+                )))
+            }
+            "possible_values" => {
+                let address = self.function(&text("target")?)?;
+                let at = optional_text("address")?
+                    .map(|at| parse_address(&at))
+                    .transpose()?;
+                let variable = optional_text("variable")?.map(|v| v.trim().to_string());
+                let name = self
+                    .image
+                    .function_name(address)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("sub_{address:x}"));
+                let statements = crate::image::possible_values_of(
+                    &self.image,
+                    address,
+                    at,
+                    variable.as_deref(),
+                )?;
+                Ok(Answer::json(crate::image::values_json(
+                    &name,
+                    address,
+                    &statements,
                 )))
             }
             "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable"
@@ -2282,6 +2318,7 @@ mod tests {
                 "set_override",
                 "set_inline",
                 "merge_candidates",
+                "possible_values",
                 "merge_variables",
                 "unmerge_variable",
                 "split_variable",

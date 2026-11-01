@@ -46,7 +46,9 @@ use ag_engine::arm::ArmVariant;
 use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
-use ag_engine::emit::{emit_function_in, emit_function_sliced, Callees};
+use ag_engine::emit::{
+    emit_function_in, emit_function_sliced, emit_function_valued, Callees,
+};
 use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
 use ag_engine::pipeline::Disasm;
@@ -74,6 +76,7 @@ use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::swift::{
     SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
 };
+pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
@@ -2281,7 +2284,7 @@ impl Binary {
             return found.clone();
         }
 
-        let built = self.build_pseudocode(address, None).map(Arc::new);
+        let built = self.build_pseudocode(address, None, false).map(Arc::new);
         cache.insert(address, built.clone());
         built
     }
@@ -2301,7 +2304,32 @@ impl Binary {
     ) -> Result<Pseudocode, NotLifted> {
         // Refused the way the pseudocode is, and from the same cache.
         self.pseudocode(address)?;
-        self.build_pseudocode(address, Some((criterion, direction)))
+        self.build_pseudocode(address, Some((criterion, direction)), false)
+    }
+
+    /// The pseudocode of the function at `address` with the possible
+    /// values of what each statement reads at the end of its line, `// a:
+    /// 0..=9`, sliced too when `slice` says how: the same lines as
+    /// [`Binary::pseudocode`]'s, longer. The analyst's values of the
+    /// function's variables seed the analysis. Not kept. Refused as the
+    /// pseudocode is, or for a criterion the function has no such variable
+    /// or statement for.
+    pub fn valued_pseudocode(
+        &self,
+        address: u64,
+        slice: Option<(&SliceCriterion, SliceDirection)>,
+    ) -> Result<Pseudocode, NotLifted> {
+        self.pseudocode(address)?;
+        self.build_pseudocode(address, slice, true)
+    }
+
+    /// What the variables of the function at `address` can be at each of
+    /// its statements, over its lift as it reads — the analyst's edits
+    /// made — seeded with the analyst's values. See `ag_engine::pvs`.
+    pub fn possible_values(&self, address: u64) -> Result<Vec<StatementValues>, NotLifted> {
+        let stages = self.stages(address)?;
+        let words = self.variable_edits(address).values;
+        Ok(ag_engine::pvs::possible_values(&stages.function, &words))
     }
 
     /// The function at `address` at one level of the lift — the machine's
@@ -2376,11 +2404,12 @@ impl Binary {
     }
 
     /// Lift the function at `address` and print it, sliced when `slice`
-    /// says how.
+    /// says how, and with the possible values when `values`.
     fn build_pseudocode(
         &self,
         address: u64,
         slice: Option<(&SliceCriterion, SliceDirection)>,
+        values: bool,
     ) -> Result<Pseudocode, NotLifted> {
         let code = self.code_at(address).ok_or_else(|| NotLifted {
             reason: format!("no code at {address:#x}"),
@@ -2409,7 +2438,12 @@ impl Binary {
             .map_err(|reason| NotLifted { reason })?;
             Ok(pseudocode)
         };
+        let words = self.variable_edits(address).values;
         let emit = |function: &ag_engine::LiftedFunction| match slice {
+            _ if values => {
+                emit_function_valued(function, &self.options, &removable, &callees, slice, &words)
+                    .map_err(|reason| NotLifted { reason })
+            }
             None => Ok(emit_function_in(
                 function,
                 &self.options,

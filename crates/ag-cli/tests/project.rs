@@ -2541,3 +2541,59 @@ fn a_variables_value_or_range_is_pinned_and_followed_through_the_pseudocode() {
     assert!(!ok);
     assert!(stderr.contains("runs from 7 down to 0"), "{stderr}");
 }
+
+#[test]
+fn the_analysts_value_seeds_the_possible_values() {
+    let file = TempFile::new("possible");
+    let values = || -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("sample.elf"))
+            .args(["values", "sum_to", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let (ok, _, stderr) = project_with("sample.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    // Nothing bounds `a`, so the counter, which may wrap, is any value.
+    assert!(values().contains("local_14: any"), "{}", values());
+    // With `a` in 0..=100, the loop's condition bounds the counter.
+    let (ok, _, stderr) = project_with(
+        "sample.elf",
+        &["value", "--file", &file.text(), "sum_to", "a", "0..100"],
+    );
+    assert!(ok, "{stderr}");
+    let report = values();
+    assert!(
+        report.contains("reads a: 0..=100, local_14: 1..=101  writes local_14: 1..=101\n"),
+        "{report}"
+    );
+    assert!(report.contains("local_14: 1..=100  writes"), "{report}");
+    // And the pseudocode ends the loop's lines with them.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args([
+            "pseudocode",
+            "sum_to",
+            "--values",
+            "--project",
+            &file.text(),
+        ])
+        .output()
+        .expect("the ag binary runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "  for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) { // a: 0..=100; local_14: 1..=101\n\
+             \x20   local_10 = local_10 + (long)local_14;  // local_14: 1..=100\n"
+        ),
+        "{text}"
+    );
+}

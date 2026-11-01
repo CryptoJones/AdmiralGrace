@@ -215,6 +215,9 @@ pub(crate) struct Node {
     pub(crate) uses: Vec<usize>,
     /// Where control goes next.
     pub(crate) succ: Vec<usize>,
+    /// The successors a condition goes to on its arms, each with the arm:
+    /// what holds of the condition there.
+    pub(crate) branches: Vec<(usize, Arm)>,
     /// Whether it is a `return`.
     returns: bool,
     /// The condition of the control statement that holds it, when one does.
@@ -232,6 +235,20 @@ pub(crate) enum Part {
     Init,
     /// A `for`'s step.
     Step,
+}
+
+/// What holds of a condition on one of its arms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Arm {
+    /// The condition holds: an `if`'s `then`, a loop's body, a `goto` taken.
+    Holds,
+    /// The condition fails: an `if`'s `else`, the way out of a loop.
+    Fails,
+    /// A `switch`'s index is one of these case values.
+    Cases(Vec<i64>),
+    /// A `switch`'s index is none of these case values: its default, or
+    /// the way past it.
+    NoCase(Vec<i64>),
 }
 
 /// The statements of a function as a graph, with its variables numbered.
@@ -304,9 +321,12 @@ impl Graph {
         let first = builder.list(&function.body, 0, EXIT, None, None, None);
         let Builder { labels, gotos, .. } = builder;
         graph.nodes[ENTRY].succ = vec![first];
-        for (node, label) in gotos {
+        for (node, label, arm) in gotos {
             let target = labels.get(&label).copied().unwrap_or(EXIT);
             graph.nodes[node].succ.push(target);
+            if let Some(arm) = arm {
+                graph.nodes[node].branches.push((target, arm));
+            }
         }
         for node in &mut graph.nodes {
             node.succ.sort_unstable();
@@ -549,9 +569,9 @@ fn size(statement: &Statement) -> usize {
 struct Builder<'a> {
     graph: &'a mut Graph,
     labels: BTreeMap<String, usize>,
-    /// The `goto`s, with the labels they name, to join once every label
-    /// has its node.
-    gotos: Vec<(usize, String)>,
+    /// The `goto`s, with the labels they name and the arm a conditional
+    /// one is on, to join once every label has its node.
+    gotos: Vec<(usize, String, Option<Arm>)>,
 }
 
 impl Builder<'_> {
@@ -613,10 +633,30 @@ impl Builder<'_> {
                     AstNode::Goto { .. } => Vec::new(),
                     _ => vec![next],
                 };
-                let id = self.add(Node { succ, ..node }, parent);
+                // `if (c) goto l;` goes to `l` when `c` holds, on otherwise;
+                // `if (!(c)) goto l;` the other way.
+                let (branches, taken) = match &statement.node {
+                    AstNode::IfGoto { negated, .. } => {
+                        let (taken, past) = if *negated {
+                            (Arm::Fails, Arm::Holds)
+                        } else {
+                            (Arm::Holds, Arm::Fails)
+                        };
+                        (vec![(next, past)], Some(taken))
+                    }
+                    _ => (Vec::new(), None),
+                };
+                let id = self.add(
+                    Node {
+                        succ,
+                        branches,
+                        ..node
+                    },
+                    parent,
+                );
                 match &statement.node {
                     AstNode::Goto { label, .. } | AstNode::IfGoto { label, .. } => {
-                        self.gotos.push((id, label.clone()));
+                        self.gotos.push((id, label.clone(), taken));
                     }
                     AstNode::Label { name, .. } => {
                         self.labels.insert(name.clone(), id);
@@ -641,18 +681,22 @@ impl Builder<'_> {
                     Some(cond),
                 );
                 self.graph.nodes[cond].succ = vec![then_entry, else_entry];
+                self.graph.nodes[cond].branches =
+                    vec![(then_entry, Arm::Holds), (else_entry, Arm::Fails)];
                 cond
             }
             StatementKind::While { body } => {
                 let cond = self.add(node, parent);
                 let entry = self.list(body, index + 1, cond, Some(next), Some(cond), Some(cond));
                 self.graph.nodes[cond].succ = vec![entry, next];
+                self.graph.nodes[cond].branches = vec![(entry, Arm::Holds), (next, Arm::Fails)];
                 cond
             }
             StatementKind::DoWhile { body } => {
                 let cond = self.add(node, parent);
                 let entry = self.list(body, index + 1, cond, Some(next), Some(cond), Some(cond));
                 self.graph.nodes[cond].succ = vec![entry, next];
+                self.graph.nodes[cond].branches = vec![(entry, Arm::Holds), (next, Arm::Fails)];
                 entry
             }
             StatementKind::For { init, step, body } => {
@@ -675,6 +719,7 @@ impl Builder<'_> {
                     Some(cond),
                 );
                 self.graph.nodes[cond].succ = vec![entry, next];
+                self.graph.nodes[cond].branches = vec![(entry, Arm::Holds), (next, Arm::Fails)];
                 let init_node = self.graph.node_of(&init.node, index, &init.addresses);
                 self.add(
                     Node {
@@ -696,12 +741,21 @@ impl Builder<'_> {
                 // An arm that does not leave runs on into the next; the
                 // last into the statement after. No case may match.
                 let mut succ = vec![next];
+                let every: Vec<i64> = arms.iter().flat_map(|arm| arm.values.clone()).collect();
+                let mut branches = vec![(next, Arm::NoCase(every.clone()))];
                 let mut arm_next = next;
                 for (arm, base) in arms.iter().zip(bases).rev() {
                     arm_next = self.list(&arm.body, base, arm_next, Some(next), cont, Some(cond));
                     succ.push(arm_next);
+                    // The default arm is taken where no case is.
+                    branches.push(if arm.values.is_empty() {
+                        (arm_next, Arm::NoCase(every.clone()))
+                    } else {
+                        (arm_next, Arm::Cases(arm.values.clone()))
+                    });
                 }
                 self.graph.nodes[cond].succ = succ;
+                self.graph.nodes[cond].branches = branches;
                 cond
             }
         }

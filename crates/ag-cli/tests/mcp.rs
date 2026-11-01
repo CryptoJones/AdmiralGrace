@@ -589,3 +589,87 @@ fn a_variables_value_is_pinned_through_the_server() {
     );
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn possible_values_are_read_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-possible-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("switch.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"possible_values","arguments":{"target":"classify"}"#,
+            r#""name":"possible_values","arguments":{"target":"classify","address":"0x401005","variable":"a"}"#,
+            r#""name":"set_variable_value","arguments":{"function":"classify","variable":"a","value":"1..2"}"#,
+            r#""name":"possible_values","arguments":{"target":"classify","address":"0x401005"}"#,
+            r#""name":"possible_values","arguments":{"target":"classify","address":"0x1"}"#,
+            r#""name":"possible_values","arguments":{"target":"classify","variable":"nothing"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 6);
+    let json = |i: usize| -> serde_json::Value {
+        let text = replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("JSON: {text}"))
+    };
+    for reply in &replies[..4] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    // Every statement; the guard reads any value, the switch what the
+    // guard leaves.
+    let all = json(0);
+    assert_eq!(all["function"], "classify");
+    let statements = all["statements"].as_array().expect("statements");
+    assert_eq!(statements[0]["reads"][0]["values"]["kind"], "any");
+    // At the switch, `a` is what the guard's arm leaves.
+    let at = json(1);
+    let statements = at["statements"].as_array().expect("statements");
+    assert_eq!(statements.len(), 1, "{at}");
+    assert_eq!(
+        statements[0]["reads"][0],
+        serde_json::json!({
+            "variable": "a",
+            "values": { "kind": "range", "min": 0, "max": 5, "step": 1, "text": "0..=5" },
+        })
+    );
+    // The analyst's range seeds it.
+    let seeded = json(3);
+    assert_eq!(
+        seeded["statements"][0]["reads"][0]["values"],
+        serde_json::json!({ "kind": "set", "values": [1, 2], "text": "{1, 2}" })
+    );
+    // A statement or a variable the function lacks is the tool's error.
+    assert_eq!(replies[4]["result"]["isError"], true, "{:?}", replies[4]);
+    assert_eq!(replies[5]["result"]["isError"], true, "{:?}", replies[5]);
+    let _ = std::fs::remove_file(&project);
+}

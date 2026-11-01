@@ -449,6 +449,21 @@ pub trait Provider: Send + Sync {
         Err("This project's pseudocode cannot be sliced: open a program image".to_string())
     }
 
+    /// The pseudocode of the function at `address` with the possible values
+    /// of what each line reads at its end, `// a: 0..=9`: the lines of
+    /// [`Provider::pseudocode`], longer. A provider that cannot say them
+    /// answers with nothing.
+    fn valued_pseudocode(&self, _address: u64) -> Option<String> {
+        None
+    }
+
+    /// The possible values of what the statements of the function at
+    /// `function` read at a line of `addresses`, `a: 0..=5; b: 4`, when
+    /// any is known.
+    fn line_values(&self, _function: u64, _addresses: &[u64]) -> Option<String> {
+        None
+    }
+
     /// Tell the analysis which variables' dead stores to take out of the
     /// pseudocode, by the address of the function declaring each, and say
     /// whether that changed anything.
