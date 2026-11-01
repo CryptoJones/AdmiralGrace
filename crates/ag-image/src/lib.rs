@@ -78,6 +78,8 @@ pub use ag_engine::swift::{
 };
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
+pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
+pub use ag_engine::stack_vars::{parse_type, StackVar};
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Placement;
 pub use ag_engine::Bitness;
@@ -2341,6 +2343,14 @@ impl Binary {
     /// `ag_engine::variables`.
     pub fn variables(&self, address: u64) -> Result<Vec<VariableInfo>, NotLifted> {
         Ok(self.stages(address)?.function.variables())
+    }
+
+    /// The stack frame of the function at `address`, slot by slot from the
+    /// top down — the caller's slots, the return address, the saved
+    /// registers, the locals and the gaps between — over its lift as it
+    /// reads, the analyst's stack variables made. See `ag_engine::frame`.
+    pub fn stack_frame(&self, address: u64) -> Result<StackFrame, NotLifted> {
+        Ok(ag_engine::frame::stack_frame(&*self.stages(address)?))
     }
 
     /// The function at `address` at one level of the lift — the machine's

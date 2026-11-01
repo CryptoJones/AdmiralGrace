@@ -378,13 +378,14 @@ pub struct OpaquePatch {
 pub use kuna::is_kuna_export;
 
 /// One function's merges, `(keep, gone)`, splits, `(variable, at)`, new
-/// versions, `(variable, at)`, and pinned values, `(variable, at, min,
-/// max)`.
+/// versions, `(variable, at)`, pinned values, `(variable, at, min, max)`,
+/// and stack variables, `(offset, size, name, type)`.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<(String, Option<u64>, i64, i64)>,
+    Vec<(i64, u32, Option<String>, Option<String>)>,
 );
 
 /// Read access to the open project.
@@ -500,6 +501,13 @@ pub trait Provider: Send + Sync {
     /// names the lift declares. None from a provider that does not lift.
     fn variables(&self, _address: u64) -> Vec<ag_image::VariableInfo> {
         Vec::new()
+    }
+
+    /// The stack frame of the function at `address`, slot by slot from the
+    /// top down, the analyst's stack variables made. None from a provider
+    /// that does not lift, and for a function that is not lifted.
+    fn stack_frame(&self, _address: u64) -> Option<ag_image::StackFrame> {
+        None
     }
 
     /// Bytes around an address, when available.

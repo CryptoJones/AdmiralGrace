@@ -180,6 +180,10 @@ impl Style {
 /// `int *` is `*mut i32`, `void` is `()`.
 fn rust_type(ty: &str) -> String {
     let ty = ty.trim();
+    // An array, `char[16]`, is `[i8; 16]`.
+    if let Some((element, count)) = ty.strip_suffix(']').and_then(|rest| rest.split_once('[')) {
+        return format!("[{}; {}]", rust_type(element), count.trim());
+    }
     if let Some(pointee) = ty.strip_suffix('*') {
         return format!("*mut {}", rust_type(pointee));
     }
@@ -427,7 +431,11 @@ fn emit_marked(
             });
             for local in &function.locals {
                 lines.push(Line {
-                    text: format!("{}{} {};", style.indent, local.ty, local.name),
+                    text: format!(
+                        "{}{};",
+                        style.indent,
+                        crate::stack_vars::declarator(&local.ty, &local.name)
+                    ),
                     addresses: Vec::new(),
                 });
             }
@@ -1677,6 +1685,14 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
         AstNode::Intrinsic { .. } if crate::merge::versioned(n).is_some() => {
             out.push_str(crate::merge::versioned(n).expect("checked above"));
         }
+        // An element of an analyst's array: `buf[2]`.
+        AstNode::Intrinsic { .. } if crate::stack_vars::indexed(n).is_some() => {
+            let (array, index) = crate::stack_vars::indexed(n).expect("checked above");
+            operand(array, out, style);
+            out.push('[');
+            expr(index, out, false, style);
+            out.push(']');
+        }
         AstNode::Intrinsic { name, args } => {
             out.push_str(name);
             arguments(args, out, style);
@@ -1765,6 +1781,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
 /// operation as it is, anything else in parentheses.
 fn operand(n: &AstNode, out: &mut String, style: &Style) {
     if n.is_atom()
+        || crate::stack_vars::indexed(n).is_some()
         || matches!(
             n,
             AstNode::Cast { .. } | AstNode::Deref { .. } | AstNode::AddressOf { .. }

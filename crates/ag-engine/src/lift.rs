@@ -42,7 +42,9 @@
 //!   A slot becomes a real variable — declared, with its stores emitted —
 //!   when its address is taken (`lea`), when it is read before it is
 //!   written, or when it differs between two paths that join. A partial
-//!   overwrite of a slot makes its value unknown.
+//!   overwrite of a slot makes its value unknown. A slot inside a variable
+//!   the analyst made in the frame is always a variable, and the slots
+//!   inside one read as parts of it ([`crate::stack_vars`]).
 //! * **The state is split at a branch and merged at a join.** Each successor
 //!   starts from a copy of the state its predecessor ended in. Where paths
 //!   join, a register or slot that holds the same expression on every path
@@ -218,9 +220,9 @@ pub trait Symbols {
     }
 
     /// The analyst's words on the variables of the function at `address`:
-    /// which are merged, where one is split or has a new version, and what
-    /// values one holds, by the names the lift declares. None unless the
-    /// image says.
+    /// which are merged, where one is split or has a new version, what
+    /// values one holds, by the names the lift declares, and the variables
+    /// made in its stack frame. None unless the image says.
     fn variable_edits(&self, _address: u64) -> crate::merge::VariableEdits {
         crate::merge::VariableEdits::default()
     }
@@ -722,6 +724,11 @@ pub struct Stages {
     /// The C type of every name the levels use: parameters, locals, slots,
     /// temporaries, the flags.
     pub types: BTreeMap<String, String>,
+    /// What the lift saw of the stack frame: the slots the code reads and
+    /// writes, the registers it saves, the slots whose address it takes,
+    /// the prologue's `sub rsp, N`, and the analyst's variables it made.
+    /// Empty for a thunk and a plugin's lift.
+    pub slots: crate::frame::SlotFacts,
 }
 
 /// One chain of a lift: a run of blocks the lift reads as one.
@@ -887,6 +894,7 @@ pub fn lift_graph(
         medium_analysis,
         stack_pointer: BTreeMap::new(),
         types,
+        slots: crate::frame::SlotFacts::default(),
     })
 }
 
@@ -919,6 +927,11 @@ fn lift_inner(
         })
         .collect();
     let mut lifter = Lifter::new(abi, symbols, *options);
+    // The analyst's words on the function's variables; the variables made
+    // in its frame are read by the walk itself.
+    let edits = symbols.variable_edits(entry);
+    let (made, refused) = crate::stack_vars::accept(&edits.stack_vars, options.stack_slot_names);
+    lifter.covered = made.clone();
     if let Some(callee) = lifter.thunk(&chains)? {
         let function = LiftedFunction {
             name: name.to_string(),
@@ -949,6 +962,7 @@ fn lift_inner(
             analysis,
             stack_pointer: BTreeMap::new(),
             types: BTreeMap::new(),
+            slots: crate::frame::SlotFacts::default(),
         });
     }
     let analysis = structure::analyze(&successors, 0, |node| chains[node].address)?;
@@ -1036,7 +1050,13 @@ fn lift_inner(
         types.insert("flags".to_string(), "flags".to_string());
     }
     let call_sites = std::mem::take(&mut lifter.call_sites);
+    let mut slots = std::mem::take(&mut lifter.slot_facts);
+    slots.address_taken = lifter.address_taken.clone();
     let mut function = lifter.finish(name, entry, &chains, body)?;
+    // The analyst's variables in the frame, read over the lift's locals
+    // inside them before anything keys on their names.
+    function.notes.extend(refused);
+    slots.made = crate::stack_vars::make(&mut function, &made);
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
@@ -1048,12 +1068,7 @@ fn lift_inner(
         .iter()
         .map(|table| (table.site, table.base))
         .collect();
-    crate::merge::apply_edits_with(
-        &mut function,
-        &symbols.variable_edits(entry),
-        &SymbolSites(symbols),
-        &tables,
-    );
+    crate::merge::apply_edits_with(&mut function, &edits, &SymbolSites(symbols), &tables);
     let high = if keep {
         function.body.clone()
     } else {
@@ -1082,6 +1097,7 @@ fn lift_inner(
         medium_analysis,
         stack_pointer,
         types,
+        slots,
     })
 }
 
@@ -2280,6 +2296,11 @@ struct Lifter<'a> {
     return_reason: String,
     /// The temporaries declared, once the statements are resolved.
     declared: Vec<Variable>,
+    /// The analyst's variables in the frame: every slot starting inside one
+    /// is a variable, its stores kept and its loads read from memory.
+    covered: Vec<crate::stack_vars::Made>,
+    /// What the walk saw of the frame, for its layout.
+    slot_facts: crate::frame::SlotFacts,
 }
 
 impl<'a> Lifter<'a> {
@@ -2305,7 +2326,15 @@ impl<'a> Lifter<'a> {
             return_bits: None,
             return_reason: String::new(),
             declared: Vec::new(),
+            covered: Vec::new(),
+            slot_facts: crate::frame::SlotFacts::default(),
         }
+    }
+
+    /// Whether the slot at `offset` starts inside a variable the analyst
+    /// made.
+    fn is_covered(&self, offset: i64) -> bool {
+        self.covered.iter().any(|made| made.holds(offset))
     }
 
     /// Forget what one pass over the function found, keeping what holds
@@ -3107,12 +3136,15 @@ impl<'a> Lifter<'a> {
 
     /// Load `bits` bits from the slot at `offset`.
     fn load(&mut self, offset: i64, bits: u32, at: u64) -> Value {
+        self.slot_facts.accesses.insert((offset, bits / 8, at));
         if let Some(slot) = self.state.stack.get(&offset) {
             if slot.bits == bits {
                 return slot.value.clone().also_from(at);
             }
         }
-        if self.state.overlaps(offset, bits) {
+        // Inside an analyst's variable every store is kept, so the memory
+        // holds what was written in parts.
+        if self.state.overlaps(offset, bits) && !self.is_covered(offset) {
             return Value::unknown(
                 format!(
                     "the {bits} bits at {} were written in parts",
@@ -3142,7 +3174,14 @@ impl<'a> Lifter<'a> {
     fn store(&mut self, offset: i64, bits: u32, value: Value, at: u64) {
         let addresses = sorted(value.from.iter().copied().chain([at]));
         let value = value.also_from(at);
+        self.slot_facts.accesses.insert((offset, bits / 8, at));
+        if let Sym::Entry(index) = value.sym {
+            self.slot_facts.saved.insert(offset, gpr_name(index, 64));
+        }
         self.kill(offset, bits);
+        if self.is_covered(offset) {
+            self.locals.entry(offset).or_insert(bits);
+        }
         if self.locals.contains_key(&offset) {
             // The slot is a variable: what was computed from it before this
             // store is the old value, saved into a temporary if it is in
@@ -3156,11 +3195,20 @@ impl<'a> Lifter<'a> {
                 value,
                 addresses,
             });
+            // A read of an analyst's variable reads memory, not this
+            // store: two paths that store to it stay the one variable at a
+            // join, and a read past the join comes from its own
+            // instruction alone.
+            let from = if self.is_covered(offset) {
+                Vec::new()
+            } else {
+                vec![at]
+            };
             self.state.stack.insert(
                 offset,
                 Slot {
                     bits,
-                    value: Value::node(AstNode::var(name), bits, vec![at]),
+                    value: Value::node(AstNode::var(name), bits, from),
                 },
             );
             return;
@@ -3278,7 +3326,14 @@ impl<'a> Lifter<'a> {
     /// through a pointer: the slots whose address is taken are whatever is
     /// in them now, and every value read from memory is stale.
     fn memory_written(&mut self, what: &str, at: u64) {
-        for &offset in &self.address_taken {
+        let covered: Vec<i64> = self
+            .state
+            .stack
+            .keys()
+            .copied()
+            .filter(|&offset| self.is_covered(offset))
+            .collect();
+        for offset in self.address_taken.iter().copied().chain(covered) {
             if let Some(slot) = self.state.stack.get_mut(&offset) {
                 slot.value = Value::node(
                     AstNode::var(local_name(self.options.stack_slot_names, offset)),
@@ -3307,8 +3362,9 @@ impl<'a> Lifter<'a> {
                 );
             }
         }
+        let covered = &self.covered;
         for (&offset, slot) in self.state.stack.iter_mut() {
-            if self.address_taken.contains(&offset) {
+            if self.address_taken.contains(&offset) || covered.iter().any(|m| m.holds(offset)) {
                 continue;
             }
             if from_memory(&slot.value) {
@@ -3639,6 +3695,15 @@ impl<'a> Lifter<'a> {
     fn step(&mut self, ins: &DecodedInsn) -> Result<(), NotLifted> {
         self.note_stack_pointer(ins.address);
         let mnemonic = Mnemonic::try_from(ins.mnemonic as usize).unwrap_or(Mnemonic::INVALID);
+        // The first `sub rsp, N` the walk meets — the entry's chain comes
+        // first — is the prologue's, and N the frame's size.
+        if mnemonic == Mnemonic::Sub && self.slot_facts.frame_size.is_none() {
+            if let [Operand::Register(reg), Operand::Imm(n)] = ins.operands.as_slice() {
+                if reg.class == RC_GPR && reg.index == RSP && reg.bit_size == 64 && *n > 0 {
+                    self.slot_facts.frame_size = u64::try_from(*n).ok();
+                }
+            }
+        }
         match mnemonic {
             Mnemonic::Nop | Mnemonic::Endbr64 => Ok(()),
             Mnemonic::Cmp => self.compare_op(false, ins),
@@ -6023,7 +6088,7 @@ fn parameter_name(position: usize) -> String {
 
 /// The name of the stack slot at `offset` from the entry stack pointer, the
 /// offset spelled as `names` says.
-fn local_name(names: SlotNames, offset: i64) -> String {
+pub(crate) fn local_name(names: SlotNames, offset: i64) -> String {
     let (prefix, magnitude) = if offset < 0 {
         ("local", -offset)
     } else {

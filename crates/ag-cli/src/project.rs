@@ -5,9 +5,9 @@
 //! changes. This command creates one from a target (`save`), reads one back
 //! (`show`), adds one annotation at a time (`rename`, `comment`, `bookmark`,
 //! `tag`, `color`, `xref`, `mark`, `operand`, `switch`, `inline`, `merge`,
-//! `split`, `version`, `value`, `patch`, `asm`, `nop`, `opaque`) so a
-//! script or an agent can build a project without editing JSON by hand, and
-//! reports the tags the analyst gave (`tags`).
+//! `split`, `version`, `value`, `stack-var`, `patch`, `asm`, `nop`,
+//! `opaque`) so a script or an agent can build a project without editing
+//! JSON by hand, and reports the tags the analyst gave (`tags`).
 
 use std::path::{Path, PathBuf};
 
@@ -270,6 +270,32 @@ pub enum ProjectCmd {
         variable: String,
         /// The address of the statement the new definition goes before.
         address: String,
+    },
+    /// Make a variable in a function's stack frame: the bytes from OFFSET,
+    /// counted from the stack pointer at the function's entry as the lift's
+    /// `local_<hex>` names count them, for SIZE bytes, read as one variable
+    /// — whole, by element in an array, or at byte offsets. `clear` in
+    /// place of SIZE takes the variable at OFFSET back.
+    StackVar {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The offset from the stack pointer at entry: `-0x20`, `-32`, `8`.
+        #[arg(allow_hyphen_values = true)]
+        offset: String,
+        /// The size in bytes, or `clear`.
+        size: String,
+        /// The variable's name, which renames and merges key on; the lift's
+        /// `local_<hex>` when absent.
+        #[arg(long)]
+        name: Option<String>,
+        /// The variable's C type: `int`, `char *`, `char[16]`, `int[]`; one
+        /// of the size when absent.
+        #[arg(long = "type", value_name = "TYPE")]
+        ty: Option<String>,
     },
     /// Pin a function's variable to a value or an inclusive range, for the
     /// whole function or from an address on: the uses it settles read the
@@ -789,6 +815,58 @@ pub fn run(
                     Some(at) => eprintln!("{variable} had no value pinned at {at} in {address}"),
                     None => eprintln!("{variable} had no value pinned in {address}"),
                 }
+            }
+            Ok(code)
+        }
+        ProjectCmd::StackVar {
+            file,
+            function,
+            offset,
+            size,
+            name,
+            ty,
+        } => {
+            let offset = ag_corpus::project::parse_offset(&offset).map_err(anyhow::Error::msg)?;
+            let clear = size.trim().eq_ignore_ascii_case("clear");
+            let size = if clear {
+                None
+            } else {
+                let text = size.trim();
+                let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    Some(hex) => u32::from_str_radix(hex, 16),
+                    None => text.parse::<u32>(),
+                };
+                match parsed {
+                    Ok(0) | Err(_) => {
+                        anyhow::bail!(
+                            "{text:?} is not a size in bytes such as 4 or 0x10, nor clear"
+                        )
+                    }
+                    Ok(size) => Some(size),
+                }
+            };
+            let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+            let ty = ty.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            if let Some(ty) = &ty {
+                ag_image::parse_type(ty).map_err(anyhow::Error::msg)?;
+            }
+            let address = function_key(&target, &file, &function)?;
+            let mut had = true;
+            let code = edit(
+                &target,
+                &file,
+                TargetKind::Function,
+                &address,
+                |a| match size {
+                    Some(size) => a.set_stack_var(offset, size, name.as_deref(), ty.as_deref()),
+                    None => had = a.clear_stack_var(offset),
+                },
+            )?;
+            if !had {
+                eprintln!(
+                    "no stack variable was made at {} in {address}",
+                    stack_offset_text(offset)
+                );
             }
             Ok(code)
         }
@@ -1839,6 +1917,12 @@ fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
 ///
 /// `show` prints an annotation with this, and `edit` confirms with it, so the
 /// two can never disagree about what a record holds.
+/// A stack offset as the frame spells it: `-0x20`, `+0x8`.
+fn stack_offset_text(offset: i64) -> String {
+    let sign = if offset < 0 { '-' } else { '+' };
+    format!("{sign}{:#x}", offset.unsigned_abs())
+}
+
 fn summarize(annotation: &Annotation) -> String {
     let mut parts = Vec::new();
     if let Some(name) = &annotation.name {
@@ -1905,6 +1989,17 @@ fn summarize(annotation: &Annotation) -> String {
             value.variable,
             value.spelled()
         ));
+    }
+    for variable in &annotation.stack_vars {
+        let mut text = format!(
+            "stack variable {} at {}",
+            variable.name.as_deref().unwrap_or("(unnamed)"),
+            variable.spelled()
+        );
+        if let Some(ty) = &variable.ty {
+            text.push_str(&format!(" of {ty}"));
+        }
+        parts.push(text);
     }
     if let Some(patch) = &annotation.patch {
         match &annotation.patch_text {

@@ -724,6 +724,7 @@ mod tests {
             medium_analysis: Analysis::default(),
             stack_pointer: BTreeMap::new(),
             types: BTreeMap::new(),
+            slots: Default::default(),
         }
     }
 

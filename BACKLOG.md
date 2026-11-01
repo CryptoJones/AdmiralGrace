@@ -183,7 +183,7 @@ Filed 2026-10-26.
 - [x] User-informed data flow: set a variable's value or range — [#360](https://github.com/CryptoJones/AdmiralGrace/issues/360)
 - [x] Expose possible-value-set analysis in the workbench and the CLI — [#361](https://github.com/CryptoJones/AdmiralGrace/issues/361)
 - [x] Variables pane: register, stack and flag variables with their placement — [#362](https://github.com/CryptoJones/AdmiralGrace/issues/362)
-- [ ] Stack layout pane with variable creation — [#363](https://github.com/CryptoJones/AdmiralGrace/issues/363)
+- [x] Stack layout pane with variable creation — [#363](https://github.com/CryptoJones/AdmiralGrace/issues/363)
 - [ ] Listing: stack-offset column — [#364](https://github.com/CryptoJones/AdmiralGrace/issues/364)
 - [ ] Highlight every instruction that reads or writes the selected register's value — [#365](https://github.com/CryptoJones/AdmiralGrace/issues/365)
 - [ ] Track and override global pointer registers — [#366](https://github.com/CryptoJones/AdmiralGrace/issues/366)

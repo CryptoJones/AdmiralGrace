@@ -9,6 +9,7 @@ pub mod dead;
 pub mod demangle;
 pub mod emit;
 pub mod emulate;
+pub mod frame;
 pub mod il;
 pub mod image;
 pub mod inline;
@@ -24,6 +25,7 @@ pub mod procedure;
 pub mod pvs;
 pub mod register;
 pub mod slice;
+pub mod stack_vars;
 pub mod structure;
 pub mod swift;
 pub mod swift_demangle;
@@ -45,6 +47,8 @@ pub use lift::{
     Abi, LiftedFunction, LowStatement, NotLifted, Placement, StageChain, Stages, Statement,
     StatementKind,
 };
+pub use frame::{FrameRow, Region, StackFrame};
+pub use stack_vars::StackVar;
 pub use variables::{VariableInfo, VariableKind};
 pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};

@@ -2690,3 +2690,119 @@ fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
         .expect("eax");
     assert_eq!(eax["name"], "count");
 }
+
+#[test]
+fn a_stack_variable_the_analyst_makes_is_read_by_the_lift_and_taken_back() {
+    let file = TempFile::new("stack-var");
+    // What `ag image sample.elf COMMAND sum_to --project FILE` prints.
+    let read = |command: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("sample.elf"))
+            .args([command, "sum_to", "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let word = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec!["stack-var", "--file"];
+        let text = file.text();
+        all.push(&text);
+        all.extend(args);
+        project_with("sample.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("sample.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = read("pseudocode");
+
+    // An array over the counter's slot and the gap below it: the counter
+    // reads as its second element.
+    let (ok, stdout, stderr) =
+        word(&["sum_to", "-0x18", "8", "--name", "pair", "--type", "int[2]"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("stack variable pair at [sp-0x18] 8 bytes of int[2]"),
+        "{stdout}"
+    );
+    // A whole-width variable replaces the lift's, typed as the analyst says.
+    let (ok, _, stderr) = word(&[
+        "sum_to",
+        "-0x10",
+        "8",
+        "--name",
+        "total",
+        "--type",
+        "unsigned long",
+    ]);
+    assert!(ok, "{stderr}");
+    let text = read("pseudocode");
+    assert!(
+        text.contains("  unsigned long total;\n  int pair[2];\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("for (pair[1] = 1; pair[1] <= a; pair[1] = pair[1] + 1) {"),
+        "{text}"
+    );
+    assert!(text.contains("total = total + (long)pair[1];"), "{text}");
+    let frame = read("stack");
+    assert!(
+        frame.contains("-0x10      8  local           total [made]  unsigned long         8\n"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("-0x18      4  local           pair [made]   int[2]                never\n"),
+        "{frame}"
+    );
+    let variables = read("variables");
+    assert!(
+        variables.contains("pair   int[2]         local  [sp-0x18] 8 bytes     2     4\n"),
+        "{variables}"
+    );
+
+    // The analyst renames the variable by the name it was made with.
+    let (ok, _, stderr) = project_with(
+        "sample.elf",
+        &["var", "--file", &file.text(), "0x1161", "total", "sum"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(read("stack").contains("sum (total) [made]"));
+
+    // One that overlaps another is refused, and the leading comments say so.
+    let (ok, _, stderr) = word(&["sum_to", "-0x14", "4", "--name", "i"]);
+    assert!(ok, "{stderr}");
+    let text = read("pseudocode");
+    assert!(
+        text.contains(
+            "// i is not made at [sp-0x14] 4 bytes: it overlaps pair at [sp-0x18] 8 bytes\n"
+        ),
+        "{text}"
+    );
+    // A type that is not C is refused before it is kept.
+    let (ok, _, stderr) = word(&["sum_to", "-0x20", "8", "--type", "int[2][2]"]);
+    assert!(!ok);
+    assert!(stderr.contains("an array of arrays"), "{stderr}");
+
+    // Cleared, the lift's own locals come back.
+    for offset in ["-0x14", "-0x18", "-0x10"] {
+        let (ok, _, stderr) = word(&["sum_to", offset, "clear"]);
+        assert!(ok, "{stderr}");
+    }
+    let (ok, _, stderr) = word(&["sum_to", "-0x10", "clear"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("no stack variable was made at -0x10 in 0x1161"),
+        "{stderr}"
+    );
+    let after = read("pseudocode");
+    assert_eq!(
+        after.replace("sum_to", ""),
+        before.replace("sum_to", ""),
+        "{after}"
+    );
+}

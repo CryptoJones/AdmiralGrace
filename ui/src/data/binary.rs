@@ -443,6 +443,10 @@ impl Provider for BinaryProvider {
         self.binary.variables(address).unwrap_or_default()
     }
 
+    fn stack_frame(&self, address: u64) -> Option<ag_image::StackFrame> {
+        self.binary.stack_frame(address).ok()
+    }
+
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
         Some(self.byte_rows(address))
     }

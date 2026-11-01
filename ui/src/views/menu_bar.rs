@@ -268,6 +268,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     Message::ViewToggleBottom,
                 )),
                 Item::new(item_button("Variables", "", Message::ViewVariables)),
+                Item::new(item_button("Stack layout", "", Message::ViewStack)),
                 Item::new(separator()),
                 Item::new(item_button(
                     "Cycle the pane's level",

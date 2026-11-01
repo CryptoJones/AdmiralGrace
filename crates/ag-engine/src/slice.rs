@@ -422,6 +422,13 @@ fn read(node: &AstNode, effects: &mut Effects) {
                 read(arg, effects);
             }
         }
+        // An element of an analyst's array is memory, read.
+        AstNode::Intrinsic { name, args } if name == crate::stack_vars::INDEX => {
+            effects.reads_memory = true;
+            for arg in args {
+                read(arg, effects);
+            }
+        }
         AstNode::Intrinsic { name, args } => {
             // A note — an inlined call's, a halt's, a new version's, a pinned
             // value's — is no call.
@@ -503,6 +510,13 @@ fn collect_names(node: &AstNode, names: &mut BTreeSet<String>, escaped: &mut BTr
             AstNode::Var { name } => found.borrow_mut().0.push(name.clone()),
             AstNode::AddressOf { target } => {
                 if let AstNode::Var { name } = target.as_ref() {
+                    found.borrow_mut().1.push(name.clone());
+                }
+            }
+            // An array the analyst made is memory, as a variable whose
+            // address is taken is.
+            n if crate::stack_vars::indexed(n).is_some() => {
+                if let Some((AstNode::Var { name }, _)) = crate::stack_vars::indexed(n) {
                     found.borrow_mut().1.push(name.clone());
                 }
             }
