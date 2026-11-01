@@ -1917,7 +1917,7 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     assert!(dead("  if (0) { // constant: &completed.0 != &completed.0"), "{report}");
     assert!(dead("      return;"), "{report}");
     assert!(!dead("  return;"), "{report}");
-    assert!(!dead("  long rax;"), "{report}");
+    assert!(!dead("  void *rax;"), "{report}");
 
     // The analyst's word on `rax`: its dead store goes, the rest stays.
     let (ok, stdout, stderr) = project(&[
@@ -2627,7 +2627,7 @@ fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
     assert!(ok, "{stderr}");
     let before = variables("ping");
     assert!(
-        before.contains("local_c  int   local  [sp-0xc] 4 bytes     2     1\n"),
+        before.contains("local_c  int   local  [sp-0xc] 4 bytes     2     1  -\n"),
         "{before}"
     );
 
@@ -2637,7 +2637,7 @@ fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
     let merged = variables("ping");
     assert!(!merged.contains("local_c"), "{merged}");
     assert!(
-        merged.contains("a     int   param  edi (in rdi); [sp-0xc] 4 bytes     1     3\n"),
+        merged.contains("a     int   param  edi (in rdi); [sp-0xc] 4 bytes     1     3  -\n"),
         "{merged}"
     );
     let (ok, _, stderr) = word(&["unmerge", "ping", "local_c"]);
@@ -2648,7 +2648,7 @@ fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
     assert!(ok, "{stderr}");
     let split = variables("ping");
     assert!(
-        split.contains("eax_2    int   local  eax (in rax)         1     0\n"),
+        split.contains("eax_2    int   local  eax (in rax)         1     0  -\n"),
         "{split}"
     );
     let (ok, _, stderr) = word(&["unsplit", "ping", "eax", "0x401023"]);
@@ -2761,7 +2761,7 @@ fn a_stack_variable_the_analyst_makes_is_read_by_the_lift_and_taken_back() {
     );
     let variables = read("variables");
     assert!(
-        variables.contains("pair   int[2]         local  [sp-0x18] 8 bytes     2     4\n"),
+        variables.contains("pair   int[2]         local  [sp-0x18] 8 bytes     2     4  analyst\n"),
         "{variables}"
     );
 
@@ -3196,7 +3196,7 @@ fn a_structure_is_made_from_a_pointers_accesses_updated_and_taken_back() {
     assert!(ok, "{stderr}");
     assert!(
         stdout.starts_with(
-            "struct struct_make_conn_v1 {\n    int field_0;\n    short field_4;\n    char field_6;\n    long field_8;\n    long field_10;\n    char gap_18[16];\n};\n"
+            "struct struct_make_conn_v1 {\n    int field_0;\n    short field_4;\n    char field_6;\n    char *field_8;\n    long field_10;\n    char gap_18[16];\n};\n"
         ),
         "{stdout}"
     );
@@ -3331,6 +3331,6 @@ fn a_structure_is_made_from_a_pointers_accesses_updated_and_taken_back() {
     assert!(ok, "{stderr}");
     let (ok, body, _) = image(&["pseudocode", "make_conn"], true);
     assert!(ok);
-    assert!(body.contains("long v1;"), "{body}");
+    assert!(body.contains("void *v1;"), "{body}");
     assert!(!body.contains("field_0"), "{body}");
 }

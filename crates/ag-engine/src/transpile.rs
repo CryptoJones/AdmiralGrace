@@ -28,6 +28,9 @@ pub struct External {
     /// The function's own signature, when its lift is known and it is
     /// declared rather than defined.
     pub signature: Option<String>,
+    /// The types its parameters are declared with in the signature, in
+    /// order; none when there is no signature.
+    pub params: Vec<String>,
 }
 
 /// A global the program defines: a datum the lift names, with the bytes
@@ -65,7 +68,9 @@ pub fn program(program: &Program) -> String {
     out.push_str(
         "// Lifted by AdmiralGrace: the medium level of each function, a label per block.\n",
     );
-    out.push_str("#include <cstdint>\n\n");
+    // The header of the platform's `size_t`, which declares no function,
+    // and `ssize_t`, which no header of C++'s own declares.
+    out.push_str("#include <cstdint>\n#include <cstddef>\ntypedef intptr_t ssize_t;\n\n");
     out.push_str("// What the program itself calls, declared exactly; no header is included,\n");
     out.push_str("// so a function of the image may bear any name the C library has.\n");
     out.push_str("extern \"C\" int printf(const char *, ...);\n");
@@ -86,6 +91,19 @@ pub fn program(program: &Program) -> String {
         .iter()
         .map(|stages| stages.function.name.as_str())
         .collect();
+    let platform = TypeStore::default();
+    let store = program.types.unwrap_or(&platform);
+    let named: Vec<&str> = program
+        .externals
+        .iter()
+        .flat_map(|external| external.params.iter().map(String::as_str))
+        .collect();
+    let definitions = definitions(&program.functions, &named, store);
+    if !definitions.is_empty() {
+        out.push_str("// The types the functions' variables are declared with.\n");
+        out.push_str(&definitions);
+        out.push('\n');
+    }
     let mut declared = false;
     for external in &program.externals {
         if defined.contains(external.name.as_str()) || OWN.contains(&external.name.as_str()) {
@@ -109,14 +127,6 @@ pub fn program(program: &Program) -> String {
     if declared {
         out.push('\n');
     }
-    let platform = TypeStore::default();
-    let store = program.types.unwrap_or(&platform);
-    let definitions = definitions(&program.functions, store);
-    if !definitions.is_empty() {
-        out.push_str("// The types the functions' variables are declared with.\n");
-        out.push_str(&definitions);
-        out.push('\n');
-    }
     if program.functions.len() > 1 {
         for stages in &program.functions {
             out.push_str(&signature(stages));
@@ -124,8 +134,28 @@ pub fn program(program: &Program) -> String {
         }
         out.push('\n');
     }
+    // The parameters each function the program calls is declared with,
+    // which a typed one's argument — an integer, as the medium level
+    // reads it — is cast to.
+    let mut callees: std::collections::BTreeMap<String, Vec<String>> = program
+        .externals
+        .iter()
+        .filter(|external| external.signature.is_some())
+        .map(|external| (identifier(&external.name), external.params.clone()))
+        .collect();
     for stages in &program.functions {
-        out.push_str(&function_with(stages, store));
+        callees.insert(
+            identifier(&stages.function.name),
+            stages
+                .function
+                .params
+                .iter()
+                .map(|p| p.ty.clone())
+                .collect(),
+        );
+    }
+    for stages in &program.functions {
+        out.push_str(&function_calling(stages, store, &callees));
         out.push('\n');
     }
     if let Some(stages) = program.harness {
@@ -135,8 +165,9 @@ pub fn program(program: &Program) -> String {
 }
 
 /// The definitions of the project's types the functions' variables and
-/// returns name, in an order C reads them in, as C.
-fn definitions(functions: &[&Stages], store: &TypeStore) -> String {
+/// returns name, and the types `named` besides — the parameters of the
+/// functions declared — in an order C reads them in, as C.
+fn definitions(functions: &[&Stages], named: &[&str], store: &TypeStore) -> String {
     let types: Vec<Type> = functions
         .iter()
         .flat_map(|stages| {
@@ -148,6 +179,7 @@ fn definitions(functions: &[&Stages], store: &TypeStore) -> String {
                 .map(|v| v.ty.as_str())
                 .chain([function.return_type.as_str()])
         })
+        .chain(named.iter().copied())
         .filter_map(|ty| crate::ctype::parse_type(store, ty).ok())
         .collect();
     let mut out = String::new();
@@ -187,6 +219,49 @@ fn retyped(
         );
     }
     out
+}
+
+/// `node` with each argument of a call to a function of `callees` cast to
+/// the parameter's type where that is no integer.
+fn cast_arguments(
+    node: &AstNode,
+    callees: &std::collections::BTreeMap<String, Vec<String>>,
+    store: &TypeStore,
+) -> AstNode {
+    if callees.is_empty() {
+        return node.clone();
+    }
+    crate::inline::map(node.clone(), &mut |n| match n {
+        AstNode::Call { callee, args } => {
+            let params = match callee.as_ref() {
+                AstNode::FunctionName { name, .. } => callees.get(&identifier(name)),
+                _ => None,
+            };
+            let Some(params) = params else {
+                return AstNode::Call { callee, args };
+            };
+            let args = args
+                .into_iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    let typed = params.get(index).and_then(|text| {
+                        let ty = crate::ctype::parse_type(store, text).ok()?;
+                        let integer = matches!(store.resolve(&ty), Type::Prim(p) if p.is_integer());
+                        (!integer && store.is_scalar(&ty)).then(|| ty.spelled(store))
+                    });
+                    match typed {
+                        Some(ty) => AstNode::Cast {
+                            ty,
+                            target: Box::new(arg),
+                        },
+                        None => arg,
+                    }
+                })
+                .collect();
+            AstNode::Call { callee, args }
+        }
+        other => other,
+    })
 }
 
 /// `node` with each read of a typed variable cast to its integer, and each
@@ -250,7 +325,22 @@ pub fn function(stages: &Stages) -> String {
 
 /// [`function`], the variables' types read against `store`.
 pub fn function_with(stages: &Stages, store: &TypeStore) -> String {
+    function_calling(stages, store, &std::collections::BTreeMap::new())
+}
+
+/// [`function_with`], each argument a callee of `callees` takes in a
+/// parameter of a type no integer is cast to that type: `fgets((char
+/// *)&local_48, 0x40, (FILE *)(long)a)`.
+fn function_calling(
+    stages: &Stages,
+    store: &TypeStore,
+    callees: &std::collections::BTreeMap<String, Vec<String>>,
+) -> String {
     let retyped = retyped(stages, store);
+    let cast_retyped =
+        |node: &AstNode, retyped: &std::collections::BTreeMap<String, (String, String)>| {
+            cast_arguments(&cast_retyped(node, retyped), callees, store)
+        };
     let mut out = signature(stages);
     out.push_str("\n{\n");
     for local in &stages.function.locals {
@@ -869,6 +959,7 @@ mod tests {
             stack_pointer: BTreeMap::new(),
             types: BTreeMap::new(),
             slots: Default::default(),
+            inferred: Default::default(),
         }
     }
 
@@ -886,16 +977,19 @@ mod tests {
                     name: "printf".to_string(),
                     reason: None,
                     signature: None,
+                    params: Vec::new(),
                 },
                 External {
                     name: "mystery".to_string(),
                     reason: Some("not lifted yet: the block ends in hlt".to_string()),
                     signature: None,
+                    params: Vec::new(),
                 },
                 External {
                     name: "helper".to_string(),
                     reason: None,
                     signature: Some("int helper(int a)".to_string()),
+                    params: vec!["int".to_string()],
                 },
             ],
             globals: vec![

@@ -297,8 +297,10 @@ back.
 tab is showing: a row for each parameter and local of the function on screen — its name, the
 analyst's when it was renamed with the lift's beside it, `count (eax)`; its type; `param` or
 `local`; where it lives — `edi (in rdi)`, `[sp-0x14] 4 bytes`, a merged variable's places
-joined by `; `, a callee's inlined one marked `inlined from ping`; and how many statements
-assign it and read it. Clicking a row selects the first line of the pseudocode that names the
+joined by `; `, a callee's inlined one marked `inlined from ping`; how many statements
+assign it and read it; and, under **type from**, where its type came from — `analyst`, or type
+propagation's source, `from strlen's parameter 1`, `indexed as an array at 0x4011cd`
+(`docs/types.md`, Propagation). Clicking a row selects the first line of the pseudocode that names the
 variable in a statement, and shows the pseudocode tab; **Rename** opens the variable rename
 prompt on it. The rows follow the pseudocode as it is read again — another function, a merge,
 a split, an inline — and are read only while the tab is showing. What they say is `ag image

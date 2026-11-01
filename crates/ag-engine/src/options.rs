@@ -397,6 +397,42 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "type-propagation",
+        phase: Phase::Lift,
+        tier: Tier::Analysis,
+        kind: Kind::Choice(&["on", "off"]),
+        default: "on",
+        description: "Whether the lift types the variables the analyst left untyped from what the code says of them (`docs/types.md`, Propagation): the prototypes of the C library's and Windows' functions it calls, strings, allocations, dereferences and unsigned uses, carried through copies, call arguments and returns across the call graph; and whether a run of stack slots indexed as an array, or whose address is passed where a prototype takes a buffer of a constant length or a known structure, is made one stack variable, `int local_38[8]`, `char local_48[64]`, `struct timeval local_18`. The analyst's types and stack variables always win. Off, the variables keep the integer of their width and the slots stay one local each.",
+        symptoms: &[
+            symptom(
+                "`long a` on a parameter the function passes to `strlen`, or `*(int *)(a + (long)i * 4)` where an array was meant",
+                "on",
+            ),
+            symptom(
+                "a type or an array you do not trust, where the plain integers and slots are wanted",
+                "off",
+            ),
+        ],
+    },
+    OptionSpec {
+        name: "auto-structs",
+        phase: Phase::Lift,
+        tier: Tier::Analysis,
+        kind: Kind::Choice(&["off", "on"]),
+        default: "off",
+        description: "Whether, under `type-propagation on`, a run of stack slots whose address is taken and which no known prototype types is drafted as a structure — as `struct-from` drafts one, `struct struct_<function>_<slot>` with members `field_<hex>` — and made a stack variable of it. Off by default: the draft is a guess at a layout the analyst has not seen, and its name and members are new words in the output; `ag project … struct-from` makes one the analyst keeps.",
+        symptoms: &[
+            symptom(
+                "`long local_18; long local_10;` beside `f(&local_18)`, where a structure on the stack was meant",
+                "on",
+            ),
+            symptom(
+                "a `struct struct_main_local_18` you did not write",
+                "off",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "loop-form",
         phase: Phase::Structure,
         tier: Tier::Transform,
@@ -840,6 +876,12 @@ pub struct Options {
     /// The column statements are wrapped at; 0 for never.
     pub wrap: u16,
     pub call_hints: CallHints,
+    /// Whether the variables the analyst left untyped are typed from what
+    /// the code says of them, and stack arrays and structures made.
+    pub type_propagation: bool,
+    /// Whether a structure no prototype types is drafted for an
+    /// address-taken run of stack slots.
+    pub auto_structs: bool,
 }
 
 /// The analyst's word at one site — the address of a branch or an indirect
@@ -1039,6 +1081,8 @@ impl Default for Options {
             ternaries: Ternaries::default(),
             wrap: 0,
             call_hints: CallHints::default(),
+            type_propagation: true,
+            auto_structs: false,
         }
     }
 }
@@ -1335,6 +1379,12 @@ impl Options {
                     &[("off", CallHints::Off), ("names", CallHints::Names)],
                 )?
             }
+            "type-propagation" => {
+                self.type_propagation = choose(spec, value, &[("on", true), ("off", false)])?
+            }
+            "auto-structs" => {
+                self.auto_structs = choose(spec, value, &[("off", false), ("on", true)])?
+            }
             _ => unreachable!("every row of OPTIONS is matched above: {name}"),
         }
         Ok(())
@@ -1442,6 +1492,18 @@ impl Options {
                     CallHints::Off => "off",
                     CallHints::Names => "names",
                 },
+                "type-propagation" | "auto-structs" => {
+                    let on = if name == "type-propagation" {
+                        self.type_propagation
+                    } else {
+                        self.auto_structs
+                    };
+                    if on {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                }
                 _ => return None,
             }
             .to_string(),

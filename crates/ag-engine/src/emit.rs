@@ -442,7 +442,12 @@ fn emit_marked(
                     .join(", ")
             };
             lines.push(Line {
-                text: format!("{} {}({params})", function.return_type, function.name),
+                // A pointer's star goes with the name, `char *f(…)`.
+                text: if function.return_type.ends_with('*') {
+                    format!("{}{}({params})", function.return_type, function.name)
+                } else {
+                    format!("{} {}({params})", function.return_type, function.name)
+                },
                 addresses: signature_addresses,
             });
             lines.push(Line {

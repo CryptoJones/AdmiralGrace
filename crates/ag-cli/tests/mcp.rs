@@ -1128,3 +1128,75 @@ fn a_structure_is_drafted_and_made_from_a_pointer_through_the_server() {
     assert!(saved.contains("int field_18[4];"), "{saved}");
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn the_variables_carry_where_their_types_came_from_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-propagate-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("propagate.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"variables","arguments":{"target":"measure"}"#,
+            r#""name":"set_variable_type","arguments":{"function":"measure","variable":"a","type":"long"}"#,
+            r#""name":"variables","arguments":{"target":"measure"}"#,
+            r#""name":"variables","arguments":{"target":"sum"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 4);
+    for reply in &replies {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    let json = |i: usize| -> serde_json::Value {
+        let text = replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("JSON: {text}"))
+    };
+    let inferred = &json(0)["variables"][0];
+    assert_eq!(inferred["type"], "char *");
+    assert_eq!(inferred["type_source"], "from strlen's parameter 1");
+    // The analyst's word wins, and says so.
+    let analyst = &json(2)["variables"][0];
+    assert_eq!(analyst["type"], "long");
+    assert_eq!(analyst["type_source"], "analyst");
+    let array = json(3)["variables"]
+        .as_array()
+        .expect("the variables")
+        .iter()
+        .find(|v| v["name"] == "local_38")
+        .cloned()
+        .expect("the array");
+    assert_eq!(array["type"], "int[8]");
+    assert_eq!(array["type_source"], "indexed as an array at 0x4011cd");
+    let _ = std::fs::remove_file(&project);
+}

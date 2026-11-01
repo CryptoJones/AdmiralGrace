@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 use crate::ast::{AstNode, BinaryOp};
 use crate::lift::{LiftedFunction, Statement, StatementKind};
 use crate::stack_vars::StackVar;
-use crate::types::{Step, Type, TypeStore};
+use crate::types::{Prim, Step, Type, TypeStore};
 
 /// The intrinsic a member of a variable reads through: `v.f` is
 /// `__member(v, "f")`.
@@ -327,6 +327,9 @@ fn read_pointers(function: &mut LiftedFunction, store: &TypeStore) {
             continue;
         };
         match store.resolve(&ty) {
+            // A `void *` says nothing of what it points at: its loads and
+            // its arithmetic stay as the lift reads them.
+            Type::Pointer(pointee) if matches!(store.resolve(pointee), Type::Prim(Prim::Void)) => {}
             Type::Pointer(pointee) => {
                 typed
                     .pointers
@@ -586,8 +589,25 @@ fn through(
     let pointee = typed.pointers.get(pointer)?;
     let store = typed.store;
     let each = store.size_of(pointee).ok().filter(|&each| each > 0)?;
-    let offset = u64::try_from(offset).ok()?;
     let base = AstNode::var(pointer);
+    // An index a whole number of elements back, `p[i - 1]`.
+    if offset < 0 {
+        let (index, scale) = index?;
+        let back = offset.unsigned_abs();
+        if scale != each || !back.is_multiple_of(each) {
+            return None;
+        }
+        let (path, _) = store.field_at(pointee, 0, size)?;
+        let index = AstNode::binary(index, BinaryOp::Sub, AstNode::constant(back / each, 8));
+        return Some(crate::stack_vars::parts_node(
+            AstNode::Intrinsic {
+                name: crate::stack_vars::INDEX.to_string(),
+                args: vec![base, index],
+            },
+            &path,
+        ));
+    }
+    let offset = u64::try_from(offset).ok()?;
     let element = offset / each;
     let within = offset % each;
     match index {
@@ -738,6 +758,12 @@ fn decompose(address: &AstNode, typed: &Typed) -> Option<Address> {
                 };
                 let scale = 1u64.checked_shl(u32::try_from(*value).ok()?)?;
                 if index.replace(((**lhs).clone(), scale)).is_some() {
+                    return None;
+                }
+            }
+            // A value added unscaled is an index of one byte, `p + i`.
+            AstNode::Var { .. } | AstNode::Cast { .. } if !negative => {
+                if index.replace((term.clone(), 1)).is_some() {
                     return None;
                 }
             }

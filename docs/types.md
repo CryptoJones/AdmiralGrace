@@ -365,14 +365,120 @@ place; the variable is given a pointer to it.
 Both are the project's ordinary words, `types` and `var_types`: `types remove` and `var-type …
 clear` take them back, and the workbench's undo does.
 
+## Propagation
+
+With no word from the analyst the pseudocode is typed from what the code says of its values
+(`ag_engine::propagate`), and the variables listing says where each type came from:
+
+```bash
+ag image ./propagate.elf pseudocode measure     # void measure(char *a) { strlen(a); … }
+ag image ./propagate.elf pseudocode greet       # measure("hello");
+ag image ./propagate.elf pseudocode sum         # int local_38[8]; … local_38[(long)local_c] = …
+ag image ./propagate.elf variables line         # local_48  char[64] … from fgets's parameter 1, 0x40 bytes at 0x40119c
+```
+
+### Seeds
+
+| What the code does | What the value is | Source |
+|---|---|---|
+| passed to, or returned by, a function of known prototype | the prototype's type | `from strlen's parameter 1`, `returned by fopen at 0x401020` |
+| is a parameter of a function of the image named as a known one | the prototype's type | `from fgets's prototype` |
+| typed by the analyst (`var-type`) | that type, never changed | `analyst` |
+| assigned the result of an allocator `smart_struct` knows | a pointer, `void *` | `allocated by malloc at 0x401004` |
+| assigned or passed a string — a literal, or a constant address the image holds one at | `char *` | `a string passed at 0x401159 in greet` |
+| dereferenced — every access one width, at multiples of it, unindexed or at that stride | a pointer to that type, `int *` | `dereferenced at 0x401010`, `indexed as an array at 0x401020` |
+| dereferenced otherwise, or assigned an address and no number | `void *` | `an address assigned at 0x401008` |
+| compared with a pointer, or a pointer with an offset added | that pointer (a structure's pointer plus an offset is `void *`) | `compared with p at …`, `p plus an offset at …` |
+| read only through unsigned casts — an unsigned comparison, a zero extension | the unsigned integer of its width | `used unsigned at 0x401003` |
+
+The prototypes are C in `crates/ag-engine/src/prototypes.h` — a few dozen of the C library's,
+POSIX's and Windows' common functions, with the types they name (`FILE`, `struct timeval`,
+`struct timespec`, `struct tm`, `struct sockaddr_in`, `HANDLE`, `DWORD` …) — read by the parser
+under the image's data model. A function is found under an import's or a stub's decoration,
+`strlen@plt`, `__imp_ReadFile`, `_strlen`, `j_strlen`. Adding a prototype to the file teaches it;
+a buffer whose length another argument gives carries `/* size: N */`, the length's argument
+counted from 1, or `/* size: N*M */` for a count of elements of a size. The library's types are
+known to every lift beside the project's, which win where both define a name, and the
+transpiler writes the ones the functions name. Type libraries (#376) generalise the table.
+
+### Directions
+
+The facts of each function — its slots and their widths, the seeds, the copies between its
+variables, its calls with their arguments and results, its returns — are read off its lift once
+(`Facts`), and the types are carried through them by `solve`:
+
+- **through copies**, both ways: `b = a;`, `return a;` and the function's return;
+- **call site to callee**: an argument's type is the callee's parameter's — every call site
+  passing a string makes the parameter `char *`, `a string passed at 0x401159 in greet`;
+- **callee to call site**: a callee's parameter's type is the argument variable's, `from the call
+  at 0x401234 to parse(char *)`, and a callee's return the result's, `returned by make at …`;
+- a known prototype's types go into the arguments and the result and do not come back.
+
+The image solves each function with the functions about it in the call graph — its callers and
+callees and theirs, 48 at most, the nearest first — each one's facts read once and kept with the
+pseudocode. The solution is a fixed point, or 16 rounds over every link when it is not reached
+sooner.
+
+Evidence ranks: the analyst's above a prototype's, a string's, an allocation's and what calls
+and returns carry; those above a dereference's, a comparison's and an address's; and an unsigned
+use last. A higher rank replaces a lower one; one rank joins — `void *` and `char *` are `char *`;
+two pointers to different types are `void *`, and a pointer and an integer, or two integers,
+leave the variable the integer of its width, each with a note in the function's leading comments:
+`p is void *: char * from strlen's parameter 1, int * dereferenced at 0x401010`. A type is only
+given where it is a scalar of the variable's width. A variable the analyst pins values of keeps
+its sign.
+
+What is inferred is read as the analyst's types are: `p[i]`, `p->f`, enumerators, `char *f(…)`.
+A pointer to `void` says nothing of what it points at, so its loads and arithmetic stay as the
+lift reads them. A constant passed where the callee takes a `char *` and the image holds a string
+is the string, `measure("hello")`.
+
+### Arrays and structures on the stack
+
+The first lift reads a slot's address plus an index as that sum, `(long)&local_38 + (long)i *
+4`, and looks at the frame:
+
+- **an indexed run**: a slot read or written through an index at the stride of the access's
+  width is an array of that element, as many as a comparison of the index with a constant bounds
+  (`i <= 7` is 8), or reaching to the next slot the code touches: `int local_38[8]`, `indexed as
+  an array at 0x4011cd`;
+- **a known length**: a slot whose address is passed where a prototype's buffer has a constant
+  length is an array of that many bytes — `char` for a `void *` or `char *` buffer, the
+  prototype's element otherwise: `fgets(&local_48, 64, f)` makes `char local_48[64]`,
+  `memcpy(&local_28, s, 0x20)` `char local_28[32]`;
+- **a known structure**: a slot whose address is passed where a prototype, or the analyst's type
+  of the callee's parameter (by its lift name, `a`, `b`, …), takes a pointer to a structure the
+  types define is that structure: `gettimeofday(&local_18, 0)` makes `struct timeval local_18`,
+  read `local_18.tv_sec`;
+- **a drafted structure**, under `--option auto-structs on`: a run of slots from one whose
+  address is taken to the next such slot, a saved register or the return address, reached at two
+  offsets at least, is drafted as `struct-from` drafts one (`infer_struct`), `struct
+  struct_<function>_<slot>`, and made a stack variable of it. Off by default: the draft is a
+  guess at a layout the analyst has not seen, with new names in the output, and is no type the
+  other functions know; `ag project … struct-from` makes one the analyst keeps.
+
+None of them overlaps a saved register, the return address, another, or a byte of an analyst's
+stack variable — the analyst's words win. Each is made a stack variable as the analyst's are, the
+function is lifted again with them, and its accesses read as its elements, `local_38[i]`, its
+address passed as the array, `fgets(local_48, 0x40, a)`, or the structure's, `&local_18`.
+
+### Options and sources
+
+`--option type-propagation off` turns all of it off: the variables keep the integer of their
+width, the slots stay a local each, and a slot indexed outside an analyst's variable is refused as
+before (`arithmetic on the stack pointer`). Inside an analyst's stack variable an indexed access
+is read either way. `--option auto-structs on` adds the drafts.
+
+`ag image … variables` gives each variable's `source` — `analyst`, the inference's source, or
+`-` — as does `--json` (`type_source`), the MCP `variables` tool and the workbench's Variables
+pane.
+
 ## What comes later
 
 The model leaves room for the items that build on it:
 
 - **Struct-by-value calling conventions (#388)** add the SSE and MEMORY classes, `rdx` of a
   returned structure, and the other conventions to the INTEGER class the fragments read.
-- **Type propagation (#370)** carries a type from a variable to what it is copied into and
-  passed to; the lift's variables already take a type by name.
 - **The union field per instruction (#371)** replaces the first-member-that-fits choice, made
   in one place (`TypeStore::field_at`).
 - **Bit-field members (#372)** read the accesses to a bit-field's unit as the bit-field: the

@@ -719,7 +719,7 @@ fn rewrite(statement: &mut Statement, f: &mut dyn FnMut(AstNode) -> AstNode, at:
 }
 
 /// Call `f` on `node` and every node inside it, outermost first.
-fn visit(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+pub(crate) fn visit(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
     f(node);
     match node {
         AstNode::Binary { lhs, rhs, .. } | AstNode::Assign { lhs, rhs } => {
