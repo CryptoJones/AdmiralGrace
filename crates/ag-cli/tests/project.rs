@@ -2597,3 +2597,96 @@ fn the_analysts_value_seeds_the_possible_values() {
         "{text}"
     );
 }
+
+#[test]
+fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
+    let file = TempFile::new("variables");
+    // What `ag image inline.elf variables FUNCTION --project FILE` prints.
+    let variables = |function: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(["variables", function, "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let word = |args: &[&str]| -> (bool, String, String) {
+        let mut all = vec![args[0], "--file"];
+        let text = file.text();
+        all.push(&text);
+        all.extend(&args[1..]);
+        project_with("inline.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = variables("ping");
+    assert!(
+        before.contains("local_c  int   local  [sp-0xc] 4 bytes     2     1\n"),
+        "{before}"
+    );
+
+    // The variable a merge keeps lives where both did.
+    let (ok, _, stderr) = word(&["merge", "ping", "a", "local_c"]);
+    assert!(ok, "{stderr}");
+    let merged = variables("ping");
+    assert!(!merged.contains("local_c"), "{merged}");
+    assert!(
+        merged.contains("a     int   param  edi (in rdi); [sp-0xc] 4 bytes     1     3\n"),
+        "{merged}"
+    );
+    let (ok, _, stderr) = word(&["unmerge", "ping", "local_c"]);
+    assert!(ok, "{stderr}");
+
+    // The piece a split makes lives where its origin does.
+    let (ok, _, stderr) = word(&["split", "ping", "eax", "0x401023"]);
+    assert!(ok, "{stderr}");
+    let split = variables("ping");
+    assert!(
+        split.contains("eax_2    int   local  eax (in rax)         1     0\n"),
+        "{split}"
+    );
+    let (ok, _, stderr) = word(&["unsplit", "ping", "eax", "0x401023"]);
+    assert!(ok, "{stderr}");
+
+    // A callee inlined brings its variables, placed in its own frame.
+    let (ok, _, stderr) = word(&["inline", "ping", "on"]);
+    assert!(ok, "{stderr}");
+    let start = variables("start");
+    assert!(
+        start.contains("ping_local_c  int   local  [sp-0xc] 4 bytes, inlined from ping"),
+        "{start}"
+    );
+    assert!(
+        start.contains("ping_eax      int   local  eax (in rax), inlined from ping"),
+        "{start}"
+    );
+
+    // The analyst's name is shown, the lift's beside it.
+    let (ok, _, stderr) = word(&["var", "0x401000", "eax", "count"]);
+    assert!(ok, "{stderr}");
+    let renamed = variables("ping");
+    assert!(
+        renamed.contains("count (eax)  int   local  eax (in rax)"),
+        "{renamed}"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("inline.elf"))
+        .args(["variables", "ping", "--json", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let eax = json["variables"]
+        .as_array()
+        .expect("the variables")
+        .iter()
+        .find(|v| v["lift_name"] == "eax")
+        .expect("eax");
+    assert_eq!(eax["name"], "count");
+}

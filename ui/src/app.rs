@@ -226,6 +226,16 @@ pub enum Message {
     ViewToggleInspector,
     /// Show or hide the bottom panel.
     ViewToggleBottom,
+    /// Show the Variables pane — the bottom panel open on its tab — or hide
+    /// it when it is showing.
+    ViewVariables,
+    /// A row of the Variables pane was clicked: the variable, by its place
+    /// in the list. The first line of the pseudocode that names it is
+    /// selected.
+    VariableSelected(usize),
+    /// Rename a variable from the Variables pane, by the name the lift
+    /// declares it with: the rename prompt opens on it.
+    VariableRename(String),
     /// Restore the default layout.
     ViewResetLayout,
     /// Restart the analysis.
@@ -676,6 +686,15 @@ pub struct BottomPanel {
     pub problems: Vec<Problem>,
     /// Analysis log lines.
     pub log: Vec<String>,
+    /// The variables of the function `variables_of`, by the names the lift
+    /// declares, as the Variables tab lists them. Read while the tab is
+    /// showing, since each read lifts the function.
+    pub variables: Vec<ag_image::VariableInfo>,
+    /// The function the variables were read for; `None` when they are to
+    /// be read again.
+    pub variables_of: Option<u64>,
+    /// The variable last clicked in the Variables tab, by its lift name.
+    pub selected_variable: Option<String>,
 }
 
 /// The names a view replaces as it draws.
@@ -970,6 +989,7 @@ impl App {
                 hits: Vec::new(),
                 problems: Vec::new(),
                 log: vec!["Workbench started.".into()],
+                ..BottomPanel::default()
             },
             history: History::new(64),
             selection: Selection::None,
@@ -2470,6 +2490,9 @@ impl App {
         self.work.listing_of = Some(address);
         self.refresh_listing();
         self.work.pseudocode = self.pseudocode_of(address);
+        // The variable clicked was one of the last function's.
+        self.bottom.selected_variable = None;
+        self.refresh_variables();
         self.work.line_values = None;
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
         self.work.references = self.provider.references(address);
@@ -3124,6 +3147,7 @@ impl App {
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3142,6 +3166,7 @@ impl App {
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3159,6 +3184,75 @@ impl App {
             }
         }
         self.provider.pseudocode(function)
+    }
+
+    /// Read the variables of the function on screen again for the Variables
+    /// tab while it is showing; while it is not, mark them to be read when
+    /// it is, since each read lifts the function.
+    fn refresh_variables(&mut self) {
+        let showing = self.show_bottom && self.bottom.tab == BottomTab::Variables;
+        match self.work.listing_of {
+            Some(function) if showing => {
+                self.bottom.variables = self.provider.variables(function);
+                self.bottom.variables_of = Some(function);
+            }
+            _ => {
+                self.bottom.variables.clear();
+                self.bottom.variables_of = None;
+            }
+        }
+    }
+
+    /// The variables the Variables tab lists: those of the function on
+    /// screen, each named as the analyst renamed it, `lift_name` the name
+    /// the lift declares.
+    pub(crate) fn shown_variables(&self) -> Vec<ag_image::VariableInfo> {
+        let Some(function) = self.work.listing_of else {
+            return Vec::new();
+        };
+        if self.bottom.variables_of != Some(function) {
+            return Vec::new();
+        }
+        let key = self.annotation_key(function);
+        self.bottom
+            .variables
+            .iter()
+            .cloned()
+            .map(|mut variable| {
+                if let Some(renamed) = self.annotations.variable_name(&key, &variable.lift_name) {
+                    variable.name = renamed;
+                }
+                variable
+            })
+            .collect()
+    }
+
+    /// The first line of the pseudocode that names `variable` in a
+    /// statement — one with addresses, so not its declaration — preferring
+    /// a line that carries one of the statements assigning or reading it;
+    /// with the line's first address.
+    fn first_line_naming(&self, variable: &ag_image::VariableInfo) -> Option<(usize, u64)> {
+        let body = self.work.pseudocode.as_deref()?;
+        let sites: BTreeSet<u64> = variable
+            .defined_at
+            .iter()
+            .chain(&variable.used_at)
+            .copied()
+            .collect();
+        let naming: Vec<(usize, &Vec<u64>)> = body
+            .lines()
+            .enumerate()
+            .filter(|(_, text)| names_word(text, &variable.lift_name))
+            .filter_map(|(line, _)| {
+                let addresses = self.work.line_addresses.get(&line)?;
+                (!addresses.is_empty()).then_some((line, addresses))
+            })
+            .collect();
+        naming
+            .iter()
+            .find(|(_, addresses)| addresses.iter().any(|at| sites.contains(at)))
+            .or_else(|| naming.first())
+            .map(|(line, addresses)| (*line, addresses[0]))
     }
 
     /// Take the slice on screen again over the pseudocode as it now reads;
@@ -3290,6 +3384,7 @@ impl App {
         }
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3305,6 +3400,7 @@ impl App {
         }
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3323,6 +3419,7 @@ impl App {
         }
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3411,6 +3508,7 @@ impl App {
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3443,6 +3541,7 @@ impl App {
         self.refresh_listing();
         if let Some(function) = self.work.listing_of {
             self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
             self.work.line_addresses = self.provider.line_addresses(function);
             self.work.dead_lines = self.provider.dead_lines(function);
             self.refresh_slice();
@@ -3971,6 +4070,52 @@ impl App {
 
             Message::BottomTabSelected(tab) => {
                 self.bottom.tab = tab;
+                self.refresh_variables();
+            }
+
+            Message::ViewVariables => {
+                if self.show_bottom && self.bottom.tab == BottomTab::Variables {
+                    self.show_bottom = false;
+                } else {
+                    self.show_bottom = true;
+                    self.bottom.tab = BottomTab::Variables;
+                }
+                self.refresh_variables();
+            }
+
+            Message::VariableSelected(index) => {
+                let Some(variable) = self.bottom.variables.get(index).cloned() else {
+                    return Task::none();
+                };
+                self.bottom.selected_variable = Some(variable.lift_name.clone());
+                let Some((line, address)) = self.first_line_naming(&variable) else {
+                    self.notice = Some(format!(
+                        "No line of the pseudocode reads or writes {}",
+                        variable.lift_name
+                    ));
+                    return Task::none();
+                };
+                self.work.tab = ViewTab::Pseudocode;
+                return self.update(Message::PseudocodeLineSelected(line, address));
+            }
+
+            Message::VariableRename(lift_name) => {
+                let Some(address) = self.work.detail.as_ref().and_then(|detail| detail.start)
+                else {
+                    self.notice = Some("Open a function to rename its variables".into());
+                    return Task::none();
+                };
+                self.bottom.selected_variable = Some(lift_name.clone());
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .variable_name(&key, &lift_name)
+                    .unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Variable,
+                    title: "Rename local variable (declared=new name)",
+                    value: format!("{lift_name}={current}"),
+                });
             }
 
             Message::GlobalQueryChanged(query) => {
@@ -5920,6 +6065,7 @@ impl App {
                 self.show_values = !self.show_values;
                 if let Some(function) = self.work.listing_of {
                     self.work.pseudocode = self.pseudocode_of(function);
+                    self.refresh_variables();
                 }
                 self.notice = Some(if self.show_values {
                     "The pseudocode's lines end with the possible values they read".into()
@@ -5938,12 +6084,14 @@ impl App {
 
             Message::ViewToggleBottom => {
                 self.show_bottom = !self.show_bottom;
+                self.refresh_variables();
             }
 
             Message::ViewResetLayout => {
                 self.show_navigator = true;
                 self.show_inspector = true;
                 self.show_bottom = true;
+                self.refresh_variables();
                 self.notice = Some("Layout reset".into());
             }
 
@@ -6187,6 +6335,21 @@ pub(crate) fn il_graph(
         .collect();
     let edges = Graph::edges_of_blocks(&blocks);
     Graph { blocks, edges }
+}
+
+/// Whether `text` holds `word` as a whole word: not inside a longer
+/// identifier, so `v1` is not found in `v10`.
+fn names_word(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    !word.is_empty()
+        && text.match_indices(word).any(|(at, _)| {
+            let before = text[..at].chars().next_back().is_none_or(|c| !is_word(c));
+            let after = text[at + word.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_word(c));
+            before && after
+        })
 }
 
 /// `text` with every whole-word use of each name replaced in one pass.
@@ -11785,6 +11948,101 @@ mod tests {
         let _ = app.update(Message::EditRedo);
         let body = app.work.pseudocode.clone().unwrap_or_default();
         assert!(body.contains("rax = &completed.0;"), "{body}");
+    }
+
+    #[test]
+    fn the_variables_pane_lists_where_each_variable_lives_and_selects_its_line() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        // Not read until the pane shows.
+        assert!(app.shown_variables().is_empty());
+        let _ = app.update(Message::ViewVariables);
+        assert!(app.show_bottom);
+        assert_eq!(app.bottom.tab, BottomTab::Variables);
+        let rows = |app: &App| -> Vec<(String, String, String, usize, usize)> {
+            app.shown_variables()
+                .iter()
+                .map(|v| {
+                    (
+                        v.name.clone(),
+                        v.ty.clone(),
+                        v.placement_text(),
+                        v.defined_at.len(),
+                        v.used_at.len(),
+                    )
+                })
+                .collect()
+        };
+        let row = |name: &str, ty: &str, placement: &str, defs: usize, uses: usize| {
+            (
+                name.to_string(),
+                ty.to_string(),
+                placement.to_string(),
+                defs,
+                uses,
+            )
+        };
+        assert_eq!(
+            rows(&app),
+            vec![
+                row("a", "int", "edi (in rdi)", 0, 1),
+                row("local_10", "long", "[sp-0x10] 8 bytes", 2, 2),
+                row("local_14", "int", "[sp-0x14] 4 bytes", 2, 3),
+            ]
+        );
+        let _ = crate::views::bottom_panel::view(&app);
+
+        // A row selects the first line of the pseudocode that names it, in
+        // the pseudocode tab.
+        let _ = app.update(Message::VariableSelected(2));
+        assert_eq!(app.work.tab, ViewTab::Pseudocode);
+        assert_eq!(app.bottom.selected_variable.as_deref(), Some("local_14"));
+        let body = app.work.pseudocode.clone().unwrap_or_default();
+        let line = app.work.selected_line.expect("a line selected");
+        assert!(
+            body.lines()
+                .nth(line)
+                .is_some_and(|text| text.contains("for (local_14 = 1;")),
+            "line {line} of {body}"
+        );
+        assert_eq!(
+            app.selection.address(),
+            Some(app.work.line_addresses[&line][0])
+        );
+
+        // The rename prompt opens on the row's variable; the analyst's name
+        // is shown, the lift's kept beside it.
+        let _ = app.update(Message::VariableRename("local_14".into()));
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::Variable);
+        assert_eq!(prompt.value, "local_14=");
+        let _ = app.update(Message::PromptChanged("local_14=i".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let renamed = app.shown_variables();
+        assert_eq!(renamed[2].name, "i");
+        assert_eq!(renamed[2].lift_name, "local_14");
+
+        // Another function's variables replace them, and a merge is
+        // followed: the variable kept lives where both did.
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        assert!(app.bottom.selected_variable.is_none());
+        let names: Vec<String> = app.shown_variables().into_iter().map(|v| v.name).collect();
+        assert_eq!(names, ["a", "b", "v2"]);
+        let _ = app.update(Message::EditMergeVariables);
+        let _ = app.update(Message::PromptSubmit);
+        let merged = app.shown_variables();
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert_eq!(merged[1].placement_text(), "rsi; rax");
+
+        // View ▸ Variables again hides the pane, and the rows are not
+        // kept.
+        let _ = app.update(Message::ViewVariables);
+        assert!(!app.show_bottom);
+        assert!(app.shown_variables().is_empty());
     }
 
     #[test]

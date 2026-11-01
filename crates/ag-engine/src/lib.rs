@@ -30,6 +30,7 @@ pub mod swift_demangle;
 pub mod transpile;
 pub mod unwind;
 pub mod values;
+pub mod variables;
 
 pub use arch::Bitness;
 pub use ast::{AstNode, StructField};
@@ -41,8 +42,10 @@ pub use emit::{Line, Pseudocode};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};
 pub use lift::{
-    Abi, LiftedFunction, LowStatement, NotLifted, StageChain, Stages, Statement, StatementKind,
+    Abi, LiftedFunction, LowStatement, NotLifted, Placement, StageChain, Stages, Statement,
+    StatementKind,
 };
+pub use variables::{VariableInfo, VariableKind};
 pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{

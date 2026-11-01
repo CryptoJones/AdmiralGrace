@@ -705,10 +705,12 @@ mod tests {
                 params: vec![Variable {
                     ty: "int".to_string(),
                     name: "a".to_string(),
+                    placements: Vec::new(),
                 }],
                 locals: vec![Variable {
                     ty: "long".to_string(),
                     name: "total".to_string(),
+                    placements: Vec::new(),
                 }],
                 body: Vec::new(),
                 frame: Vec::new(),

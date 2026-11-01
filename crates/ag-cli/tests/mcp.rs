@@ -673,3 +673,82 @@ fn possible_values_are_read_through_the_server() {
     assert_eq!(replies[5]["result"]["isError"], true, "{:?}", replies[5]);
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn the_variables_and_their_placements_are_read_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-variables-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("inline.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"variables","arguments":{"target":"ping"}"#,
+            r#""name":"merge_variables","arguments":{"function":"ping","keep":"a","gone":"local_c"}"#,
+            r#""name":"variables","arguments":{"target":"ping"}"#,
+            r#""name":"variables","arguments":{"target":"tangle"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 4);
+    let json = |i: usize| -> serde_json::Value {
+        let text = replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("JSON: {text}"))
+    };
+    for reply in &replies[..3] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    let before = json(0);
+    assert_eq!(before["function"], "ping");
+    let names: Vec<&str> = before["variables"]
+        .as_array()
+        .expect("the variables")
+        .iter()
+        .map(|v| v["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, ["a", "local_c", "eax", "v1"]);
+    assert_eq!(before["variables"][0]["placement"], "edi (in rdi)");
+    assert_eq!(before["variables"][1]["placement"], "[sp-0xc] 4 bytes");
+    // Merged, `a` lives in its register and in the slot.
+    let after = json(2);
+    assert_eq!(
+        after["variables"][0]["placement"],
+        "edi (in rdi); [sp-0xc] 4 bytes"
+    );
+    assert_eq!(
+        after["variables"][0]["placements"][1],
+        serde_json::json!({ "kind": "stack", "offset": -12, "size": 4, "text": "[sp-0xc] 4 bytes" })
+    );
+    // A function the lifter refuses is the tool's error.
+    assert_eq!(replies[3]["result"]["isError"], true, "{:?}", replies[3]);
+    let _ = std::fs::remove_file(&project);
+}

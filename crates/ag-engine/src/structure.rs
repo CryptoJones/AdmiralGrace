@@ -1056,6 +1056,7 @@ mod tests {
             params: vec![Variable {
                 ty: "int".into(),
                 name: "a".into(),
+                placements: Vec::new(),
             }],
             locals: Vec::new(),
             body,

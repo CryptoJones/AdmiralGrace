@@ -1991,15 +1991,18 @@ mod tests {
             params: vec![Variable {
                 ty: "int".to_string(),
                 name: "a".to_string(),
+                placements: Vec::new(),
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "i".to_string(),
+                    placements: Vec::new(),
                 },
                 Variable {
                     ty: "long".to_string(),
                     name: "total".to_string(),
+                    placements: Vec::new(),
                 },
             ],
             body: vec![
@@ -2176,6 +2179,7 @@ mod tests {
             params: vec![Variable {
                 ty: "int".to_string(),
                 name: "a".to_string(),
+                placements: Vec::new(),
             }],
             locals: Vec::new(),
             body: vec![
@@ -2412,6 +2416,7 @@ mod tests {
             locals: vec![Variable {
                 ty: "int".into(),
                 name: "x".into(),
+                placements: Vec::new(),
             }],
             body: vec![Statement {
                 node: AstNode::binary(AstNode::var("x"), BinaryOp::Less, AstNode::constant(3, 4)),
@@ -2587,15 +2592,18 @@ mod tests {
             params: vec![Variable {
                 ty: "int".to_string(),
                 name: "a".to_string(),
+                placements: Vec::new(),
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "x".to_string(),
+                    placements: Vec::new(),
                 },
                 Variable {
                     ty: "int".to_string(),
                     name: "y".to_string(),
+                    placements: Vec::new(),
                 },
             ],
             body: vec![
@@ -2678,6 +2686,7 @@ mod tests {
         let local = |name: &str| Variable {
             ty: "int".to_string(),
             name: name.to_string(),
+            placements: Vec::new(),
         };
         // switch (a) { case 0: y = a; break; case 1: y = 1; break; }
         // x = 1 (overwritten); if (1) { x = a; } else { y = 3; } return x + y.
@@ -3040,15 +3049,18 @@ mod tests {
             params: vec![Variable {
                 ty: "int".to_string(),
                 name: "a".to_string(),
+                placements: Vec::new(),
             }],
             locals: vec![
                 Variable {
                     ty: "int".to_string(),
                     name: "x".to_string(),
+                    placements: Vec::new(),
                 },
                 Variable {
                     ty: "int".to_string(),
                     name: "y".to_string(),
+                    placements: Vec::new(),
                 },
             ],
             body: vec![
@@ -3155,6 +3167,7 @@ mod tests {
         let int = |name: &str| Variable {
             ty: "int".to_string(),
             name: name.to_string(),
+            placements: Vec::new(),
         };
         let assign = |name: &str, rhs: AstNode, at: u64| {
             Statement::plain(

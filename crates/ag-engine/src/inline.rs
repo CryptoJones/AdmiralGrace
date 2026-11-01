@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AstNode, StructField};
-use crate::lift::{LiftedFunction, Statement, StatementKind, Symbols, Variable};
+use crate::lift::{LiftedFunction, Placement, Statement, StatementKind, Symbols, Variable};
 
 /// The statement that opens a body inlined for a call, with the callee's
 /// name as its one argument, a string: the pseudocode says `// inlined: f`
@@ -49,6 +49,20 @@ pub fn inlined_callee(node: &AstNode) -> Option<&str> {
         },
         _ => None,
     }
+}
+
+/// Where a variable of `callee` lives once inlined: its own placements, in
+/// the callee's frame, marked as the callee's. One already inlined into the
+/// callee keeps the callee it came from.
+fn inlined_placements(variable: &Variable, callee: &str) -> Vec<Placement> {
+    variable
+        .placements
+        .iter()
+        .map(|placement| match placement {
+            Placement::Inlined { .. } => placement.clone(),
+            other => other.inlined_from(callee),
+        })
+        .collect()
 }
 
 /// Read the calls `function` makes to the functions `symbols` says are
@@ -389,6 +403,7 @@ impl Inliner<'_> {
             self.declared.push(Variable {
                 ty: param.ty.clone(),
                 name: fresh.clone(),
+                placements: inlined_placements(param, &callee.name),
             });
             bound.push(Statement::plain(
                 AstNode::Assign {
@@ -404,6 +419,7 @@ impl Inliner<'_> {
             self.declared.push(Variable {
                 ty: local.ty.clone(),
                 name: fresh.clone(),
+                placements: inlined_placements(local, &callee.name),
             });
             renames.insert(local.name.clone(), AstNode::var(fresh));
         }
@@ -869,6 +885,7 @@ mod tests {
         Variable {
             ty: "int".to_string(),
             name: name.to_string(),
+            placements: Vec::new(),
         }
     }
 

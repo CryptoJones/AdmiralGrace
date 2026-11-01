@@ -267,6 +267,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     "Ctrl+J",
                     Message::ViewToggleBottom,
                 )),
+                Item::new(item_button("Variables", "", Message::ViewVariables)),
                 Item::new(separator()),
                 Item::new(item_button(
                     "Cycle the pane's level",

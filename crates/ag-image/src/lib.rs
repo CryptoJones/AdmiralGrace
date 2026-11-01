@@ -78,6 +78,8 @@ pub use ag_engine::swift::{
 };
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
+pub use ag_engine::variables::{VariableInfo, VariableKind};
+pub use ag_engine::Placement;
 pub use ag_engine::Bitness;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
@@ -2330,6 +2332,15 @@ impl Binary {
         let stages = self.stages(address)?;
         let words = self.variable_edits(address).values;
         Ok(ag_engine::pvs::possible_values(&stages.function, &words))
+    }
+
+    /// The parameters and locals of the function at `address`, over its
+    /// lift as it reads — the analyst's edits made — each with where it
+    /// lives and the statements that assign and read it. The names are the
+    /// lift's: a rename is the analyst's, kept in the project. See
+    /// `ag_engine::variables`.
+    pub fn variables(&self, address: u64) -> Result<Vec<VariableInfo>, NotLifted> {
+        Ok(self.stages(address)?.function.variables())
     }
 
     /// The function at `address` at one level of the lift — the machine's

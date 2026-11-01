@@ -308,6 +308,21 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The variables of a function: each parameter and local with its type,
+    /// where it lives — a register, a stack slot, a flag — and how many
+    /// statements assign and read it.
+    Variables {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose words the function is lifted with — its
+        /// merges, splits and versions made — and whose renames name the
+        /// variables.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The possible values of a function's variables at each statement:
     /// the constants, sets and ranges each can hold where the statement
     /// reads or writes it, narrowed by the conditions on the way there.
@@ -917,6 +932,7 @@ pub fn run(
         | ImageCmd::Il { project, .. }
         | ImageCmd::Opaque { project, .. }
         | ImageCmd::Merges { project, .. }
+        | ImageCmd::Variables { project, .. }
         | ImageCmd::Values { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
@@ -1030,6 +1046,9 @@ pub fn run(
             Ok(0)
         }
         ImageCmd::Merges { target, json, .. } => merges(&image, &target, json),
+        ImageCmd::Variables { target, json, .. } => {
+            variables(&image, &target, json, project.as_ref())
+        }
         ImageCmd::Values {
             target,
             at,
@@ -2405,6 +2424,170 @@ fn merges(image: &Binary, target: &str, json: bool) -> Result<i32> {
         print!("{}", merges_text(&name, address, &candidates));
     }
     Ok(0)
+}
+
+/// The variables of the function at `address`, each named as the
+/// analyst renamed it in `project` when it was; or why there are none.
+pub(crate) fn variables_of(
+    image: &Binary,
+    address: u64,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> std::result::Result<Vec<ag_image::VariableInfo>, String> {
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    let mut variables = image
+        .variables(address)
+        .map_err(|error| format!("{name} at {address:#x}: {}", error.reason))?;
+    if let Some(project) = project {
+        let key = format!("{address:#x}");
+        for variable in &mut variables {
+            if let Some(renamed) = project.variable_name(&key, &variable.lift_name) {
+                variable.name = renamed;
+            }
+        }
+    }
+    Ok(variables)
+}
+
+/// `ag image FILE variables FUNCTION`: each variable and where it lives.
+fn variables(
+    image: &Binary,
+    target: &str,
+    json: bool,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
+        image.language()
+    );
+    let address = resolve(image, target)?;
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    let variables =
+        variables_of(image, address, project).map_err(|error| anyhow::anyhow!(error))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&variables_json(&name, address, &variables))?
+        );
+    } else {
+        print!("{}", variables_text(&name, address, &variables));
+    }
+    Ok(0)
+}
+
+/// The name a variable is shown by: the analyst's, with the lift's after
+/// it in parentheses when the two differ.
+fn shown_name(variable: &ag_image::VariableInfo) -> String {
+    if variable.name == variable.lift_name {
+        variable.name.clone()
+    } else {
+        format!("{} ({})", variable.name, variable.lift_name)
+    }
+}
+
+/// The variables as text: a heading, then one row a variable — its name,
+/// type, kind, where it lives, and how many statements assign and read it.
+pub(crate) fn variables_text(
+    name: &str,
+    address: u64,
+    variables: &[ag_image::VariableInfo],
+) -> String {
+    let mut out = format!("// variables of {name} at {address:#x}\n");
+    if variables.is_empty() {
+        out.push_str("none\n");
+        return out;
+    }
+    let names: Vec<String> = variables.iter().map(shown_name).collect();
+    let placements: Vec<String> = variables
+        .iter()
+        .map(ag_image::VariableInfo::placement_text)
+        .collect();
+    let name_width = names.iter().map(String::len).max().unwrap_or(0).max(4);
+    let ty_width = variables
+        .iter()
+        .map(|v| v.ty.len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let placement_width = placements.iter().map(String::len).max().unwrap_or(0).max(9);
+    out.push_str(&format!(
+        "{:name_width$}  {:ty_width$}  {:5}  {:placement_width$}  defs  uses\n",
+        "name", "type", "kind", "placement"
+    ));
+    for ((variable, shown), placement) in variables.iter().zip(&names).zip(&placements) {
+        out.push_str(&format!(
+            "{shown:name_width$}  {:ty_width$}  {:5}  {placement:placement_width$}  {:4}  {:4}\n",
+            variable.ty,
+            variable.kind.name(),
+            variable.defined_at.len(),
+            variable.used_at.len(),
+        ));
+    }
+    out
+}
+
+/// One placement as JSON: its kind, its spelling, and its parts.
+fn placement_json(placement: &ag_image::Placement) -> serde_json::Value {
+    use ag_image::Placement as P;
+    let mut row = match placement {
+        P::Register { name, full } => serde_json::json!({
+            "kind": "register",
+            "register": name,
+            "in": full,
+        }),
+        P::Stack { offset, size } => serde_json::json!({
+            "kind": "stack",
+            "offset": offset,
+            "size": size,
+        }),
+        P::Flag(flag) => serde_json::json!({ "kind": "flag", "flag": flag }),
+        P::Temporary => serde_json::json!({ "kind": "temporary" }),
+        P::Inlined { callee, placement } => {
+            let mut row = placement_json(placement);
+            row["inlined_from"] = serde_json::json!(callee);
+            row
+        }
+    };
+    row["text"] = serde_json::json!(placement.spelled());
+    row
+}
+
+/// The variables as JSON: the function, and a row a variable with its
+/// placements and the addresses of its definitions and uses.
+pub(crate) fn variables_json(
+    name: &str,
+    address: u64,
+    variables: &[ag_image::VariableInfo],
+) -> serde_json::Value {
+    let hex = |list: &[u64]| -> Vec<String> { list.iter().map(|at| format!("{at:#x}")).collect() };
+    let rows: Vec<serde_json::Value> = variables
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "name": v.name,
+                "lift_name": v.lift_name,
+                "type": v.ty,
+                "kind": v.kind.name(),
+                "placements": v.placements.iter().map(placement_json).collect::<Vec<_>>(),
+                "placement": v.placement_text(),
+                "definitions": v.defined_at.len(),
+                "uses": v.used_at.len(),
+                "defined_at": hex(&v.defined_at),
+                "used_at": hex(&v.used_at),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "function": name,
+        "address": format!("{address:#x}"),
+        "variables": rows,
+    })
 }
 
 /// The merge candidates as text: a heading for each kind, and under it one

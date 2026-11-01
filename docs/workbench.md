@@ -26,7 +26,7 @@ the workbench in more detail.
 | Navigator | The project's functions, a name filter, and the explore sections with their counts. |
 | Work surface | The selected function: listing, pseudocode, graph, bytes, and references; for an Objective-C image, a Header tab with the recovered declarations. |
 | Inspector | The selection's detail — its name, the mangled name a C++ or Rust symbol spelled, its size from the unwind data — its cross references, the project's provenance and its shape. |
-| Bottom workspace | Search results, problems, and the log. |
+| Bottom workspace | Search results, problems, the log, the patch history, and the variables of the function on screen. |
 
 ## A kuna project export in the workbench
 
@@ -290,6 +290,19 @@ table. The leading comments say what was used, `// a is 3 here, as the analyst s
 not. `NAME off` or `NAME@ADDRESS off` takes the word back. The words are kept on the
 function's record in the project file, by the names the lift declares, and undo takes them
 back.
+
+## The variables of a function
+
+**View ▸ Variables** opens the bottom workspace on its Variables tab, or closes it when the
+tab is showing: a row for each parameter and local of the function on screen — its name, the
+analyst's when it was renamed with the lift's beside it, `count (eax)`; its type; `param` or
+`local`; where it lives — `edi (in rdi)`, `[sp-0x14] 4 bytes`, a merged variable's places
+joined by `; `, a callee's inlined one marked `inlined from ping`; and how many statements
+assign it and read it. Clicking a row selects the first line of the pseudocode that names the
+variable in a statement, and shows the pseudocode tab; **Rename** opens the variable rename
+prompt on it. The rows follow the pseudocode as it is read again — another function, a merge,
+a split, an inline — and are read only while the tab is showing. What they say is `ag image
+variables`'s (`docs/cli.md`).
 
 ## Possible values
 

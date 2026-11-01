@@ -439,6 +439,10 @@ impl Provider for BinaryProvider {
         self.binary.merge_candidates(address).unwrap_or_default()
     }
 
+    fn variables(&self, address: u64) -> Vec<ag_image::VariableInfo> {
+        self.binary.variables(address).unwrap_or_default()
+    }
+
     fn bytes(&self, address: u64) -> Option<Vec<ByteLine>> {
         Some(self.byte_rows(address))
     }

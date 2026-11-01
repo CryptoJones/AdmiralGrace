@@ -1286,10 +1286,7 @@ pub fn graph_of(answer: &serde_json::Value) -> Result<LiftedGraph, String> {
                     .get("type")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("long");
-                Ok(Variable {
-                    ty: ty.to_string(),
-                    name: name.to_string(),
-                })
+                Ok(Variable::new(ty, name))
             })
             .collect()
     };
