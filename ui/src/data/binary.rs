@@ -481,6 +481,14 @@ impl Provider for BinaryProvider {
         Some(self.binary.types())
     }
 
+    fn struct_accesses(
+        &self,
+        address: u64,
+        variable: &str,
+    ) -> Result<ag_image::StructAccesses, String> {
+        self.binary.struct_accesses(address, variable)
+    }
+
     fn merge_candidates(&self, address: u64) -> Vec<ag_image::MergeCandidate> {
         self.binary.merge_candidates(address).unwrap_or_default()
     }

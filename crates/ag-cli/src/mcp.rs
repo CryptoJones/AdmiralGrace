@@ -602,6 +602,33 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "infer_struct",
+            description: "Draft a structure from the accesses through a pointer variable of a function, by its lift name or its rename: one member each offset and width the code reads or writes through the pointer, through its copies (`q = p;`, `q = p + 8;`) and, one level deep, through the callees it is passed to. Members are named `field_<hex offset>` and typed by width and use — `int`, `unsigned short`, `char *` where the value is dereferenced, `int field_18[4]` for an access indexed by a variable — with `char gap_<hex>[n]` for bytes no access reaches. The size is the allocation's when the pointer is the result of `malloc`, `calloc`, `operator new` and their like with constant sizes, else the accesses' extent. Returns the C, each member with the addresses it came from, and notes on what was chosen between or left out. Nothing is changed.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The pointer variable." },
+                    "name": { "type": "string", "description": "The structure's tag; `struct_<function>_<variable>` when absent." },
+                },
+                "required": ["function", "variable"]
+            }),
+        },
+        Tool {
+            name: "create_struct_from_pointer",
+            description: "Make the structure `infer_struct` drafts, add it to the project's types and give the variable a pointer to it, so the pseudocode reads `p->field_8`. With `update`, the structure named there gains a member for each access in bytes none of its members holds, a gap a draft left split about it; no member is renamed or retyped, and an access that meets one at other bytes comes back as a note. `remove_type` and `set_variable_type` with no type take it back. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The pointer variable." },
+                    "name": { "type": "string", "description": "The new structure's tag; `struct_<function>_<variable>` when absent." },
+                    "update": { "type": "string", "description": "The structure to add the members to, in place of a new one." },
+                },
+                "required": ["function", "variable"]
+            }),
+        },
+        Tool {
             name: "opaque_predicates",
             description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
             schema: json!({
@@ -1575,6 +1602,82 @@ impl Server {
                     &self.project()?.file,
                     address,
                 )))
+            }
+            "infer_struct" => {
+                let address = self.function(&text("function")?)?;
+                let variable = text("variable")?;
+                let project = self.project.as_ref().map(|p| &p.file);
+                let lift = crate::types::lift_variable(&self.image, address, project, &variable)?;
+                let store = self.image.types();
+                let tag = match optional_text("name")?.filter(|n| !n.trim().is_empty()) {
+                    Some(name) => ag_image::smart_struct::tag_of(&name)?,
+                    None => {
+                        let shown = self
+                            .image
+                            .function_name(address)
+                            .map_or_else(|| format!("sub_{address:x}"), str::to_string);
+                        ag_image::smart_struct::default_tag(&store, &shown, variable.trim())
+                    }
+                };
+                let draft = self.image.struct_draft(address, &lift, Some(&tag))?;
+                let mut shown = crate::types::draft_json(&draft);
+                shown["function"] = json!(format!("{address:#x}"));
+                shown["variable"] = json!(lift);
+                Ok(Answer::json(shown))
+            }
+            "create_struct_from_pointer" => {
+                let address = self.function(&text("function")?)?;
+                let variable = text("variable")?;
+                let name = optional_text("name")?.filter(|n| !n.trim().is_empty());
+                let update = optional_text("update")?.filter(|n| !n.trim().is_empty());
+                self.reload()?;
+                let (lift, applied) = crate::types::struct_from(
+                    &self.image,
+                    &self.project()?.file,
+                    address,
+                    &variable,
+                    name.as_deref(),
+                    update.as_deref(),
+                )?;
+                let kept = crate::types::definitions(&applied.definitions);
+                let key = format!("{address:#x}");
+                let pointer = applied.pointer.clone();
+                self.change_file(|file| {
+                    file.types = kept;
+                    file.annotation_mut(TargetKind::Function, &key)
+                        .set_var_type(&lift, &pointer);
+                })?;
+                self.image.set_type_definitions(&applied.definitions)?;
+                self.image
+                    .set_variable_edits(crate::image::variable_edits(&self.project()?.file));
+                let mut shown = json!({
+                    "name": applied.key,
+                    "variable": lift,
+                    "type": applied.pointer,
+                    "c": applied.c,
+                    "notes": applied.notes,
+                });
+                match &applied.draft {
+                    Some(draft) => {
+                        shown["defined"] = json!(true);
+                        shown["size"] = json!(draft.size);
+                        shown["sized_by"] = json!(draft.sized_by);
+                        shown["members"] = json!(draft
+                            .members
+                            .iter()
+                            .map(crate::types::member_json)
+                            .collect::<Vec<_>>());
+                    }
+                    None => {
+                        shown["defined"] = json!(false);
+                        shown["added"] = json!(applied
+                            .added
+                            .iter()
+                            .map(crate::types::member_json)
+                            .collect::<Vec<_>>());
+                    }
+                }
+                Ok(Answer::json(shown))
             }
             "possible_values" => {
                 let address = self.function(&text("target")?)?;
@@ -2696,6 +2799,8 @@ mod tests {
                 "remove_type",
                 "search_types",
                 "set_variable_type",
+                "infer_struct",
+                "create_struct_from_pointer",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",

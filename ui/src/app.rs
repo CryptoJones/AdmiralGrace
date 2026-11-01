@@ -197,6 +197,12 @@ pub enum Message {
     /// Give a variable of the function on screen a C type, or take the
     /// type given back.
     EditVariableType,
+    /// Make a structure from the accesses through a pointer variable of
+    /// the function on screen, and type the variable a pointer to it.
+    EditStructFromPointer,
+    /// Add to a structure the members the accesses through a pointer
+    /// variable of the function on screen reach.
+    EditUpdateStructFromPointer,
     /// Merge two variables of the function on screen.
     EditMergeVariables,
     /// Take back a merge of a variable of the function on screen.
@@ -404,6 +410,12 @@ pub enum PromptKind {
     /// A type given a variable of the function on screen: `VAR TYPE`, or
     /// `VAR clear` to take it back.
     VariableType,
+    /// A pointer variable of the function on screen a structure is made
+    /// from: `VAR [NAME]`.
+    StructFromPointer,
+    /// A pointer variable of the function on screen and the structure its
+    /// accesses add members to: `VAR STRUCT`.
+    StructUpdate,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -3163,6 +3175,8 @@ impl App {
                         | PromptKind::TypeNew
                         | PromptKind::TypeEdit
                         | PromptKind::VariableType
+                        | PromptKind::StructFromPointer
+                        | PromptKind::StructUpdate
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -4120,6 +4134,58 @@ impl App {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::VariableType,
                     title: "Variable type (VAR TYPE, or VAR clear)",
+                    value,
+                });
+            }
+
+            Message::EditStructFromPointer | Message::EditUpdateStructFromPointer => {
+                let update = matches!(message, Message::EditUpdateStructFromPointer);
+                if self.work.listing_of.is_none() || self.work.pseudocode.is_none() {
+                    self.notice = Some("Open the function whose pointer to read".into());
+                    return Task::none();
+                }
+                // The selected line's variable; for an update, the
+                // structure it points to already or the one selected in
+                // the Types tab.
+                let suggestion = self.slice_suggestion();
+                let variable = suggestion.split('@').next().unwrap_or_default().to_string();
+                let value = if update {
+                    let key = self.work.listing_of.map(|f| self.annotation_key(f));
+                    let pointed = key
+                        .as_ref()
+                        .and_then(|key| self.annotations.annotation_for(key))
+                        .and_then(|a| {
+                            let lift = self
+                                .declared_name(&a.address, &variable)
+                                .unwrap_or_else(|| variable.clone());
+                            a.var_types.iter().find(|v| v.variable == lift).cloned()
+                        })
+                        .and_then(|v| {
+                            v.ty.trim()
+                                .strip_suffix('*')
+                                .map(|t| t.trim().to_string())
+                                .filter(|t| t.starts_with("struct "))
+                        });
+                    let structure = pointed
+                        .or_else(|| self.bottom.selected_type.clone())
+                        .unwrap_or_default();
+                    format!("{variable} {structure}")
+                } else if variable.is_empty() {
+                    String::new()
+                } else {
+                    format!("{variable} ")
+                };
+                self.prompt = Some(Prompt {
+                    kind: if update {
+                        PromptKind::StructUpdate
+                    } else {
+                        PromptKind::StructFromPointer
+                    },
+                    title: if update {
+                        "Update struct from pointer (VAR STRUCT)"
+                    } else {
+                        "Create struct from pointer (VAR [NAME])"
+                    },
                     value,
                 });
             }
@@ -5902,6 +5968,117 @@ impl App {
                             self.annotations.prune();
                             self.notice = Some(format!("{variable} is typed {spelled}"));
                         }
+                    }
+                    PromptKind::StructFromPointer | PromptKind::StructUpdate => {
+                        let update = prompt.kind == PromptKind::StructUpdate;
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let text = prompt.value.trim();
+                        let (shown, rest) = match text.split_once(char::is_whitespace) {
+                            Some((variable, rest)) => {
+                                (variable.to_string(), rest.trim().to_string())
+                            }
+                            None => (text.to_string(), String::new()),
+                        };
+                        if shown.is_empty() || (update && rest.is_empty()) {
+                            self.notice = Some(if update {
+                                "Give the pointer and the structure: p struct conn".into()
+                            } else {
+                                "Give the pointer, and a name if you like: p conn".into()
+                            });
+                            return Task::none();
+                        }
+                        let Some(variable) = self.declared_name(&key, &shown) else {
+                            self.notice =
+                                Some(format!("This function declares no variable {shown}"));
+                            return Task::none();
+                        };
+                        let Some(store) = self.provider.types() else {
+                            self.notice = Some("Open a program image to make its types".into());
+                            return Task::none();
+                        };
+                        let found = match self.provider.struct_accesses(function, &variable) {
+                            Ok(found) => found,
+                            Err(why) => {
+                                self.notice = Some(format!("No structure is made: {why}"));
+                                return Task::none();
+                            }
+                        };
+                        let model = *store.model();
+                        let (texts, structure, said) = if update {
+                            match ag_image::smart_struct::update_struct(
+                                model,
+                                &self.type_texts(),
+                                &rest,
+                                &found,
+                            ) {
+                                Ok(merged) => {
+                                    let added: Vec<&str> = merged
+                                        .added
+                                        .iter()
+                                        .filter(|m| !m.gap)
+                                        .map(|m| m.name.as_str())
+                                        .collect();
+                                    let mut said = if added.is_empty() {
+                                        format!("{} gains no member", merged.key)
+                                    } else {
+                                        format!("{} gains {}", merged.key, added.join(", "))
+                                    };
+                                    if let Some(note) = merged.notes.first() {
+                                        said.push_str(&format!(" ({note})"));
+                                    }
+                                    (merged.definitions, merged.key, said)
+                                }
+                                Err(why) => {
+                                    self.notice = Some(format!("{rest} is not updated: {why}"));
+                                    return Task::none();
+                                }
+                            }
+                        } else {
+                            let tag = if rest.is_empty() {
+                                Ok(ag_image::smart_struct::default_tag(
+                                    &store,
+                                    &found.function,
+                                    &shown,
+                                ))
+                            } else {
+                                ag_image::smart_struct::tag_of(&rest)
+                            };
+                            let made = tag.and_then(|tag| {
+                                let draft = ag_image::smart_struct::draft(&found, &tag, &store)?;
+                                let texts = ag_image::smart_struct::create_struct(
+                                    model,
+                                    &self.type_texts(),
+                                    &draft,
+                                )?;
+                                Ok((texts, draft))
+                            });
+                            match made {
+                                Ok((texts, draft)) => {
+                                    let members = draft.members.iter().filter(|m| !m.gap).count();
+                                    let said = format!(
+                                        "Defined {} of {members} member{}, {:#x} bytes",
+                                        draft.key(),
+                                        if members == 1 { "" } else { "s" },
+                                        draft.size
+                                    );
+                                    (texts, draft.key(), said)
+                                }
+                                Err(why) => {
+                                    self.notice = Some(format!("No structure is made: {why}"));
+                                    return Task::none();
+                                }
+                            }
+                        };
+                        self.keep_types(texts);
+                        self.bottom.selected_type = Some(structure.clone());
+                        self.annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                            .set_var_type(&variable, &format!("{structure} *"));
+                        self.annotations.prune();
+                        self.notice = Some(format!("{said}; {shown} is {structure} *"));
                     }
                     PromptKind::StackVariable => {
                         let Some(function) = self.work.listing_of else {
@@ -13291,6 +13468,88 @@ mod tests {
         let _ = app.update(Message::EditUndo);
         assert!(app.annotations.types.is_empty());
         assert!(app.shown_types().is_empty());
+    }
+
+    #[test]
+    fn a_structure_is_made_from_a_pointer_and_updated_with_undo() {
+        let config = Config {
+            binary: Some(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../crates/ag-engine/tests/fixtures/smart.elf"),
+            ),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        // make_conn fills what malloc gave it.
+        let _ = app.update(Message::FunctionSelected(0x40109e));
+        assert!(body(&app).contains("long v1;"), "{}", body(&app));
+        let _ = app.update(Message::EditStructFromPointer);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::StructFromPointer);
+        assert_eq!(prompt.value, "v1 ");
+        let _ = app.update(Message::PromptChanged("v1 conn".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Defined struct conn of 5 members, 0x28 bytes; v1 is struct conn *")
+        );
+        assert!(body(&app).contains("struct conn *v1;"), "{}", body(&app));
+        assert!(body(&app).contains("v1->field_0 = a;"), "{}", body(&app));
+        assert_eq!(app.bottom.selected_type.as_deref(), Some("struct conn"));
+        assert_eq!(app.shown_types().len(), 1);
+
+        // read_conn's index adds an array in the gap; the prompt offers the
+        // structure selected.
+        let _ = app.update(Message::FunctionSelected(0x4010f8));
+        let _ = app.update(Message::EditUpdateStructFromPointer);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::StructUpdate);
+        assert!(prompt.value.ends_with(" struct conn"), "{}", prompt.value);
+        let _ = app.update(Message::PromptChanged("a struct conn".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("struct conn gains field_18; a is struct conn *")
+        );
+        assert!(body(&app).contains("a->field_18[b]"), "{}", body(&app));
+        assert!(app
+            .selected_type_text()
+            .is_some_and(|c| c.contains("int field_18[4];")));
+
+        // A pointer the function lacks, and an update with no structure,
+        // are said and change nothing.
+        let _ = app.update(Message::EditUpdateStructFromPointer);
+        let _ = app.update(Message::PromptChanged("a".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Give the pointer and the structure: p struct conn")
+        );
+        let _ = app.update(Message::EditStructFromPointer);
+        let _ = app.update(Message::PromptChanged("zz".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("This function declares no variable zz")
+        );
+
+        // Undo takes the update back, then the structure.
+        let _ = app.update(Message::EditUndo);
+        assert!(
+            body(&app).contains("long read_conn(long a, long b)"),
+            "{}",
+            body(&app)
+        );
+        assert!(app
+            .selected_type_text()
+            .is_some_and(|c| !c.contains("field_18[4]")));
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.types.is_empty());
+        let _ = app.update(Message::FunctionSelected(0x40109e));
+        assert!(body(&app).contains("long v1;"), "{}", body(&app));
+        let _ = app.update(Message::EditRedo);
+        assert!(body(&app).contains("v1->field_0 = a;"), "{}", body(&app));
     }
 
     #[test]

@@ -3171,3 +3171,166 @@ fn the_structures_held_in_registers_read_as_their_members() {
         .expect("the program runs");
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "17");
 }
+
+#[test]
+fn a_structure_is_made_from_a_pointers_accesses_updated_and_taken_back() {
+    let file = TempFile::new("struct-from");
+    let image = |args: &[&str], with_project: bool| -> (bool, String, String) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ag"));
+        command.arg("image").arg(fixture("smart.elf")).args(args);
+        if with_project {
+            command.args(["--project", &file.text()]);
+        }
+        let output = command.output().expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let smart = |args: &[&str]| project_with("smart.elf", args);
+    let text = file.text();
+
+    // The draft: make_conn fills what malloc(0x28) gave it.
+    let (ok, stdout, stderr) = image(&["struct-from", "make_conn", "v1"], false);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.starts_with(
+            "struct struct_make_conn_v1 {\n    int field_0;\n    short field_4;\n    char field_6;\n    long field_8;\n    long field_10;\n    char gap_18[16];\n};\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("0x28 bytes, sized by malloc(0x28) at 0x"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("0 reads, 1 written, at 0x"), "{stdout}");
+    // read_conn's parameter: unsigned by its comparison, a pointer by its
+    // dereference, an array by its index.
+    let (ok, stdout, stderr) = image(&["struct-from", "read_conn", "a", "--json"], false);
+    assert!(ok, "{stderr}");
+    let draft: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(draft["name"], "struct struct_read_conn_a");
+    assert_eq!(draft["sized_by"], "the extent of the accesses");
+    let types: Vec<&str> = draft["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["int", "unsigned short", "char *", "long", "int[1]"]);
+    // The pointer passed on is followed into the callee.
+    let (ok, stdout, stderr) = image(&["struct-from", "open_conn", "v1"], false);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("(through read_conn)"), "{stdout}");
+    assert!(stdout.contains("int field_18[3];"), "{stdout}");
+    // calloc's two sizes.
+    let (ok, stdout, _) = image(&["struct-from", "make_pair", "v1"], false);
+    assert!(ok);
+    assert!(stdout.contains("sized by calloc(2, 8) at 0x"), "{stdout}");
+    // A variable nothing is read through is refused.
+    let (ok, _, stderr) = image(&["struct-from", "read_conn", "b"], false);
+    assert!(!ok);
+    assert!(
+        stderr.contains("no access through the pointer is seen"),
+        "{stderr}"
+    );
+
+    // --dry-run changes nothing.
+    let (ok, stdout, stderr) = smart(&[
+        "struct-from",
+        "--file",
+        &text,
+        "make_conn",
+        "v1",
+        "--name",
+        "conn",
+        "--dry-run",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("nothing changed (--dry-run)"), "{stdout}");
+    assert!(
+        !file.path().exists()
+            || show_json(&file)["types"]
+                .as_array()
+                .is_none_or(|t| t.is_empty())
+    );
+
+    // Applied: the type is the project's, the pointer typed by it.
+    let (ok, stdout, stderr) = smart(&[
+        "struct-from",
+        "--file",
+        &text,
+        "make_conn",
+        "v1",
+        "--name",
+        "conn",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("struct conn defined, v1 of 0x40109e typed struct conn *"),
+        "{stdout}"
+    );
+    let (ok, body, stderr) = image(&["pseudocode", "make_conn"], true);
+    assert!(ok, "{stderr}");
+    assert!(body.contains("struct conn *v1;"), "{body}");
+    assert!(body.contains("v1->field_0 = a;"), "{body}");
+    assert!(body.contains("v1->field_8 = b;"), "{body}");
+    // The name is taken now.
+    let (ok, _, stderr) = smart(&[
+        "struct-from",
+        "--file",
+        &text,
+        "make_conn",
+        "v1",
+        "--name",
+        "conn",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("struct conn is defined already"),
+        "{stderr}"
+    );
+
+    // Updated from read_conn: the index adds the array in the gap, and no
+    // member is renamed or retyped.
+    let (ok, stdout, stderr) = smart(&[
+        "struct-from",
+        "--file",
+        &text,
+        "read_conn",
+        "a",
+        "--update",
+        "conn",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("added 0x0018  field_18     int[4]"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("    short field_4;\n"), "{stdout}");
+    assert!(stdout.contains("struct conn updated"), "{stdout}");
+    let (ok, body, _) = image(&["pseudocode", "read_conn"], true);
+    assert!(ok);
+    assert!(
+        body.contains("long read_conn(struct conn *a, long b)"),
+        "{body}"
+    );
+    assert!(body.contains("a->field_18[b]"), "{body}");
+    assert!(body.contains("*a->field_8"), "{body}");
+    let (ok, shown, _) = smart(&["types", "--file", &text, "show", "conn"]);
+    assert!(ok);
+    assert!(shown.contains("/* 0x18 */ int field_18[4];"), "{shown}");
+
+    // Taken back: the variables' types cleared, then the structure.
+    for (function, variable) in [("make_conn", "v1"), ("read_conn", "a")] {
+        let (ok, _, stderr) = smart(&["var-type", "--file", &text, function, variable, "clear"]);
+        assert!(ok, "{stderr}");
+    }
+    let (ok, _, stderr) = smart(&["types", "--file", &text, "remove", "conn"]);
+    assert!(ok, "{stderr}");
+    let (ok, body, _) = image(&["pseudocode", "make_conn"], true);
+    assert!(ok);
+    assert!(body.contains("long v1;"), "{body}");
+    assert!(!body.contains("field_0"), "{body}");
+}

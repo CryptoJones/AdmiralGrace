@@ -1033,3 +1033,98 @@ fn the_global_pointer_is_set_through_the_server() {
     assert_eq!(saved.global_pointers().get(&0x2_0088), Some(&0x2_a0e0));
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn a_structure_is_drafted_and_made_from_a_pointer_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-smart-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("smart.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"infer_struct","arguments":{"function":"make_conn","variable":"v1"}"#,
+            r#""name":"create_struct_from_pointer","arguments":{"function":"make_conn","variable":"v1","name":"conn"}"#,
+            r#""name":"decompile","arguments":{"target":"make_conn"}"#,
+            r#""name":"create_struct_from_pointer","arguments":{"function":"read_conn","variable":"a","update":"conn"}"#,
+            r#""name":"decompile","arguments":{"target":"read_conn"}"#,
+            r#""name":"create_struct_from_pointer","arguments":{"function":"make_conn","variable":"v1","name":"conn"}"#,
+            r#""name":"infer_struct","arguments":{"function":"make_conn","variable":"nothing"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 7);
+    let text = |i: usize| -> String {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let json = |i: usize| -> serde_json::Value {
+        serde_json::from_str(&text(i)).unwrap_or_else(|_| panic!("JSON: {}", text(i)))
+    };
+    for reply in &replies[..5] {
+        assert_eq!(reply["result"]["isError"], false, "{reply:?}");
+    }
+    let draft = json(0);
+    assert_eq!(draft["name"], "struct struct_make_conn_v1");
+    assert_eq!(draft["size"], 0x28);
+    assert_eq!(draft["members"][0]["name"], "field_0");
+    assert_eq!(draft["members"][5]["gap"], true);
+    assert!(draft["sized_by"]
+        .as_str()
+        .unwrap()
+        .starts_with("malloc(0x28) at 0x"));
+    let made = json(1);
+    assert_eq!(made["defined"], true);
+    assert_eq!(made["type"], "struct conn *");
+    assert!(text(2).contains("v1->field_4 = 0x50;"), "{}", text(2));
+    let updated = json(3);
+    assert_eq!(updated["defined"], false);
+    assert_eq!(updated["added"][0]["name"], "field_18");
+    assert_eq!(updated["added"][0]["type"], "int[4]");
+    assert!(text(4).contains("a->field_18[b]"), "{}", text(4));
+    // The name is taken; a variable the function lacks is refused.
+    assert_eq!(replies[5]["result"]["isError"], true, "{:?}", replies[5]);
+    assert!(
+        text(5).contains("struct conn is defined already"),
+        "{}",
+        text(5)
+    );
+    assert_eq!(replies[6]["result"]["isError"], true, "{:?}", replies[6]);
+    assert!(
+        text(6).contains("make_conn declares no nothing"),
+        "{}",
+        text(6)
+    );
+    let saved = std::fs::read_to_string(&project).expect("the project is saved");
+    assert!(saved.contains("int field_18[4];"), "{saved}");
+    let _ = std::fs::remove_file(&project);
+}

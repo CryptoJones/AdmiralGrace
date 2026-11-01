@@ -1399,6 +1399,49 @@ impl TypeStore {
         out
     }
 
+    /// The structure or union `key` as its definition writes it, apart:
+    /// the head before its members — `struct conn`, `struct
+    /// __attribute__((packed)) conn` — and each member's declaration
+    /// without its `;`, an anonymous member's body written out, with the
+    /// member's layout. None for no structure or union with members.
+    pub fn member_texts(&self, key: &str) -> Option<(String, Vec<(String, FieldLayout)>)> {
+        let (Definition::Struct(c) | Definition::Union(c)) = self.definitions.get(key)? else {
+            return None;
+        };
+        let members = c.members.as_ref()?;
+        let fields = &self.layouts.get(key)?.fields;
+        let text = self.body_text(key, false, 0);
+        let head = text.split(" {\n").next()?.to_string();
+        let mut out = Vec::new();
+        for (member, field) in members.iter().zip(fields) {
+            let inline = match &member.ty {
+                Type::Named(inner) if is_anonymous(inner) => Some(self.body_text(inner, false, 1)),
+                _ => None,
+            };
+            let mut declared = match (&inline, &member.name) {
+                (Some(body), Some(name)) => format!("{body} {name}"),
+                (Some(body), None) => body.clone(),
+                (None, _) => member_text_with(member, self, None),
+            };
+            if inline.is_some() {
+                if let Some(bits) = member.bits {
+                    let _ = write!(declared, " : {bits}");
+                }
+            }
+            out.push((declared, field.clone()));
+        }
+        Some((head, out))
+    }
+
+    /// The `#pragma pack` the structure or union `key` was read under,
+    /// when one was in force.
+    pub fn pack_of(&self, key: &str) -> Option<u64> {
+        match self.definitions.get(key)? {
+            Definition::Struct(c) | Definition::Union(c) => c.pack,
+            _ => None,
+        }
+    }
+
     /// The definitions `ty` needs before it in C, their own needs first,
     /// in the order they were defined: every structure, union, enumeration
     /// and typedef it names, through pointers too.

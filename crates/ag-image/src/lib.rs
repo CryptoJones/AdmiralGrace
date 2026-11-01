@@ -94,6 +94,10 @@ pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
+pub use ag_engine::smart_struct::{
+    self as smart_struct, Access as StructAccess, Accesses as StructAccesses, DraftMember,
+    Merged as MergedStruct, StructDraft,
+};
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Placement;
 pub use ag_engine::Bitness;
@@ -2677,6 +2681,36 @@ impl Binary {
     /// `ag_engine::variables`.
     pub fn variables(&self, address: u64) -> Result<Vec<VariableInfo>, NotLifted> {
         Ok(self.stages(address)?.function.variables())
+    }
+
+    /// The loads and stores through the pointer `variable` of the function
+    /// at `address` — by its lift name — through its copies and, one level
+    /// deep, through the callees it is passed to, with the allocation it is
+    /// the result of, over the lift as it reads, the analyst's edits made.
+    /// See `ag_engine::smart_struct`.
+    pub fn struct_accesses(&self, address: u64, variable: &str) -> Result<StructAccesses, String> {
+        let stages = self.stages(address).map_err(|e| e.reason)?;
+        let store = self.types();
+        let callee = |at: u64| self.stages(at).ok().map(|stages| stages.function.clone());
+        ag_engine::smart_struct::struct_accesses(&stages.function, variable, &store, &callee)
+    }
+
+    /// The structure the accesses through the pointer `variable` of the
+    /// function at `address` draft, by the tag `tag` — or, when none,
+    /// `struct_<function>_<variable>`, numbered past the types defined.
+    pub fn struct_draft(
+        &self,
+        address: u64,
+        variable: &str,
+        tag: Option<&str>,
+    ) -> Result<StructDraft, String> {
+        let found = self.struct_accesses(address, variable)?;
+        let store = self.types();
+        let tag = match tag {
+            Some(tag) => ag_engine::smart_struct::tag_of(tag)?,
+            None => ag_engine::smart_struct::default_tag(&store, &found.function, variable),
+        };
+        ag_engine::smart_struct::draft(&found, &tag, &store)
     }
 
     /// The stack frame of the function at `address`, slot by slot from the

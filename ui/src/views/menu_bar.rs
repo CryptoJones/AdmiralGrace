@@ -212,6 +212,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "",
                 Message::EditVariableType,
             )),
+            Item::new(item_button(
+                "Create struct from pointer…",
+                "",
+                Message::EditStructFromPointer,
+            )),
+            Item::new(item_button(
+                "Update struct from pointer…",
+                "",
+                Message::EditUpdateStructFromPointer,
+            )),
             Item::new(item_button("New type from C…", "", Message::EditNewType)),
             Item::new(item_button("Edit type…", "", Message::EditEditType)),
             Item::new(item_button("Delete type", "", Message::EditDeleteType)),

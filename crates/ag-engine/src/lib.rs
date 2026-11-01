@@ -30,6 +30,7 @@ pub mod procedure;
 pub mod pvs;
 pub mod register;
 pub mod slice;
+pub mod smart_struct;
 pub mod stack_offsets;
 pub mod stack_vars;
 pub mod structure;

@@ -363,6 +363,18 @@ name`, `in: member`, `in: text`, and back to `in: any`.
   declares it so, `void init(struct point *a, int b)`, and reads the accesses through it as
   members, `a->x = b;`; a type that does not fit the variable is refused in its leading
   comments.
+- **Create struct from pointer…** drafts a structure from what the function on screen does
+  through a pointer variable — one member each offset and width it reads or writes through
+  it, its copies and the callees it is passed to, `field_<hex offset>`, typed by width and use,
+  sized by the `malloc` or `calloc` it came from or by the accesses — adds it to the types and
+  types the variable a pointer to it, so the pseudocode reads `v1->field_0 = a;` at once. The
+  prompt is `VAR [NAME]` and opens on the variable of the selected line; with no name the
+  structure is `struct_<function>_<variable>`. The new type is selected in the Types tab.
+- **Update struct from pointer…** adds to a structure already defined a member for each
+  access through the pointer in bytes none of its members holds, renaming and retyping none:
+  `VAR STRUCT`, opening on the variable of the selected line and the structure it points to
+  already, or the type selected in the Types tab. The notice says what was added and the first
+  access that met a member at other bytes.
 
 The definitions are the project's `types`, and the variables' types its functions' `var_types`
 (`docs/project-format.md`); undo takes each change back. The C subset the definitions are read
