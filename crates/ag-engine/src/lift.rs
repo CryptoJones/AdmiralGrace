@@ -356,7 +356,7 @@ impl Abi {
     }
 
     /// The argument registers, as GPR indices, in order.
-    fn argument_registers(self) -> &'static [u32] {
+    pub fn argument_registers(self) -> &'static [u32] {
         match self {
             Abi::SystemV => &[RDI, RSI, RDX, RCX, R8, R9],
             Abi::Win64 => &[RCX, RDX, R8, R9],
@@ -364,7 +364,7 @@ impl Abi {
     }
 
     /// Whether a call leaves the register alone.
-    fn is_callee_saved(self, index: u32) -> bool {
+    pub fn is_callee_saved(self, index: u32) -> bool {
         match self {
             Abi::SystemV => matches!(index, RBX | RSP | RBP | 12..=15),
             Abi::Win64 => matches!(index, RBX | RSP | RBP | RSI | RDI | 12..=15),

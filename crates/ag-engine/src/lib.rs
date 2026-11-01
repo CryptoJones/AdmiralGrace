@@ -6,6 +6,7 @@ pub mod cfg;
 pub mod cfgwalk;
 pub mod cpu_context;
 pub mod dead;
+pub mod defuse;
 pub mod demangle;
 pub mod emit;
 pub mod emulate;
@@ -41,6 +42,7 @@ pub use cfg::{
     BasicBlock, CfgLoop, Halt, HaltReason, HighLevelBlock, HighLevelProcedure, ProcedureCfg,
     TailCall,
 };
+pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
 pub use emit::{Line, Pseudocode};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};
