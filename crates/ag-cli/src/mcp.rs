@@ -399,6 +399,19 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "register_def_use",
+            description: "The value a register holds at one instruction of a function: the instructions that define it and those that read it — its def-use web, not every instruction that names the register, since a later write starts a new value. Found by reaching definitions over the function's control-flow graph: definitions that reach one read are one value. The register is named at any width and counted whole (`eax`, `al` and `rax` are one register); a write of 32 bits or more replaces it (a write to `eax` zero-extends into `rax`), one of 8 or 16 bits or a conditional move keeps the rest and so both reads and defines it. A `call` reads the convention's argument registers and defines the ones the callee need not keep (`rax` its result), a `ret` reads `rax`. At an instruction that reads and writes the register the value is the one it reads. Flags (`zf`, `cf`, …) are followed the same way. `entry` says the value is, on some path, the one the register held at the function's entry — a parameter. Each instruction of the web comes with its role (`def`, `use`, `both`) and its text.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "register": { "type": "string", "description": "The register at any width (`rax`, `eax`, `al`, `r8d`) or a flag (`zf`)." },
+                    "address": { "type": "string", "description": "The instruction the register is read or written at (`0x11ba`)." },
+                },
+                "required": ["target", "register", "address"]
+            }),
+        },
+        Tool {
             name: "merge_variables",
             description: "Merge two of a function's variables, by the names the lift declares them with (before the analyst's renames): every occurrence of `gone` reads `keep`, `gone` is no longer declared, and a copy `keep = keep;` left is dropped. An unsound merge is made, and the function's leading comments say `v1 and v2 are merged though both are live at 0x401020`; one of a parameter merged away, a name the function does not declare, or two types is refused there with why. A word already on `gone` is replaced. The pseudocode is read again with the word. The project is saved.",
             schema: json!({
@@ -1369,6 +1382,13 @@ impl Server {
                     address,
                     &statements,
                 )))
+            }
+            "register_def_use" => {
+                let address = self.function(&text("target")?)?;
+                let at = parse_address(&text("address")?)?;
+                let report =
+                    crate::image::def_use_of(&self.image, address, &text("register")?, at)?;
+                Ok(Answer::json(crate::image::def_use_json(&report)))
             }
             "merge_variables" | "unmerge_variable" | "split_variable" | "unsplit_variable"
             | "version_variable" | "unversion_variable" | "set_variable_value" => {
@@ -2438,6 +2458,7 @@ mod tests {
                 "variables",
                 "stack_frame",
                 "possible_values",
+                "register_def_use",
                 "merge_variables",
                 "unmerge_variable",
                 "split_variable",
@@ -2522,6 +2543,29 @@ mod tests {
         let text = text_of(&listing);
         assert!(text.contains("0x11a4   -0x28 89 7d ec"), "{text}");
         assert!(text.contains("0x11eb     000 c3 ret"), "{text}");
+
+        // The value of eax at the store after `call add` is the call's
+        // result, and only that store reads it.
+        let web = call(
+            &mut server,
+            "register_def_use",
+            json!({ "target": "main", "register": "eax", "address": "0x11ba" }),
+        );
+        let web = &web["structuredContent"];
+        assert_eq!(web["register"], "rax", "{web}");
+        assert_eq!(web["definitions"], json!(["0x11b5"]), "{web}");
+        assert_eq!(web["uses"], json!(["0x11ba"]), "{web}");
+        assert_eq!(web["entry"], false, "{web}");
+        assert_eq!(web["instructions"][0]["role"], "def", "{web}");
+        assert_eq!(web["summary"], "rax at 0x11ba: 1 definition, 1 use");
+        // main's first argument is read once, as it is spilled.
+        let web = call(
+            &mut server,
+            "register_def_use",
+            json!({ "target": "main", "register": "rdi", "address": "0x11a4" }),
+        );
+        assert_eq!(web["structuredContent"]["entry"], true, "{web}");
+        assert_eq!(web["structuredContent"]["uses"], json!(["0x11a4"]), "{web}");
 
         let code = call(&mut server, "decompile", json!({ "target": "0x1198" }));
         assert_eq!(code["isError"], false);

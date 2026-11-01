@@ -185,7 +185,7 @@ Filed 2026-10-26.
 - [x] Variables pane: register, stack and flag variables with their placement — [#362](https://github.com/CryptoJones/AdmiralGrace/issues/362)
 - [x] Stack layout pane with variable creation — [#363](https://github.com/CryptoJones/AdmiralGrace/issues/363)
 - [x] Listing: stack-offset column — [#364](https://github.com/CryptoJones/AdmiralGrace/issues/364)
-- [ ] Highlight every instruction that reads or writes the selected register's value — [#365](https://github.com/CryptoJones/AdmiralGrace/issues/365)
+- [x] Highlight every instruction that reads or writes the selected register's value — [#365](https://github.com/CryptoJones/AdmiralGrace/issues/365)
 - [ ] Track and override global pointer registers — [#366](https://github.com/CryptoJones/AdmiralGrace/issues/366)
 - [ ] Type fragments: track parts of a struct held in registers — [#367](https://github.com/CryptoJones/AdmiralGrace/issues/367)
 

@@ -343,6 +343,31 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The value a register holds at one instruction: the instructions
+    /// that define it and the instructions that read it — not every
+    /// instruction that names the register, since a later write starts a
+    /// new value.
+    Defuse {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// The register, at any width — `rax`, `eax` and `al` are one
+        /// register — or a flag, such as `zf`.
+        #[arg(long, value_name = "REG")]
+        register: String,
+        /// The instruction the register is read or written at.
+        #[arg(long, value_name = "ADDRESS")]
+        at: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose jump-table notes the walk is told.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Set an engine option, such as `--option abi win64`. May be
+        /// repeated; `ag catalog` lists the options.
+        #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
+        options: Vec<String>,
+    },
     /// The possible values of a function's variables at each statement:
     /// the constants, sets and ranges each can hold where the statement
     /// reads or writes it, narrowed by the conditions on the way there.
@@ -940,6 +965,7 @@ pub fn run(
         | ImageCmd::Pseudocode { options, .. }
         | ImageCmd::Il { options, .. }
         | ImageCmd::Values { options, .. }
+        | ImageCmd::Defuse { options, .. }
         | ImageCmd::Export { options, .. } => {
             Options::from_flat(options).map_err(|error| anyhow::anyhow!("{error}"))?
         }
@@ -959,6 +985,7 @@ pub fn run(
         | ImageCmd::Variables { project, .. }
         | ImageCmd::Stack { project, .. }
         | ImageCmd::Values { project, .. }
+        | ImageCmd::Defuse { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -1089,6 +1116,24 @@ pub fn run(
         } => {
             let at = at.as_deref().map(parse_address).transpose()?;
             values(&image, &target, at, variable.as_deref(), json)
+        }
+        ImageCmd::Defuse {
+            target,
+            register,
+            at,
+            json,
+            ..
+        } => {
+            let at = parse_address(&at)?;
+            let address = resolve(&image, &target)?;
+            let report =
+                def_use_of(&image, address, &register, at).map_err(|e| anyhow::anyhow!(e))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&def_use_json(&report))?);
+            } else {
+                print!("{}", def_use_text(&report));
+            }
+            Ok(0)
         }
         ImageCmd::Export {
             dir,
@@ -2083,6 +2128,167 @@ fn values(
         print!("{}", values_text(&name, address, &statements));
     }
     Ok(0)
+}
+
+/// The value a register holds at one instruction of a function, with the
+/// instructions of its web, as `defuse` and the MCP `register_def_use`
+/// tool report it.
+pub(crate) struct DefUseReport {
+    /// The function's entry.
+    pub(crate) function: u64,
+    /// The function's name, `sub_<hex>` when it has none.
+    pub(crate) name: String,
+    /// The instruction asked about.
+    pub(crate) at: u64,
+    /// The register's name, whole: `rax` for `eax`.
+    pub(crate) register: String,
+    /// The web.
+    pub(crate) web: ag_image::ValueWeb,
+    /// The web in a line: `rax at 0x11ba: 1 definition, 1 use`.
+    pub(crate) summary: String,
+    /// Each instruction of the web, in order, with what it is to the web
+    /// and its text.
+    pub(crate) instructions: Vec<(u64, ag_image::DefUseRole, String)>,
+}
+
+/// The value `register` holds at the instruction at `at` of the function at
+/// `function`, or why there is none to give: the image is not x86, the
+/// register is no register, the address is no instruction of the
+/// function, or the instruction does not touch the register.
+pub(crate) fn def_use_of(
+    image: &Binary,
+    function: u64,
+    register: &str,
+    at: u64,
+) -> std::result::Result<DefUseReport, String> {
+    let location = ag_image::DefUseLocation::parse(register).ok_or_else(|| {
+        format!("{register:?} is no general register or flag: rax, eax, al, r8d, zf, …")
+    })?;
+    let defuse = image.register_def_use(function).ok_or_else(|| {
+        format!(
+            "the def-use webs are read off x86 code, and this image is {}",
+            image.language()
+        )
+    })?;
+    let name = image
+        .function_name(function)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{function:x}"));
+    let bitness = defuse.bitness();
+    let touched = defuse.touches(at);
+    if touched.is_empty() {
+        return Err(format!(
+            "{at:#x} is no instruction of {name} that touches a register"
+        ));
+    }
+    let web = defuse.value_at(at, location).ok_or_else(|| {
+        let names: Vec<String> = touched
+            .iter()
+            .map(|touch| touch.location.name(bitness))
+            .collect();
+        format!(
+            "the instruction at {at:#x} does not read or write {}; it touches {}",
+            location.name(bitness),
+            names.join(", ")
+        )
+    })?;
+    let text: BTreeMap<u64, String> = image
+        .disassembly(function)
+        .map(|disassembly| {
+            disassembly
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .map(|instruction| {
+                    let text = format!("{} {}", instruction.mnemonic, operands_of(instruction));
+                    (instruction.address, text.trim_end().to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let instructions = web
+        .addresses()
+        .into_iter()
+        .filter_map(|address| {
+            let role = web.role(address)?;
+            Some((
+                address,
+                role,
+                text.get(&address).cloned().unwrap_or_default(),
+            ))
+        })
+        .collect();
+    Ok(DefUseReport {
+        function,
+        name,
+        at,
+        register: location.name(bitness),
+        summary: web.summary(at, bitness),
+        web,
+        instructions,
+    })
+}
+
+/// The web as text: a heading with the summary, then a line an instruction
+/// with its role — `def`, `use`, or `def, use` — and an `entry` line first
+/// when the value is, on some path, the one the register held at the entry.
+pub(crate) fn def_use_text(report: &DefUseReport) -> String {
+    let mut out = format!(
+        "; {} at {:#x} in {}: {}\n",
+        report.register,
+        report.at,
+        report.name,
+        report.web.counts()
+    );
+    if report.web.entry {
+        out.push_str(&format!(
+            "{:<8}{:<10}the value {} holds at the function's entry\n",
+            "entry", "def", report.register
+        ));
+    }
+    for (address, role, text) in &report.instructions {
+        out.push_str(&format!(
+            "{:<8}{:<10}{text}\n",
+            format!("{address:#x}"),
+            role.text()
+        ));
+    }
+    out
+}
+
+/// The web as JSON: the function, the register and the instruction asked
+/// about, whether the entry value reaches, the definitions and the uses by
+/// address, and each instruction with its role (`def`, `use`, `both`) and
+/// text.
+pub(crate) fn def_use_json(report: &DefUseReport) -> serde_json::Value {
+    let hex = |addresses: &[u64]| {
+        addresses
+            .iter()
+            .map(|address| format!("{address:#x}"))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "function": report.function,
+        "function_hex": format!("{:#x}", report.function),
+        "name": report.name,
+        "register": report.register,
+        "at": report.at,
+        "at_hex": format!("{:#x}", report.at),
+        "summary": report.summary,
+        "entry": report.web.entry,
+        "definitions": hex(&report.web.defs),
+        "uses": hex(&report.web.uses),
+        "instructions": report.instructions.iter().map(|(address, role, text)| serde_json::json!({
+            "address": address,
+            "address_hex": format!("{address:#x}"),
+            "role": match role {
+                ag_image::DefUseRole::Definition => "def",
+                ag_image::DefUseRole::Use => "use",
+                ag_image::DefUseRole::Both => "both",
+            },
+            "text": text,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// The possible values as text: a line a statement, its first address,

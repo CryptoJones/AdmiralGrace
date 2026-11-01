@@ -133,6 +133,41 @@ pub struct ListingLine {
     pub stack_offset: Option<ag_image::StackOffset>,
 }
 
+/// The value a register holds at one instruction of the listing: the
+/// instructions that define it and those that read it — its def-use web,
+/// not every instruction that names the register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterWeb {
+    /// The register's name as the listing spells it where it was clicked:
+    /// `eax`.
+    pub register: String,
+    /// The instruction it was clicked at.
+    pub at: u64,
+    /// The instructions that define the value.
+    pub defs: BTreeSet<u64>,
+    /// The instructions that read it.
+    pub uses: BTreeSet<u64>,
+    /// Whether the value is, on some path, the one the register held at
+    /// the function's entry.
+    pub entry: bool,
+    /// The web in a line, as the status bar says it: `rax at 0x401005: 1
+    /// definition, 3 uses`.
+    pub summary: String,
+}
+
+impl RegisterWeb {
+    /// What the instruction at `address` is to the value, when it is
+    /// anything.
+    pub fn role(&self, address: u64) -> Option<ag_image::DefUseRole> {
+        match (self.defs.contains(&address), self.uses.contains(&address)) {
+            (true, true) => Some(ag_image::DefUseRole::Both),
+            (true, false) => Some(ag_image::DefUseRole::Definition),
+            (false, true) => Some(ag_image::DefUseRole::Use),
+            (false, false) => None,
+        }
+    }
+}
+
 /// One row of a hex dump.
 #[derive(Debug, Clone)]
 pub struct ByteLine {
@@ -460,6 +495,14 @@ pub trait Provider: Send + Sync {
     /// [`Provider::pseudocode`], longer. A provider that cannot say them
     /// answers with nothing.
     fn valued_pseudocode(&self, _address: u64) -> Option<String> {
+        None
+    }
+
+    /// The value `register` — as the listing spells it, `eax` — holds at
+    /// the instruction at `address` of the function at `function`: the
+    /// instructions that define it and those that read it. A provider that
+    /// does not follow registers answers with nothing.
+    fn register_web(&self, _function: u64, _address: u64, _register: &str) -> Option<RegisterWeb> {
         None
     }
 

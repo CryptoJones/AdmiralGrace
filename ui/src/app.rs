@@ -35,6 +35,11 @@ pub enum Message {
     FunctionSelected(u64),
     /// An address inside the current function was activated.
     AddressSelected(u64),
+    /// A register operand of a listing row was clicked: the row's address
+    /// and the register as the listing spells it. Its value — the
+    /// instructions that define it and those that read it — is
+    /// highlighted.
+    RegisterSelected(u64, String),
     /// A line of the pseudocode was clicked: the line, counted from zero,
     /// and the first of its addresses, which becomes the selection.
     PseudocodeLineSelected(usize, u64),
@@ -646,6 +651,11 @@ pub struct WorkSurface {
     /// The possible values of what the selected pseudocode line reads, as
     /// the status bar says them: `a: 0..=5`.
     pub line_values: Option<String>,
+    /// The register value highlighted in the listing, when the analyst
+    /// clicked a register: the instructions that define it and those that
+    /// read it. Escape, a click on another row and another function clear
+    /// it.
+    pub register_web: Option<crate::data::RegisterWeb>,
     /// The addresses each line of the pseudocode came from.
     ///
     /// The keys are line numbers counted from zero, so they line up with the
@@ -2128,6 +2138,36 @@ impl App {
         replace_words(&base, &pairs)
     }
 
+    /// The operands of a listing row in pieces, each register the row names
+    /// a piece of its own: the text shown, with the analyst's renames in
+    /// place, and for a register the spelling the disassembler put there,
+    /// which a click on it selects. A call shown by its callee's name, and
+    /// a row that names no registers, is one plain piece.
+    pub(crate) fn operand_spans(
+        line: &ListingLine,
+        renamed: &Renames,
+    ) -> Vec<(String, Option<String>)> {
+        if line.call_target.is_some() || line.registers.is_empty() {
+            return vec![(Self::shown_operands(line, renamed), None)];
+        }
+        let words: Vec<&str> = line.registers.iter().map(String::as_str).collect();
+        split_words(&line.operands, &words)
+            .into_iter()
+            .map(|(text, word)| match word {
+                Some(index) => {
+                    let spelled = line.registers[index].clone();
+                    let shown = renamed
+                        .registers
+                        .get(&spelled)
+                        .cloned()
+                        .unwrap_or_else(|| spelled.clone());
+                    (shown, Some(spelled))
+                }
+                None => (text, None),
+            })
+            .collect()
+    }
+
     /// The reference labels with the analyst's renames in place.
     ///
     /// A reference is labeled by the name of the function it points at, or
@@ -2532,6 +2572,8 @@ impl App {
         self.work.dead_lines = self.provider.dead_lines(address);
         // A slice is of the function it was taken in.
         self.work.slice = None;
+        // So is a register's value.
+        self.work.register_web = None;
 
         if record_history {
             self.history.push(self.selection);
@@ -4073,9 +4115,28 @@ impl App {
                 return self.update(Message::AddressSelected(address));
             }
 
+            Message::RegisterSelected(address, register) => {
+                let _ = self.update(Message::AddressSelected(address));
+                let web = self
+                    .work
+                    .listing_of
+                    .and_then(|function| self.provider.register_web(function, address, &register));
+                match web {
+                    Some(web) => self.work.register_web = Some(web),
+                    None => {
+                        self.notice = Some(format!(
+                            "No value of {register} is followed at {address:#x}"
+                        ))
+                    }
+                }
+            }
+
             Message::AddressSelected(address) => {
                 self.selection = Selection::Address(address);
                 self.history.push(self.selection);
+                // A click elsewhere in the listing lets the highlighted
+                // register value go.
+                self.work.register_web = None;
                 // A provider that knows the address says what it is; one
                 // that does not leaves the last detail alone.
                 if let Some(detail) = self.provider.function_detail(address) {
@@ -6352,6 +6413,8 @@ impl App {
                     self.show_about = false;
                 } else if self.prompt.is_some() {
                     self.prompt = None;
+                } else {
+                    self.work.register_web = None;
                 }
             }
 
@@ -6635,6 +6698,59 @@ fn names_word(text: &str, word: &str) -> bool {
 /// The earliest match is taken first, and among matches starting at the
 /// same point the longest word wins, so a declared name that starts with
 /// another — `v1` and `v10` — still keys on the whole word it found.
+/// `text` in pieces at the whole-word occurrences of `words`, by the rule
+/// [`replace_words`] reads words by: each piece with the index of the word
+/// it is, or `None` for the text between. The pieces put together are the
+/// text.
+pub(crate) fn split_words(text: &str, words: &[&str]) -> Vec<(String, Option<usize>)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut pieces: Vec<(String, Option<usize>)> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while !rest.is_empty() {
+        let best = words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| !word.is_empty())
+            .filter_map(|(index, word)| rest.find(word).map(|found| (found, index, *word)))
+            .min_by(|(left_found, _, left_word), (right_found, _, right_word)| {
+                left_found
+                    .cmp(right_found)
+                    .then(right_word.len().cmp(&left_word.len()))
+            });
+        let Some((found, index, word)) = best else {
+            plain.push_str(rest);
+            break;
+        };
+        let before = rest[..found]
+            .chars()
+            .next_back()
+            .or(prev)
+            .is_none_or(|c| !is_word(c));
+        let after_index = found + word.len();
+        let after = rest[after_index..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+        plain.push_str(&rest[..found]);
+        if before && after {
+            if !plain.is_empty() {
+                pieces.push((std::mem::take(&mut plain), None));
+            }
+            pieces.push((word.to_string(), Some(index)));
+        } else {
+            plain.push_str(word);
+        }
+        prev = word.chars().next_back();
+        rest = &rest[after_index..];
+    }
+    if !plain.is_empty() {
+        pieces.push((plain, None));
+    }
+    pieces
+}
+
 pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
     let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
     if pairs.is_empty() {
@@ -12944,6 +13060,103 @@ mod tests {
             "add_one",
             "a label at an address with no provider row still keys the listing"
         );
+    }
+
+    #[test]
+    fn clicking_a_register_highlights_its_value_and_escape_clears_it() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1198));
+
+        // The store after `call add` names its registers as pieces a click
+        // can land on.
+        let store = app
+            .work
+            .listing
+            .iter()
+            .find(|line| line.address == 0x11ba)
+            .cloned()
+            .expect("main stores the result at 0x11ba");
+        let spans = App::operand_spans(&store, &app.renames());
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            store.operands,
+            "the pieces put together are the operands"
+        );
+        assert!(
+            spans.contains(&("eax".to_string(), Some("eax".to_string()))),
+            "{spans:?}"
+        );
+
+        // eax there is the call's result: the call defines it, the store
+        // reads it, and the eax loaded again at 0x11bd is another value.
+        let _ = app.update(Message::RegisterSelected(0x11ba, "eax".into()));
+        assert_eq!(app.selection, Selection::Address(0x11ba));
+        let web = app
+            .work
+            .register_web
+            .clone()
+            .expect("a value is highlighted");
+        assert_eq!(web.defs, BTreeSet::from([0x11b5]));
+        assert_eq!(web.uses, BTreeSet::from([0x11ba]));
+        assert_eq!(web.summary, "rax at 0x11ba: 1 definition, 1 use");
+        use crate::views::work_surface::web_role;
+        assert_eq!(
+            web_role(&app, 0x11b5),
+            Some(ag_image::DefUseRole::Definition)
+        );
+        assert_eq!(web_role(&app, 0x11ba), Some(ag_image::DefUseRole::Use));
+        assert_eq!(
+            web_role(&app, 0x11bd),
+            None,
+            "a later load is another value"
+        );
+
+        // Escape lets it go.
+        let _ = app.update(Message::Dismiss);
+        assert!(app.work.register_web.is_none());
+        assert_eq!(web_role(&app, 0x11b5), None);
+
+        // So does a click on another row.
+        let _ = app.update(Message::RegisterSelected(0x11a4, "edi".into()));
+        let web = app.work.register_web.clone().expect("the parameter");
+        assert!(web.entry);
+        assert_eq!(web.summary, "rdi at 0x11a4: the entry value, 1 use");
+        let _ = app.update(Message::AddressSelected(0x11ab));
+        assert!(app.work.register_web.is_none());
+
+        // A register the row does not touch highlights nothing, and says so.
+        let _ = app.update(Message::RegisterSelected(0x11ba, "ecx".into()));
+        assert!(app.work.register_web.is_none());
+        assert!(
+            app.notice.as_deref().unwrap_or("").contains("ecx"),
+            "{:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn split_words_cuts_at_whole_words_only() {
+        assert_eq!(
+            split_words("[rbp-0Ch],eax", &["rbp", "eax"]),
+            vec![
+                ("[".to_string(), None),
+                ("rbp".to_string(), Some(0)),
+                ("-0Ch],".to_string(), None),
+                ("eax".to_string(), Some(1)),
+            ]
+        );
+        assert_eq!(
+            split_words("reax", &["eax"]),
+            vec![("reax".to_string(), None)]
+        );
+        assert_eq!(split_words("", &["eax"]), Vec::new());
     }
 
     #[test]

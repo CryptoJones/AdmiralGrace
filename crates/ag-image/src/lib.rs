@@ -80,6 +80,9 @@ pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
 pub use ag_engine::stack_offsets::StackOffset;
+pub use ag_engine::defuse::{
+    DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
+};
 pub use ag_engine::stack_vars::{parse_type, StackVar};
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Placement;
@@ -2356,6 +2359,30 @@ impl Binary {
     /// reads, the analyst's stack variables made. See `ag_engine::frame`.
     pub fn stack_frame(&self, address: u64) -> Result<StackFrame, NotLifted> {
         Ok(ag_engine::frame::stack_frame(&*self.stages(address)?))
+    }
+
+    /// The def-use webs of the function at `address`: for each instruction
+    /// and each register or flag it touches, the instructions that define
+    /// the value it holds there and those that read it. Read off the
+    /// decoded instructions over the control-flow graph under the image's
+    /// calling convention, so a function the lifter refuses has them too.
+    /// `None` for an address that is no function the x86 decoder reads.
+    /// See `ag_engine::defuse`.
+    pub fn register_def_use(&self, address: u64) -> Option<DefUse> {
+        let bitness = match (self.bitness, &self.arm, &self.plugin_arch) {
+            (Some(bitness), None, None) => bitness,
+            _ => return None,
+        };
+        let code = self.code_at(address)?;
+        let decoded = self.decoded_of(code);
+        let cfg = self.walk(&decoded.disasm, address);
+        Some(ag_engine::register_def_use(
+            &decoded.disasm,
+            &cfg,
+            address,
+            bitness,
+            self.abi(),
+        ))
     }
 
     /// The function at `address` at one level of the lift — the machine's

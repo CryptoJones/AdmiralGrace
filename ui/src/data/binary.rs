@@ -407,6 +407,25 @@ impl Provider for BinaryProvider {
             .map(|pseudocode| pseudocode.text())
     }
 
+    fn register_web(
+        &self,
+        function: u64,
+        address: u64,
+        register: &str,
+    ) -> Option<crate::data::RegisterWeb> {
+        let location = ag_image::DefUseLocation::parse(register)?;
+        let defuse = self.binary.register_def_use(function)?;
+        let web = defuse.value_at(address, location)?;
+        Some(crate::data::RegisterWeb {
+            register: register.to_string(),
+            at: address,
+            defs: web.defs.iter().copied().collect(),
+            uses: web.uses.iter().copied().collect(),
+            entry: web.entry,
+            summary: web.summary(address, defuse.bitness()),
+        })
+    }
+
     fn line_values(&self, function: u64, addresses: &[u64]) -> Option<String> {
         let notes: Vec<String> = self
             .binary

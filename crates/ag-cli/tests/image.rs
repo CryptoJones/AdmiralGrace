@@ -267,6 +267,73 @@ fn the_stack_offset_column_follows_the_prologue_and_the_epilogue() {
 }
 
 #[test]
+fn defuse_gives_the_value_a_register_holds_not_every_use_of_its_name() {
+    // eax after `call add` is the call's result: the store reads it, and
+    // the eax loaded again at 0x11bd is another value.
+    let report = image(
+        "sample.elf",
+        &["defuse", "main", "--register", "eax", "--at", "0x11ba"],
+    );
+    assert_eq!(
+        report,
+        "; rax at 0x11ba in main: 1 definition, 1 use\n\
+         0x11b5  def       call add\n\
+         0x11ba  use       mov [rbp-0Ch],eax\n"
+    );
+
+    // edi before `call add` is the argument, read by the call.
+    let report = image(
+        "sample.elf",
+        &["defuse", "main", "--register", "rdi", "--at", "0x11b3"],
+    );
+    assert!(
+        report.contains("0x11b3  def       mov edi,eax\n"),
+        "{report}"
+    );
+    assert!(report.contains("0x11b5  use       call add\n"), "{report}");
+
+    // main's first parameter: the entry value, spilled once.
+    let report = image_json(
+        "sample.elf",
+        &["defuse", "main", "--register", "edi", "--at", "0x11a4"],
+    );
+    assert_eq!(report["entry"], serde_json::json!(true));
+    assert_eq!(report["definitions"], serde_json::json!([]));
+    assert_eq!(report["uses"], serde_json::json!(["0x11a4"]));
+    assert_eq!(
+        report["summary"],
+        serde_json::json!("rdi at 0x11a4: the entry value, 1 use")
+    );
+
+    // sum_to's loop compare: its own load, and the flag it sets for jle.
+    let report = image(
+        "sample.elf",
+        &["defuse", "sum_to", "--register", "zf", "--at", "0x1190"],
+    );
+    assert!(
+        report.contains("0x118d  def       cmp eax,[rbp-14h]\n"),
+        "{report}"
+    );
+    assert!(report.contains("0x1190  use       jle"), "{report}");
+}
+
+#[test]
+fn defuse_says_what_an_instruction_touches_when_it_is_not_the_register() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["defuse", "sum_to", "--register", "rcx", "--at", "0x1190"])
+        .output()
+        .expect("the ag binary runs");
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("does not read or write rcx; it touches of, sf, zf"),
+        "{error}"
+    );
+}
+
+#[test]
 fn the_stack_offset_column_counts_32_bit_pushes_and_the_caller_s_pop() {
     let report = image("sample32.elf", &["disasm", "main", "--stack-offsets"]);
     assert!(report.contains("0x8049013   -0x14 c7 45 fc"), "{report}");

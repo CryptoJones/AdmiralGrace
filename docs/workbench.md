@@ -336,6 +336,20 @@ rsp` of a register, or where two paths meet at two depths. The column is off at 
 toggle takes it off again, and a lifted level's rows leave it blank. The depths are `ag image
 disasm --stack-offsets`'s (`docs/cli.md`).
 
+## A register's value
+
+Each register in a listing row's operands is a target of its own. Clicking one highlights the
+value it holds at that instruction: the instructions that define the value in amber, those that
+read it in green, and one that does both — a partial write such as `mov al, 1`, or an `add eax,
+1` whose sum comes round a loop to it again — in purple. It is the value, not the name: a later
+`mov eax, 5` starts another value, and neither it nor the instructions that read it are lit. The
+clicked register is drawn in amber on its row, and the status bar says what the value comes to,
+`rax at 0x401005: 1 definition, 3 uses`, or `rdi at 0x401000: the entry value, 1 use` for a
+parameter. Escape, a click on another row, and another function clear it. `eax`, `ax` and `al`
+are parts of `rax`; a call reads the argument registers and clobbers the ones the callee need
+not keep. The webs are `ag image defuse`'s (`docs/cli.md`), which says the rules in full. A
+lifted level's rows name no registers to click.
+
 ## Possible values
 
 Selecting a pseudocode line says in the status bar what the variables it reads can hold

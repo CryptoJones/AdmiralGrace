@@ -424,7 +424,9 @@ fn listing_row<'a>(
     renamed: &crate::app::Renames,
 ) -> Element<'a, Message> {
     let focused = matches!(app.selection, Selection::Address(a) if a == line.address);
-    let operands = App::shown_operands(line, renamed);
+    let operands = operands_cell(app, line, renamed);
+    // What the row is to the register value highlighted, when one is.
+    let role = web_role(app, line.address);
     // The disassembler's own comment (what the bytes point at) and the
     // analyst's note are different things and both keep their place: the
     // disassembler's shows in its usual slot, and an inline analyst note
@@ -473,12 +475,7 @@ fn listing_row<'a>(
                     .font(MONO)
                     .width(Length::Fixed(58.0)),
             )
-            .push(
-                Text::new(operands)
-                    .size(12)
-                    .color(color::TEXT)
-                    .font(MONO),
-            )
+            .push(operands)
             .push(
                 line.comment
                     .clone()
@@ -502,22 +499,25 @@ fn listing_row<'a>(
             ),
     )
     .width(Length::Fill)
-    .style(move |_| container::Style {
-        background: Some(Background::Color(match (focused, tint) {
-            (true, _) => color::FOCUS_BG,
-            (false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
-            (false, None) => color::PANEL,
-        })),
-        border: Border {
-            color: match (focused, tint) {
-                (true, _) => color::CYAN,
-                (false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
-                (false, None) => color::PANEL,
+    .style(move |_| {
+        // The register value's tint stands over the focus and the
+        // analyst's highlight, so the clicked row shows what it is to the
+        // value too; the focus keeps its border.
+        let surface = match (role, focused, tint) {
+            (Some(role), _, _) => tinted(color::PANEL, web_tint(role), 0.28),
+            (None, true, _) => color::FOCUS_BG,
+            (None, false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
+            (None, false, None) => color::PANEL,
+        };
+        container::Style {
+            background: Some(Background::Color(surface)),
+            border: Border {
+                color: if focused { color::CYAN } else { surface },
+                width: 1.0,
+                radius: 0.0.into(),
             },
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..container::Style::default()
+            ..container::Style::default()
+        }
     });
 
     let element: Element<'a, Message> = mouse_area(row)
@@ -525,6 +525,61 @@ fn listing_row<'a>(
         .into();
 
     element
+}
+
+/// The operands of a listing row, each register in them a target of its
+/// own: a click on one highlights the value the register holds there —
+/// the instructions that define it and those that read it. The register
+/// clicked is drawn in amber on its row while its value is
+/// highlighted.
+fn operands_cell<'a>(
+    app: &'a App,
+    line: &'a ListingLine,
+    renamed: &crate::app::Renames,
+) -> Element<'a, Message> {
+    let clicked = app
+        .work
+        .register_web
+        .as_ref()
+        .filter(|web| web.at == line.address)
+        .map(|web| web.register.as_str());
+    let mut cell = Row::new().spacing(0);
+    for (text, register) in App::operand_spans(line, renamed) {
+        let piece = Text::new(text).size(12).font(MONO);
+        cell = cell.push(match register {
+            Some(register) => {
+                let shade = if clicked == Some(register.as_str()) {
+                    color::AMBER
+                } else {
+                    color::TEXT
+                };
+                let element: Element<'a, Message> = mouse_area(piece.color(shade))
+                    .on_press(Message::RegisterSelected(line.address, register))
+                    .interaction(iced::mouse::Interaction::Pointer)
+                    .into();
+                element
+            }
+            None => piece.color(color::TEXT).into(),
+        });
+    }
+    cell.into()
+}
+
+/// What the instruction at `address` is to the register value highlighted
+/// in the listing, when one is and it is anything to it.
+pub(crate) fn web_role(app: &App, address: u64) -> Option<ag_image::DefUseRole> {
+    app.work.register_web.as_ref()?.role(address)
+}
+
+/// The tint of a row of the register value highlighted: amber for an
+/// instruction that defines it, green for one that reads it, purple for
+/// one that does both.
+pub(crate) fn web_tint(role: ag_image::DefUseRole) -> iced::Color {
+    match role {
+        ag_image::DefUseRole::Definition => color::AMBER,
+        ag_image::DefUseRole::Use => color::GREEN,
+        ag_image::DefUseRole::Both => color::PURPLE,
+    }
 }
 
 /// The stack-offset column of an instruction row, when the view shows it:
