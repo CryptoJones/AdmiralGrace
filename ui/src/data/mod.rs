@@ -573,6 +573,18 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// The loads and stores through the pointer `variable` of the function
+    /// at `address`, by its lift name — through its copies and the callees
+    /// it is passed to — and the allocation it is the result of. Refused
+    /// by a provider that does not lift.
+    fn struct_accesses(
+        &self,
+        _address: u64,
+        _variable: &str,
+    ) -> Result<ag_image::StructAccesses, String> {
+        Err("this project is not lifted".to_string())
+    }
+
     /// The pairs of the variables of the function at `address` that could
     /// be one, suggested first, then valid, then unsound. None from a
     /// provider that does not lift.

@@ -250,13 +250,125 @@ A fragment rides with its variable through the analyst's splits, new versions an
 copy the variable's declaration, and through inlining: a structure passed by value is bound to a
 local of the caller's that holds the same bytes.
 
+## Smart structures
+
+Before the analyst writes a structure, the code says much of it. `ag image … struct-from
+FUNCTION VARIABLE` drafts one from what the function does through a pointer variable, and
+`ag project … struct-from` makes it the project's and types the variable a pointer to it:
+
+```bash
+ag image ./smart.elf struct-from make_conn v1                          # the draft, and where each member came from
+ag project ./smart.elf struct-from --file p.agproj make_conn v1 --name conn
+ag image ./smart.elf pseudocode make_conn --project p.agproj           # v1->field_0 = a; v1->field_4 = 0x50; …
+ag project ./smart.elf struct-from --file p.agproj read_conn a --update conn   # adds int field_18[4]
+```
+
+```c
+struct conn {
+    int field_0;
+    short field_4;
+    char field_6;
+    long field_8;
+    long field_10;
+    char gap_18[16];
+};
+```
+
+### The accesses
+
+The accesses (`ag_engine::smart_struct::struct_accesses`) are read off the function's lift as
+it reads, the analyst's words made:
+
+- **through the variable**: a load or store `*(T *)(p + k)` is an access of `sizeof(T)` bytes
+  at `k`; an index by a variable, `*(T *)(p + k + i*s)` — or `(i + j)*s`, which is `j*s` bytes
+  on — is one at a stride of `s`, and a variable added unscaled, `*(char *)(p + i)`, one at a
+  stride of 1; a run of stores the lift reads as one struct initializer is one store a field.
+  Through a pointer already typed, `p->f`, `p->inner.g`, `p->a[i]` and `p[1].x` are the
+  member's bytes;
+- **through its copies**: a variable each assignment of which is the pointer, or the pointer
+  and one constant — `q = p;`, `q = p + 8;` — is the pointer at that offset; a variable
+  assigned two offsets is not;
+- **through the callees, one level deep**: the pointer, or a copy, passed to a function the
+  image lifts is read in the callee the same way, through the parameter it arrives in — the
+  argument's position — at the offset it was passed at. The callee's own callees, and a call
+  back into the function, are not followed.
+
+What the uses of a value say of it:
+
+| Use | Hint |
+|---|---|
+| the load cast to a wider signed integer, `(long)*(int *)p` | signed |
+| the load cast to an unsigned integer — a zero extension, an unsigned comparison | unsigned |
+| the loaded value dereferenced, `*(char *)*(long *)(p + 8)` | a pointer, to the width it is read at |
+| the loaded value passed to a callee that reads or writes through that parameter, or to `free`, `strlen`, `strcmp`, `memcpy`, `memset`, `puts`, `printf`'s format and their like | a pointer |
+| a stored value that is a string, an address, a function, a variable of pointer type, the pointer itself, or an allocation | a pointer (`char *` for a string) |
+
+### The size
+
+When the pointer — or the variable it is a copy of — is assigned once, from a call to a known
+allocator with constant arguments, the structure is the size it asks for: `malloc(0x18)`,
+`calloc(2, 8)`, `realloc(p, 0x40)`, `aligned_alloc`, `xmalloc`, `g_malloc`, `g_malloc0`,
+`g_slice_alloc`, `kmalloc`, `kzalloc`, `kcalloc`, `vmalloc`, `devm_kzalloc`, `HeapAlloc`,
+`RtlAllocateHeap`, `LocalAlloc`, `GlobalAlloc`, `VirtualAlloc`, `CoTaskMemAlloc`,
+`ExAllocatePool(WithTag)`, and `operator new` and `new[]` as Itanium (`_Znwm`, `_Znam`) and
+MSVC (`??2@YAPEAX_K@Z`) mangle them, under an import's or a stub's decoration — `malloc@plt`,
+`__imp_HeapAlloc`, `_malloc`, `j_malloc`. An access past the allocation is left out with a note.
+Otherwise the size is the extent of the accesses: the end of the last, rounded up to the
+alignment of the widest. An allocation that is no multiple of the members' alignment is
+rounded up the same way, with a note.
+
+### The draft
+
+`ag_engine::smart_struct::infer_struct` makes one member of each distinct offset and width:
+
+- **names**: `field_<offset in hex>` — `field_0`, `field_1c` — and `gap_<offset in hex>` for
+  bytes no access reaches;
+- **types**: the width's integer — `char`, `short`, `int`, `long` (`long long` where `long` is
+  4 bytes) — unsigned where an unsigned use is seen and no signed one; a pointer where the value
+  is one and the width is a pointer's, to the integer it is dereferenced at (`char *`) or
+  `void *` when it is dereferenced at no one width or only passed on; `unsigned char[N]` for a
+  width no integer has;
+- **arrays**: an access indexed at a stride of its own width is an element, and the array runs
+  from it — over the accesses of that width at that stride before and after it — to the next
+  member, or to the end of the allocation, or to the last element seen: `int field_18[4]`. An
+  access indexed at a wider stride is an element of an array of structures, which is noted and
+  left to the analyst;
+- **overlaps**: two accesses that share bytes are one member — the wider of two at one
+  offset, the first of two that cross — and the other is a note: `field_0 is reached as 4 bytes
+  at 0x0 too, at 0x401000: the wider is kept`. A union of both is the analyst's to write;
+- **gaps**: bytes no access reaches are a `char gap_<offset>[n]` only where natural alignment
+  would not leave them as padding — a `char` at 0 and a `long` at 8 need none, a `char` at 0 and
+  an `int` at 8 need `char gap_1[7]` — and at the end, to reach the size;
+- **packing**: a member natural alignment cannot place at its offset — an `int` at 2 — makes
+  the structure `__attribute__((packed))`, every gap spelled out.
+
+The draft is C the parser reads back, and it is checked: each member at its offset, the size
+the size chosen.
+
+### Made and updated
+
+`struct-from` without `--update` adds the draft to the project's `types` — named by `--name`,
+or `struct_<function>_<variable>`, made an identifier and numbered `_2`, `_3` past the names
+defined — and gives the variable the type `struct NAME *` in its function's `var_types`, so the
+pseudocode reads it at once: `v1->field_0 = a;`. A name defined already is refused.
+
+`--update STRUCT` merges the accesses into a structure already defined. Each access in bytes
+no member holds — padding, the bytes past the end, or a `gap_<offset>` a draft left, which is
+split about the new member — is a member, with a gap before it where natural alignment would
+not place it; an array runs on to the next member or the end of its gap. An access exactly a
+member's bytes adds nothing; one that meets a member at other bytes is a note, `an access of 4
+bytes at 0xc meets y at other bytes: left as it is`. No member is renamed, retyped or moved: a
+member that would move one is left out with a note. The structure's C is written again from
+its members — a `#pragma pack` it was read under is kept — and replaces the definition in its
+place; the variable is given a pointer to it.
+
+Both are the project's ordinary words, `types` and `var_types`: `types remove` and `var-type …
+clear` take them back, and the workbench's undo does.
+
 ## What comes later
 
 The model leaves room for the items that build on it:
 
-- **Smart structures (#369)** build structures from the accesses through a pointer:
-  `field_at` answers what lies at an offset, `members_in` what a range of bytes holds, and a
-  structure is made by writing its C.
 - **Struct-by-value calling conventions (#388)** add the SSE and MEMORY classes, `rdx` of a
   returned structure, and the other conventions to the INTEGER class the fragments read.
 - **Type propagation (#370)** carries a type from a variable to what it is copied into and

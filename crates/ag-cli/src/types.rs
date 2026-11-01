@@ -148,3 +148,209 @@ pub(crate) fn users(project: &ProjectFile, image: &ag_image::Binary) -> Vec<(Str
         })
         .collect()
 }
+
+/// The lift name of `variable` in the function at `address`: the name
+/// itself when the lift declares it, else the variable the project
+/// renames so.
+pub(crate) fn lift_variable(
+    image: &ag_image::Binary,
+    address: u64,
+    project: Option<&ProjectFile>,
+    variable: &str,
+) -> Result<String, String> {
+    let variable = variable.trim();
+    if variable.is_empty() {
+        return Err("the variable is empty".to_string());
+    }
+    let declared = image.variables(address).map_err(|error| error.reason)?;
+    if declared.iter().any(|v| v.name == variable) {
+        return Ok(variable.to_string());
+    }
+    let key = format!("{address:#x}");
+    project
+        .and_then(|project| {
+            declared
+                .iter()
+                .find(|v| project.variable_name(&key, &v.name).as_deref() == Some(variable))
+        })
+        .map(|v| v.name.clone())
+        .ok_or_else(|| {
+            let name = image
+                .function_name(address)
+                .map_or_else(|| format!("sub_{address:x}"), str::to_string);
+            format!("{name} declares no {variable}")
+        })
+}
+
+/// The addresses a member was read or written at, as the reports spell
+/// them: `0x4010b4, 0x40110c in read_conn`.
+fn member_sources(member: &ag_image::DraftMember) -> String {
+    let mut out = member
+        .at
+        .iter()
+        .map(|at| format!("{at:#x}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !member.via.is_empty() {
+        out.push_str(&format!(" (through {})", member.via.join(", ")));
+    }
+    out
+}
+
+/// A drafted structure as text: its C, what sized it, each member with
+/// the accesses it came from, and the notes.
+pub(crate) fn draft_text(draft: &ag_image::StructDraft) -> String {
+    let mut out = format!("{}\n\n", draft.c);
+    out.push_str(&format!(
+        "{}: {:#x} bytes, sized by {}{}\n",
+        draft.key(),
+        draft.size,
+        draft.sized_by,
+        if draft.packed { ", packed" } else { "" }
+    ));
+    for member in &draft.members {
+        let what = if member.gap {
+            "no access".to_string()
+        } else {
+            format!(
+                "{} read{}, {} written, at {}",
+                member.reads,
+                if member.reads == 1 { "" } else { "s" },
+                member.writes,
+                member_sources(member)
+            )
+        };
+        out.push_str(&format!(
+            "  {:#06x}  {:<12} {:<16} {what}\n",
+            member.offset, member.name, member.ty
+        ));
+    }
+    for note in &draft.notes {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    out
+}
+
+/// A drafted member as JSON.
+pub(crate) fn member_json(member: &ag_image::DraftMember) -> Value {
+    json!({
+        "offset": member.offset,
+        "size": member.size,
+        "name": member.name,
+        "type": member.ty,
+        "gap": member.gap,
+        "reads": member.reads,
+        "writes": member.writes,
+        "at": member.at.iter().map(|at| format!("{at:#x}")).collect::<Vec<_>>(),
+        "via": member.via,
+    })
+}
+
+/// A drafted structure as JSON.
+pub(crate) fn draft_json(draft: &ag_image::StructDraft) -> Value {
+    json!({
+        "name": draft.key(),
+        "size": draft.size,
+        "sized_by": draft.sized_by,
+        "packed": draft.packed,
+        "members": draft.members.iter().map(member_json).collect::<Vec<_>>(),
+        "notes": draft.notes,
+        "c": draft.c,
+    })
+}
+
+/// A structure made or updated from a pointer: the project's definitions
+/// after, the structure, the type the pointer is given, and what changed.
+pub(crate) struct Applied {
+    pub definitions: Vec<TypeText>,
+    pub key: String,
+    pub pointer: String,
+    pub c: String,
+    /// The draft, when the structure is a new one.
+    pub draft: Option<ag_image::StructDraft>,
+    /// The members an update added.
+    pub added: Vec<ag_image::DraftMember>,
+    pub notes: Vec<String>,
+}
+
+/// The structure the pointer `variable` — as the analyst names it — of
+/// the function at `address` makes: a new one named `name`, or by default
+/// `struct_<function>_<variable>`; or, with `update`, that structure
+/// given the members its accesses add.
+pub(crate) fn struct_from(
+    image: &ag_image::Binary,
+    project: &ProjectFile,
+    address: u64,
+    variable: &str,
+    name: Option<&str>,
+    update: Option<&str>,
+) -> Result<(String, Applied), String> {
+    let lift = lift_variable(image, address, Some(project), variable)?;
+    let model = image.data_model();
+    let held = texts(project);
+    if let Some(update) = update {
+        let found = image.struct_accesses(address, &lift)?;
+        let merged = ag_image::smart_struct::update_struct(model, &held, update, &found)?;
+        return Ok((
+            lift,
+            Applied {
+                definitions: merged.definitions,
+                pointer: format!("{} *", merged.key),
+                key: merged.key,
+                c: merged.c,
+                draft: None,
+                added: merged.added,
+                notes: merged.notes,
+            },
+        ));
+    }
+    let store = image.types();
+    let tag = match name {
+        Some(name) => ag_image::smart_struct::tag_of(name)?,
+        None => {
+            let function = image
+                .function_name(address)
+                .map_or_else(|| format!("sub_{address:x}"), str::to_string);
+            ag_image::smart_struct::default_tag(&store, &function, variable.trim())
+        }
+    };
+    let draft = image.struct_draft(address, &lift, Some(&tag))?;
+    let definitions = ag_image::smart_struct::create_struct(model, &held, &draft)?;
+    Ok((
+        lift,
+        Applied {
+            definitions,
+            key: draft.key(),
+            pointer: draft.pointer(),
+            c: draft.c.clone(),
+            notes: draft.notes.clone(),
+            draft: Some(draft),
+            added: Vec::new(),
+        },
+    ))
+}
+
+/// What an update added, as text.
+pub(crate) fn added_text(applied: &Applied) -> String {
+    let mut out = String::new();
+    if applied.added.is_empty() {
+        out.push_str(&format!("{}: no member added\n", applied.key));
+    }
+    for member in &applied.added {
+        out.push_str(&format!(
+            "  added {:#06x}  {:<12} {:<16} {}\n",
+            member.offset,
+            member.name,
+            member.ty,
+            if member.gap {
+                "no access".to_string()
+            } else {
+                format!("at {}", member_sources(member))
+            }
+        ));
+    }
+    for note in &applied.notes {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    out
+}

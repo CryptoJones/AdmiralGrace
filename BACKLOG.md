@@ -192,7 +192,7 @@ Filed 2026-10-26.
 ### Type system
 
 - [x] Type system: structs, unions, enums and typedefs, with a C type parser and a Types view — [#368](https://github.com/CryptoJones/AdmiralGrace/issues/368)
-- [ ] Smart structures: build a struct from the accesses to a pointer — [#369](https://github.com/CryptoJones/AdmiralGrace/issues/369)
+- [x] Smart structures: build a struct from the accesses to a pointer — [#369](https://github.com/CryptoJones/AdmiralGrace/issues/369)
 - [ ] Type propagation with automatic array and struct detection — [#370](https://github.com/CryptoJones/AdmiralGrace/issues/370)
 - [ ] Choose the union field per instruction — [#371](https://github.com/CryptoJones/AdmiralGrace/issues/371)
 - [ ] Bitfield struct members — [#372](https://github.com/CryptoJones/AdmiralGrace/issues/372)

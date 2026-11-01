@@ -335,6 +335,35 @@ pub enum ProjectCmd {
         #[arg(value_name = "TYPE")]
         ty: String,
     },
+    /// Make a structure from the accesses through a pointer variable — one
+    /// member each offset and width the function reads or writes through
+    /// it, sized by its allocation or the accesses' extent (`ag image …
+    /// struct-from` shows the draft) — add it to the project's types and
+    /// give the variable a pointer to it, so the pseudocode reads
+    /// `p->field_8`. With `--update STRUCT`, the structure already defined
+    /// gains a member for each access in bytes none of its members holds;
+    /// none is renamed or retyped, and an access that meets one at other
+    /// bytes is a note. `types remove` and `var-type … clear` take it back
+    StructFrom {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The pointer variable, by its lift name or the project's rename.
+        variable: String,
+        /// The structure's tag; `struct_<function>_<variable>` when absent.
+        #[arg(long, conflicts_with = "update")]
+        name: Option<String>,
+        /// The structure to add the accesses' members to, in place of a new
+        /// one.
+        #[arg(long, value_name = "STRUCT")]
+        update: Option<String>,
+        /// Show what would change, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// The project's types — structures, unions, enumerations and typedefs,
     /// written as C — added, replaced, removed, shown with their layout
     /// under the image's data model, or searched by name, member or text
@@ -878,6 +907,22 @@ pub fn run(
             ty,
         } => var_type(&target, &file, &function, &variable, &ty),
         ProjectCmd::Types { file, cmd } => types(&target, &file, cmd),
+        ProjectCmd::StructFrom {
+            file,
+            function,
+            variable,
+            name,
+            update,
+            dry_run,
+        } => struct_from(
+            &target,
+            &file,
+            &function,
+            &variable,
+            name.as_deref(),
+            update.as_deref(),
+            dry_run,
+        ),
         ProjectCmd::StackVar {
             file,
             function,
@@ -1608,6 +1653,67 @@ fn var_type(target: &Path, file: &Path, function: &str, variable: &str, ty: &str
     edit(target, file, TargetKind::Function, &address, |a| {
         a.set_var_type(&variable, &spelled);
     })
+}
+
+/// `ag project TARGET struct-from`: a structure made from the accesses
+/// through a pointer, or one updated from them, and the pointer given a
+/// pointer to it.
+fn struct_from(
+    target: &Path,
+    file: &Path,
+    function: &str,
+    variable: &str,
+    name: Option<&str>,
+    update: Option<&str>,
+    dry_run: bool,
+) -> Result<i32> {
+    let address = function_key(target, file, function)?;
+    let mut project = open_project(target, file)?;
+    let image = crate::image::open_image(
+        target,
+        None,
+        None,
+        Some(&project),
+        ag_image::Options::default(),
+    )?;
+    anyhow::ensure!(
+        image.supports_pseudocode(),
+        "the lifter reads x86-64 code, and this image is {}",
+        image.language()
+    );
+    let entry = ag_corpus::parse_addr(&address)?;
+    let (lift, applied) =
+        crate::types::struct_from(&image, &project, entry, variable, name, update)
+            .map_err(anyhow::Error::msg)?;
+    match &applied.draft {
+        Some(draft) => print!("{}", crate::types::draft_text(draft)),
+        None => {
+            println!("{}\n", applied.c);
+            print!("{}", crate::types::added_text(&applied));
+        }
+    }
+    if dry_run {
+        println!("{}: nothing changed (--dry-run)", file.display());
+        return Ok(0);
+    }
+    project.types = crate::types::definitions(&applied.definitions);
+    project
+        .annotation_mut(TargetKind::Function, &address)
+        .set_var_type(&lift, &applied.pointer);
+    project.prune();
+    project.save(file)?;
+    println!(
+        "{}: {} {}, {lift} of {address} typed {}",
+        file.display(),
+        applied.key,
+        if applied.draft.is_some() {
+            "defined"
+        } else {
+            "updated"
+        },
+        applied.pointer
+    );
+    Ok(0)
 }
 
 /// The C source an edit of the types gives: the argument, or the file.

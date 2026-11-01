@@ -345,6 +345,29 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The structure the accesses through a pointer variable draft: one
+    /// member each offset and width the function reads or writes through
+    /// it — through its copies and, one level deep, the callees it is
+    /// passed to — typed by width and use, sized by the allocation the
+    /// pointer comes from (`malloc(0x28)`) or the accesses' extent, as C
+    /// with where each member came from. `ag project … struct-from`
+    /// applies it
+    StructFrom {
+        /// The function: an address such as `0x1149`, or a name.
+        function: String,
+        /// The pointer variable, by its lift name or the project's rename.
+        variable: String,
+        /// The draft's tag; `struct_<function>_<variable>` when absent.
+        #[arg(long)]
+        name: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose words the function is lifted with and
+        /// whose types the draft is read against.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The stack frame of a function, from the top down: the caller's
     /// slots, the return address, the saved registers and the locals, each
     /// slot with the sizes it is accessed at, the variable it belongs to and
@@ -1185,6 +1208,7 @@ pub fn run(
         | ImageCmd::Variables { project, .. }
         | ImageCmd::Stack { project, .. }
         | ImageCmd::Types { project, .. }
+        | ImageCmd::StructFrom { project, .. }
         | ImageCmd::Transpile { project, .. }
         | ImageCmd::GlobalPointer { project, .. }
         | ImageCmd::Values { project, .. }
@@ -1312,6 +1336,20 @@ pub fn run(
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
         ImageCmd::Types { json, .. } => types(&image, json),
+        ImageCmd::StructFrom {
+            function,
+            variable,
+            name,
+            json,
+            ..
+        } => struct_from(
+            &image,
+            &function,
+            &variable,
+            name.as_deref(),
+            json,
+            project.as_ref(),
+        ),
         ImageCmd::GlobalPointer {
             functions, json, ..
         } => global_pointer(&image, &functions, json),
@@ -2978,6 +3016,48 @@ fn types(image: &Binary, json: bool) -> Result<i32> {
         if let Some(text) = store.definition_text(key, true) {
             println!("{text}");
         }
+    }
+    Ok(0)
+}
+
+/// `ag image FILE struct-from FUNCTION VARIABLE`: the structure the
+/// accesses through the pointer draft.
+fn struct_from(
+    image: &Binary,
+    function: &str,
+    variable: &str,
+    name: Option<&str>,
+    json: bool,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_pseudocode(),
+        "the lifter reads x86-64 code, and this image is {}",
+        image.language()
+    );
+    let address = resolve(image, function)?;
+    let lift = crate::types::lift_variable(image, address, project, variable)
+        .map_err(anyhow::Error::msg)?;
+    let store = image.types();
+    let tag = match name {
+        Some(name) => ag_image::smart_struct::tag_of(name).map_err(anyhow::Error::msg)?,
+        None => {
+            let shown = image
+                .function_name(address)
+                .map_or_else(|| format!("sub_{address:x}"), str::to_string);
+            ag_image::smart_struct::default_tag(&store, &shown, variable.trim())
+        }
+    };
+    let draft = image
+        .struct_draft(address, &lift, Some(&tag))
+        .map_err(anyhow::Error::msg)?;
+    if json {
+        let mut shown = crate::types::draft_json(&draft);
+        shown["function"] = serde_json::json!(format!("{address:#x}"));
+        shown["variable"] = serde_json::json!(lift);
+        println!("{}", serde_json::to_string_pretty(&shown)?);
+    } else {
+        print!("{}", crate::types::draft_text(&draft));
     }
     Ok(0)
 }

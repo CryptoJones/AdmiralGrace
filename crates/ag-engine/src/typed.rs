@@ -708,6 +708,22 @@ fn decompose(address: &AstNode, typed: &Typed) -> Option<Address> {
                     (AstNode::Constant { value, .. }, by) => (by, *value),
                     _ => return None,
                 };
+                // `(i + k) * s` is the index `i`, `k * s` bytes on.
+                let by = match by {
+                    AstNode::Binary {
+                        lhs: inner,
+                        op: BinaryOp::Add,
+                        rhs: on,
+                    } => match on.as_ref() {
+                        AstNode::Constant { value, .. } => {
+                            let on = (*value as i64).checked_mul(i64::try_from(scale).ok()?)?;
+                            offset = offset.checked_add(on)?;
+                            inner.as_ref()
+                        }
+                        _ => by,
+                    },
+                    _ => by,
+                };
                 if index.replace((by.clone(), scale)).is_some() {
                     return None;
                 }
