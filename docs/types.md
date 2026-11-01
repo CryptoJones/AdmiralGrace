@@ -148,13 +148,117 @@ an enumeration; a structure on the stack is a stack variable. One that does not 
 refused in the function's leading comments: `b is not typed char *: char * is 8 bytes, b
 holds 4`.
 
+## Fragments
+
+Code moves a structure about in parts: `mov eax, [rbp-0x10]` loads `p.x` of a `struct point p`,
+`mov rax, [rbp-0x10]` loads `p.x` and `p.y` together as one eight-byte value and `shr rax, 32`
+leaves `p.y`, and System V passes a `struct point { int x, y; }` by value in one register and
+returns it in `rax`. A fragment is the type of such a value: the bytes `[offset, offset +
+size)` of a known structure or union. `struct point [4..8) (y)` is `p.y`; `[0..8)` is the whole
+of it. A fragment lives on the variable (`ag_engine::lift::Fragment`, `Variable::fragment`), not
+in its C type: `ty` stays the integer the machine holds the bytes in, so the medium level — and
+the C++ the transpiler writes from it — reads them with the machine's own shifts and masks and
+still computes what the machine did. Only the pseudocode's declarations and the variables
+listing say the structure.
+
+```bash
+ag project ./fragments.elf types --file p.agproj add 'struct point { int x; int y; };'
+ag project ./fragments.elf var-type --file p.agproj weigh a 'struct point'
+ag project ./fragments.elf var-type --file p.agproj make return 'struct point'
+ag image ./fragments.elf pseudocode weigh --project p.agproj   # return (a.y + (a.y * 2)) + a.x;
+ag image ./fragments.elf pseudocode second --project p.agproj  # return make(…).y;
+```
+
+What is bytes of a structure:
+
+- a typed stack variable, a member or element of one, and bytes at an offset into one — a slot
+  of the variable read at another width than its own is the bytes there, `*(long *)&p`, not
+  the member the slot was first read as;
+- the pointee of a typed pointer, a member of it, bytes through it, `*(long *)a`, and the
+  pointee of a member that is a pointer, `a->next->v`;
+- a parameter a structure is passed in, and the result of a call to a function whose `return`
+  is typed a structure.
+
+How the operations narrow a fragment, the structure little-endian:
+
+| Operation | Fragment |
+|---|---|
+| `x >> 32` (`shr`, `sar`) on `[0..8)` | `[4..8)`, the value above it zeros, or its sign for `sar` |
+| `x & 0xffffffff`, `& 0xffff`, `& 0xff` | `[0..4)`, `[0..2)`, `[0..1)` |
+| `(int)x` — `eax` of `rax`, the source of `movzx` or `movsx` | `[0..4)` |
+| a wider cast | the same bytes, extended by the narrower type's sign or with zeros |
+| `(long)b << 32 \| (unsigned int)a`, `a` and `b` neighbours of one source | the bytes of both |
+
+How a fragment reads:
+
+- exactly one member: the member, `p.y`, `a->y`, `make(b, 5).y`. Held wider than the member,
+  it is cast to the type the value has, through the extension the machine made where the
+  member's own type would not make it: `(unsigned long)(unsigned int)p.y` for `shr`, `(long)p.y`
+  for `sar`;
+- several members, loaded or stored where it stands: the bytes from the first member it starts
+  at, with the members it holds in a comment — `*(long *)&p.x /* p.x, p.y */`. The comment is
+  the `__fragment` intrinsic, a value and no call;
+- a whole structure assigned from a whole one of its type: the copy, `q = p;`, `*a = *b;`;
+- bytes that are no member's, or of no known structure: as before.
+
+A store of a fragment into a structure at the offset it came from is the member assigned, `q.y
+= p.y;`; a run of such stores, in order, that covers a structure — but its padding — from one
+other structure of its type is the copy, `q = p;`.
+
+A variable assigned a fragment — each of its assignments the same bytes — holds it:
+
+- exactly a member of pointer or enumeration type: the variable takes the member's type, and
+  the loads through it and the constants compared with it read as such, `b = a->next; … return
+  b->v;`. An integer member leaves the variable its integer;
+- the whole of a structure: the variable is declared as the structure and its parts read as
+  its members, `v.y`, where every read of it is a member, a copy, an argument or a return —
+  another read leaves it its integer, holding `[0..size)`;
+- a part of a stack variable or of a whole structure's variable, assigned once at the top of
+  the body, the structure not written from there on and its address never passed or stored:
+  its parts read as the structure's members, `p.y`;
+- another part: its integer, and the listing says what it holds.
+
+The variables listing (`ag image … variables`, the workbench's Variables pane) gives a
+fragment's variable the type `struct point [4..8) (y)`, the structure alone for a whole one.
+
+### Structures by value
+
+A parameter typed a structure or union (`var-type … a 'struct point'`) is the structure passed
+by value:
+
+- **System V**: a structure of the INTEGER class — at most 16 bytes, every member an integer,
+  an enumeration or a pointer at its natural alignment — comes in general registers: its first
+  eight bytes in the parameter's argument register, `[0..8)`, the rest in the next, `[8..16)`.
+  The signature declares the structure once, `long width(struct span a)`, the second register's
+  parameter standing in it, and both registers' reads are its members, `a.lo`, `a.hi`, while
+  the body leaves the registers as they came. A structure with a floating member (the SSE
+  class), one of more than 16 bytes or with a member out of its alignment (MEMORY), and one
+  that needs two registers when its parameter is in the last, are refused with a note; those
+  classes are #388's, with the other calling conventions.
+- **Microsoft x64**: a structure of 1, 2, 4 or 8 bytes comes whole in its register; another is
+  passed by its address, and the parameter is typed a pointer to it, with a note: `a is struct
+  big *: Microsoft x64 passes struct big, of 24 bytes, by its address`.
+
+A function's `return` typed a structure (`var-type … make return 'struct point'`) is read at its
+calls: the call's result in `rax` is the structure's first eight bytes, `make(a, 5).y`. A
+structure the System V convention returns in `rax` and `rdx` is refused — the calls read `rax`
+alone — as are the SSE and MEMORY classes, and under Microsoft x64 a size other than 1, 2, 4 or
+8 bytes, which is returned through memory the caller passes. The function's own pseudocode keeps
+the integer it returns in.
+
+A fragment rides with its variable through the analyst's splits, new versions and merges, which
+copy the variable's declaration, and through inlining: a structure passed by value is bound to a
+local of the caller's that holds the same bytes.
+
 ## What comes later
 
 The model leaves room for the items that build on it:
 
-- **Type fragments (#367)** and **smart structures (#369)** read and build structures from
-  the accesses through a pointer: `field_at` answers what lies at an offset, and a structure
-  is made by writing its C.
+- **Smart structures (#369)** build structures from the accesses through a pointer:
+  `field_at` answers what lies at an offset, `members_in` what a range of bytes holds, and a
+  structure is made by writing its C.
+- **Struct-by-value calling conventions (#388)** add the SSE and MEMORY classes, `rdx` of a
+  returned structure, and the other conventions to the INTEGER class the fragments read.
 - **Type propagation (#370)** carries a type from a variable to what it is copied into and
   passed to; the lift's variables already take a type by name.
 - **The union field per instruction (#371)** replaces the first-member-that-fits choice, made

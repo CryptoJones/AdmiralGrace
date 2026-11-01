@@ -3057,3 +3057,117 @@ fn an_enumerations_variable_reads_its_constants_as_enumerators() {
     assert!(text.contains("  case C_TWO:\n"), "{text}");
     assert!(!text.contains("case 2:"), "{text}");
 }
+
+#[test]
+fn the_structures_held_in_registers_read_as_their_members() {
+    let file = TempFile::new("fragments");
+    let word = |args: &[&str]| {
+        let text = file.text();
+        let mut all = vec![args[0], "--file", &text];
+        all.extend(&args[1..]);
+        let (ok, _, stderr) = project_with("fragments.elf", &all);
+        assert!(ok, "{stderr}");
+    };
+    let image = |args: &[&str]| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("fragments.elf"))
+            .args(args)
+            .args(["--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    word(&[
+        "types",
+        "add",
+        "struct point { int x; int y; };\nstruct span { long lo; long hi; };",
+    ]);
+    word(&["var-type", "weigh", "a", "struct point"]);
+    word(&["var-type", "width", "a", "struct span"]);
+    word(&["var-type", "make", "return", "struct point"]);
+    word(&["var-type", "copy_y", "a", "struct point *"]);
+    word(&["var-type", "copy_y", "b", "struct point *"]);
+
+    // rdi holds a whole struct point: x in its low half, y in its high.
+    let text = image(&["pseudocode", "weigh"]);
+    assert!(
+        text.contains("int weigh(struct point a)\n{\n  return (a.y + (a.y * 2)) + a.x;\n}"),
+        "{text}"
+    );
+    // A struct span comes in rdi and rsi.
+    let text = image(&["pseudocode", "width"]);
+    assert!(
+        text.contains("long width(struct span a)\n{\n  return a.hi - a.lo;\n}"),
+        "{text}"
+    );
+    // The caller reads y from the high half of what make returns in rax.
+    let text = image(&["pseudocode", "second"]);
+    assert!(
+        text.contains("return make(") && text.contains(").y;"),
+        "{text}"
+    );
+    // GCC loads both members, joins them in rax and shifts y back out.
+    let text = image(&["pseudocode", "copy_y"]);
+    assert!(text.contains("  a->y = b->y;\n"), "{text}");
+
+    // The listing says what bytes each register holds.
+    let text = image(&["variables", "width"]);
+    assert!(
+        text.contains("a     struct span [0..8) (lo)   param  rdi"),
+        "{text}"
+    );
+    assert!(
+        text.contains("b     struct span [8..16) (hi)  param  rsi"),
+        "{text}"
+    );
+
+    // The C++ reads the registers as the machine did, and computes it.
+    let program = image(&[
+        "transpile",
+        "weigh",
+        "width",
+        "copy_y",
+        "make",
+        "--no-follow",
+        "--harness",
+        "weigh",
+    ]);
+    assert!(program.contains("int weigh(long a)"), "{program}");
+    let Some(compiler) = ["c++", "g++", "clang++"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }) else {
+        return;
+    };
+    let source = TempFile::new("fragments-cpp");
+    let source_path = source.path().with_extension("cpp");
+    let binary = TempFile::new("fragments-bin");
+    std::fs::write(&source_path, &program).expect("the C++ is written");
+    let built = Command::new(compiler)
+        .args(["-w", "-o"])
+        .arg(binary.path())
+        .arg(&source_path)
+        .output()
+        .expect("the compiler runs");
+    let _ = std::fs::remove_file(&source_path);
+    assert!(
+        built.status.success(),
+        "{}\n{program}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    // x = 2, y = 5: 2 + 5 * 3.
+    let run = Command::new(binary.path())
+        .arg(((5u64 << 32) | 2).to_string())
+        .output()
+        .expect("the program runs");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "17");
+}

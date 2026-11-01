@@ -881,8 +881,8 @@ mod tests {
     /// The address of `sum_to` in the sample, which has a loop.
     const SUM_TO: u64 = 0x1161;
 
-    /// `register_tm_clones`: shifts right, which the lifter does not read.
-    const REFUSED: u64 = 0x10c0;
+    /// `_start`: ends in hlt, which the lifter has no reading of.
+    const REFUSED: u64 = 0x1060;
 
     /// The address of the `printf` PLT stub in the sample: a thunk.
     const PRINTF: u64 = 0x1050;
@@ -1046,7 +1046,10 @@ mod tests {
 
         let problems = provider.function_problems(REFUSED);
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert_eq!(problems[0].message, "No pseudocode: not lifted yet: shr.");
+        assert_eq!(
+            problems[0].message,
+            "No pseudocode: not lifted yet: the block ends in hlt."
+        );
         assert_eq!(problems[0].address, Some(REFUSED));
     }
 

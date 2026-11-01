@@ -908,6 +908,7 @@ mod tests {
             ty: "long".to_string(),
             name: name.to_string(),
             placements: Vec::new(),
+            fragment: None,
         };
         LiftedFunction {
             name: "f".to_string(),
@@ -1002,11 +1003,13 @@ mod tests {
                 ty: "long".to_string(),
                 name: "z".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             locals: vec![crate::lift::Variable {
                 ty: "long".to_string(),
                 name: "x".to_string(),
                 placements: Vec::new(),
+                fragment: None,
             }],
             body: vec![
                 assign("x", AstNode::constant(1, 8)),

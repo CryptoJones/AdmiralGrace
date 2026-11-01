@@ -342,6 +342,7 @@ pub(crate) fn make(
         return done;
     }
     let mut parts: BTreeMap<String, AstNode> = BTreeMap::new();
+    let mut slots: BTreeMap<String, (&Made, i64)> = BTreeMap::new();
     let mut addresses: Vec<AstNode> = Vec::new();
     for variable in made {
         let inside: Vec<(String, i64, u32, String)> = function
@@ -373,6 +374,7 @@ pub(crate) fn make(
                 addresses.push((**target).clone());
             }
             parts.insert(name.clone(), part);
+            slots.insert(name.clone(), (variable, *offset - variable.offset));
         }
         // Declared where the first of its locals was; with none, among the
         // stack locals by offset, the nearest the frame first.
@@ -411,6 +413,40 @@ pub(crate) fn make(
     if parts.is_empty() {
         return done;
     }
+    // A local read at another width than its own, `*(long *)&local_18`, is
+    // the part those bytes are.
+    let mut widened = |node: AstNode| match node {
+        AstNode::Deref { target } => match *target {
+            AstNode::Cast { ty, target: inner } => {
+                let read = match (ty.strip_suffix(" *"), inner.as_ref()) {
+                    (Some(width), AstNode::AddressOf { target: local }) => match local.as_ref() {
+                        AstNode::Var { name } => slots.get(name).and_then(|(variable, at)| {
+                            let size = parse_type_in(store, width).ok()?.element_size?;
+                            Some(part_of(variable, *at, size, width, store))
+                        }),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match read {
+                    Some(read) => {
+                        if let AstNode::Deref { target } = &read {
+                            addresses.push((**target).clone());
+                        }
+                        read
+                    }
+                    None => AstNode::Deref {
+                        target: Box::new(AstNode::Cast { ty, target: inner }),
+                    },
+                }
+            }
+            other => AstNode::Deref {
+                target: Box::new(other),
+            },
+        },
+        other => other,
+    };
+    rewrite_all(&mut function.body, &mut widened);
     let mut rewrite = |node: AstNode| match node {
         AstNode::Var { name } => match parts.get(&name) {
             Some(part) => part.clone(),

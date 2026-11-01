@@ -316,9 +316,12 @@ pub enum ProjectCmd {
     /// state`, `uint32_t` — by its lift name: it is declared so, a load or
     /// store through a typed pointer reads as the member it is, `p->x`, and
     /// a constant compared with or assigned to an enumeration's variable as
-    /// its enumerator. The type must be a scalar of the variable's width;
-    /// one that is not is refused with a note in the pseudocode. `clear` in
-    /// place of TYPE takes the type back
+    /// its enumerator. The type must be a scalar of the variable's width,
+    /// or, for a parameter, a structure passed by value in its registers,
+    /// which read as its members, `p.y`; one that is not is refused with a
+    /// note in the pseudocode. The variable `return` types what the
+    /// function returns, a structure its callers read as its members.
+    /// `clear` in place of TYPE takes the type back
     VarType {
         /// The project file to change.
         #[arg(long)]
@@ -326,7 +329,7 @@ pub enum ProjectCmd {
         /// The function: its name, or its address with its space when it
         /// names one.
         function: String,
-        /// The variable, as the lift declares it.
+        /// The variable, as the lift declares it, or `return`.
         variable: String,
         /// The C type, or `clear`.
         #[arg(value_name = "TYPE")]

@@ -848,11 +848,13 @@ mod tests {
                     ty: "int".to_string(),
                     name: "a".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 }],
                 locals: vec![Variable {
                     ty: "long".to_string(),
                     name: "total".to_string(),
                     placements: Vec::new(),
+                    fragment: None,
                 }],
                 body: Vec::new(),
                 frame: Vec::new(),

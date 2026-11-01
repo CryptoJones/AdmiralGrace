@@ -8256,16 +8256,14 @@ mod tests {
         );
 
         // A function the lifter refuses has no body, and the problem says
-        // why: register_tm_clones shifts right, which the lifter does not
-        // read.
-        let _ = app.update(Message::FunctionSelected(0x10c0));
+        // why: _start ends in hlt, which the lifter has no reading of.
+        let _ = app.update(Message::FunctionSelected(0x1060));
         assert_eq!(app.work.pseudocode, None);
         assert!(app.work.line_addresses.is_empty());
         assert!(
-            app.bottom
-                .problems
-                .iter()
-                .any(|problem| problem.message.contains("not lifted yet: shr")),
+            app.bottom.problems.iter().any(|problem| problem
+                .message
+                .contains("not lifted yet: the block ends in hlt")),
             "{:?}",
             app.bottom.problems
         );

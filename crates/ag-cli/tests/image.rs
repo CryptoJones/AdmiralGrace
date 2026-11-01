@@ -859,7 +859,7 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "register_tm_clones"])
+        .args(["pseudocode", "_start"])
         .output()
         .expect("the ag binary runs");
 
@@ -867,13 +867,13 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     let report = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         report,
-        "// register_tm_clones at 0x10c0: not lifted yet: shr\n"
+        "// _start at 0x1060: not lifted yet: the block ends in hlt\n"
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "register_tm_clones", "--json"])
+        .args(["pseudocode", "_start", "--json"])
         .output()
         .expect("the ag binary runs");
 
@@ -883,7 +883,7 @@ fn a_function_the_lifter_refuses_is_reported_with_the_reason() {
     assert_eq!(report["lifted"], serde_json::json!(false));
     assert_eq!(
         report["reason"],
-        serde_json::json!("not lifted yet: shr")
+        serde_json::json!("not lifted yet: the block ends in hlt")
     );
     assert_eq!(report["text"], serde_json::Value::Null);
 }
@@ -1181,12 +1181,12 @@ fn a_function_of_an_export_names_itself_and_holds_the_four_reports() {
     assert_eq!(sum_to["pseudocode"]["lifted"], serde_json::json!(true));
 
     // A function the lifter refuses carries the reason instead.
-    let init = dir.json("functions/0x10c0.json");
-    assert_eq!(init["name"], serde_json::json!("register_tm_clones"));
+    let init = dir.json("functions/0x1060.json");
+    assert_eq!(init["name"], serde_json::json!("_start"));
     assert_eq!(init["pseudocode"]["lifted"], serde_json::json!(false));
     assert_eq!(
         init["pseudocode"]["reason"],
-        serde_json::json!("not lifted yet: shr")
+        serde_json::json!("not lifted yet: the block ends in hlt")
     );
 
     // The listing is what `disasm` prints.
