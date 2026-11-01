@@ -304,6 +304,30 @@ prompt on it. The rows follow the pseudocode as it is read again — another fun
 a split, an inline — and are read only while the tab is showing. What they say is `ag image
 variables`'s (`docs/cli.md`).
 
+## The stack frame of a function
+
+**View ▸ Stack layout** opens the bottom workspace on its Stack tab, or closes it when the tab
+is showing: the frame of the function on screen from the top down, under a line giving the
+prologue's `sub rsp` and how far below its value at entry the stack pointer goes. A row is a
+slot the code touches, by its offset from the stack pointer at the function's entry — `-0x14`,
+the offset `local_14` is named after — and its size: its region (`caller` for the caller's
+frame at `+0x8` and above, `return address`, `saved rbp` for a register the prologue pushes,
+`local`), the variable it belongs to and its type, `[made]` after one the analyst made, whether
+its address is taken, and the sizes the code accesses it at. The bytes the code never touches
+are rows too, accessed `never`, so the frame reads without a hole. Clicking a row selects the
+first line of the pseudocode that names its variable, as the Variables tab does.
+
+**Create…** on a row, a slot or a gap, makes a variable in the frame: the prompt opens on the
+row's offset and size, `-0x14 4` — on a variable the analyst made, on the variable as made —
+and takes `OFFSET SIZE [NAME] [TYPE]`, `-0x18 8 pair int[2]`; the name is a C identifier that
+is no type's word, `-` for none, and the type the rest of the line. The lift then reads the
+bytes as one variable: a slot of its whole size is the variable, `pair`; an element of an
+array, `pair[1]`; anything else the bytes at an offset, `*(int *)((char *)&pair + 4)`. One that
+overlaps another is refused, and the leading comments say why. **Remove** on a row of a
+variable the analyst made takes it back, and the lift's own locals return. The words are kept
+on the function's record in the project file, and undo takes them back. What the rows say is
+`ag image stack`'s (`docs/cli.md`).
+
 ## Possible values
 
 Selecting a pseudocode line says in the status bar what the variables it reads can hold

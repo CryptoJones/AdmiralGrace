@@ -236,6 +236,19 @@ pub enum Message {
     /// Rename a variable from the Variables pane, by the name the lift
     /// declares it with: the rename prompt opens on it.
     VariableRename(String),
+    /// Show the Stack layout pane — the bottom panel open on its tab — or
+    /// hide it when it is showing.
+    ViewStack,
+    /// A row of the Stack layout pane was clicked, by its place in the
+    /// frame: the first line of the pseudocode that names its variable is
+    /// selected.
+    StackRowSelected(usize),
+    /// Make a variable in the frame from a row of the Stack layout pane:
+    /// the prompt opens on the row's offset and size.
+    StackCreateVariable(usize),
+    /// Take back the variable the analyst made that a row of the Stack
+    /// layout pane belongs to.
+    StackRemoveVariable(usize),
     /// Restore the default layout.
     ViewResetLayout,
     /// Restart the analysis.
@@ -346,6 +359,9 @@ pub enum PromptKind {
     /// `VAR@ADDRESS=…`, or `VAR off` / `VAR@ADDRESS off` to take the word
     /// back.
     VariableValue,
+    /// A variable made in the stack frame of the function on screen:
+    /// `OFFSET SIZE [NAME] [TYPE]`, `-` for no name.
+    StackVariable,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -695,6 +711,14 @@ pub struct BottomPanel {
     pub variables_of: Option<u64>,
     /// The variable last clicked in the Variables tab, by its lift name.
     pub selected_variable: Option<String>,
+    /// The stack frame of the function `stack_of`, as the Stack layout tab
+    /// lists it. Read while the tab is showing, as the variables are.
+    pub stack: Option<ag_image::StackFrame>,
+    /// The function the frame was read for; `None` when it is to be read
+    /// again.
+    pub stack_of: Option<u64>,
+    /// The row last clicked in the Stack layout tab, by its offset.
+    pub selected_slot: Option<i64>,
 }
 
 /// The names a view replaces as it draws.
@@ -2492,6 +2516,7 @@ impl App {
         self.work.pseudocode = self.pseudocode_of(address);
         // The variable clicked was one of the last function's.
         self.bottom.selected_variable = None;
+        self.bottom.selected_slot = None;
         self.refresh_variables();
         self.work.line_values = None;
         self.work.bytes = self.provider.bytes(address).unwrap_or_default();
@@ -3011,7 +3036,8 @@ impl App {
             | Message::EditMark(_)
             | Message::EditOperandFormat
             | Message::EditNop
-            | Message::EditOpaque => true,
+            | Message::EditOpaque
+            | Message::StackRemoveVariable(_) => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -3031,6 +3057,7 @@ impl App {
                         | PromptKind::SplitVariable
                         | PromptKind::VersionVariable
                         | PromptKind::VariableValue
+                        | PromptKind::StackVariable
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -3187,8 +3214,9 @@ impl App {
     }
 
     /// Read the variables of the function on screen again for the Variables
-    /// tab while it is showing; while it is not, mark them to be read when
-    /// it is, since each read lifts the function.
+    /// tab while it is showing, and its frame for the Stack layout tab;
+    /// while a tab is not showing, mark what it lists to be read when it
+    /// is, since each read lifts the function.
     fn refresh_variables(&mut self) {
         let showing = self.show_bottom && self.bottom.tab == BottomTab::Variables;
         match self.work.listing_of {
@@ -3201,6 +3229,42 @@ impl App {
                 self.bottom.variables_of = None;
             }
         }
+        let showing = self.show_bottom && self.bottom.tab == BottomTab::Stack;
+        match self.work.listing_of {
+            Some(function) if showing => {
+                self.bottom.stack = self.provider.stack_frame(function);
+                self.bottom.stack_of = Some(function);
+            }
+            _ => {
+                self.bottom.stack = None;
+                self.bottom.stack_of = None;
+            }
+        }
+    }
+
+    /// The rows the Stack layout tab lists: the frame of the function on
+    /// screen, from the top down.
+    pub(crate) fn shown_stack(&self) -> Option<&ag_image::StackFrame> {
+        let function = self.work.listing_of?;
+        if self.bottom.stack_of != Some(function) {
+            return None;
+        }
+        self.bottom.stack.as_ref()
+    }
+
+    /// The variable the analyst made that holds the frame offset `offset`,
+    /// in the record of the function keyed `key`.
+    fn stack_variable_at(
+        &self,
+        key: &str,
+        offset: i64,
+    ) -> Option<ag_corpus::project::StackVariable> {
+        self.annotations
+            .annotation_for(key)?
+            .stack_vars
+            .iter()
+            .find(|v| v.offset <= offset && offset < v.offset + i64::from(v.size))
+            .cloned()
     }
 
     /// The variables the Variables tab lists: those of the function on
@@ -4097,6 +4161,121 @@ impl App {
                 };
                 self.work.tab = ViewTab::Pseudocode;
                 return self.update(Message::PseudocodeLineSelected(line, address));
+            }
+
+            Message::ViewStack => {
+                if self.show_bottom && self.bottom.tab == BottomTab::Stack {
+                    self.show_bottom = false;
+                } else {
+                    self.show_bottom = true;
+                    self.bottom.tab = BottomTab::Stack;
+                }
+                self.refresh_variables();
+            }
+
+            Message::StackRowSelected(index) => {
+                let Some(row) = self
+                    .shown_stack()
+                    .and_then(|frame| frame.rows.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                self.bottom.selected_slot = Some(row.offset);
+                let Some((lift_name, _)) = row.variable.clone() else {
+                    self.notice = Some(format!(
+                        "No variable lives at {}",
+                        row.placement().spelled()
+                    ));
+                    return Task::none();
+                };
+                let Some(function) = self.work.listing_of else {
+                    return Task::none();
+                };
+                let variable = self
+                    .provider
+                    .variables(function)
+                    .into_iter()
+                    .find(|variable| variable.lift_name == lift_name);
+                let Some((line, address)) = variable
+                    .as_ref()
+                    .and_then(|variable| self.first_line_naming(variable))
+                else {
+                    self.notice = Some(format!(
+                        "No line of the pseudocode reads or writes {lift_name}"
+                    ));
+                    return Task::none();
+                };
+                self.work.tab = ViewTab::Pseudocode;
+                return self.update(Message::PseudocodeLineSelected(line, address));
+            }
+
+            Message::StackCreateVariable(index) => {
+                let Some(row) = self
+                    .shown_stack()
+                    .and_then(|frame| frame.rows.get(index))
+                    .cloned()
+                else {
+                    self.notice = Some("Open a function to make a variable in its frame".into());
+                    return Task::none();
+                };
+                self.bottom.selected_slot = Some(row.offset);
+                // The row's place, and the variable already there when the
+                // analyst made it.
+                let key = self
+                    .work
+                    .listing_of
+                    .map(|function| self.annotation_key(function))
+                    .unwrap_or_default();
+                let made = self.stack_variable_at(&key, row.offset);
+                let (offset, size, name, ty) = match &made {
+                    Some(made) => (
+                        made.offset,
+                        made.size,
+                        made.name.clone().unwrap_or_else(|| "-".to_string()),
+                        made.ty.clone().unwrap_or_default(),
+                    ),
+                    None => (row.offset, row.size, String::new(), String::new()),
+                };
+                let sign = if offset < 0 { "-" } else { "" };
+                let mut value = format!("{sign}{:#x} {size}", offset.unsigned_abs());
+                for part in [name, ty] {
+                    if !part.is_empty() {
+                        value.push(' ');
+                        value.push_str(&part);
+                    }
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::StackVariable,
+                    title: "Create stack variable (OFFSET SIZE [NAME] [TYPE], - for no name)",
+                    value,
+                });
+            }
+
+            Message::StackRemoveVariable(index) => {
+                let Some(function) = self.work.listing_of else {
+                    return Task::none();
+                };
+                let Some(row) = self
+                    .shown_stack()
+                    .and_then(|frame| frame.rows.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let Some(made) = self.stack_variable_at(&key, row.offset) else {
+                    self.notice = Some(format!(
+                        "The analyst made no variable at {}",
+                        row.placement().spelled()
+                    ));
+                    return Task::none();
+                };
+                self.annotations
+                    .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                    .clear_stack_var(made.offset);
+                self.annotations.prune();
+                self.notice = Some(format!("Took back the variable at {}", made.spelled()));
             }
 
             Message::VariableRename(lift_name) => {
@@ -5218,6 +5397,35 @@ impl App {
                         self.annotations.prune();
                         self.tell_variable_edits();
                     }
+                    PromptKind::StackVariable => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let (offset, size, name, ty) = match parse_stack_variable(&prompt.value) {
+                            Ok(word) => word,
+                            Err(why) => {
+                                self.notice = Some(why);
+                                return Task::none();
+                            }
+                        };
+                        self.annotations
+                            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                            .set_stack_var(offset, size, name.as_deref(), ty.as_deref());
+                        self.annotations.prune();
+                        let made = ag_corpus::project::StackVariable {
+                            offset,
+                            size,
+                            name,
+                            ty,
+                        };
+                        self.bottom.selected_slot = Some(offset);
+                        self.notice = Some(format!(
+                            "Made {} at {}",
+                            made.name.as_deref().unwrap_or("a variable"),
+                            made.spelled()
+                        ));
+                    }
                     PromptKind::VariableValue => {
                         let Some(function) = self.work.listing_of else {
                             return Task::none();
@@ -6335,6 +6543,50 @@ pub(crate) fn il_graph(
         .collect();
     let edges = Graph::edges_of_blocks(&blocks);
     Graph { blocks, edges }
+}
+
+/// A stack variable as the analyst types it: `OFFSET SIZE [NAME] [TYPE]`
+/// — `-0x18 8 pair int[2]`, `-0x18 8 int[2]`, `-0x10 8 - unsigned long` —
+/// the name a C identifier that is no type's word, `-` for none, and the
+/// type the rest of the line.
+fn parse_stack_variable(text: &str) -> Result<(i64, u32, Option<String>, Option<String>), String> {
+    let usage = "Give the variable as OFFSET SIZE [NAME] [TYPE]: -0x18 8 pair int[2]";
+    let mut words = text.split_whitespace();
+    let offset = words.next().ok_or_else(|| usage.to_string())?;
+    let offset = ag_corpus::project::parse_offset(offset)?;
+    let size = words.next().ok_or_else(|| usage.to_string())?;
+    let size = match size.strip_prefix("0x").or_else(|| size.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => size.parse::<u32>(),
+    }
+    .ok()
+    .filter(|size| *size > 0)
+    .ok_or_else(|| format!("{size:?} is not a size in bytes such as 4 or 0x10"))?;
+    let rest: Vec<&str> = words.collect();
+    const TYPE_WORDS: [&str; 16] = [
+        "char", "short", "int", "long", "unsigned", "signed", "float", "double", "struct", "union",
+        "enum", "const", "volatile", "void", "_Bool", "bool",
+    ];
+    let named = |word: &str| {
+        let mut chars = word.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !TYPE_WORDS.contains(&word)
+            && !word.ends_with("_t")
+    };
+    let (name, ty) = match rest.split_first() {
+        None => (None, &[][..]),
+        Some((&"-", ty)) => (None, ty),
+        Some((first, ty)) if named(first) => (Some(first.to_string()), ty),
+        Some(_) => (None, rest.as_slice()),
+    };
+    let ty = (!ty.is_empty()).then(|| ty.join(" "));
+    if let Some(ty) = &ty {
+        ag_image::parse_type(ty)?;
+    }
+    Ok((offset, size, name, ty))
 }
 
 /// Whether `text` holds `word` as a whole word: not inside a longer
@@ -11948,6 +12200,186 @@ mod tests {
         let _ = app.update(Message::EditRedo);
         let body = app.work.pseudocode.clone().unwrap_or_default();
         assert!(body.contains("rax = &completed.0;"), "{body}");
+    }
+
+    #[test]
+    fn the_stack_pane_lays_out_the_frame_and_makes_variables_in_it_with_undo() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        let _ = app.update(Message::FunctionSelected(0x1161));
+        // Not read until the pane shows.
+        assert!(app.shown_stack().is_none());
+        let _ = app.update(Message::ViewStack);
+        assert!(app.show_bottom);
+        assert_eq!(app.bottom.tab, BottomTab::Stack);
+        let rows = |app: &App| -> Vec<(String, u32, String, Option<String>, bool)> {
+            app.shown_stack()
+                .map(|frame| {
+                    frame
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            (
+                                row.offset_text(),
+                                row.size,
+                                row.region.spelled(),
+                                row.variable.as_ref().map(|(name, _)| name.clone()),
+                                row.gap,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let row = |offset: &str, size: u32, region: &str, variable: Option<&str>, gap: bool| {
+            (
+                offset.to_string(),
+                size,
+                region.to_string(),
+                variable.map(str::to_string),
+                gap,
+            )
+        };
+        assert_eq!(
+            rows(&app),
+            vec![
+                row("+0x0", 8, "return address", None, false),
+                row("-0x8", 8, "saved rbp", None, false),
+                row("-0x10", 8, "local", Some("local_10"), false),
+                row("-0x14", 4, "local", Some("local_14"), false),
+                row("-0x18", 4, "local", None, true),
+                row("-0x1c", 4, "local", None, false),
+            ]
+        );
+        let _ = crate::views::bottom_panel::view(&app);
+
+        // A row selects the first line of the pseudocode naming its
+        // variable; a gap has none.
+        let _ = app.update(Message::StackRowSelected(3));
+        assert_eq!(app.work.tab, ViewTab::Pseudocode);
+        assert_eq!(app.bottom.selected_slot, Some(-0x14));
+        let line = app.work.selected_line.expect("a line selected");
+        assert!(
+            body(&app)
+                .lines()
+                .nth(line)
+                .is_some_and(|text| text.contains("for (local_14 = 1;")),
+            "line {line} of {}",
+            body(&app)
+        );
+        let _ = app.update(Message::StackRowSelected(4));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("No variable lives at [sp-0x18] 4 bytes")
+        );
+
+        // Create opens on the row's place; the analyst makes an array over
+        // the counter and the gap below it.
+        let _ = app.update(Message::StackCreateVariable(3));
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::StackVariable);
+        assert_eq!(prompt.value, "-0x14 4");
+        let _ = app.update(Message::PromptChanged("-0x18 8 pair int[2]".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Made pair at [sp-0x18] 8 bytes")
+        );
+        let made = body(&app);
+        assert!(made.contains("  int pair[2];\n"), "{made}");
+        assert!(made.contains("pair[1] <= a"), "{made}");
+        let frame = rows(&app);
+        assert_eq!(frame[3], row("-0x14", 4, "local", Some("pair"), false));
+        assert_eq!(frame[4], row("-0x18", 4, "local", Some("pair"), true));
+        assert!(app.shown_stack().is_some_and(|frame| frame.rows[3].analyst));
+        let _ = crate::views::bottom_panel::view(&app);
+        // On the analyst's variable, Create opens on the variable as made.
+        let _ = app.update(Message::StackCreateVariable(4));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.value.as_str()),
+            Some("-0x18 8 pair int[2]")
+        );
+        let _ = app.update(Message::PromptCancel);
+
+        // Undo takes the variable back, and redo makes it again.
+        let _ = app.update(Message::EditUndo);
+        assert!(body(&app).contains("local_14"), "{}", body(&app));
+        assert_eq!(rows(&app)[3].3.as_deref(), Some("local_14"));
+        let _ = app.update(Message::EditRedo);
+        assert!(body(&app).contains("int pair[2];"), "{}", body(&app));
+
+        // Remove takes it back too, as one change undo remembers.
+        let _ = app.update(Message::StackRemoveVariable(3));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Took back the variable at [sp-0x18] 8 bytes")
+        );
+        assert!(!body(&app).contains("pair"), "{}", body(&app));
+        let _ = app.update(Message::EditUndo);
+        assert!(body(&app).contains("int pair[2];"), "{}", body(&app));
+        // A row of the lift's own has nothing to remove.
+        let _ = app.update(Message::StackRemoveVariable(2));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("The analyst made no variable at [sp-0x10] 8 bytes")
+        );
+
+        // What is not a variable is said, and changes nothing.
+        let _ = app.update(Message::StackCreateVariable(5));
+        let _ = app.update(Message::PromptChanged("-0x1c four".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("\"four\" is not a size in bytes such as 4 or 0x10")
+        );
+        assert!(body(&app).contains("int pair[2];"), "{}", body(&app));
+
+        // View ▸ Stack layout again hides the pane, and the rows are not
+        // kept.
+        let _ = app.update(Message::ViewStack);
+        assert!(!app.show_bottom);
+        assert!(app.shown_stack().is_none());
+    }
+
+    #[test]
+    fn a_stack_variable_is_read_as_the_analyst_types_it() {
+        let word = |offset: i64, size: u32, name: Option<&str>, ty: Option<&str>| {
+            Ok((
+                offset,
+                size,
+                name.map(str::to_string),
+                ty.map(str::to_string),
+            ))
+        };
+        assert_eq!(
+            parse_stack_variable("-0x18 8 pair int[2]"),
+            word(-0x18, 8, Some("pair"), Some("int[2]"))
+        );
+        assert_eq!(
+            parse_stack_variable("-0x18 8 int[2]"),
+            word(-0x18, 8, None, Some("int[2]"))
+        );
+        assert_eq!(
+            parse_stack_variable("-16 8 unsigned long"),
+            word(-16, 8, None, Some("unsigned long"))
+        );
+        assert_eq!(
+            parse_stack_variable("-16 8 - size_t"),
+            word(-16, 8, None, Some("size_t"))
+        );
+        assert_eq!(parse_stack_variable("-16 0x8"), word(-16, 8, None, None));
+        assert_eq!(
+            parse_stack_variable("-16 8 n"),
+            word(-16, 8, Some("n"), None)
+        );
+        assert!(parse_stack_variable("-16").is_err());
+        assert!(parse_stack_variable("-16 0").is_err());
+        assert!(parse_stack_variable("-16 8 x int[2][2]").is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! numbers without scraping the text. `pseudocode` and `export` take the
 //! engine's options, `--option NAME VALUE`, which `ag catalog` lists.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ag_image::{Binary, Options};
@@ -320,6 +321,21 @@ pub enum ImageCmd {
         /// A project file whose words the function is lifted with — its
         /// merges, splits and versions made — and whose renames name the
         /// variables.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// The stack frame of a function, from the top down: the caller's
+    /// slots, the return address, the saved registers and the locals, each
+    /// slot with the sizes it is accessed at, the variable it belongs to and
+    /// whether its address is taken, and the gaps the code never touches.
+    Stack {
+        /// The function: an address such as `0x1149`, or a name.
+        target: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose words the function is lifted with — its
+        /// stack variables made — and whose renames name the variables.
         #[arg(long)]
         project: Option<PathBuf>,
     },
@@ -933,6 +949,7 @@ pub fn run(
         | ImageCmd::Opaque { project, .. }
         | ImageCmd::Merges { project, .. }
         | ImageCmd::Variables { project, .. }
+        | ImageCmd::Stack { project, .. }
         | ImageCmd::Values { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
@@ -1049,6 +1066,7 @@ pub fn run(
         ImageCmd::Variables { target, json, .. } => {
             variables(&image, &target, json, project.as_ref())
         }
+        ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
         ImageCmd::Values {
             target,
             at,
@@ -2479,6 +2497,212 @@ fn variables(
         print!("{}", variables_text(&name, address, &variables));
     }
     Ok(0)
+}
+
+/// The stack frame of the function at `address`, and the name each of its
+/// variables is shown by — the analyst's rename in `project`, with the
+/// lift's after it; or why there is none.
+pub(crate) fn stack_frame_of(
+    image: &Binary,
+    address: u64,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> std::result::Result<(ag_image::StackFrame, BTreeMap<String, String>), String> {
+    let name = image
+        .function_name(address)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("sub_{address:x}"));
+    let frame = image
+        .stack_frame(address)
+        .map_err(|error| format!("{name} at {address:#x}: {}", error.reason))?;
+    let mut shown = BTreeMap::new();
+    if let Some(project) = project {
+        let key = format!("{address:#x}");
+        for row in &frame.rows {
+            if let Some((lift_name, _)) = &row.variable {
+                if let Some(renamed) = project.variable_name(&key, lift_name) {
+                    shown.insert(lift_name.clone(), renamed);
+                }
+            }
+        }
+    }
+    Ok((frame, shown))
+}
+
+/// `ag image FILE stack FUNCTION`: the function's frame, slot by slot.
+fn stack(
+    image: &Binary,
+    target: &str,
+    json: bool,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> Result<i32> {
+    anyhow::ensure!(
+        image.supports_disassembly(),
+        "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
+        image.language()
+    );
+    let address = resolve(image, target)?;
+    let (frame, shown) =
+        stack_frame_of(image, address, project).map_err(|error| anyhow::anyhow!(error))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stack_json(&frame, &shown))?
+        );
+    } else {
+        print!("{}", stack_text(&frame, &shown));
+    }
+    Ok(0)
+}
+
+/// The variable a frame row belongs to as the listing shows it: the
+/// analyst's name, with the lift's after it in parentheses when the two
+/// differ, and `made` after a variable the analyst made.
+fn frame_variable(row: &ag_image::FrameRow, shown: &BTreeMap<String, String>) -> String {
+    let Some((lift_name, _)) = &row.variable else {
+        return String::new();
+    };
+    let mut text = match shown.get(lift_name) {
+        Some(renamed) if renamed != lift_name => format!("{renamed} ({lift_name})"),
+        _ => lift_name.clone(),
+    };
+    if row.analyst {
+        text.push_str(" [made]");
+    }
+    text
+}
+
+/// The sizes a frame row is accessed at, `4` or `4, 8`; `never` for a gap.
+fn frame_access(row: &ag_image::FrameRow) -> String {
+    if row.gap {
+        return "never".to_string();
+    }
+    row.sizes
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The frame as text: a heading, the prologue's `sub rsp`, then one row a
+/// slot or gap from the top down — its offset, size, region, variable and
+/// type, whether its address is taken, and the sizes it is accessed at.
+pub(crate) fn stack_text(frame: &ag_image::StackFrame, shown: &BTreeMap<String, String>) -> String {
+    let mut out = format!(
+        "// stack frame of {} at {:#x}
+",
+        frame.function, frame.address
+    );
+    match frame.frame_size {
+        Some(size) => out.push_str(&format!(
+            "// sub rsp, {size:#x}; {:#x} bytes below the return address
+",
+            frame.depth
+        )),
+        None => out.push_str(&format!(
+            "// no sub rsp; {:#x} bytes below the return address
+",
+            frame.depth
+        )),
+    }
+    let rows: Vec<[String; 7]> = frame
+        .rows
+        .iter()
+        .map(|row| {
+            [
+                row.offset_text(),
+                row.size.to_string(),
+                row.region.spelled(),
+                frame_variable(row, shown),
+                row.variable
+                    .as_ref()
+                    .map(|(_, ty)| ty.clone())
+                    .unwrap_or_default(),
+                if row.address_taken { "yes" } else { "" }.to_string(),
+                frame_access(row),
+            ]
+        })
+        .collect();
+    let header = [
+        "offset", "size", "region", "variable", "type", "taken", "access",
+    ];
+    let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
+    for row in &rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let line = |cells: &[&str]| -> String {
+        let mut text = String::new();
+        for (i, (cell, width)) in cells.iter().zip(&widths).enumerate() {
+            if i > 0 {
+                text.push_str("  ");
+            }
+            if i == 1 {
+                text.push_str(&format!("{cell:>width$}"));
+            } else {
+                text.push_str(&format!("{cell:width$}"));
+            }
+        }
+        format!(
+            "{}
+",
+            text.trim_end()
+        )
+    };
+    out.push_str(&line(&header));
+    for row in &rows {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        out.push_str(&line(&cells));
+    }
+    out
+}
+
+/// The frame as JSON: the function, the prologue's `sub rsp`, the depth,
+/// and a row a slot or gap with its parts.
+pub(crate) fn stack_json(
+    frame: &ag_image::StackFrame,
+    shown: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = frame
+        .rows
+        .iter()
+        .map(|row| {
+            let (lift_name, ty) = match &row.variable {
+                Some((name, ty)) => (Some(name.clone()), Some(ty.clone())),
+                None => (None, None),
+            };
+            let name = lift_name
+                .as_ref()
+                .map(|lift| shown.get(lift).cloned().unwrap_or_else(|| lift.clone()));
+            let register = match &row.region {
+                ag_image::FrameRegion::Saved(register) => Some(register.clone()),
+                _ => None,
+            };
+            serde_json::json!({
+                "offset": row.offset,
+                "offset_text": row.offset_text(),
+                "size": row.size,
+                "region": row.region.kind(),
+                "region_text": row.region.spelled(),
+                "register": register,
+                "variable": name,
+                "lift_name": lift_name,
+                "type": ty,
+                "analyst": row.analyst,
+                "address_taken": row.address_taken,
+                "gap": row.gap,
+                "sizes": row.sizes,
+                "accessed_at": row.accessed_at.iter().map(|at| format!("{at:#x}")).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "function": frame.function,
+        "address": format!("{:#x}", frame.address),
+        "frame_size": frame.frame_size,
+        "depth": frame.depth,
+        "rows": rows,
+    })
 }
 
 /// The name a variable is shown by: the analyst's, with the lift's after

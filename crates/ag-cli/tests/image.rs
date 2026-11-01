@@ -2377,3 +2377,58 @@ fn the_variables_of_a_function_say_where_each_lives() {
     assert!(!ok);
     assert!(error.contains("tangle at 0x401067: irreducible"), "{error}");
 }
+
+#[test]
+fn the_stack_frame_of_a_function_reads_slot_by_slot_from_the_top() {
+    // The return address, the saved rbp, the two locals, the slot the
+    // parameter is stored in and never read from but propagated, and the
+    // gap between.
+    assert_eq!(
+        image("sample.elf", &["stack", "sum_to"]),
+        "// stack frame of sum_to at 0x1161\n\
+         // no sub rsp; 0x8 bytes below the return address\n\
+         offset  size  region          variable  type  taken  access\n\
+         +0x0       8  return address\n\
+         -0x8       8  saved rbp                              8\n\
+         -0x10      8  local           local_10  long         8\n\
+         -0x14      4  local           local_14  int          4\n\
+         -0x18      4  local                                  never\n\
+         -0x1c      4  local                                  4\n"
+    );
+    // The prologue's `sub rsp` is the frame's size.
+    let ping = image("inline.elf", &["stack", "ping"]);
+    assert!(
+        ping.starts_with(
+            "// stack frame of ping at 0x401000\n// sub rsp, 0x20; 0x28 bytes below the return address\n"
+        ),
+        "{ping}"
+    );
+    assert!(
+        ping.contains("-0xc       4  local           local_c   int          4\n"),
+        "{ping}"
+    );
+
+    // As JSON, with the parts of each row.
+    let report = image_json("sample.elf", &["stack", "sum_to"]);
+    assert_eq!(report["function"], "sum_to");
+    assert_eq!(report["depth"], 8);
+    assert_eq!(report["frame_size"], serde_json::Value::Null);
+    let rows = report["rows"].as_array().expect("the rows");
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[1]["region"], "saved");
+    assert_eq!(rows[1]["register"], "rbp");
+    assert_eq!(
+        rows[1]["accessed_at"],
+        serde_json::json!(["0x1165", "0x1196"])
+    );
+    assert_eq!(rows[3]["offset"], -20);
+    assert_eq!(rows[3]["offset_text"], "-0x14");
+    assert_eq!(rows[3]["variable"], "local_14");
+    assert_eq!(rows[3]["type"], "int");
+    assert_eq!(rows[4]["gap"], true);
+
+    // A function the lifter refuses says why.
+    let (ok, _, error) = image_result("inline.elf", &["stack", "tangle"]);
+    assert!(!ok);
+    assert!(error.contains("tangle at 0x401067: irreducible"), "{error}");
+}

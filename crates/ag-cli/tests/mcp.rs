@@ -752,3 +752,100 @@ fn the_variables_and_their_placements_are_read_through_the_server() {
     assert_eq!(replies[3]["result"]["isError"], true, "{:?}", replies[3]);
     let _ = std::fs::remove_file(&project);
 }
+
+#[test]
+fn the_stack_frame_and_the_analysts_stack_variables_go_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-stack-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("sample.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"stack_frame","arguments":{"target":"sum_to"}"#,
+            r#""name":"create_stack_variable","arguments":{"function":"sum_to","offset":"-0x18","size":8,"name":"pair","type":"int[2]"}"#,
+            r#""name":"stack_frame","arguments":{"target":"sum_to"}"#,
+            r#""name":"decompile","arguments":{"target":"sum_to"}"#,
+            r#""name":"remove_stack_variable","arguments":{"function":"sum_to","offset":-24}"#,
+            r#""name":"remove_stack_variable","arguments":{"function":"sum_to","offset":-24}"#,
+            r#""name":"create_stack_variable","arguments":{"function":"sum_to","offset":-24,"size":8,"type":"int[2][2]"}"#,
+            r#""name":"stack_frame","arguments":{"target":"sum_to"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 8);
+    let text = |i: usize| -> String {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let json = |i: usize| -> serde_json::Value {
+        serde_json::from_str(&text(i)).unwrap_or_else(|_| panic!("JSON: {}", text(i)))
+    };
+    for i in [0, 1, 2, 3, 4, 7] {
+        assert_eq!(replies[i]["result"]["isError"], false, "{:?}", replies[i]);
+    }
+    let before = json(0);
+    assert_eq!(before["function"], "sum_to");
+    let rows = before["rows"].as_array().expect("the rows");
+    assert_eq!(rows[1]["region_text"], "saved rbp");
+    assert_eq!(rows[3]["variable"], "local_14");
+    // Made, the variable is the record's and the frame's.
+    let made = json(1);
+    assert_eq!(
+        made["record"]["stack_vars"],
+        serde_json::json!([{
+            "offset": -24, "size": 8, "name": "pair", "type": "int[2]",
+            "spelled": "[sp-0x18] 8 bytes"
+        }])
+    );
+    let after = json(2);
+    let pair: Vec<&serde_json::Value> = after["rows"]
+        .as_array()
+        .expect("the rows")
+        .iter()
+        .filter(|row| row["variable"] == "pair")
+        .collect();
+    assert_eq!(pair.len(), 2, "{after}");
+    assert!(pair
+        .iter()
+        .all(|row| row["analyst"] == true && row["type"] == "int[2]"));
+    assert!(text(3).contains("int pair[2];"), "{}", text(3));
+    assert!(text(3).contains("pair[1] <= a"), "{}", text(3));
+    // Taken back once; a second time there is none, and a type that is not
+    // C is refused.
+    assert_eq!(json(4)["record"], serde_json::Value::Null);
+    assert_eq!(replies[5]["result"]["isError"], true, "{:?}", replies[5]);
+    assert_eq!(replies[6]["result"]["isError"], true, "{:?}", replies[6]);
+    assert!(text(6).contains("an array of arrays"), "{}", text(6));
+    assert_eq!(json(7), before);
+    let _ = std::fs::remove_file(&project);
+}

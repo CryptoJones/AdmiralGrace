@@ -374,6 +374,11 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
         },
         Tool {
+            name: "stack_frame",
+            description: "A function's stack frame, from the top down, each row a slot the code touches or a gap it never touches, by its offset from the stack pointer at the function's entry (`+0x8`, `-0x14`, as the lift's `local_14` names count it) and its size: its region — `caller` for the caller's frame at `+0x8` and above (stack arguments, a Microsoft x64 home area), `return` for the return address at `+0x0`, `saved` for a slot a register's value on entry is stored into (the prologue's pushes, with `register`), `local` below — the sizes the code accesses it at, the variable it belongs to with its type (`variable` the analyst's rename, `lift_name` the lift's; `analyst` for a variable the analyst made), whether its address is taken, and the addresses of the instructions that access it. `frame_size` is N of the prologue's `sub rsp, N`, and `depth` how far below its value at entry the stack pointer goes. Read over the lift with the project's stack variables made.",
+            schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
+        },
+        Tool {
             name: "possible_values",
             description: "The possible values of a function's variables at each statement: for every statement, by its addresses, each variable it reads with what it can hold there and each it writes with what it can hold after — `5`, a set `{1, 3, 7}`, a range `0..=9`, a strided range `0..=36 step 4`, `undetermined` on a path no value takes, or `any`. Found forward from the entry through the arithmetic, joined where paths meet and widened at loop heads, and narrowed by each branch's condition on its arm (`a < 10`, `a + 1 < 10`, `a == 3`, a `switch` case); arithmetic wraps as the machine's does. The analyst's pinned values seed it. Only integer and pointer variables are followed; one whose address is taken, and a global, are not. Each set is also given as `kind` (constant, set, range, undetermined, any) with its numbers.",
             schema: json!({
@@ -475,6 +480,33 @@ fn tools() -> Vec<Tool> {
                     "address": { "type": "string", "description": "The address of the statement the word holds from; the whole function when absent." },
                 },
                 "required": ["function", "variable", "value"]
+            }),
+        },
+        Tool {
+            name: "create_stack_variable",
+            description: "Make a variable in a function's stack frame: the bytes from `offset` — counted from the stack pointer at the function's entry, as `stack_frame` and the lift's `local_<hex>` names count them, so `-0x20` is `local_20` — for `size` bytes, read by the lift as one variable named `name` (the lift's `local_<hex>` when absent) of C type `type` (`int`, `char *`, `char[16]`, `int[]`; the integer of the size, or an array of `char`, when absent). Every slot the code touches inside it is read as part of it: one at its offset and of its size is the variable itself; in an array of a known element type, one at an element's offset and size is the element, `buf[2]`; anything else is the bytes at an offset, `*(int *)((char *)&buf + 4)`. The name is the variable's lift name, which renames, merges, splits and pinned values key on. A variable that overlaps one made before it, whose type is not its size, or whose name the function declares already outside it, is refused, and the function's leading comments say why: `buf is not made at [sp-0x20] 16 bytes: it overlaps key at [sp-0x18] 8 bytes`. A variable already made at the offset is replaced. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "offset": { "type": ["string", "integer"], "description": "The offset from the stack pointer at entry: `-0x20`, `-32`, `8`." },
+                    "size": { "type": "integer", "description": "The size in bytes." },
+                    "name": { "type": "string", "description": "The variable's name." },
+                    "type": { "type": "string", "description": "The variable's C type." },
+                },
+                "required": ["function", "offset", "size"]
+            }),
+        },
+        Tool {
+            name: "remove_stack_variable",
+            description: "Take back the variable the analyst made at `offset` in a function's stack frame: the lift reads its own locals there again. An error when there was none. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "offset": { "type": ["string", "integer"], "description": "The variable's offset from the stack pointer at entry: `-0x20`, `-32`." },
+                },
+                "required": ["function", "offset"]
             }),
         },
         Tool {
@@ -1253,6 +1285,58 @@ impl Server {
                 let variables = crate::image::variables_of(&self.image, address, project)?;
                 Ok(Answer::json(crate::image::variables_json(
                     &name, address, &variables,
+                )))
+            }
+            "stack_frame" => {
+                let address = self.function(&text("target")?)?;
+                let project = self.project.as_ref().map(|project| &project.file);
+                let (frame, shown) = crate::image::stack_frame_of(&self.image, address, project)?;
+                Ok(Answer::json(crate::image::stack_json(&frame, &shown)))
+            }
+            "create_stack_variable" | "remove_stack_variable" => {
+                let address = self.function(&text("function")?)?;
+                let offset = match arguments.get("offset") {
+                    Some(Value::String(text)) => ag_corpus::project::parse_offset(text)?,
+                    Some(Value::Number(number)) => number
+                        .as_i64()
+                        .ok_or_else(|| format!("{number} is not an offset"))?,
+                    _ => return Err("\"offset\" is an offset such as -0x20 or -32".to_string()),
+                };
+                let mut had = true;
+                if name == "create_stack_variable" {
+                    let size = arguments
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .and_then(|size| u32::try_from(size).ok())
+                        .filter(|size| *size > 0)
+                        .ok_or_else(|| "\"size\" is a size in bytes, 1 or more".to_string())?;
+                    let label = optional_text("name")?
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty());
+                    let ty = optional_text("type")?
+                        .map(|ty| ty.trim().to_string())
+                        .filter(|ty| !ty.is_empty());
+                    if let Some(ty) = &ty {
+                        ag_image::parse_type(ty)?;
+                    }
+                    self.change(TargetKind::Function, address, |record| {
+                        record.set_stack_var(offset, size, label.as_deref(), ty.as_deref())
+                    })?;
+                } else {
+                    self.change(TargetKind::Function, address, |record| {
+                        had = record.clear_stack_var(offset)
+                    })?;
+                }
+                if !had {
+                    return Err(format!(
+                        "no stack variable was made at {offset} in the function at {address:#x}"
+                    ));
+                }
+                self.image
+                    .set_variable_edits(crate::image::variable_edits(&self.project()?.file));
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
                 )))
             }
             "possible_values" => {
@@ -2114,6 +2198,13 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
                     "spelled": value.spelled(),
                 })
             }).collect::<Vec<Value>>(),
+            "stack_vars": record.stack_vars.iter().map(|variable| json!({
+                "offset": variable.offset,
+                "size": variable.size,
+                "name": variable.name,
+                "type": variable.ty,
+                "spelled": variable.spelled(),
+            })).collect::<Vec<Value>>(),
         })
     };
     json!({
@@ -2337,6 +2428,7 @@ mod tests {
                 "set_inline",
                 "merge_candidates",
                 "variables",
+                "stack_frame",
                 "possible_values",
                 "merge_variables",
                 "unmerge_variable",
@@ -2345,6 +2437,8 @@ mod tests {
                 "version_variable",
                 "unversion_variable",
                 "set_variable_value",
+                "create_stack_variable",
+                "remove_stack_variable",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",

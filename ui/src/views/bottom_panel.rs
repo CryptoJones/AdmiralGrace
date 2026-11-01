@@ -1,5 +1,5 @@
 //! The bottom workspace: search results, problems, analysis log, patch
-//! history, and the variables of the function on screen.
+//! history, and the variables and stack frame of the function on screen.
 
 use iced::widget::{
     button, container, mouse_area, scrollable, Column, Container, Row, Space, Text,
@@ -25,16 +25,19 @@ pub enum BottomTab {
     PatchHistory,
     /// The variables of the function on screen, with where each lives.
     Variables,
+    /// The stack frame of the function on screen, slot by slot.
+    Stack,
 }
 
 impl BottomTab {
     /// Every tab, in display order.
-    pub const ALL: [BottomTab; 5] = [
+    pub const ALL: [BottomTab; 6] = [
         BottomTab::SearchResults,
         BottomTab::Problems,
         BottomTab::AnalysisLog,
         BottomTab::PatchHistory,
         BottomTab::Variables,
+        BottomTab::Stack,
     ];
 
     /// The tab label.
@@ -45,6 +48,7 @@ impl BottomTab {
             BottomTab::AnalysisLog => "Analysis Log",
             BottomTab::PatchHistory => "Patch History",
             BottomTab::Variables => "Variables",
+            BottomTab::Stack => "Stack",
         }
     }
 }
@@ -84,6 +88,7 @@ fn tab_strip(app: &App) -> Element<'_, Message> {
             BottomTab::AnalysisLog => app.bottom.log.len(),
             BottomTab::PatchHistory => app.annotations.patch_records().len(),
             BottomTab::Variables => app.shown_variables().len(),
+            BottomTab::Stack => app.shown_stack().map_or(0, |frame| frame.rows.len()),
         };
 
         let active = app.bottom.tab == tab;
@@ -280,6 +285,7 @@ fn content(app: &App) -> Element<'_, Message> {
                 .into()
         }
         BottomTab::Variables => variables(app),
+        BottomTab::Stack => stack(app),
     }
 }
 
@@ -376,6 +382,164 @@ fn variables(app: &App) -> Element<'_, Message> {
                     }),
             )
             .on_press(Message::VariableSelected(index)),
+        );
+    }
+    scrollable(list)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A small bordered button of a pane's row.
+fn row_button(label: &str, message: Message, width: f32) -> Element<'_, Message> {
+    button::Button::new(Text::new(label).size(11).color(color::MUTED))
+        .on_press(message)
+        .padding([2, 8])
+        .width(Length::Fixed(width))
+        .style(|_, status| button::Style {
+            background: match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Some(Background::Color(color::PANEL_ALT))
+                }
+                _ => None,
+            },
+            text_color: color::MUTED,
+            border: Border {
+                color: color::LINE,
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            ..button::Style::default()
+        })
+        .into()
+}
+
+/// The Stack layout tab: a row a slot of the frame of the function on
+/// screen, from the top down — its offset from the stack pointer at entry,
+/// size, region, the variable it belongs to and its type, whether its
+/// address is taken, and the sizes it is accessed at — and a row a gap the
+/// code never touches. Clicking a row selects the first line of the
+/// pseudocode that names its variable; Create makes a variable from the
+/// row, and Remove takes back one the analyst made.
+fn stack(app: &App) -> Element<'_, Message> {
+    let Some(frame) = app.shown_stack() else {
+        return subtle(if app.work.listing_of.is_some() {
+            "This function was not lifted, so its frame is not known."
+        } else {
+            "Open a function to lay out its stack frame."
+        })
+        .into();
+    };
+    let key = app.annotation_key(frame.address);
+    let cell = |text: String, width: f32, tint: iced::Color| {
+        Text::new(text)
+            .size(12)
+            .color(tint)
+            .font(MONO)
+            .width(Length::Fixed(width))
+    };
+    let mut list = Column::new().spacing(0).width(Length::Fill);
+    let summary = match frame.frame_size {
+        Some(size) => format!(
+            "sub rsp, {size:#x}; {:#x} bytes below the return address",
+            frame.depth
+        ),
+        None => format!(
+            "no sub rsp; {:#x} bytes below the return address",
+            frame.depth
+        ),
+    };
+    list = list.push(Container::new(cell(summary, 400.0, color::MUTED)).padding([2, 8]));
+    let header = Row::new()
+        .spacing(12)
+        .padding([2, 8])
+        .push(cell("offset".into(), 60.0, color::MUTED))
+        .push(cell("size".into(), 40.0, color::MUTED))
+        .push(cell("region".into(), 120.0, color::MUTED))
+        .push(
+            Text::new("variable")
+                .size(12)
+                .color(color::MUTED)
+                .font(MONO)
+                .width(Length::Fill),
+        )
+        .push(cell("type".into(), 110.0, color::MUTED))
+        .push(cell("taken".into(), 44.0, color::MUTED))
+        .push(cell("access".into(), 60.0, color::MUTED))
+        .push(Space::new().width(Length::Fixed(140.0)));
+    list = list.push(header);
+    for (index, row) in frame.rows.iter().enumerate() {
+        let selected = app.bottom.selected_slot == Some(row.offset);
+        let (name, ty) = match &row.variable {
+            Some((lift_name, ty)) => {
+                let shown = match app.annotations.variable_name(&key, lift_name) {
+                    Some(renamed) if renamed != *lift_name => format!("{renamed} ({lift_name})"),
+                    _ => lift_name.clone(),
+                };
+                let shown = if row.analyst {
+                    format!("{shown} [made]")
+                } else {
+                    shown
+                };
+                (shown, ty.clone())
+            }
+            None => (String::new(), String::new()),
+        };
+        let access = if row.gap {
+            "never".to_string()
+        } else {
+            row.sizes
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let tint = if row.gap { color::MUTED } else { color::TEXT };
+        let mut line = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .push(cell(row.offset_text(), 60.0, color::ADDR))
+            .push(cell(row.size.to_string(), 40.0, tint))
+            .push(cell(row.region.spelled(), 120.0, color::MUTED))
+            .push(
+                Text::new(name)
+                    .size(12)
+                    .color(tint)
+                    .font(MONO)
+                    .width(Length::Fill),
+            )
+            .push(cell(ty, 110.0, tint))
+            .push(cell(
+                if row.address_taken { "yes" } else { "" }.to_string(),
+                44.0,
+                tint,
+            ))
+            .push(cell(access, 60.0, color::MUTED))
+            .push(row_button(
+                "Create…",
+                Message::StackCreateVariable(index),
+                64.0,
+            ));
+        line = if row.analyst {
+            line.push(row_button(
+                "Remove",
+                Message::StackRemoveVariable(index),
+                64.0,
+            ))
+        } else {
+            line.push(Space::new().width(Length::Fixed(64.0)))
+        };
+        list = list.push(
+            mouse_area(
+                Container::new(line)
+                    .padding([2, 8])
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: selected.then_some(Background::Color(color::FOCUS_BG)),
+                        ..container::Style::default()
+                    }),
+            )
+            .on_press(Message::StackRowSelected(index)),
         );
     }
     scrollable(list)

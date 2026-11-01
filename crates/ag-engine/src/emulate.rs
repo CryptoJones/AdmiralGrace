@@ -1124,6 +1124,7 @@ mod tests {
             medium_analysis: Analysis::default(),
             stack_pointer: Map::new(),
             types: Map::new(),
+            slots: Default::default(),
         }
     }
 

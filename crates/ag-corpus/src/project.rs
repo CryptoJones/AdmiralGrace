@@ -572,6 +572,66 @@ pub struct Annotation {
     /// function as the bytes say and misreads nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<VariableValue>,
+    /// On a function's record: the variables the analyst made in its stack
+    /// frame, each its offset from the stack pointer at the function's
+    /// entry, its size in bytes, and optionally its name and C type, in the
+    /// order they are made. The lift reads the bytes each covers as that
+    /// one variable. A reader that does not know the field reads the lift's
+    /// own locals and misreads nothing, so the format version does not
+    /// change for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack_vars: Vec<StackVariable>,
+}
+
+/// A variable the analyst made in a function's stack frame, on its
+/// record: `{"offset": -32, "size": 16, "name": "buf", "type": "char[16]"}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackVariable {
+    /// The offset from the stack pointer at the function's entry: `-32` for
+    /// the bytes `local_20` starts at.
+    pub offset: i64,
+    /// The size in bytes.
+    pub size: u32,
+    /// The name, which is the variable's lift name; the lift's `local_<hex>`
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The C type: `int`, `char *`, `char[16]`; one of the size when
+    /// absent.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub ty: Option<String>,
+}
+
+impl StackVariable {
+    /// The variable's place as a variable's placement spells it: `[sp-0x20]
+    /// 16 bytes`.
+    pub fn spelled(&self) -> String {
+        let sign = if self.offset < 0 { '-' } else { '+' };
+        let bytes = if self.size == 1 { "byte" } else { "bytes" };
+        format!(
+            "[sp{sign}{:#x}] {} {bytes}",
+            self.offset.unsigned_abs(),
+            self.size
+        )
+    }
+}
+
+/// A stack offset as the analyst types it: `-0x20`, `-32`, `0x8`, `+8`.
+pub fn parse_offset(text: &str) -> Result<i64, String> {
+    let raw = text.trim();
+    let (negative, digits) = match raw.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+    };
+    let magnitude = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        Some(hex) => i64::from_str_radix(hex, 16),
+        None => digits.parse::<i64>(),
+    }
+    .map_err(|_| format!("{raw:?} is not an offset such as -0x20 or 8"))?;
+    Ok(if negative { -magnitude } else { magnitude })
 }
 
 /// A value or an inclusive range pinned on a variable, on a function's
@@ -672,14 +732,15 @@ pub struct VariableSplit {
 pub type VariableVersion = VariableSplit;
 
 /// The analyst's merges of one function's variables, `(keep, gone)`, its
-/// splits, `(variable, at)`, its new versions, `(variable, at)`, and its
+/// splits, `(variable, at)`, its new versions, `(variable, at)`, its
 /// pinned values, `(variable, at, min, max)`, `at` `None` for the whole
-/// function.
+/// function, and its stack variables, `(offset, size, name, type)`.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<(String, Option<u64>, i64, i64)>,
+    Vec<(i64, u32, Option<String>, Option<String>)>,
 );
 
 impl Annotation {
@@ -714,6 +775,7 @@ impl Annotation {
             splits: Vec::new(),
             versions: Vec::new(),
             values: Vec::new(),
+            stack_vars: Vec::new(),
         }
     }
 
@@ -748,6 +810,7 @@ impl Annotation {
             splits: Vec::new(),
             versions: Vec::new(),
             values: Vec::new(),
+            stack_vars: Vec::new(),
         }
     }
 
@@ -781,6 +844,7 @@ impl Annotation {
             splits: Vec::new(),
             versions: Vec::new(),
             values: Vec::new(),
+            stack_vars: Vec::new(),
         }
     }
 
@@ -1001,6 +1065,7 @@ impl Annotation {
             && self.splits.is_empty()
             && self.versions.is_empty()
             && self.values.is_empty()
+            && self.stack_vars.is_empty()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -1090,6 +1155,30 @@ impl Annotation {
             Some(held) => *held = word,
             None => self.values.push(word),
         }
+    }
+
+    /// Make a variable of `size` bytes at `offset` in the function's stack
+    /// frame, named and typed as given: a variable already made at the
+    /// offset is replaced in its place.
+    pub fn set_stack_var(&mut self, offset: i64, size: u32, name: Option<&str>, ty: Option<&str>) {
+        let word = StackVariable {
+            offset,
+            size,
+            name: name.map(str::to_string),
+            ty: ty.map(str::to_string),
+        };
+        match self.stack_vars.iter_mut().find(|v| v.offset == offset) {
+            Some(held) => *held = word,
+            None => self.stack_vars.push(word),
+        }
+    }
+
+    /// Take back the stack variable made at `offset`, and say whether there
+    /// was one.
+    pub fn clear_stack_var(&mut self, offset: i64) -> bool {
+        let before = self.stack_vars.len();
+        self.stack_vars.retain(|v| v.offset != offset);
+        self.stack_vars.len() != before
     }
 
     /// Take back the value pinned on `variable` at `at`, and say whether
@@ -1560,10 +1649,11 @@ impl ProjectFile {
         removable
     }
 
-    /// The analyst's merges, splits, new versions and pinned values of each
-    /// function's variables, by the value of the function's entry. A split,
-    /// a version or a value at an address that does not read is left out,
-    /// and so is a value that says no value or range.
+    /// The analyst's merges, splits, new versions, pinned values and stack
+    /// variables of each function's variables, by the value of the
+    /// function's entry. A split, a version or a value at an address that
+    /// does not read is left out, and so is a value that says no value or
+    /// range.
     pub fn variable_edits(&self) -> BTreeMap<u64, VariableWords> {
         let read = |words: &[VariableSplit]| -> Vec<(String, u64)> {
             words
@@ -1593,7 +1683,8 @@ impl ProjectFile {
                     && (!a.merges.is_empty()
                         || !a.splits.is_empty()
                         || !a.versions.is_empty()
-                        || !a.values.is_empty())
+                        || !a.values.is_empty()
+                        || !a.stack_vars.is_empty())
             })
             .filter_map(|a| {
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
@@ -1604,6 +1695,10 @@ impl ProjectFile {
                         read(&a.splits),
                         read(&a.versions),
                         values(&a.values),
+                        a.stack_vars
+                            .iter()
+                            .map(|v| (v.offset, v.size, v.name.clone(), v.ty.clone()))
+                            .collect(),
                     ),
                 ))
             })
@@ -2834,6 +2929,7 @@ mod tests {
                     vec![("local_14".to_string(), 0x401020)],
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 )
             )])
         );
@@ -2872,6 +2968,7 @@ mod tests {
                         ("a".to_string(), 0x40101b),
                         ("local_c".to_string(), 0x40102e)
                     ],
+                    Vec::new(),
                     Vec::new(),
                 )
             )])
@@ -2912,6 +3009,7 @@ mod tests {
                         ("a".to_string(), None, 6, 6),
                         ("eax".to_string(), Some(0x401007), 0, 3)
                     ],
+                    Vec::new(),
                 )
             )])
         );
@@ -2944,5 +3042,63 @@ mod tests {
         assert!(parse_value_or_range("7..0").is_err());
         assert!(parse_value_or_range("five").is_err());
         assert!(parse_value_or_range("").is_err());
+    }
+
+    #[test]
+    fn stack_variables_are_kept_on_the_functions_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        record.set_stack_var(-0x20, 16, Some("buf"), Some("char[16]"));
+        record.set_stack_var(-0x28, 8, None, None);
+        // A word at the same offset is replaced.
+        record.set_stack_var(-0x20, 16, Some("key"), Some("char[16]"));
+        assert_eq!(record.stack_vars.len(), 2, "one word per offset");
+        assert_eq!(record.stack_vars[0].spelled(), "[sp-0x20] 16 bytes");
+        let edits = project.variable_edits();
+        assert_eq!(
+            edits,
+            BTreeMap::from([(
+                0x401000,
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    vec![
+                        (
+                            -0x20,
+                            16,
+                            Some("key".to_string()),
+                            Some("char[16]".to_string())
+                        ),
+                        (-0x28, 8, None, None)
+                    ],
+                )
+            )])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"stack_vars\": ["), "{json}");
+        assert!(json.contains("\"offset\": -32"), "{json}");
+        assert!(json.contains("\"type\": \"char[16]\""), "{json}");
+        assert!(!json.contains("\"values\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.variable_edits(), edits);
+        assert_eq!(read.format, FORMAT_VERSION);
+        // Taken back, the record goes.
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        assert!(record.clear_stack_var(-0x20));
+        assert!(!record.clear_stack_var(-0x20));
+        assert!(record.clear_stack_var(-0x28));
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_stack_offset_is_read_as_the_analyst_types_it() {
+        assert_eq!(parse_offset("-0x20"), Ok(-32));
+        assert_eq!(parse_offset("-32"), Ok(-32));
+        assert_eq!(parse_offset("+0x8"), Ok(8));
+        assert_eq!(parse_offset(" 8 "), Ok(8));
+        assert!(parse_offset("sp-8").is_err());
+        assert!(parse_offset("").is_err());
     }
 }

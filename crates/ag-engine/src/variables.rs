@@ -94,6 +94,12 @@ impl LiftedFunction {
                     used.push(first);
                 }
             }
+            // A store into a part of the variable — an element of an
+            // analyst's array, the bytes at an offset into it — assigns it
+            // too, though as memory it stays live.
+            defined.extend(parts_stored(&self.body, name));
+            defined.sort_unstable();
+            defined.dedup();
             (defined, used)
         };
         let kinds = self
@@ -116,6 +122,45 @@ impl LiftedFunction {
             })
             .collect()
     }
+}
+
+/// The first addresses of the statements of `statements` that store into
+/// a part of `name`: `name[2] = …`, `*(int *)((char *)&name + 4) = …`.
+fn parts_stored(statements: &[crate::lift::Statement], name: &str) -> Vec<u64> {
+    use crate::ast::AstNode;
+    use crate::lift::StatementKind;
+    let into = |node: &AstNode| match node {
+        AstNode::Assign { lhs, .. } => match crate::slice::strip_casts(lhs) {
+            AstNode::Var { .. } => false,
+            target => target.any(&|n| match n {
+                AstNode::AddressOf { target } => {
+                    matches!(target.as_ref(), AstNode::Var { name: held } if held == name)
+                }
+                n => matches!(
+                    crate::stack_vars::indexed(n),
+                    Some((AstNode::Var { name: held }, _)) if held == name
+                ),
+            }),
+        },
+        _ => false,
+    };
+    let mut found = Vec::new();
+    for statement in statements {
+        if let StatementKind::For { init, step, .. } = &statement.kind {
+            for part in [init, step] {
+                if into(&part.node) {
+                    found.extend(part.addresses.first());
+                }
+            }
+        }
+        if into(&statement.node) {
+            found.extend(statement.addresses.first());
+        }
+        for child in statement.children() {
+            found.extend(parts_stored(child, name));
+        }
+    }
+    found
 }
 
 #[cfg(test)]

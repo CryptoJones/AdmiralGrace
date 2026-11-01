@@ -89,25 +89,44 @@ pub struct VariableEdits {
     /// The values and ranges the analyst pinned, followed through the body
     /// after the versions and before the merges ([`crate::values`]).
     pub values: Vec<crate::values::PinnedValue>,
+    /// The variables the analyst made in the function's stack frame, read
+    /// by the lift as it makes its stack locals ([`crate::stack_vars`]),
+    /// before every other word.
+    pub stack_vars: Vec<crate::stack_vars::StackVar>,
 }
 
 /// One function's merges, `(keep, gone)`, splits, `(variable, at)`, new
-/// versions, `(variable, at)`, and pinned values, `(variable, at, min,
-/// max)`, as the project file gives them.
+/// versions, `(variable, at)`, pinned values, `(variable, at, min, max)`,
+/// and stack variables, `(offset, size, name, type)`, as the project file
+/// gives them.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<crate::values::PinnedWord>,
+    Vec<StackWord>,
 );
 
+/// A stack variable as the project file gives it: `(offset, size, name,
+/// type)`.
+pub type StackWord = (i64, u32, Option<String>, Option<String>);
+
 impl From<VariableWords> for VariableEdits {
-    fn from((merges, splits, versions, values): VariableWords) -> Self {
+    fn from((merges, splits, versions, values, stack_vars): VariableWords) -> Self {
         Self {
             merges,
             splits,
             versions,
             values: values.into_iter().map(Into::into).collect(),
+            stack_vars: stack_vars
+                .into_iter()
+                .map(|(offset, size, name, ty)| crate::stack_vars::StackVar {
+                    offset,
+                    size,
+                    name,
+                    ty,
+                })
+                .collect(),
         }
     }
 }
@@ -119,6 +138,7 @@ impl VariableEdits {
             && self.splits.is_empty()
             && self.versions.is_empty()
             && self.values.is_empty()
+            && self.stack_vars.is_empty()
     }
 }
 
