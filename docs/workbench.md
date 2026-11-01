@@ -328,6 +328,14 @@ variable the analyst made takes it back, and the lift's own locals return. The w
 on the function's record in the project file, and undo takes them back. What the rows say is
 `ag image stack`'s (`docs/cli.md`).
 
+**View ▸ Stack offsets** adds a column to the listing after each instruction's address: the
+stack pointer's depth below its value at the function's entry, before the instruction — `000`
+at the entry, `-0x8` after the `push rbp`, `-0x28` after the `sub rsp, 0x20` below it, and back
+to `000` at the `ret`. `?` stands where the depth is not known: after `and rsp, -16`, a `sub
+rsp` of a register, or where two paths meet at two depths. The column is off at first, the
+toggle takes it off again, and a lifted level's rows leave it blank. The depths are `ag image
+disasm --stack-offsets`'s (`docs/cli.md`).
+
 ## Possible values
 
 Selecting a pseudocode line says in the status bar what the variables it reads can hold

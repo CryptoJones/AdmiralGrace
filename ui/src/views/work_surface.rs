@@ -438,17 +438,27 @@ fn listing_row<'a>(
     // function's, mixed into the row's surface so the text stays legible.
     let tint = renamed.line_color(line.address, app.block_of(line.address));
 
+    // The address, then the stack-offset column when the view shows it.
+    let mut cells = Row::new().align_y(Alignment::Center).spacing(10).push(
+        Text::new(format!("{:08X}", line.address))
+            .size(12)
+            .color(color::ADDR)
+            .font(MONO)
+            .width(Length::Fixed(88.0)),
+    );
+    if let Some(depth) = stack_column(app, line) {
+        cells = cells.push(
+            Text::new(depth)
+                .size(12)
+                .color(color::DIM)
+                .font(MONO)
+                .align_x(iced::alignment::Horizontal::Right)
+                .width(Length::Fixed(56.0)),
+        );
+    }
+
     let row = Container::new(
-        Row::new()
-            .align_y(Alignment::Center)
-            .spacing(10)
-            .push(
-                Text::new(format!("{:08X}", line.address))
-                    .size(12)
-                    .color(color::ADDR)
-                    .font(MONO)
-                    .width(Length::Fixed(88.0)),
-            )
+        cells
             .push(
                 Text::new(line.bytes.clone())
                     .size(12)
@@ -515,6 +525,22 @@ fn listing_row<'a>(
         .into();
 
     element
+}
+
+/// The stack-offset column of an instruction row, when the view shows it:
+/// the stack pointer's depth below its value at the function's entry, `000`
+/// at the entry, `-0x28` below it, `?` where it is not known. A row with no
+/// depth to show — a statement of a lifted level, a provider that does not
+/// track it — is blank.
+pub(crate) fn stack_column(app: &App, line: &ListingLine) -> Option<String> {
+    if !app.show_stack_offsets {
+        return None;
+    }
+    Some(
+        line.stack_offset
+            .map(ag_image::StackOffset::text)
+            .unwrap_or_default(),
+    )
 }
 
 /// A comment standing on its own line above an instruction.

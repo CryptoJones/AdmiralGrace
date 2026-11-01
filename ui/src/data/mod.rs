@@ -126,6 +126,11 @@ pub struct ListingLine {
     pub registers: Vec<String>,
     /// Optional trailing comment.
     pub comment: Option<String>,
+    /// Where the stack pointer stands before the instruction, against its
+    /// value at the function's entry: the listing's stack-offset column. A
+    /// provider that does not track it, and a row of a lifted level, carry
+    /// none.
+    pub stack_offset: Option<ag_image::StackOffset>,
 }
 
 /// One row of a hex dump.

@@ -79,6 +79,7 @@ pub use ag_engine::swift::{
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
+pub use ag_engine::stack_offsets::StackOffset;
 pub use ag_engine::stack_vars::{parse_type, StackVar};
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Placement;
@@ -212,6 +213,10 @@ pub struct Instruction {
     pub comment: Option<String>,
     /// The call the instruction makes, when it is a direct call.
     pub call: Option<Call>,
+    /// Where the stack pointer stands before the instruction, against its
+    /// value at the function's entry: the listing's stack-offset column.
+    /// None in an image the x86 decoder does not read.
+    pub stack_offset: Option<StackOffset>,
 }
 
 /// One basic block of a function.
@@ -3067,6 +3072,14 @@ impl Binary {
 
         let decoded = self.decoded_of(code);
         let cfg = self.walk(&decoded.disasm, address);
+        // The stack pointer's depth is read off x86's pushes, pops and
+        // frame pointer; the ARM and plugin decoders have no column.
+        let stack_offsets = match (self.bitness, &self.arm, &self.plugin_arch) {
+            (Some(bitness), None, None) => {
+                ag_engine::stack_offsets(&decoded.disasm, &cfg, address, bitness)
+            }
+            _ => BTreeMap::new(),
+        };
 
         // The direct calls are gathered first: a listing says which symbol a
         // call goes to, and that is the same answer the references give.
@@ -3184,6 +3197,7 @@ impl Binary {
                         None
                     },
                     call: call_at.get(&instruction.address).cloned(),
+                    stack_offset: stack_offsets.get(&instruction.address).copied(),
                 });
             }
 
