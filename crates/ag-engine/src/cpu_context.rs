@@ -125,6 +125,10 @@ pub struct DecodedInsn {
     /// Whether the instruction carries a `rep` or `repne` prefix: a string
     /// instruction repeated `rcx` times.
     pub rep: bool,
+    /// Whether the instruction after it — its delay slot — runs before its
+    /// flow takes effect, as a MIPS branch's does: the branch's block ends
+    /// after that instruction, and the fall-through is the one after it.
+    pub delay_slot: bool,
 }
 
 /// The name of an instruction's form, as the x86 decoder numbers it: `None`
@@ -303,6 +307,7 @@ impl CpuContext for X86IcedContext {
                 flags_read: 0,
                 flags_written: 0,
                 rep: false,
+                delay_slot: false,
             });
         }
         let mnemonic = ins.mnemonic() as u32;
@@ -390,6 +395,7 @@ impl CpuContext for X86IcedContext {
             flags_read: ins.rflags_read(),
             flags_written: ins.rflags_modified(),
             rep: ins.has_rep_prefix() || ins.has_repne_prefix(),
+            delay_slot: false,
         })
     }
 

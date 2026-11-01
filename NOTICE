@@ -8,9 +8,10 @@ under the Apache License, Version 2.0, through the kuna-analysis crate and the
 crates it pulls in (kuna-base, kuna-num, kuna-sleigh, kuna-decomp). The test
 fixture crates/ag-engine/tests/fixtures/sample.elf is copied from kuna's
 integrations/web/test/fixtures. The compiled SLEIGH specifications under
-crates/ag-engine/specs/arm and crates/ag-engine/specs/aarch64 are Ghidra's ARM
-and AArch64 processor specifications, vendored by kuna and compiled with kuna's
-SLEIGH compiler (see the READMEs there). The following attribution is reproduced from
+crates/ag-engine/specs/arm, crates/ag-engine/specs/aarch64 and
+crates/ag-engine/specs/mips are Ghidra's ARM, AArch64 and MIPS processor
+specifications, vendored by kuna and compiled with kuna's SLEIGH compiler (see
+the READMEs there). The following attribution is reproduced from
 kuna's NOTICE file:
 
     kuna

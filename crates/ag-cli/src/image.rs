@@ -343,6 +343,25 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The global pointer of each function — the value the architecture's
+    /// global pointer register, MIPS's `gp`, holds in it — and where the
+    /// value came from: the analyst, the function's own prologue, the
+    /// image's `_gp` symbol, or the start of the GOT and 0x7ff0
+    GlobalPointer {
+        /// The functions: addresses such as `0x20084`, or names. Every
+        /// function when none is named.
+        functions: Vec<String>,
+        /// Every function, as when none is named.
+        #[arg(long, conflicts_with = "functions")]
+        all: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A project file whose words on the global pointer stand over
+        /// what the image says.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The value a register holds at one instruction: the instructions
     /// that define it and the instructions that read it — not every
     /// instruction that names the register, since a later write starts a
@@ -523,6 +542,26 @@ struct InstructionJson {
     /// at the function's entry: 0 at the entry, negative below it; null
     /// where it is not known.
     stack_offset: Option<i64>,
+    /// The address a register-relative operand names, when the register's
+    /// value is known — the global pointer's — and what is there; absent
+    /// where nothing is resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedJson>,
+}
+
+/// What a register-relative operand names, as JSON.
+#[derive(Debug, Serialize)]
+struct ResolvedJson {
+    /// The address.
+    address: u64,
+    /// The address, as a hex string.
+    address_hex: String,
+    /// How the instruction uses it: `memory` for a load or a store,
+    /// `address` for an address computed into a register, `through` for an
+    /// indirect call or jump to the word loaded from it.
+    kind: &'static str,
+    /// What the image calls the thing there, as the listing says it.
+    name: Option<String>,
 }
 
 /// One basic block, as JSON.
@@ -592,6 +631,21 @@ struct StringFunctionJson {
 pub(crate) struct StringsJson {
     /// The strings.
     strings: Vec<StringJson>,
+}
+
+/// A resolved operand, as JSON.
+fn resolved_json(resolved: &ag_image::ResolvedOperand) -> ResolvedJson {
+    let address = resolved.resolved.address();
+    ResolvedJson {
+        address,
+        address_hex: format!("{address:#x}"),
+        kind: match resolved.resolved {
+            ag_image::ResolvedAddress::Memory(_) => "memory",
+            ag_image::ResolvedAddress::Address(_) => "address",
+            ag_image::ResolvedAddress::Through(_) => "through",
+        },
+        name: resolved.name.clone(),
+    }
 }
 
 /// One edge of a control-flow graph, as JSON.
@@ -915,8 +969,134 @@ pub(crate) fn open_image(
         image.set_removable_stores(project.removable_stores());
         image.set_inlines(project.inlines());
         image.set_variable_edits(variable_edits(project));
+        let words = global_pointer_words(project);
+        if words != ag_image::GlobalPointerWords::default() && !image.set_global_pointer_words(words) {
+            eprintln!(
+                "note: the project's global pointer means nothing to {}: it keeps none the engine follows",
+                image.language()
+            );
+        }
     }
     Ok(image)
+}
+
+/// The analyst's words on the global pointer the project holds: its value
+/// for the whole image, and for single functions.
+pub(crate) fn global_pointer_words(
+    project: &ag_corpus::project::ProjectFile,
+) -> ag_image::GlobalPointerWords {
+    ag_image::GlobalPointerWords {
+        image: project.image_global_pointer(),
+        functions: project.global_pointers(),
+    }
+}
+
+/// One function's global pointer, as JSON.
+#[derive(Debug, Serialize)]
+pub(crate) struct GlobalPointerJson {
+    /// The function's entry.
+    address: u64,
+    /// The entry, as a hex string.
+    address_hex: String,
+    /// The function's name.
+    name: String,
+    /// The value, when anything says what it is.
+    value: Option<u64>,
+    /// The value, as a hex string.
+    value_hex: Option<String>,
+    /// Where the value came from: `analyst`, `prologue`, `symbol` or `got`.
+    source: Option<&'static str>,
+    /// The instruction of the prologue that sets it, for `prologue`.
+    at: Option<String>,
+    /// Whether the analyst's word is the function's own rather than the
+    /// image's, for `analyst`; whether the prologue computes it from the
+    /// function's own address, for `prologue`.
+    own: Option<bool>,
+    /// Where the value came from, as the text report says it.
+    text: Option<String>,
+}
+
+/// The global pointers of `functions` — every function when empty — as
+/// JSON, under the image's convention.
+pub(crate) fn global_pointers_json(image: &Binary, functions: &[u64]) -> Vec<GlobalPointerJson> {
+    let conv = image.global_pointer_convention();
+    functions
+        .iter()
+        .map(|&address| {
+            let found = image.global_pointer(address);
+            let (at, own) = match found.map(|found| found.source) {
+                Some(ag_image::GlobalPointerSource::Prologue { at, pic }) => {
+                    (Some(format!("{at:#x}")), Some(pic))
+                }
+                Some(ag_image::GlobalPointerSource::Analyst { function }) => (None, Some(function)),
+                _ => (None, None),
+            };
+            GlobalPointerJson {
+                address,
+                address_hex: format!("{address:#x}"),
+                name: image
+                    .function_name(address)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("sub_{address:x}")),
+                value: found.map(|found| found.value),
+                value_hex: found.map(|found| format!("{:#x}", found.value)),
+                source: found.map(|found| found.source.kind()),
+                at,
+                own,
+                text: found
+                    .zip(conv)
+                    .map(|(found, conv)| found.source.describe(conv)),
+            }
+        })
+        .collect()
+}
+
+/// Report the global pointer of each of `targets`, or of every function.
+fn global_pointer(image: &Binary, targets: &[String], json: bool) -> Result<i32> {
+    let Some(conv) = image.global_pointer_convention() else {
+        anyhow::bail!(
+            "{} keeps no global pointer the engine follows: only 32-bit MIPS's gp is",
+            image.language()
+        );
+    };
+    let functions: Vec<u64> = if targets.is_empty() {
+        image
+            .functions()
+            .iter()
+            .map(|function| function.address)
+            .collect()
+    } else {
+        targets
+            .iter()
+            .map(|target| resolve(image, target))
+            .collect::<Result<_>>()?
+    };
+    let rows = global_pointers_json(image, &functions);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "register": conv.name,
+                "functions": rows,
+            }))?
+        );
+        return Ok(0);
+    }
+    println!("global pointer: {}", conv.name);
+    let width = rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
+    for row in &rows {
+        match (&row.value_hex, &row.text) {
+            (Some(value), Some(text)) => println!(
+                "{} {:<width$} {value:>10}  {text}",
+                row.address_hex, row.name
+            ),
+            _ => println!(
+                "{} {:<width$} {:>10}  nothing says",
+                row.address_hex, row.name, "?"
+            ),
+        }
+    }
+    Ok(0)
 }
 
 /// Report on a program image.
@@ -984,6 +1164,7 @@ pub fn run(
         | ImageCmd::Merges { project, .. }
         | ImageCmd::Variables { project, .. }
         | ImageCmd::Stack { project, .. }
+        | ImageCmd::GlobalPointer { project, .. }
         | ImageCmd::Values { project, .. }
         | ImageCmd::Defuse { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
@@ -1107,6 +1288,9 @@ pub fn run(
             variables(&image, &target, json, project.as_ref())
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
+        ImageCmd::GlobalPointer {
+            functions, json, ..
+        } => global_pointer(&image, &functions, json),
         ImageCmd::Values {
             target,
             at,
@@ -1640,8 +1824,13 @@ pub(crate) fn listing_text(
             } else {
                 String::new()
             };
+            let resolved = instruction
+                .resolved
+                .as_ref()
+                .map(|resolved| format!("  ; {}", resolved.text()))
+                .unwrap_or_default();
             let line = format!(
-                "{:#x}{depth} {} {} {}",
+                "{:#x}{depth} {} {} {}{resolved}",
                 instruction.address,
                 bytes.join(" "),
                 instruction.mnemonic,
@@ -3628,6 +3817,7 @@ fn block_json(block: &ag_image::Block) -> BlockJson {
                 stack_offset: instruction
                     .stack_offset
                     .and_then(ag_image::StackOffset::known),
+                resolved: instruction.resolved.as_ref().map(resolved_json),
             })
             .collect(),
     }

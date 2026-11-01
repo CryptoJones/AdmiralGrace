@@ -2559,3 +2559,88 @@ fn the_stack_frame_of_a_function_reads_slot_by_slot_from_the_top() {
     assert!(!ok);
     assert!(error.contains("tangle at 0x401067: irreducible"), "{error}");
 }
+
+#[test]
+fn a_mips_listing_reads_its_operands_through_the_global_pointer() {
+    let text = image("mips_pic.elf", &["disasm", "main"]);
+    assert!(text.contains("; main at 0x20084 in .text"), "{text}");
+    assert!(
+        text.contains("0x200a4 2c 80 19 8e lw t9, -0x7fd4(s0)  ; [0x2223c] = puts\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("0x200a8 09 f8 20 03 jalr t9  ; [0x2223c] = puts\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("addiu a0, at, 0x1209  ; 0x21209 \"hello\""),
+        "{text}"
+    );
+    // The delay slot is in its branch's block.
+    assert!(
+        text.contains("0x200ac 25 e0 00 02 or gp, s0, zero\n; block 0x200b0"),
+        "{text}"
+    );
+
+    let json = image_json("mips_pic.elf", &["disasm", "main"]);
+    let instructions: Vec<&serde_json::Value> = json["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|block| block["instructions"].as_array().unwrap())
+        .collect();
+    let jalr = instructions
+        .iter()
+        .find(|instruction| instruction["address_hex"] == "0x200a8")
+        .expect("the jalr");
+    assert_eq!(jalr["resolved"]["kind"], "through");
+    assert_eq!(jalr["resolved"]["address_hex"], "0x2223c");
+    assert_eq!(jalr["resolved"]["name"], "= puts");
+    assert_eq!(jalr["call"]["name"], "puts");
+
+    // Big-endian too.
+    let text = image("mips_nopic.elf", &["disasm", "sum"]);
+    assert!(
+        text.contains("sw v0, -0x7fe0(gp)  ; [0x22100] counter"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_global_pointer_of_each_function_is_listed_with_where_it_came_from() {
+    let text = image("mips_pic.elf", &["global-pointer"]);
+    assert!(text.starts_with("global pointer: gp\n"), "{text}");
+    assert!(
+        text.contains("0x20000 add          0x2a210  _gp symbol\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("0x20008 sum          0x2a210  PIC prologue at 0x20028\n"),
+        "{text}"
+    );
+    let text = image("mips_pic_nogp.elf", &["global-pointer", "add", "0x20084"]);
+    assert!(
+        text.contains("add") && text.contains(".got + 0x7ff0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("main") && text.contains("PIC prologue at 0x20098"),
+        "{text}"
+    );
+    let text = image("mips_nopic.elf", &["global-pointer", "--all"]);
+    assert!(
+        text.contains("__start    0x2a0e0  prologue at 0x20004"),
+        "{text}"
+    );
+
+    let json = image_json("mips_nopic.elf", &["global-pointer", "__start"]);
+    assert_eq!(json["register"], "gp");
+    assert_eq!(json["functions"][0]["source"], "prologue");
+    assert_eq!(json["functions"][0]["at"], "0x20004");
+    assert_eq!(json["functions"][0]["own"], false);
+    assert_eq!(json["functions"][0]["value_hex"], "0x2a0e0");
+
+    let (ok, _, stderr) = image_result("sample.elf", &["global-pointer"]);
+    assert!(!ok);
+    assert!(stderr.contains("keeps no global pointer"), "{stderr}");
+}

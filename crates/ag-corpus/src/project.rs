@@ -541,6 +541,14 @@ pub struct Annotation {
     /// format version does not change for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<bool>,
+    /// On a function's record: the value the analyst says the global
+    /// pointer register (MIPS's `gp`) holds in the function, `0x…`, over
+    /// what its prologue, the image's `_gp` symbol or its GOT say — and
+    /// over the project's own `global_pointer`. A reader that does not know
+    /// the field reads the operands through the pointer as the image says,
+    /// so the format version does not change for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_pointer: Option<String>,
     /// On a function's record: the analyst's merges of its variables, each
     /// `[keep, gone]` — every occurrence of `gone` reads `keep`, and `gone`
     /// is no longer declared — in the order they are made. The names are
@@ -771,6 +779,7 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            global_pointer: None,
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
@@ -806,6 +815,7 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            global_pointer: None,
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
@@ -840,6 +850,7 @@ impl Annotation {
             overrides: BTreeMap::new(),
             drop_stores: false,
             inline: None,
+            global_pointer: None,
             merges: Vec::new(),
             splits: Vec::new(),
             versions: Vec::new(),
@@ -1061,6 +1072,7 @@ impl Annotation {
             && self.overrides.is_empty()
             && !self.drop_stores
             && self.inline.is_none()
+            && self.global_pointer.is_none()
             && self.merges.is_empty()
             && self.splits.is_empty()
             && self.versions.is_empty()
@@ -1247,6 +1259,13 @@ pub struct ProjectFile {
     /// the segments added, removed and renamed.
     #[serde(default, skip_serializing_if = "Layout::is_empty")]
     pub layout: Layout,
+    /// The value the analyst says the global pointer register (MIPS's `gp`)
+    /// holds in every function, `0x…`, over what the image says; a
+    /// function's record may say otherwise for that function. A reader that
+    /// does not know the field reads the operands through the pointer as
+    /// the image says, so the format version does not change for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_pointer: Option<String>,
 }
 
 /// The layout the image is read under, as the analyst corrected it.
@@ -1324,6 +1343,7 @@ impl ProjectFile {
             options: BTreeMap::new(),
             annotations: Vec::new(),
             layout: Layout::default(),
+            global_pointer: None,
         }
     }
 
@@ -1716,6 +1736,27 @@ impl ProjectFile {
                 let on = a.inline?;
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, on))
+            })
+            .collect()
+    }
+
+    /// The analyst's word on the global pointer's value for the whole
+    /// image, when there is one and it reads as an address.
+    pub fn image_global_pointer(&self) -> Option<u64> {
+        crate::parse_addr(self.global_pointer.as_deref()?).ok()
+    }
+
+    /// The analyst's words on the global pointer's value in single
+    /// functions, by the value of each function's entry. A word on a
+    /// spaced address keys on its value, as an override does; one that
+    /// does not read as an address is left out.
+    pub fn global_pointers(&self) -> BTreeMap<u64, u64> {
+        self.places()
+            .filter(|a| !a.block)
+            .filter_map(|a| {
+                let value = crate::parse_addr(a.global_pointer.as_deref()?).ok()?;
+                let (entry, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((entry, value))
             })
             .collect()
     }
@@ -3100,5 +3141,42 @@ mod tests {
         assert_eq!(parse_offset(" 8 "), Ok(8));
         assert!(parse_offset("sp-8").is_err());
         assert!(parse_offset("").is_err());
+    }
+
+    #[test]
+    fn the_global_pointer_is_kept_for_the_image_and_for_a_function_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        project.global_pointer = Some("0x2a1f0".to_string());
+        project
+            .annotation_mut(TargetKind::Function, "0x20084")
+            .global_pointer = Some("0x30000".to_string());
+        // A word on a block is not the function's.
+        project
+            .annotation_mut(TargetKind::Region, "0x20008")
+            .global_pointer = Some("0x40000".to_string());
+        assert_eq!(project.image_global_pointer(), Some(0x2_a1f0));
+        assert_eq!(
+            project.global_pointers(),
+            BTreeMap::from([(0x2_0084, 0x3_0000)])
+        );
+        let json = project.to_json().unwrap();
+        assert!(json.contains("\"global_pointer\": \"0x2a1f0\""), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.image_global_pointer(), Some(0x2_a1f0));
+        assert_eq!(read.global_pointers(), project.global_pointers());
+        assert_eq!(read.format, FORMAT_VERSION);
+        // A file without the fields reads as no word.
+        let bare = ProjectFile::from_json(
+            r#"{"format": 6, "annotations": [{"kind": "function", "address": "0x20084", "name": "main"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.image_global_pointer(), None);
+        assert!(bare.global_pointers().is_empty());
+        // The word alone keeps a function's record; cleared, it goes.
+        let mut record = Annotation::new(TargetKind::Function, "0x20084");
+        record.global_pointer = Some("0x30000".to_string());
+        assert!(!record.is_empty());
+        record.global_pointer = None;
+        assert!(record.is_empty());
     }
 }

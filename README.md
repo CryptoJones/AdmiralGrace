@@ -105,7 +105,7 @@ cargo run --bin ag -- image ./sample.elf data
 cargo run --bin ag -- image ./sample.elf export ./sample.ag
 ```
 
-Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), so it refuses an image of another architecture rather than printing nonsense.
+Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), and through SLEIGH 32-bit ARM and Thumb, AArch64, and 32-bit MIPS of either byte order — decoded, walked and listed, not yet lifted to pseudocode, MIPS with its operands read through the global pointer (`global-pointer` says where its value came from) — so it refuses an image of another architecture rather than printing nonsense.
 
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, and `--utf16` reports the strings that are held as UTF-16LE.
 

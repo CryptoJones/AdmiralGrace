@@ -371,6 +371,18 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_global_pointer",
+            description: "Say what the global pointer register — MIPS's `gp` — holds: in every function, or in one with `function`, over what the image says (the function's own prologue, the image's `_gp` symbol, the start of the GOT and 0x7ff0). With the value known, a load or a store through `gp`, or through a register that copies it, names the address it reads (`lw t9, -0x7fd4(gp)  ; [0x2223c] = puts`), an address computed from it is a reference, and a `jalr` through a register loaded from a GOT slot is a call to the import the slot holds; the disassembly, the references and the calls are read again with the word. `value` null takes the word back. Answers each function's value and where it came from: `analyst`, `prologue` (with the instruction that sets it), `symbol` or `got`. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": ["string", "null"], "description": "The value, such as `0x418ff0`; null to take the word back." },
+                    "function": { "type": "string", "description": "The function the value is for: its name, or its address (`0x400200`). Every function the analyst said nothing more of when left out." },
+                },
+                "required": ["value"]
+            }),
+        },
+        Tool {
             name: "merge_candidates",
             description: "The pairs of a function's variables of one type that could be one, as the lift declares them: `suggested` — never live at once with different values, and one is a copy of the other (`v2 = v1;`) or both hold one register or stack slot (`eax` and `eax_2`); `valid` — never live at once, so one name serves for both and the pseudocode means what it meant; `unsound` — one is assigned while the other is live, so one name for both changes the meaning, with the address where. Each pair names the variable kept and the one merged into it, and why. A variable whose address is taken is no candidate. Read over the lift with the project's merges and splits made.",
             schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
@@ -1278,6 +1290,45 @@ impl Server {
                     &self.project()?.file,
                     address,
                 )))
+            }
+            "set_global_pointer" => {
+                if self.image.global_pointer_convention().is_none() {
+                    return Err(format!(
+                        "{} keeps no global pointer the engine follows: only 32-bit MIPS's gp is",
+                        self.image.language()
+                    ));
+                }
+                let value = optional_text("value")?
+                    .map(|value| parse_address(value.trim()))
+                    .transpose()?
+                    .map(|value| format!("{value:#x}"));
+                let function = optional_text("function")?
+                    .map(|function| self.function(function.trim()))
+                    .transpose()?;
+                match function {
+                    Some(address) => {
+                        self.change(TargetKind::Function, address, |record| {
+                            record.global_pointer = value
+                        })?;
+                    }
+                    None => self.change_file(|file| file.global_pointer = value)?,
+                }
+                self.image.set_global_pointer_words(crate::image::global_pointer_words(
+                    &self.project()?.file,
+                ));
+                let functions: Vec<u64> = match function {
+                    Some(address) => vec![address],
+                    None => self
+                        .image
+                        .functions()
+                        .iter()
+                        .map(|function| function.address)
+                        .collect(),
+                };
+                Ok(Answer::json(json!({
+                    "global_pointer": self.project()?.file.global_pointer,
+                    "functions": crate::image::global_pointers_json(&self.image, &functions),
+                })))
             }
             "merge_candidates" => {
                 let address = self.function(&text("target")?)?;
@@ -2207,6 +2258,7 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
             "color": record.color,
             "overrides": record.overrides,
             "inline": record.inline,
+            "global_pointer": record.global_pointer,
             "merges": record.merges,
             "splits": record.splits.iter().map(|split| json!({
                 "variable": split.variable,
@@ -2454,6 +2506,7 @@ mod tests {
                 "set_comment",
                 "set_override",
                 "set_inline",
+                "set_global_pointer",
                 "merge_candidates",
                 "variables",
                 "stack_frame",

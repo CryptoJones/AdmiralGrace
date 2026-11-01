@@ -173,7 +173,16 @@ impl BinaryProvider {
             call_target,
             tail: instruction.call.as_ref().is_some_and(|call| call.tail),
             registers: instruction.registers.clone(),
-            comment: instruction.comment.clone(),
+            // What a register-relative operand names — `[0x2223c] = puts`
+            // through the global pointer — rides after the block's header,
+            // in the slot for what the bytes point at.
+            comment: match (
+                instruction.comment.clone(),
+                instruction.resolved.as_ref().map(ag_image::ResolvedOperand::text),
+            ) {
+                (Some(header), Some(resolved)) => Some(format!("{header}; {resolved}")),
+                (header, resolved) => header.or(resolved),
+            },
             stack_offset: instruction.stack_offset,
         }
     }
@@ -444,6 +453,15 @@ impl Provider for BinaryProvider {
 
     fn set_inlines(&self, inlines: BTreeMap<u64, bool>) -> bool {
         self.binary.set_inlines(inlines)
+    }
+
+    fn set_global_pointer_words(&self, image: Option<u64>, functions: BTreeMap<u64, u64>) -> bool {
+        self.binary
+            .set_global_pointer_words(ag_image::GlobalPointerWords { image, functions })
+    }
+
+    fn has_global_pointer(&self) -> bool {
+        self.binary.global_pointer_convention().is_some()
     }
 
     fn set_variable_edits(&self, edits: BTreeMap<u64, crate::data::VariableWords>) -> bool {
