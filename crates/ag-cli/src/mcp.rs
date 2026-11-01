@@ -192,7 +192,14 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "disassemble",
             description: "The disassembly of one function: its blocks, the instructions in them, and the ways each block goes on.",
-            schema: json!({ "type": "object", "properties": { "target": target }, "required": ["target"] }),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": target,
+                    "stack_offsets": { "type": "boolean", "description": "The stack-offset column: the stack pointer's depth below its value at the function's entry, after each instruction's address — `000`, `-0x28`, `?` where it is not known (default false)." },
+                },
+                "required": ["target"]
+            }),
         },
         Tool {
             name: "decompile",
@@ -970,6 +977,7 @@ impl Server {
                     &self.image,
                     address,
                     &disassembly,
+                    flag("stack_offsets", false)?,
                 )))
             }
             "decompile" => {
@@ -2501,6 +2509,19 @@ mod tests {
         let text = text_of(&listing);
         assert!(text.starts_with("; main at 0x1198"), "{text}");
         assert!(text.contains("endbr64"), "{text}");
+        assert!(
+            !text.contains("-0x28"),
+            "no stack-offset column unasked: {text}"
+        );
+
+        let listing = call(
+            &mut server,
+            "disassemble",
+            json!({ "target": "main", "stack_offsets": true }),
+        );
+        let text = text_of(&listing);
+        assert!(text.contains("0x11a4   -0x28 89 7d ec"), "{text}");
+        assert!(text.contains("0x11eb     000 c3 ret"), "{text}");
 
         let code = call(&mut server, "decompile", json!({ "target": "0x1198" }));
         assert_eq!(code["isError"], false);

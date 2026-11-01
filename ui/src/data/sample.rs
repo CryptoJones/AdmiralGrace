@@ -460,6 +460,7 @@ fn line(
         tail: false,
         registers: Vec::new(),
         comment: comment.map(str::to_string),
+        stack_offset: None,
     }
 }
 

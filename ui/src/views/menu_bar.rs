@@ -320,6 +320,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     "",
                     Message::ViewTogglePossibleValues,
                 )),
+                Item::new(item_button(
+                    if app.show_stack_offsets {
+                        "Stack offsets: on"
+                    } else {
+                        "Stack offsets: off"
+                    },
+                    "",
+                    Message::ViewToggleStackOffsets,
+                )),
                 Item::new(separator()),
             ]
             .into_iter()

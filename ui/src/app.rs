@@ -90,6 +90,8 @@ pub enum Message {
     /// End the pseudocode's lines with the possible values of what each
     /// reads, or stop.
     ViewTogglePossibleValues,
+    /// Show the listing's stack-offset column, or stop.
+    ViewToggleStackOffsets,
     /// Show, or stop showing, one of the notes beside a level's items.
     ViewToggleIlOption(IlOption),
     /// Run the program under the debugger, stopped at its first instruction.
@@ -912,6 +914,10 @@ pub struct App {
     /// Whether the pseudocode's lines end with the possible values of what
     /// each reads, `// a: 0..=9`.
     pub show_values: bool,
+    /// Whether the listing shows the stack-offset column: the stack
+    /// pointer's depth below its value at the function's entry, before
+    /// each instruction.
+    pub show_stack_offsets: bool,
     /// An open path prompt, when one is active.
     pub prompt: Option<Prompt>,
     /// The corpus directory currently open.
@@ -1027,6 +1033,7 @@ impl App {
             rainbow_braces: false,
             indent_guides: false,
             show_values: false,
+            show_stack_offsets: false,
             prompt: None,
             corpus_root: config.corpus.clone(),
             kuna_root: config.kuna.clone(),
@@ -6286,6 +6293,15 @@ impl App {
                 self.indent_guides = !self.indent_guides;
             }
 
+            Message::ViewToggleStackOffsets => {
+                self.show_stack_offsets = !self.show_stack_offsets;
+                self.notice = Some(if self.show_stack_offsets {
+                    "The listing shows the stack pointer's depth at each instruction".into()
+                } else {
+                    "The stack offsets are hidden".into()
+                });
+            }
+
             Message::ViewToggleInspector => {
                 self.show_inspector = !self.show_inspector;
             }
@@ -6478,6 +6494,7 @@ pub(crate) fn il_rows(il: &ag_image::IlFunction, render: &ag_image::Render) -> V
                 tail: false,
                 registers: Vec::new(),
                 comment: None,
+                stack_offset: None,
             });
         }
     }
@@ -6514,6 +6531,7 @@ pub(crate) fn il_graph(
                         tail: false,
                         registers: Vec::new(),
                         comment: None,
+                        stack_offset: None,
                     }
                 })
                 .collect();
@@ -6882,6 +6900,7 @@ fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) ->
         tail: false,
         registers: Vec::new(),
         comment: None,
+        stack_offset: None,
     };
     let raw = |at: u64, chunk: &[u8]| {
         line(
@@ -10095,6 +10114,7 @@ mod tests {
             tail: false,
             registers: Vec::new(),
             comment: None,
+            stack_offset: None,
         };
         let marks =
             |address: u64, mark: ByteType| std::collections::HashMap::from([(address, mark)]);
@@ -11952,6 +11972,43 @@ mod tests {
     }
 
     #[test]
+    fn the_view_menu_toggles_the_listing_s_stack_offset_column() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1198));
+        let column = |app: &App, address: u64| {
+            app.work
+                .listing
+                .iter()
+                .find(|line| line.address == address)
+                .and_then(|line| crate::views::work_surface::stack_column(app, line))
+        };
+        // Off at first: the rows carry the depth, the listing shows none.
+        assert!(!app.show_stack_offsets);
+        assert!(app
+            .work
+            .listing
+            .iter()
+            .any(|line| line.stack_offset == Some(ag_image::StackOffset::Known(-0x28))));
+        assert_eq!(column(&app, 0x1198), None);
+
+        let _ = app.update(Message::ViewToggleStackOffsets);
+        assert!(app.show_stack_offsets);
+        assert_eq!(column(&app, 0x1198).as_deref(), Some("000"));
+        assert_eq!(column(&app, 0x119d).as_deref(), Some("-0x8"));
+        assert_eq!(column(&app, 0x11a4).as_deref(), Some("-0x28"));
+        assert_eq!(column(&app, 0x11eb).as_deref(), Some("000"));
+        let _ = crate::views::work_surface::view(&app);
+
+        let _ = app.update(Message::ViewToggleStackOffsets);
+        assert!(!app.show_stack_offsets);
+        assert_eq!(column(&app, 0x11a4), None);
+    }
+
+    #[test]
     fn a_function_marked_inline_reads_as_its_body_in_its_callers_and_undo_takes_it_back() {
         let config = Config {
             binary: Some(sample_elf()),
@@ -12880,6 +12937,7 @@ mod tests {
             tail: false,
             registers: Vec::new(),
             comment: None,
+            stack_offset: None,
         };
         assert_eq!(
             App::shown_operands(&line, &renamed),

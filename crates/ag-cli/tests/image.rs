@@ -239,6 +239,66 @@ fn the_disassembly_of_a_32_bit_elf_is_reported_as_json() {
 }
 
 #[test]
+fn the_stack_offset_column_follows_the_prologue_and_the_epilogue() {
+    // sum_to has no `sub rsp`: the push of rbp is its whole frame.
+    let report = image("sample.elf", &["disasm", "sum_to", "--stack-offsets"]);
+    assert!(report.contains("0x1165     000 55 push rbp\n"), "{report}");
+    assert!(
+        report.contains("0x1166    -0x8 48 89 e5 mov rbp,rsp\n"),
+        "{report}"
+    );
+    assert!(report.contains("0x1196    -0x8 5d pop rbp\n"), "{report}");
+    assert!(report.contains("0x1197     000 c3 ret\n"), "{report}");
+
+    // main's `sub rsp, 0x20` below the push, and the `leave` that gives
+    // both back.
+    let report = image("sample.elf", &["disasm", "main", "--stack-offsets"]);
+    assert!(
+        report.contains("0x11a0    -0x8 48 83 ec 20 sub rsp,20h\n"),
+        "{report}"
+    );
+    assert!(report.contains("0x11a4   -0x28 89 7d ec"), "{report}");
+    assert!(report.contains("0x11ea   -0x28 c9 leave\n"), "{report}");
+    assert!(report.contains("0x11eb     000 c3 ret\n"), "{report}");
+
+    // Off unless asked for.
+    let report = image("sample.elf", &["disasm", "main"]);
+    assert!(report.contains("0x11eb c3 ret\n"), "{report}");
+}
+
+#[test]
+fn the_stack_offset_column_counts_32_bit_pushes_and_the_caller_s_pop() {
+    let report = image("sample32.elf", &["disasm", "main", "--stack-offsets"]);
+    assert!(report.contains("0x8049013   -0x14 c7 45 fc"), "{report}");
+    // The arguments pushed for add, and taken back by `add esp, 8`.
+    assert!(report.contains("0x8049029   -0x1c e8"), "{report}");
+    assert!(report.contains("0x8049031   -0x14 89 45 fc"), "{report}");
+    assert!(report.contains("0x8049057     000 c3 ret\n"), "{report}");
+}
+
+#[test]
+fn the_json_disassembly_carries_every_instruction_s_stack_offset() {
+    let report = image_json("sample.elf", &["disasm", "main"]);
+    let instructions: Vec<&serde_json::Value> = report["blocks"]
+        .as_array()
+        .expect("the blocks")
+        .iter()
+        .flat_map(|block| block["instructions"].as_array().expect("the instructions"))
+        .collect();
+    let at = |address: u64| {
+        instructions
+            .iter()
+            .find(|instruction| instruction["address"] == address)
+            .map(|instruction| instruction["stack_offset"].clone())
+            .expect("the instruction")
+    };
+    assert_eq!(at(0x1198), serde_json::json!(0));
+    assert_eq!(at(0x119d), serde_json::json!(-8));
+    assert_eq!(at(0x11a4), serde_json::json!(-0x28));
+    assert_eq!(at(0x11eb), serde_json::json!(0));
+}
+
+#[test]
 fn the_cfg_of_the_start_up_glue_stops_at_the_hlt() {
     // _start calls __libc_start_main and then halts; the nop padding and
     // deregister_tm_clones after the hlt are not its blocks. The call ends

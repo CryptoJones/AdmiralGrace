@@ -486,6 +486,7 @@ mod tests {
             tail: false,
             registers: Vec::new(),
             comment: None,
+            stack_offset: None,
         }
     }
 

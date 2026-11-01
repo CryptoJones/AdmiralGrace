@@ -79,6 +79,10 @@ pub enum ImageCmd {
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// The stack-offset column: the stack pointer's depth below its
+        /// value at the function's entry, before each instruction.
+        #[arg(long = "stack-offsets")]
+        stack_offsets: bool,
         /// A project file whose jump-table notes the walk is told.
         #[arg(long)]
         project: Option<PathBuf>,
@@ -490,6 +494,10 @@ struct InstructionJson {
     operands: String,
     /// The call the instruction makes, when it is a direct call.
     call: Option<CallJson>,
+    /// The stack pointer's depth before the instruction, against its value
+    /// at the function's entry: 0 at the entry, negative below it; null
+    /// where it is not known.
+    stack_offset: Option<i64>,
 }
 
 /// One basic block, as JSON.
@@ -966,7 +974,12 @@ pub fn run(
         // Answered above, before any image was read.
         ImageCmd::Slices { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
-        ImageCmd::Disasm { target, json, .. } => disasm(&image, &target, json),
+        ImageCmd::Disasm {
+            target,
+            json,
+            stack_offsets,
+            ..
+        } => disasm(&image, &target, json, stack_offsets),
         ImageCmd::Strings {
             filter,
             utf16,
@@ -1499,7 +1512,7 @@ pub(crate) fn symbols_json(image: &Binary, filter: Option<&str>) -> Result<Symbo
 }
 
 /// Report the disassembly of one function.
-fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
+fn disasm(image: &Binary, target: &str, json: bool, stack_offsets: bool) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
         "the decoder reads x86, 32-bit and 64-bit, and this image is {}",
@@ -1517,40 +1530,14 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
             function_hex: format!("{address:#x}"),
             name: image.function_name(address).map(str::to_string),
             section: disassembly.section.clone(),
-            blocks: disassembly
-                .blocks
-                .iter()
-                .map(|block| BlockJson {
-                    from: block.from,
-                    from_hex: format!("{:#x}", block.from),
-                    to: block.to,
-                    to_hex: format!("{:#x}", block.to),
-                    successors: block.successors.clone(),
-                    instructions: block
-                        .instructions
-                        .iter()
-                        .map(|instruction| InstructionJson {
-                            address: instruction.address,
-                            address_hex: format!("{:#x}", instruction.address),
-                            bytes: instruction
-                                .bytes
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect(),
-                            mnemonic: instruction.mnemonic.clone(),
-                            operands: operands_of(instruction),
-                            call: instruction.call.as_ref().map(call_json),
-                        })
-                        .collect(),
-                })
-                .collect(),
+            blocks: disassembly.blocks.iter().map(block_json).collect(),
             calls: disassembly.calls.iter().map(call_json).collect(),
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
-    print!("{}", listing_text(image, address, &disassembly));
+    print!("{}", listing_text(image, address, &disassembly, stack_offsets));
 
     Ok(0)
 }
@@ -1559,11 +1546,15 @@ fn disasm(image: &Binary, target: &str, json: bool) -> Result<i32> {
 ///
 /// A `; name at 0x… in section` header, then a `; block 0x…` header per
 /// block with its successors, then `address bytes mnemonic operands` for
-/// each instruction. Every line ends in a newline.
+/// each instruction. Every line ends in a newline. With `stack_offsets`,
+/// the stack pointer's depth stands after the address, right-aligned in a
+/// column of its own: `000` at the entry, `-0x28` below it, `?` where it
+/// is not known.
 pub(crate) fn listing_text(
     image: &Binary,
     address: u64,
     disassembly: &ag_image::Disassembly,
+    stack_offsets: bool,
 ) -> String {
     use std::fmt::Write as _;
 
@@ -1596,8 +1587,16 @@ pub(crate) fn listing_text(
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
 
+            let depth = if stack_offsets {
+                let text = instruction
+                    .stack_offset
+                    .map_or_else(|| "?".to_string(), ag_image::StackOffset::text);
+                format!(" {text:>7}")
+            } else {
+                String::new()
+            };
             let line = format!(
-                "{:#x} {} {} {}",
+                "{:#x}{depth} {} {} {}",
                 instruction.address,
                 bytes.join(" "),
                 instruction.mnemonic,
@@ -3420,6 +3419,9 @@ fn block_json(block: &ag_image::Block) -> BlockJson {
                 mnemonic: instruction.mnemonic.clone(),
                 operands: operands_of(instruction),
                 call: instruction.call.as_ref().map(call_json),
+                stack_offset: instruction
+                    .stack_offset
+                    .and_then(ag_image::StackOffset::known),
             })
             .collect(),
     }

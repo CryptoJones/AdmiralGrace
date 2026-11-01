@@ -25,6 +25,7 @@ pub mod procedure;
 pub mod pvs;
 pub mod register;
 pub mod slice;
+pub mod stack_offsets;
 pub mod stack_vars;
 pub mod structure;
 pub mod swift;
@@ -48,6 +49,7 @@ pub use lift::{
     StatementKind,
 };
 pub use frame::{FrameRow, Region, StackFrame};
+pub use stack_offsets::{stack_offsets, StackOffset};
 pub use stack_vars::StackVar;
 pub use variables::{VariableInfo, VariableKind};
 pub use options::{OptionError, Options, SiteOverride, Sites};

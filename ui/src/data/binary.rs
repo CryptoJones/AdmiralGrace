@@ -174,6 +174,7 @@ impl BinaryProvider {
             tail: instruction.call.as_ref().is_some_and(|call| call.tail),
             registers: instruction.registers.clone(),
             comment: instruction.comment.clone(),
+            stack_offset: instruction.stack_offset,
         }
     }
 
