@@ -1,8 +1,9 @@
 //! The bottom workspace: search results, problems, analysis log, patch
-//! history, and the variables and stack frame of the function on screen.
+//! history, the variables and stack frame of the function on screen, and
+//! the types the project defines.
 
 use iced::widget::{
-    button, container, mouse_area, scrollable, Column, Container, Row, Space, Text,
+    button, container, mouse_area, scrollable, text_input, Column, Container, Row, Space, Text,
 };
 use iced::{Alignment, Background, Border, Element, Length};
 
@@ -27,17 +28,20 @@ pub enum BottomTab {
     Variables,
     /// The stack frame of the function on screen, slot by slot.
     Stack,
+    /// The types the project defines, with their layout.
+    Types,
 }
 
 impl BottomTab {
     /// Every tab, in display order.
-    pub const ALL: [BottomTab; 6] = [
+    pub const ALL: [BottomTab; 7] = [
         BottomTab::SearchResults,
         BottomTab::Problems,
         BottomTab::AnalysisLog,
         BottomTab::PatchHistory,
         BottomTab::Variables,
         BottomTab::Stack,
+        BottomTab::Types,
     ];
 
     /// The tab label.
@@ -49,6 +53,7 @@ impl BottomTab {
             BottomTab::PatchHistory => "Patch History",
             BottomTab::Variables => "Variables",
             BottomTab::Stack => "Stack",
+            BottomTab::Types => "Types",
         }
     }
 }
@@ -89,6 +94,7 @@ fn tab_strip(app: &App) -> Element<'_, Message> {
             BottomTab::PatchHistory => app.annotations.patch_records().len(),
             BottomTab::Variables => app.shown_variables().len(),
             BottomTab::Stack => app.shown_stack().map_or(0, |frame| frame.rows.len()),
+            BottomTab::Types => app.shown_types().len(),
         };
 
         let active = app.bottom.tab == tab;
@@ -286,7 +292,103 @@ fn content(app: &App) -> Element<'_, Message> {
         }
         BottomTab::Variables => variables(app),
         BottomTab::Stack => stack(app),
+        BottomTab::Types => types(app),
     }
+}
+
+/// The Types tab: the project's definitions, filtered by the search — by
+/// name, member or full text — each with its kind and size, and the one
+/// clicked written out as C with its layout: each member's offset, the
+/// padding between, the size and alignment. New, Edit and Delete open the
+/// Edit menu's prompts.
+fn types(app: &App) -> Element<'_, Message> {
+    let within = match app.bottom.types_in {
+        None | Some(ag_image::TypeSearch::Any) => "in: any",
+        Some(ag_image::TypeSearch::Name) => "in: name",
+        Some(ag_image::TypeSearch::Member) => "in: member",
+        Some(ag_image::TypeSearch::Text) => "in: text",
+    };
+    let search = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(
+            text_input::TextInput::new("search types…", &app.bottom.types_filter)
+                .on_input(Message::TypesFilterChanged)
+                .size(12)
+                .padding([3, 6])
+                .width(Length::Fill),
+        )
+        .push(row_button(within, Message::TypesSearchIn, 90.0));
+    let actions = Row::new()
+        .spacing(8)
+        .push(row_button("New…", Message::EditNewType, 64.0))
+        .push(row_button("Edit…", Message::EditEditType, 64.0))
+        .push(row_button("Delete", Message::EditDeleteType, 64.0));
+    let cell = |text: String, width: f32, tint: iced::Color| {
+        Text::new(text)
+            .size(12)
+            .color(tint)
+            .font(MONO)
+            .width(Length::Fixed(width))
+    };
+    let mut list = Column::new().spacing(0).width(Length::Fill);
+    let rows = app.shown_types();
+    if rows.is_empty() {
+        list = list.push(subtle(if app.annotations.types.is_empty() {
+            "The project defines no types: New… reads them from C."
+        } else {
+            "No type matches the search."
+        }));
+    }
+    for (key, kind, size) in rows {
+        let selected = app.bottom.selected_type.as_deref() == Some(key.as_str());
+        let line = Row::new()
+            .spacing(12)
+            .push(
+                Text::new(key.clone())
+                    .size(12)
+                    .color(color::TEXT)
+                    .font(MONO)
+                    .width(Length::Fill),
+            )
+            .push(cell(kind.to_string(), 60.0, color::MUTED))
+            .push(cell(size, 80.0, color::ADDR));
+        list = list.push(
+            mouse_area(
+                Container::new(line)
+                    .padding([2, 8])
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: selected.then_some(Background::Color(color::FOCUS_BG)),
+                        ..container::Style::default()
+                    }),
+            )
+            .on_press(Message::TypeSelected(key)),
+        );
+    }
+    let left = Column::new()
+        .spacing(6)
+        .width(Length::FillPortion(2))
+        .push(search)
+        .push(actions)
+        .push(scrollable(list).height(Length::Fill));
+    let shown: Element<'_, Message> = match app.selected_type_text() {
+        Some(text) => Text::new(text)
+            .size(12)
+            .color(color::TEXT)
+            .font(MONO)
+            .into(),
+        None => subtle("Select a type to see it as C with its layout.").into(),
+    };
+    Row::new()
+        .spacing(16)
+        .push(left)
+        .push(
+            scrollable(Container::new(shown).padding([2, 8]))
+                .height(Length::Fill)
+                .width(Length::FillPortion(3)),
+        )
+        .into()
 }
 
 /// The Variables tab: a row a variable of the function on screen — its

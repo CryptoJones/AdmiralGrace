@@ -88,7 +88,12 @@ pub use ag_engine::stack_offsets::StackOffset;
 pub use ag_engine::defuse::{
     DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
 };
-pub use ag_engine::stack_vars::{parse_type, StackVar};
+pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
+pub use ag_engine::ctype::{self as ctype, CError, TypeText};
+pub use ag_engine::types::{
+    self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
+    Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
+};
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Placement;
 pub use ag_engine::Bitness;
@@ -525,6 +530,9 @@ pub struct Binary {
     /// The analyst's merges, splits, new versions and pinned values of
     /// each function's variables, by the function's entry.
     variable_edits: Mutex<BTreeMap<u64, VariableEdits>>,
+    /// The analyst's types, built from the project's C under the image's
+    /// data model; `None` for the platform's primitives alone.
+    types: Mutex<Option<Arc<TypeStore>>>,
     /// The functions being lifted, by the thread lifting them, so that a
     /// cycle of calls through the bodies inlined is not followed round —
     /// and another thread lifting the same function at once is no cycle.
@@ -873,6 +881,7 @@ impl Binary {
             removable_stores: Mutex::new(BTreeMap::new()),
             inlines: Mutex::new(BTreeMap::new()),
             variable_edits: Mutex::new(BTreeMap::new()),
+            types: Mutex::new(None),
             inline_visiting: Mutex::new(HashSet::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
             cfgs: Mutex::new(HashMap::new()),
@@ -1971,6 +1980,55 @@ impl Binary {
         let instruction = decoder.decode();
         !instruction.is_invalid()
             && instruction.flow_control() == iced_x86::FlowControl::IndirectBranch
+    }
+
+    /// The data model the image's types are laid out under: the sizes and
+    /// alignments of C's primitives on its platform. x86-64 follows the
+    /// calling convention the functions are lifted with — LLP64 for
+    /// Microsoft's, LP64 otherwise; the rest follow the language, ILP32 for
+    /// 32-bit code.
+    pub fn data_model(&self) -> DataModel {
+        let fields: Vec<&str> = self.language.split(':').collect();
+        if fields.first() == Some(&"x86") && fields.get(2) == Some(&"64") {
+            DataModel::of_abi(self.abi())
+        } else {
+            DataModel::of_language(&self.language)
+        }
+    }
+
+    /// The types the analyst defined, built under the image's data model;
+    /// the platform's primitives alone until a project says more.
+    pub fn types(&self) -> Arc<TypeStore> {
+        self.types
+            .lock()
+            .ok()
+            .and_then(|held| held.clone())
+            .unwrap_or_else(|| Arc::new(TypeStore::new(self.data_model())))
+    }
+
+    /// Read the analyst's type definitions — each a name and its C, in the
+    /// order the project keeps them — under the image's data model, and
+    /// say whether that changed anything; the pseudocode and the levels are
+    /// read again after. A definition that does not read is refused with
+    /// what was wrong, and the types read before are kept.
+    pub fn set_type_definitions(&self, definitions: &[TypeText]) -> Result<bool, String> {
+        let (store, _) = ag_engine::ctype::build(self.data_model(), definitions)?;
+        let store = (!definitions.is_empty()).then(|| Arc::new(store));
+        if let Ok(mut held) = self.types.lock() {
+            if *held == store {
+                return Ok(false);
+            }
+            *held = store;
+        } else {
+            return Ok(false);
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        Ok(true)
     }
 
     /// The analyst's merges and splits of the variables of the function at
@@ -3258,11 +3316,13 @@ impl Binary {
                 .find(|(at, _)| *at == address)
                 .map(|(_, stages)| stages.as_ref())
         });
+        let types = self.types();
         Ok(ag_engine::transpile::program(&Program {
             functions,
             externals,
             globals,
             harness,
+            types: Some(&types),
         }))
     }
 
@@ -3775,6 +3835,11 @@ impl Symbols for ImageSymbols<'_> {
     /// variables.
     fn variable_edits(&self, address: u64) -> VariableEdits {
         self.0.variable_edits(address)
+    }
+
+    /// The analyst's types.
+    fn types(&self) -> Option<Arc<TypeStore>> {
+        Some(self.0.types())
     }
 
     /// The function's own lift, when the analyst said to inline it: lifted

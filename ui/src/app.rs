@@ -187,6 +187,16 @@ pub enum Message {
     /// Say what the global pointer register holds in the function on
     /// screen, or in every function.
     EditGlobalPointer,
+    /// Define types from C: the prompt opens for the declarations.
+    EditNewType,
+    /// Edit the type selected in the Types tab: the prompt opens on its C.
+    EditEditType,
+    /// Delete the type selected in the Types tab, unless something names
+    /// it.
+    EditDeleteType,
+    /// Give a variable of the function on screen a C type, or take the
+    /// type given back.
+    EditVariableType,
     /// Merge two variables of the function on screen.
     EditMergeVariables,
     /// Take back a merge of a variable of the function on screen.
@@ -249,6 +259,16 @@ pub enum Message {
     /// Show the Stack layout pane — the bottom panel open on its tab — or
     /// hide it when it is showing.
     ViewStack,
+    /// Show the Types pane — the bottom panel open on its tab — or hide it
+    /// when it is showing.
+    ViewTypes,
+    /// The Types pane's search text changed.
+    TypesFilterChanged(String),
+    /// What the Types pane's search looks in goes to the next of any,
+    /// name, member and text.
+    TypesSearchIn,
+    /// A definition of the Types pane was clicked, by its key.
+    TypeSelected(String),
     /// A row of the Stack layout pane was clicked, by its place in the
     /// frame: the first line of the pseudocode that names its variable is
     /// selected.
@@ -376,6 +396,14 @@ pub enum PromptKind {
     /// A variable made in the stack frame of the function on screen:
     /// `OFFSET SIZE [NAME] [TYPE]`, `-` for no name.
     StackVariable,
+    /// Type definitions in C, added to the project's: `struct point { int
+    /// x, y; };`.
+    TypeNew,
+    /// The C of the type selected in the Types tab, replacing it.
+    TypeEdit,
+    /// A type given a variable of the function on screen: `VAR TYPE`, or
+    /// `VAR clear` to take it back.
+    VariableType,
     /// A variable whose dead stores go, as `NAME` or `NAME keep`.
     DeadStores,
     /// The variable a slice is taken of, as `NAME`, `NAME@ADDRESS` or
@@ -738,6 +766,12 @@ pub struct BottomPanel {
     pub stack_of: Option<u64>,
     /// The row last clicked in the Stack layout tab, by its offset.
     pub selected_slot: Option<i64>,
+    /// The Types tab's search text.
+    pub types_filter: String,
+    /// What the Types tab's search looks in; `None` for any of it.
+    pub types_in: Option<ag_image::TypeSearch>,
+    /// The definition last clicked in the Types tab, by its key.
+    pub selected_type: Option<String>,
 }
 
 /// The names a view replaces as it draws.
@@ -1003,8 +1037,14 @@ pub struct Change {
     /// The annotations after it.
     after: Vec<ag_corpus::project::Annotation>,
     /// The project's own global pointer word before the change and after
-    /// it: the one word of the project's that lies outside a record.
+    /// it: a word of the project's that lies outside a record.
     global_pointer: (Option<String>, Option<String>),
+    /// The project's type definitions before the change and after it, the
+    /// other words outside a record.
+    types: (
+        Vec<ag_corpus::project::TypeDefinition>,
+        Vec<ag_corpus::project::TypeDefinition>,
+    ),
 }
 
 /// How many changes undo remembers.
@@ -3097,6 +3137,7 @@ impl App {
             | Message::EditOperandFormat
             | Message::EditNop
             | Message::EditOpaque
+            | Message::EditDeleteType
             | Message::StackRemoveVariable(_) => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
@@ -3119,6 +3160,9 @@ impl App {
                         | PromptKind::VersionVariable
                         | PromptKind::VariableValue
                         | PromptKind::StackVariable
+                        | PromptKind::TypeNew
+                        | PromptKind::TypeEdit
+                        | PromptKind::VariableType
                         | PromptKind::DeadStores
                         | PromptKind::Assemble
                         | PromptKind::Nop
@@ -3132,14 +3176,16 @@ impl App {
             (
                 self.annotations.annotations.clone(),
                 self.annotations.global_pointer.clone(),
+                self.annotations.types.clone(),
             )
         });
         let task = self.apply(message);
-        if let Some((before, global_pointer)) = before {
+        if let Some((before, global_pointer, types)) = before {
             if before != self.annotations.annotations
                 || global_pointer != self.annotations.global_pointer
+                || types != self.annotations.types
             {
-                self.record_change(before, global_pointer);
+                self.record_change(before, global_pointer, types);
                 self.tell_patches();
                 self.tell_modes();
                 self.tell_jump_tables();
@@ -3557,6 +3603,8 @@ impl App {
     /// function's variables, and read the function on screen again when
     /// that changed anything.
     fn tell_variable_edits(&mut self) {
+        // The variables' types name the analyst's definitions: those first.
+        self.tell_types();
         if !self
             .provider
             .set_variable_edits(self.annotations.variable_edits())
@@ -3694,6 +3742,77 @@ impl App {
         }
     }
 
+    /// Tell the analysis the analyst's type definitions, and read the
+    /// function on screen again when that changed anything. A definition
+    /// that does not read is said, and the types read before are kept.
+    fn tell_types(&mut self) {
+        match self.provider.set_type_definitions(&self.type_texts()) {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Some(function) = self.work.listing_of {
+                    self.work.pseudocode = self.pseudocode_of(function);
+                    self.refresh_variables();
+                    self.work.line_addresses = self.provider.line_addresses(function);
+                    self.work.dead_lines = self.provider.dead_lines(function);
+                    self.refresh_slice();
+                }
+            }
+            Err(why) => {
+                self.notice = Some(format!("The project's types do not read: {why}"));
+            }
+        }
+    }
+
+    /// The project's type definitions as the analysis reads them.
+    fn type_texts(&self) -> Vec<ag_image::TypeText> {
+        self.annotations
+            .types
+            .iter()
+            .map(|definition| ag_image::TypeText {
+                name: definition.name.clone(),
+                c: definition.c.clone(),
+            })
+            .collect()
+    }
+
+    /// Keep `texts` as the project's type definitions.
+    fn keep_types(&mut self, texts: Vec<ag_image::TypeText>) {
+        self.annotations.types = texts
+            .into_iter()
+            .map(|text| ag_corpus::project::TypeDefinition {
+                name: text.name,
+                c: text.c,
+            })
+            .collect();
+    }
+
+    /// The definitions the Types tab lists — each its key, its kind and
+    /// its size — filtered by the tab's search.
+    pub(crate) fn shown_types(&self) -> Vec<(String, &'static str, String)> {
+        let Some(store) = self.provider.types() else {
+            return Vec::new();
+        };
+        let within = self.bottom.types_in.unwrap_or(ag_image::TypeSearch::Any);
+        store
+            .search(&self.bottom.types_filter, within)
+            .into_iter()
+            .map(|key| {
+                let kind = store.get(&key).map_or("", |d| d.kind());
+                let size = match store.size_of(&ag_image::Type::Named(key.clone())) {
+                    Ok(size) => format!("{size:#x}"),
+                    Err(_) => "incomplete".to_string(),
+                };
+                (key, kind, size)
+            })
+            .collect()
+    }
+
+    /// The definition selected in the Types tab as C, with its layout.
+    pub(crate) fn selected_type_text(&self) -> Option<String> {
+        let key = self.bottom.selected_type.as_ref()?;
+        self.provider.types()?.definition_text(key, true)
+    }
+
     /// Remember the change that took the annotations from `before` to what
     /// they are now, and forget the changes taken back: they led from a
     /// state that is gone.
@@ -3701,12 +3820,14 @@ impl App {
         &mut self,
         before: Vec<ag_corpus::project::Annotation>,
         global_pointer: Option<String>,
+        types: Vec<ag_corpus::project::TypeDefinition>,
     ) {
         self.undo.push(Change {
             label: self.notice.clone().unwrap_or_else(|| "Edit".into()),
             before,
             after: self.annotations.annotations.clone(),
             global_pointer: (global_pointer, self.annotations.global_pointer.clone()),
+            types: (types, self.annotations.types.clone()),
         });
         if self.undo.len() > UNDO_DEPTH {
             let overflow = self.undo.len() - UNDO_DEPTH;
@@ -3923,6 +4044,86 @@ impl App {
                 });
             }
 
+            Message::EditNewType => {
+                if self.provider.types().is_none() {
+                    self.notice = Some("Open a program image to define its types".into());
+                    return Task::none();
+                }
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::TypeNew,
+                    title: "New type from C (declarations on one line, each ending in ;)",
+                    value: String::new(),
+                });
+            }
+
+            Message::EditEditType => {
+                let (Some(key), Some(store)) =
+                    (self.bottom.selected_type.clone(), self.provider.types())
+                else {
+                    self.notice = Some("Select a type in the Types tab to edit it".into());
+                    return Task::none();
+                };
+                let texts = self.type_texts();
+                let Some(at) = ag_image::ctype::find(&store, &texts, &key) else {
+                    self.notice = Some(format!("{key} is no type of the project's"));
+                    return Task::none();
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::TypeEdit,
+                    title: "Edit type (its C on one line)",
+                    value: one_line_c(&texts[at].c),
+                });
+            }
+
+            Message::EditDeleteType => {
+                let (Some(key), Some(store)) =
+                    (self.bottom.selected_type.clone(), self.provider.types())
+                else {
+                    self.notice = Some("Select a type in the Types tab to delete it".into());
+                    return Task::none();
+                };
+                match ag_image::ctype::remove(
+                    *store.model(),
+                    &self.type_texts(),
+                    &key,
+                    &self.annotations.type_users(),
+                ) {
+                    Ok((texts, removed)) => {
+                        self.keep_types(texts);
+                        self.bottom.selected_type = None;
+                        self.notice = Some(format!("Deleted {removed}"));
+                    }
+                    Err(why) => self.notice = Some(why),
+                }
+            }
+
+            Message::EditVariableType => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose variable to type".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let value = match &self.bottom.selected_variable {
+                    Some(variable) => {
+                        let given = self
+                            .annotations
+                            .annotation_for(&key)
+                            .and_then(|a| a.var_types.iter().find(|v| v.variable == *variable))
+                            .map(|v| v.ty.clone());
+                        match given {
+                            Some(ty) => format!("{variable} {ty}"),
+                            None => format!("{variable} "),
+                        }
+                    }
+                    None => String::new(),
+                };
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::VariableType,
+                    title: "Variable type (VAR TYPE, or VAR clear)",
+                    value,
+                });
+            }
+
             Message::EditGlobalPointer => {
                 let Some(function) = self.work.listing_of else {
                     self.notice = Some("Open the function whose global pointer to set".into());
@@ -4122,6 +4323,7 @@ impl App {
                 };
                 self.annotations.annotations = change.before.clone();
                 self.annotations.global_pointer = change.global_pointer.0.clone();
+                self.annotations.types = change.types.0.clone();
                 self.notice = Some(format!("Undid: {}", change.label));
                 self.redo.push(change);
                 self.refresh_functions();
@@ -4146,6 +4348,7 @@ impl App {
                 };
                 self.annotations.annotations = change.after.clone();
                 self.annotations.global_pointer = change.global_pointer.1.clone();
+                self.annotations.types = change.types.1.clone();
                 self.notice = Some(format!("Redid: {}", change.label));
                 self.undo.push(change);
                 self.refresh_functions();
@@ -4300,6 +4503,33 @@ impl App {
                 };
                 self.work.tab = ViewTab::Pseudocode;
                 return self.update(Message::PseudocodeLineSelected(line, address));
+            }
+
+            Message::ViewTypes => {
+                if self.show_bottom && self.bottom.tab == BottomTab::Types {
+                    self.show_bottom = false;
+                } else {
+                    self.show_bottom = true;
+                    self.bottom.tab = BottomTab::Types;
+                }
+            }
+
+            Message::TypesFilterChanged(filter) => {
+                self.bottom.types_filter = filter;
+            }
+
+            Message::TypesSearchIn => {
+                use ag_image::TypeSearch;
+                self.bottom.types_in = match self.bottom.types_in {
+                    None | Some(TypeSearch::Any) => Some(TypeSearch::Name),
+                    Some(TypeSearch::Name) => Some(TypeSearch::Member),
+                    Some(TypeSearch::Member) => Some(TypeSearch::Text),
+                    Some(TypeSearch::Text) => None,
+                };
+            }
+
+            Message::TypeSelected(key) => {
+                self.bottom.selected_type = Some(key);
             }
 
             Message::ViewStack => {
@@ -5578,6 +5808,101 @@ impl App {
                         self.annotations.prune();
                         self.tell_variable_edits();
                     }
+                    PromptKind::TypeNew => {
+                        let Some(store) = self.provider.types() else {
+                            return Task::none();
+                        };
+                        match ag_image::ctype::add(
+                            *store.model(),
+                            &self.type_texts(),
+                            &c_of_prompt(&prompt.value),
+                        ) {
+                            Ok((texts, added, notes)) => {
+                                self.keep_types(texts);
+                                self.bottom.selected_type = added.last().cloned();
+                                let mut said = format!("Defined {}", added.join(", "));
+                                if let Some(note) = notes.first() {
+                                    said.push_str(&format!(" ({note})"));
+                                }
+                                self.notice = Some(said);
+                            }
+                            Err(why) => {
+                                self.notice = Some(format!("The type is not defined: {why}"));
+                                return Task::none();
+                            }
+                        }
+                    }
+                    PromptKind::TypeEdit => {
+                        let (Some(key), Some(store)) =
+                            (self.bottom.selected_type.clone(), self.provider.types())
+                        else {
+                            return Task::none();
+                        };
+                        match ag_image::ctype::replace(
+                            *store.model(),
+                            &self.type_texts(),
+                            &key,
+                            &c_of_prompt(&prompt.value),
+                        ) {
+                            Ok((texts, _)) => {
+                                self.keep_types(texts);
+                                self.notice = Some(format!("Replaced {key}"));
+                            }
+                            Err(why) => {
+                                self.notice = Some(format!("{key} is not replaced: {why}"));
+                                return Task::none();
+                            }
+                        }
+                    }
+                    PromptKind::VariableType => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let key = self.annotation_key(function);
+                        let text = prompt.value.trim();
+                        let (variable, ty) = match text.split_once(char::is_whitespace) {
+                            Some((variable, ty)) if !ty.trim().is_empty() => {
+                                (variable.to_string(), ty.trim().to_string())
+                            }
+                            _ => {
+                                self.notice = Some(
+                                    "Give the variable and its type: a struct point *, or a clear"
+                                        .into(),
+                                );
+                                return Task::none();
+                            }
+                        };
+                        if ty.eq_ignore_ascii_case("clear") {
+                            let had = self
+                                .annotations
+                                .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                                .clear_var_type(&variable);
+                            self.annotations.prune();
+                            self.notice = Some(if had {
+                                format!("{variable} has the lift's type again")
+                            } else {
+                                format!("{variable} was given no type")
+                            });
+                        } else {
+                            let store = self
+                                .provider
+                                .types()
+                                .unwrap_or_else(|| std::sync::Arc::new(Default::default()));
+                            let spelled = match ag_image::ctype::parse_type(&store, &ty) {
+                                Ok(parsed) => parsed.spelled(&store),
+                                Err(error) => {
+                                    self.notice =
+                                        Some(format!("{ty} is not a type: {}", error.message));
+                                    return Task::none();
+                                }
+                            };
+                            self.annotations
+                                .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+                                .set_var_type(&variable, &spelled);
+                            self.annotations.prune();
+                            self.notice = Some(format!("{variable} is typed {spelled}"));
+                        }
+                    }
                     PromptKind::StackVariable => {
                         let Some(function) = self.work.listing_of else {
                             return Task::none();
@@ -6781,6 +7106,36 @@ fn parse_stack_variable(text: &str) -> Result<(i64, u32, Option<String>, Option<
         ag_image::parse_type(ty)?;
     }
     Ok((offset, size, name, ty))
+}
+
+/// C the analyst typed on one line as the parser reads it: each `#pragma
+/// pack(…)` on a line of its own, since a directive runs to the end of its
+/// line.
+fn c_of_prompt(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("#pragma") {
+        out.push_str(&rest[..at]);
+        let directive = &rest[at..];
+        let end = directive
+            .find(')')
+            .map_or(directive.len(), |close| close + 1);
+        out.push('\n');
+        out.push_str(directive[..end].trim());
+        out.push('\n');
+        rest = &directive[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A definition's C on one line, for the one-line prompt.
+fn one_line_c(c: &str) -> String {
+    c.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether `text` holds `word` as a whole word: not inside a longer
@@ -12731,6 +13086,227 @@ mod tests {
         assert!(app.shown_stack().is_none());
     }
 
+    fn structs_elf() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ag-engine/tests/fixtures/structs.elf")
+    }
+
+    #[test]
+    fn the_types_pane_defines_edits_searches_and_deletes_types_with_undo() {
+        let config = Config {
+            binary: Some(structs_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::ViewTypes);
+        assert!(app.show_bottom);
+        assert_eq!(app.bottom.tab, BottomTab::Types);
+        assert!(app.shown_types().is_empty());
+        let _ = crate::views::bottom_panel::view(&app);
+
+        // New type from C: the prompt reads declarations, one line, a
+        // pack pragma among them.
+        let _ = app.update(Message::EditNewType);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::TypeNew)
+        );
+        let _ = app.update(Message::PromptChanged(
+            "struct point { int x; int y; long tag; }; enum state { S_IDLE, S_READY }; \
+             #pragma pack(push, 1) struct wire { char kind; int len; }; #pragma pack(pop)"
+                .into(),
+        ));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Defined struct point, enum state, struct wire")
+        );
+        let names = |app: &App| -> Vec<(String, String)> {
+            app.shown_types()
+                .into_iter()
+                .map(|(key, kind, size)| (format!("{kind} {key}"), size))
+                .collect()
+        };
+        assert_eq!(
+            names(&app),
+            [
+                ("struct struct point".to_string(), "0x10".to_string()),
+                ("enum enum state".to_string(), "0x4".to_string()),
+                ("struct struct wire".to_string(), "0x5".to_string()),
+            ]
+        );
+        assert_eq!(app.annotations.types.len(), 3);
+        let _ = app.update(Message::TypeSelected("struct point".into()));
+        let text = app.selected_type_text().expect("the layout");
+        assert!(text.contains("/* 0x08 */ long tag;"), "{text}");
+        assert!(text.ends_with("/* size 0x10, align 8 */"), "{text}");
+        let _ = crate::views::bottom_panel::view(&app);
+
+        // The search filters by name, member or text.
+        let _ = app.update(Message::TypesFilterChanged("tag".into()));
+        assert_eq!(app.shown_types().len(), 1);
+        let _ = app.update(Message::TypesSearchIn);
+        assert_eq!(app.bottom.types_in, Some(ag_image::TypeSearch::Name));
+        assert!(app.shown_types().is_empty());
+        let _ = app.update(Message::TypesSearchIn);
+        assert_eq!(app.shown_types().len(), 1, "a member's name");
+        let _ = app.update(Message::TypesSearchIn);
+        let _ = app.update(Message::TypesSearchIn);
+        assert_eq!(app.bottom.types_in, None);
+        let _ = app.update(Message::TypesFilterChanged(String::new()));
+
+        // Edit opens on the stored C, on one line, and replaces it.
+        let _ = app.update(Message::EditEditType);
+        let prompt = app.prompt.clone().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::TypeEdit);
+        assert_eq!(prompt.value, "struct point { int x; int y; long tag; };");
+        let _ = app.update(Message::PromptChanged(
+            "struct point { int x; int y; long tag; long more; };".into(),
+        ));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("Replaced struct point"));
+        assert_eq!(names(&app)[0].1, "0x18");
+
+        // A type given a variable is not deleted.
+        let _ = app.update(Message::FunctionSelected(0x401000));
+        let _ = app.update(Message::EditVariableType);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::VariableType)
+        );
+        let _ = app.update(Message::PromptChanged("a struct point*".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("a is typed struct point *"));
+        let _ = app.update(Message::TypeSelected("struct point".into()));
+        let _ = app.update(Message::EditDeleteType);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("struct point is not removed: a of 0x401000 refers to it")
+        );
+        assert_eq!(app.shown_types().len(), 3);
+
+        // Another is deleted, and undo brings it back; redo takes it again.
+        let _ = app.update(Message::TypeSelected("struct wire".into()));
+        let _ = app.update(Message::EditDeleteType);
+        assert_eq!(app.notice.as_deref(), Some("Deleted struct wire"));
+        assert_eq!(app.shown_types().len(), 2);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.shown_types().len(), 3);
+        let _ = app.update(Message::EditRedo);
+        assert_eq!(app.shown_types().len(), 2);
+
+        // C that does not read is said, and changes nothing.
+        let _ = app.update(Message::EditNewType);
+        let _ = app.update(Message::PromptChanged("struct bad { int x }".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("The type is not defined: 1:20: expected ; after the member, not }")
+        );
+        assert_eq!(app.shown_types().len(), 2);
+
+        // View ▸ Types again hides the pane.
+        let _ = app.update(Message::PromptCancel);
+        let _ = app.update(Message::ViewTypes);
+        assert!(!app.show_bottom);
+    }
+
+    #[test]
+    fn a_variable_typed_a_struct_pointer_reads_its_members_with_undo() {
+        let config = Config {
+            binary: Some(structs_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let body = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        let _ = app.update(Message::FunctionSelected(0x401000));
+        assert!(
+            body(&app).contains("void init(long a, int b)"),
+            "{}",
+            body(&app)
+        );
+        let _ = app.update(Message::EditNewType);
+        let _ = app.update(Message::PromptChanged(
+            "struct point { int x; int y; long tag; };".into(),
+        ));
+        let _ = app.update(Message::PromptSubmit);
+        let _ = app.update(Message::EditVariableType);
+        let _ = app.update(Message::PromptChanged("a struct point *".into()));
+        let _ = app.update(Message::PromptSubmit);
+        let typed = body(&app);
+        assert!(
+            typed.contains("void init(struct point *a, int b)"),
+            "{typed}"
+        );
+        assert!(typed.contains("a->x = b;"), "{typed}");
+        assert!(typed.contains("a->tag = 0x1122334455667788;"), "{typed}");
+        let key = app.annotation_key(0x401000);
+        assert_eq!(
+            app.annotations
+                .annotation_for(&key)
+                .map(|a| a.var_types.len()),
+            Some(1)
+        );
+        // The prompt opens on the type given the variable selected.
+        app.bottom.selected_variable = Some("a".into());
+        let _ = app.update(Message::EditVariableType);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.value.as_str()),
+            Some("a struct point *")
+        );
+        let _ = app.update(Message::PromptCancel);
+        // A type that is no type is said.
+        let _ = app.update(Message::EditVariableType);
+        let _ = app.update(Message::PromptChanged("a struct point x y".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("struct point x y is not a type")),
+            "{:?}",
+            app.notice
+        );
+        let _ = app.update(Message::PromptCancel);
+
+        // Undo takes the type back, and the lift's own type returns.
+        let _ = app.update(Message::EditUndo);
+        assert!(
+            body(&app).contains("void init(long a, int b)"),
+            "{}",
+            body(&app)
+        );
+        let _ = app.update(Message::EditRedo);
+        assert!(body(&app).contains("a->x = b;"), "{}", body(&app));
+        // `clear` takes it back too.
+        let _ = app.update(Message::EditVariableType);
+        let _ = app.update(Message::PromptChanged("a clear".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert_eq!(app.notice.as_deref(), Some("a has the lift's type again"));
+        assert!(
+            body(&app).contains("void init(long a, int b)"),
+            "{}",
+            body(&app)
+        );
+        // Undoing the definition takes the type away from the store too.
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        let _ = app.update(Message::EditUndo);
+        assert!(app.annotations.types.is_empty());
+        assert!(app.shown_types().is_empty());
+    }
+
+    #[test]
+    fn c_typed_on_one_line_keeps_its_pragmas_on_lines_of_their_own() {
+        assert_eq!(
+            c_of_prompt("#pragma pack(push, 1) struct w { char c; }; #pragma pack(pop)"),
+            "\n#pragma pack(push, 1)\n struct w { char c; }; \n#pragma pack(pop)\n"
+        );
+        assert_eq!(
+            one_line_c("#pragma pack(push, 1)\nstruct w {\n  char c;\n};\n#pragma pack(pop)"),
+            "#pragma pack(push, 1) struct w { char c; }; #pragma pack(pop)"
+        );
+    }
+
     #[test]
     fn a_stack_variable_is_read_as_the_analyst_types_it() {
         let word = |offset: i64, size: u32, name: Option<&str>, ty: Option<&str>| {
@@ -12764,7 +13340,7 @@ mod tests {
         );
         assert!(parse_stack_variable("-16").is_err());
         assert!(parse_stack_variable("-16 0").is_err());
-        assert!(parse_stack_variable("-16 8 x int[2][2]").is_err());
+        assert!(parse_stack_variable("-16 8 x int[0]").is_err());
     }
 
     #[test]

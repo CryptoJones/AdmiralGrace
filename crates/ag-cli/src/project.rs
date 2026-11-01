@@ -312,6 +312,36 @@ pub enum ProjectCmd {
         #[arg(long = "type", value_name = "TYPE")]
         ty: Option<String>,
     },
+    /// Give a function's variable a C type — `struct point *`, `enum
+    /// state`, `uint32_t` — by its lift name: it is declared so, a load or
+    /// store through a typed pointer reads as the member it is, `p->x`, and
+    /// a constant compared with or assigned to an enumeration's variable as
+    /// its enumerator. The type must be a scalar of the variable's width;
+    /// one that is not is refused with a note in the pseudocode. `clear` in
+    /// place of TYPE takes the type back
+    VarType {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The variable, as the lift declares it.
+        variable: String,
+        /// The C type, or `clear`.
+        #[arg(value_name = "TYPE")]
+        ty: String,
+    },
+    /// The project's types — structures, unions, enumerations and typedefs,
+    /// written as C — added, replaced, removed, shown with their layout
+    /// under the image's data model, or searched by name, member or text
+    Types {
+        /// The project file to read or change.
+        #[arg(long)]
+        file: PathBuf,
+        #[command(subcommand)]
+        cmd: TypesCmd,
+    },
     /// Pin a function's variable to a value or an inclusive range, for the
     /// whole function or from an address on: the uses it settles read the
     /// value, the conditions it decides are constants, and a `switch` on it
@@ -838,6 +868,13 @@ pub fn run(
             }
             Ok(code)
         }
+        ProjectCmd::VarType {
+            file,
+            function,
+            variable,
+            ty,
+        } => var_type(&target, &file, &function, &variable, &ty),
+        ProjectCmd::Types { file, cmd } => types(&target, &file, cmd),
         ProjectCmd::StackVar {
             file,
             function,
@@ -868,7 +905,12 @@ pub fn run(
             let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
             let ty = ty.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
             if let Some(ty) = &ty {
-                ag_image::parse_type(ty).map_err(anyhow::Error::msg)?;
+                let project = open_project(&target, &file)?;
+                let image = image_under(&target, &project)?;
+                let (store, _) =
+                    ag_image::ctype::build(image.data_model(), &crate::types::texts(&project))
+                        .unwrap_or_default();
+                ag_image::parse_type_in(&store, ty).map_err(anyhow::Error::msg)?;
             }
             let address = function_key(&target, &file, &function)?;
             let mut had = true;
@@ -1341,6 +1383,56 @@ pub fn open_target(
 }
 
 /// One edit to the image's segments.
+/// What `ag project … types` does.
+#[derive(Subcommand)]
+pub enum TypesCmd {
+    /// Add the definitions of C source, each declaration a definition of its
+    /// own: `struct point { int x, y; };`, `typedef struct node node_t;`
+    Add {
+        /// The C source; read from `--from` when absent.
+        source: Option<String>,
+        /// A file the C source is read from.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
+    /// Replace the definition NAME with C source, in its place
+    Replace {
+        /// The definition: `struct point`, `point`, `node_t`.
+        name: String,
+        /// The C source; read from `--from` when absent.
+        source: Option<String>,
+        /// A file the C source is read from.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
+    /// Remove the definition NAME; refused while another definition or a
+    /// variable's type names what it defines
+    Remove {
+        /// The definition: `struct point`, `point`, `node_t`.
+        name: String,
+    },
+    /// Show the definitions, or one, as C with their layout: each member's
+    /// offset, the padding, the size and the alignment
+    Show {
+        /// The definition; every one when absent.
+        name: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The definitions whose name, members or C hold TEXT, in any case
+    Search {
+        /// The text looked for.
+        text: String,
+        /// Where to look: `name`, `member`, `text` or `any`.
+        #[arg(long = "in", value_name = "WHERE", default_value = "any")]
+        within: String,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum SegmentCmd {
     /// Add a segment the loader missed.
@@ -1480,6 +1572,142 @@ fn global_pointer(target: &Path, file: &Path, value: &str, function: Option<&str
                     "{}: the global pointer is what the image says",
                     file.display()
                 ),
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Give `variable` of `function` the C type `ty`, or take it back with
+/// `clear`. The type is read against the project's types.
+fn var_type(target: &Path, file: &Path, function: &str, variable: &str, ty: &str) -> Result<i32> {
+    let variable = variable.trim().to_string();
+    anyhow::ensure!(!variable.is_empty(), "the variable is empty");
+    let ty = ty.trim();
+    let address = function_key(target, file, function)?;
+    if ty.eq_ignore_ascii_case("clear") {
+        let mut had = false;
+        let code = edit(target, file, TargetKind::Function, &address, |a| {
+            had = a.clear_var_type(&variable);
+        })?;
+        if !had {
+            eprintln!("{variable} had no type given in {address}");
+        }
+        return Ok(code);
+    }
+    let project = open_project(target, file)?;
+    let image = image_under(target, &project)?;
+    let (store, _) = ag_image::ctype::build(image.data_model(), &crate::types::texts(&project))
+        .map_err(|why| anyhow::anyhow!("the project's types are not read: {why}"))?;
+    let parsed = ag_image::ctype::parse_type(&store, ty)
+        .map_err(|error| anyhow::anyhow!("{ty} is not a type: {}", error.message))?;
+    let spelled = parsed.spelled(&store);
+    edit(target, file, TargetKind::Function, &address, |a| {
+        a.set_var_type(&variable, &spelled);
+    })
+}
+
+/// The C source an edit of the types gives: the argument, or the file.
+fn type_source(source: Option<String>, from: Option<PathBuf>) -> Result<String> {
+    match (source, from) {
+        (Some(source), None) => Ok(source),
+        (None, Some(from)) => {
+            std::fs::read_to_string(&from).with_context(|| format!("reading {}", from.display()))
+        }
+        (Some(_), Some(_)) => anyhow::bail!("give the C source or --from, not both"),
+        (None, None) => anyhow::bail!("give the C source, or --from FILE"),
+    }
+}
+
+/// `ag project TARGET types …`.
+fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
+    let mut project = open_project(target, file)?;
+    let image = image_under(target, &project)?;
+    let model = image.data_model();
+    let held = crate::types::texts(&project);
+    let notes = |notes: &[String]| {
+        for note in notes {
+            eprintln!("note: {note}");
+        }
+    };
+    match cmd {
+        TypesCmd::Add { source, from } => {
+            let source = type_source(source, from)?;
+            let (defined, added, said) =
+                ag_image::ctype::add(model, &held, &source).map_err(anyhow::Error::msg)?;
+            notes(&said);
+            project.types = crate::types::definitions(&defined);
+            project.save(file)?;
+            println!("{}: {} defined", file.display(), added.join(", "));
+            Ok(0)
+        }
+        TypesCmd::Replace { name, source, from } => {
+            let source = type_source(source, from)?;
+            let (defined, said) = ag_image::ctype::replace(model, &held, &name, &source)
+                .map_err(anyhow::Error::msg)?;
+            notes(&said);
+            project.types = crate::types::definitions(&defined);
+            project.save(file)?;
+            println!("{}: {} replaced", file.display(), name.trim());
+            Ok(0)
+        }
+        TypesCmd::Remove { name } => {
+            let users = crate::types::users(&project, &image);
+            let (defined, gone) =
+                ag_image::ctype::remove(model, &held, &name, &users).map_err(anyhow::Error::msg)?;
+            project.types = crate::types::definitions(&defined);
+            project.save(file)?;
+            println!("{}: {gone} removed", file.display());
+            Ok(0)
+        }
+        TypesCmd::Show { name, json } => {
+            let (store, _) = ag_image::ctype::build(model, &held).map_err(anyhow::Error::msg)?;
+            let keys: Vec<String> = match &name {
+                Some(name) => vec![store
+                    .key_of(name)
+                    .ok_or_else(|| anyhow::anyhow!("no type is named {}", name.trim()))?],
+                None => store.names().into_iter().map(str::to_string).collect(),
+            };
+            if json {
+                let shown: Vec<serde_json::Value> = keys
+                    .iter()
+                    .map(|key| crate::types::type_json(&store, key))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&shown)?);
+                return Ok(0);
+            }
+            if keys.is_empty() {
+                println!("{}: no types are defined", file.display());
+            }
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    println!();
+                }
+                if let Some(text) = store.definition_text(key, true) {
+                    println!("{text}");
+                }
+            }
+            Ok(0)
+        }
+        TypesCmd::Search { text, within, json } => {
+            let within = ag_image::TypeSearch::parse(&within).ok_or_else(|| {
+                anyhow::anyhow!("{within:?} is not where a search looks: name, member, text or any")
+            })?;
+            let (store, _) = ag_image::ctype::build(model, &held).map_err(anyhow::Error::msg)?;
+            let found = store.search(&text, within);
+            if json {
+                let shown: Vec<serde_json::Value> = found
+                    .iter()
+                    .map(|key| crate::types::type_json(&store, key))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&shown)?);
+                return Ok(0);
+            }
+            if found.is_empty() {
+                println!("no type matches {:?}", text);
+            }
+            for key in &found {
+                println!("{}", crate::types::summary(&store, key));
             }
             Ok(0)
         }
@@ -2053,6 +2281,9 @@ fn summarize(annotation: &Annotation) -> String {
             value.variable,
             value.spelled()
         ));
+    }
+    for word in &annotation.var_types {
+        parts.push(format!("variable {} of type {}", word.variable, word.ty));
     }
     for variable in &annotation.stack_vars {
         let mut text = format!(

@@ -446,7 +446,11 @@ impl Structurer<'_> {
                             if falls_through(&body) {
                                 body.push(Statement::plain(AstNode::Break, Vec::new()));
                             }
-                            arms.push(SwitchArm { values, body });
+                            arms.push(SwitchArm {
+                                values,
+                                body,
+                                labels: Vec::new(),
+                            });
                         }
                         self.switch_depth -= 1;
                         seq.push(Statement {

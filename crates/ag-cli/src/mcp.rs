@@ -542,6 +542,66 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "list_types",
+            description: "The types the image's functions are read with: the data model their layout follows (`LP64`, `LLP64`, `ILP32`), the platform's primitives with their sizes, and the project's structures, unions, enumerations and typedefs, each with its kind and size.",
+            schema: json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "get_type",
+            description: "One of the project's types by name — `struct point`, `point`, `node_t`, `enum color` — with its kind, size and alignment, its members with their offsets and sizes (a bit-field's bit offset and width), an enumeration's values, a typedef's target, and its C with and without the layout comments (`/* 0x08 */ long next;`, the padding, `/* size 0x18, align 8 */`).",
+            schema: json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The type's name." } },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "define_types",
+            description: "Define types from C source: structures, unions (named, anonymous, nested), enumerations with constant expressions, typedefs including function pointers, bit-fields, `#pragma pack` and `__attribute__((packed))`; each declaration is a definition of its own. With `replace`, the source replaces that definition in its place. A name defined already, or source that does not read, is refused with its line and column; what the parser skipped (qualifiers, other preprocessor lines, functions and variables declared) comes back as notes. The project is saved and the pseudocode read with the types.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "c": { "type": "string", "description": "The C source." },
+                    "replace": { "type": "string", "description": "The definition the source replaces." },
+                },
+                "required": ["c"]
+            }),
+        },
+        Tool {
+            name: "remove_type",
+            description: "Remove one of the project's types by name; refused while another definition or a variable's type names what it defines, saying which. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The type's name." } },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "search_types",
+            description: "The project's types whose name, members or C hold `text`, in any case: `in` is `name`, `member`, `text` or `any` (the default).",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "The text looked for." },
+                    "in": { "type": "string", "enum": ["name", "member", "text", "any"], "description": "Where to look." },
+                },
+                "required": ["text"]
+            }),
+        },
+        Tool {
+            name: "set_variable_type",
+            description: "Give a function's variable a C type by its lift name — `struct point *`, `enum state`, `uint32_t` — or take it back with no `type`. The variable is declared so; a load or store through a typed pointer reads as its member, `p->x`, `p->a[i]`, `p[1].y`; a constant compared with, assigned to or switched on an enumeration's variable reads as its enumerator, and flags as `A | B`. A type that is no scalar of the variable's width is refused, and the function's leading comments say why: `b is not typed char *: char * is 8 bytes, b holds 4`. The project is saved.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "function": { "type": "string", "description": "The function: its name, or its address (`0x401000`)." },
+                    "variable": { "type": "string", "description": "The variable, as the lift declares it." },
+                    "type": { "type": "string", "description": "The C type; absent to take it back." },
+                },
+                "required": ["function", "variable"]
+            }),
+        },
+        Tool {
             name: "opaque_predicates",
             description: "The opaque predicates of functions: the conditional branches whose condition is decided whatever the input — a value compared with itself, `x * (x + 1)` or `x * x + x` tested for evenness, `x | 1` against 0, an unsigned value below 0, a condition over constants, and the flags a block sets to known values by itself (`xor eax, eax; test eax, eax; jnz`, `stc; jc`, `cmp eax, eax; jne`). Each with its site, its function, whether it is always or never taken, why, and the bytes that patch it out.",
             schema: json!({
@@ -1389,7 +1449,7 @@ impl Server {
                         .map(|ty| ty.trim().to_string())
                         .filter(|ty| !ty.is_empty());
                     if let Some(ty) = &ty {
-                        ag_image::parse_type(ty)?;
+                        ag_image::parse_type_in(&self.image.types(), ty)?;
                     }
                     self.change(TargetKind::Function, address, |record| {
                         record.set_stack_var(offset, size, label.as_deref(), ty.as_deref())
@@ -1402,6 +1462,111 @@ impl Server {
                 if !had {
                     return Err(format!(
                         "no stack variable was made at {offset} in the function at {address:#x}"
+                    ));
+                }
+                self.image
+                    .set_variable_edits(crate::image::variable_edits(&self.project()?.file));
+                Ok(Answer::json(annotations_json(
+                    &self.project()?.file,
+                    address,
+                )))
+            }
+            "list_types" => {
+                let store = self.image.types();
+                let defined: Vec<Value> = store
+                    .names()
+                    .into_iter()
+                    .map(|key| {
+                        let full = crate::types::type_json(&store, key);
+                        json!({
+                            "name": key,
+                            "kind": full["kind"],
+                            "size": full["size"],
+                            "align": full["align"],
+                        })
+                    })
+                    .collect();
+                Ok(Answer::json(json!({
+                    "data_model": store.model().name,
+                    "primitives": crate::types::primitives_json(&store),
+                    "types": defined,
+                })))
+            }
+            "get_type" => {
+                let store = self.image.types();
+                let wanted = text("name")?;
+                let key = store
+                    .key_of(&wanted)
+                    .ok_or_else(|| format!("no type is named {}", wanted.trim()))?;
+                Ok(Answer::json(crate::types::type_json(&store, &key)))
+            }
+            "search_types" => {
+                let store = self.image.types();
+                let within = optional_text("in")?.unwrap_or_default();
+                let within = ag_image::TypeSearch::parse(&within).ok_or_else(|| {
+                    format!("{within:?} is not where a search looks: name, member, text or any")
+                })?;
+                let found: Vec<Value> = store
+                    .search(&text("text")?, within)
+                    .iter()
+                    .map(|key| crate::types::type_json(&store, key))
+                    .collect();
+                Ok(Answer::json(json!({ "types": found })))
+            }
+            "define_types" | "remove_type" => {
+                let model = self.image.data_model();
+                self.reload()?;
+                let held = crate::types::texts(&self.project()?.file);
+                let (defined, said, notes) = if name == "define_types" {
+                    let source = text("c")?;
+                    match optional_text("replace")? {
+                        Some(replaced) => {
+                            let (defined, notes) =
+                                ag_image::ctype::replace(model, &held, &replaced, &source)?;
+                            (defined, vec![replaced.trim().to_string()], notes)
+                        }
+                        None => ag_image::ctype::add(model, &held, &source)?,
+                    }
+                } else {
+                    let users = crate::types::users(&self.project()?.file, &self.image);
+                    let (defined, gone) =
+                        ag_image::ctype::remove(model, &held, &text("name")?, &users)?;
+                    (defined, vec![gone], Vec::new())
+                };
+                let kept = crate::types::definitions(&defined);
+                self.change_file(|file| file.types = kept)?;
+                self.image.set_type_definitions(&defined)?;
+                Ok(Answer::json(json!({
+                    if name == "define_types" { "defined" } else { "removed" }: said,
+                    "notes": notes,
+                    "types": self.image.types().names(),
+                })))
+            }
+            "set_variable_type" => {
+                let address = self.function(&text("function")?)?;
+                let variable = text("variable")?.trim().to_string();
+                if variable.is_empty() {
+                    return Err("\"variable\" is empty".to_string());
+                }
+                let mut had = true;
+                match optional_text("type")?.filter(|ty| !ty.trim().is_empty()) {
+                    Some(ty) => {
+                        let store = self.image.types();
+                        let parsed = ag_image::ctype::parse_type(&store, &ty).map_err(|error| {
+                            format!("{} is not a type: {}", ty.trim(), error.message)
+                        })?;
+                        let spelled = parsed.spelled(&store);
+                        self.change(TargetKind::Function, address, |record| {
+                            record.set_var_type(&variable, &spelled)
+                        })?;
+                    }
+                    None => self.change(TargetKind::Function, address, |record| {
+                        had = record.clear_var_type(&variable)
+                    })?,
+                }
+                if !had {
+                    return Err(format!(
+                        "{variable} had no type given in the function at {address:#x}"
                     ));
                 }
                 self.image
@@ -2285,6 +2450,10 @@ fn annotations_json(project: &ProjectFile, address: u64) -> Value {
                 "type": variable.ty,
                 "spelled": variable.spelled(),
             })).collect::<Vec<Value>>(),
+            "var_types": record.var_types.iter().map(|word| json!({
+                "variable": word.variable,
+                "type": word.ty,
+            })).collect::<Vec<Value>>(),
         })
     };
     json!({
@@ -2521,6 +2690,12 @@ mod tests {
                 "set_variable_value",
                 "create_stack_variable",
                 "remove_stack_variable",
+                "list_types",
+                "get_type",
+                "define_types",
+                "remove_type",
+                "search_types",
+                "set_variable_type",
                 "opaque_predicates",
                 "patch_opaque_predicates",
                 "set_dead_stores",

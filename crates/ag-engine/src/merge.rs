@@ -93,18 +93,23 @@ pub struct VariableEdits {
     /// by the lift as it makes its stack locals ([`crate::stack_vars`]),
     /// before every other word.
     pub stack_vars: Vec<crate::stack_vars::StackVar>,
+    /// The types the analyst gave the lift's variables, `(variable,
+    /// type)`, given right after the stack variables are made
+    /// ([`crate::typed`]).
+    pub var_types: Vec<(String, String)>,
 }
 
 /// One function's merges, `(keep, gone)`, splits, `(variable, at)`, new
 /// versions, `(variable, at)`, pinned values, `(variable, at, min, max)`,
-/// and stack variables, `(offset, size, name, type)`, as the project file
-/// gives them.
+/// stack variables, `(offset, size, name, type)`, and types, `(variable,
+/// type)`, as the project file gives them.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<crate::values::PinnedWord>,
     Vec<StackWord>,
+    Vec<(String, String)>,
 );
 
 /// A stack variable as the project file gives it: `(offset, size, name,
@@ -112,7 +117,7 @@ pub type VariableWords = (
 pub type StackWord = (i64, u32, Option<String>, Option<String>);
 
 impl From<VariableWords> for VariableEdits {
-    fn from((merges, splits, versions, values, stack_vars): VariableWords) -> Self {
+    fn from((merges, splits, versions, values, stack_vars, var_types): VariableWords) -> Self {
         Self {
             merges,
             splits,
@@ -127,6 +132,7 @@ impl From<VariableWords> for VariableEdits {
                     ty,
                 })
                 .collect(),
+            var_types,
         }
     }
 }
@@ -139,6 +145,7 @@ impl VariableEdits {
             && self.versions.is_empty()
             && self.values.is_empty()
             && self.stack_vars.is_empty()
+            && self.var_types.is_empty()
     }
 }
 

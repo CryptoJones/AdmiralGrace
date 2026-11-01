@@ -780,7 +780,7 @@ fn the_stack_frame_and_the_analysts_stack_variables_go_through_the_server() {
             r#""name":"decompile","arguments":{"target":"sum_to"}"#,
             r#""name":"remove_stack_variable","arguments":{"function":"sum_to","offset":-24}"#,
             r#""name":"remove_stack_variable","arguments":{"function":"sum_to","offset":-24}"#,
-            r#""name":"create_stack_variable","arguments":{"function":"sum_to","offset":-24,"size":8,"type":"int[2][2]"}"#,
+            r#""name":"create_stack_variable","arguments":{"function":"sum_to","offset":-24,"size":8,"type":"int[2"}"#,
             r#""name":"stack_frame","arguments":{"target":"sum_to"}"#,
         ]
         .iter()
@@ -845,8 +845,120 @@ fn the_stack_frame_and_the_analysts_stack_variables_go_through_the_server() {
     assert_eq!(json(4)["record"], serde_json::Value::Null);
     assert_eq!(replies[5]["result"]["isError"], true, "{:?}", replies[5]);
     assert_eq!(replies[6]["result"]["isError"], true, "{:?}", replies[6]);
-    assert!(text(6).contains("an array of arrays"), "{}", text(6));
+    assert!(
+        text(6).contains("expected ] after the count"),
+        "{}",
+        text(6)
+    );
     assert_eq!(json(7), before);
+    let _ = std::fs::remove_file(&project);
+}
+
+#[test]
+fn the_types_and_a_variables_type_go_through_the_server() {
+    let project = std::env::temp_dir().join(format!(
+        "ag-mcp-types-{}-{:?}.agproj",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("mcp")
+        .arg(fixture("structs.elf"))
+        .arg("--project")
+        .arg(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the ag binary runs");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for (id, call) in [
+            r#""name":"define_types","arguments":{"c":"struct point { int x; int y; long tag; };\ntypedef struct point point_t;"}"#,
+            r#""name":"list_types","arguments":{}"#,
+            r#""name":"get_type","arguments":{"name":"point"}"#,
+            r#""name":"search_types","arguments":{"text":"TAG","in":"member"}"#,
+            r#""name":"set_variable_type","arguments":{"function":"init","variable":"a","type":"point_t *"}"#,
+            r#""name":"decompile","arguments":{"target":"init"}"#,
+            r#""name":"remove_type","arguments":{"name":"point_t"}"#,
+            r#""name":"define_types","arguments":{"c":"struct point { long x; };"}"#,
+            r#""name":"set_variable_type","arguments":{"function":"init","variable":"a"}"#,
+            r#""name":"remove_type","arguments":{"name":"point_t"}"#,
+            r#""name":"define_types","arguments":{"replace":"point","c":"struct point { long x, y; };"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{{call}}}}}"#,
+                id + 1
+            )
+            .unwrap();
+        }
+    }
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let replies: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("a line")).expect("a JSON reply a line"))
+        .collect();
+    assert!(child.wait().expect("the server ends").success());
+    assert_eq!(replies.len(), 11);
+    let text = |i: usize| -> String {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let json = |i: usize| -> serde_json::Value {
+        serde_json::from_str(&text(i)).unwrap_or_else(|_| panic!("JSON: {}", text(i)))
+    };
+    for i in [0, 1, 2, 3, 4, 5, 8, 9, 10] {
+        assert_eq!(replies[i]["result"]["isError"], false, "{:?}", replies[i]);
+    }
+    assert_eq!(
+        json(0)["defined"],
+        serde_json::json!(["struct point", "point_t"])
+    );
+    assert_eq!(json(1)["data_model"], "LP64");
+    assert_eq!(json(1)["types"][0]["size"], 16);
+    let point = json(2);
+    assert_eq!(point["name"], "struct point");
+    assert_eq!(point["members"][2]["name"], "tag");
+    assert_eq!(point["members"][2]["offset"], 8);
+    assert!(point["layout"]
+        .as_str()
+        .unwrap()
+        .contains("/* 0x08 */ long tag;"));
+    assert_eq!(json(3)["types"][0]["name"], "struct point");
+    assert_eq!(
+        json(4)["record"]["var_types"],
+        serde_json::json!([{"variable": "a", "type": "point_t *"}])
+    );
+    assert!(
+        text(5).contains("void init(point_t *a, int b)"),
+        "{}",
+        text(5)
+    );
+    assert!(
+        text(5).contains("a->tag = 0x1122334455667788;"),
+        "{}",
+        text(5)
+    );
+    // Refused while a variable's type names it, and defined twice.
+    assert_eq!(replies[6]["result"]["isError"], true, "{:?}", replies[6]);
+    assert!(text(6).contains("a of init refer"), "{}", text(6));
+    assert_eq!(replies[7]["result"]["isError"], true, "{:?}", replies[7]);
+    assert!(
+        text(7).contains("struct point is defined already"),
+        "{}",
+        text(7)
+    );
+    assert_eq!(json(9)["removed"], serde_json::json!(["point_t"]));
+    assert_eq!(json(10)["types"], serde_json::json!(["struct point"]));
+    let saved = std::fs::read_to_string(&project).expect("the project is saved");
+    assert!(saved.contains("struct point { long x, y; };"), "{saved}");
     let _ = std::fs::remove_file(&project);
 }
 

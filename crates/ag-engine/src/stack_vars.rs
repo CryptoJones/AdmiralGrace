@@ -20,25 +20,31 @@
 //! - **an element**: in an array, `char[16]` or `int[4]`, a local at an
 //!   element's offset and of the element's size is that element, `buf[2]`,
 //!   and its address `&buf[2]`;
-//! - **bytes at an offset**: anything else — a field of a structure, a word
-//!   of a `char` array, a local at an offset no element starts at — is a
-//!   load or store at that byte offset, `*(int *)((char *)&buf + 4)`, at the
-//!   width of the lift's local, and its address `(int *)((char *)&buf +
-//!   4)`. The lift knows no structure types, so a field reads this way.
+//! - **a member**: in a structure or union the project's types define
+//!   ([`crate::types`]), a local at a member's offset and of its size is
+//!   that member, `p.x`, inside nested structures and arrays of them,
+//!   `v.inner.g`, `v.a[2].f` — a union's first member the bytes fit, the
+//!   choice per instruction being #371's — and its address `&p.x`;
+//! - **bytes at an offset**: anything else — a word of a `char` array, a
+//!   local at an offset no element or member starts at, or straddling two,
+//!   a structure the types do not define — is a load or store at that
+//!   byte offset, `*(int *)((char *)&buf + 4)`, at the width of the lift's
+//!   local, and its address `(int *)((char *)&buf + 4)`.
 //!
 //! The lift's locals inside the variable are no longer declared; the
 //! variable is, where the first of them was, its type spelled as C declares
-//! it: `char buf[16];`. A local the code reads at two widths at one offset
-//! keeps the lift's type of its first access.
+//! it: `char buf[16];`, `struct point p;`. A local the code reads at two
+//! widths at one offset keeps the lift's type of its first access.
 //!
 //! Without a name the variable is named as the lift names its slot,
 //! `local_20`; without a type it is `char`, `short`, `int` or `long` for a
-//! size of 1, 2, 4 or 8 bytes, and an array of `char` otherwise. A type of
-//! a known size must be the variable's size — an array with no count,
-//! `int[]`, takes the count the size gives — and a type the lift does not
-//! know the size of, `struct point`, is taken at the size given. The name
-//! is the variable's lift name: the analyst's renames, merges, splits,
-//! versions and pinned values key on it.
+//! size of 1, 2, 4 or 8 bytes, and an array of `char` otherwise. The type
+//! is read by the C parser ([`crate::ctype::parse_type`]) against the
+//! project's types. A type of a known size must be the variable's size —
+//! an array with no count, `int[]`, takes the count the size gives — and a
+//! type the project does not define, `struct point`, is taken at the size
+//! given. The name is the variable's lift name: the analyst's renames,
+//! merges, splits, versions and pinned values key on it.
 //!
 //! A variable that overlaps one made before it, in the order the analyst
 //! gave them, is refused, and so is one whose type does not fit its size,
@@ -52,6 +58,7 @@ use std::collections::BTreeMap;
 use crate::ast::{AstNode, BinaryOp};
 use crate::lift::{LiftedFunction, Placement, Statement, StatementKind, Variable};
 use crate::options::SlotNames;
+use crate::types::{Prim, Step, Type, TypeStore};
 
 /// A variable the analyst made in a function's stack frame: its offset from
 /// the stack pointer at the function's entry, its size in bytes, and the
@@ -82,7 +89,7 @@ pub fn indexed(node: &AstNode) -> Option<(&AstNode, &AstNode)> {
 
 /// A C type as the analyst typed it, read as far as the lift needs: the
 /// element type and count of an array, and the size of the element when
-/// the lift knows it.
+/// it is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedType {
     /// The type as it is declared: `int`, `char *`, `char[16]`.
@@ -93,107 +100,64 @@ pub struct ParsedType {
     pub array: bool,
     /// The count of an array, when it says one.
     pub count: Option<u32>,
-    /// The size of the element in bytes, when the lift knows it: the
-    /// integer, floating and pointer types, and `int32_t` and its kind.
+    /// The size of the element in bytes, when it is known: the platform's
+    /// primitives and pointers, and what the types define.
     pub element_size: Option<u32>,
 }
 
-/// The type `text`: a C type, optionally an array of one, `char[16]` or
-/// `int[]`. An array of arrays is refused.
+/// The type `text`, `char[16]`, `int[]`, `struct point`, read against the
+/// platform's primitives alone; see [`parse_type_in`].
 pub fn parse_type(text: &str) -> Result<ParsedType, String> {
+    parse_type_in(&TypeStore::default(), text)
+}
+
+/// The type `text` read against the types of `store`: a C type, an array
+/// of one, `char[16]` or `int[]`, or a name the store does not define,
+/// taken at no known size. `void`, a function, and an array of no
+/// elements are refused.
+pub fn parse_type_in(store: &TypeStore, text: &str) -> Result<ParsedType, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("the type is empty".to_string());
     }
-    let (element, array, count) = match text.find('[') {
-        Some(open) => {
-            let element = text[..open].trim();
-            let rest = text[open + 1..].trim();
-            let Some(inside) = rest.strip_suffix(']') else {
-                return Err(format!("{text} has no closing ]"));
+    let ty = crate::ctype::parse_type(store, text).map_err(|error| error.message)?;
+    variable_type(store, &ty)?;
+    let (element, array, count) = match &ty {
+        Type::Array(element, count) => {
+            let count = match count {
+                Some(0) => return Err(format!("{} has no elements", ty.spelled(store))),
+                Some(n) => Some(
+                    u32::try_from(*n).map_err(|_| format!("{} is too large", ty.spelled(store)))?,
+                ),
+                None => None,
             };
-            let inside = inside.trim();
-            if inside.contains('[') || inside.contains(']') {
-                return Err(format!("{text} is an array of arrays"));
-            }
-            let count = if inside.is_empty() {
-                None
-            } else {
-                let parsed = match inside
-                    .strip_prefix("0x")
-                    .or_else(|| inside.strip_prefix("0X"))
-                {
-                    Some(hex) => u32::from_str_radix(hex, 16),
-                    None => inside.parse::<u32>(),
-                };
-                match parsed {
-                    Ok(0) => return Err(format!("{text} has no elements")),
-                    Ok(count) => Some(count),
-                    Err(_) => return Err(format!("{inside:?} is not a count")),
-                }
-            };
-            (element, true, count)
+            ((**element).clone(), true, count)
         }
-        None => (text, false, None),
+        other => (other.clone(), false, None),
     };
-    if element.is_empty() {
-        return Err(format!("{text} names no element type"));
-    }
-    if element == "void" {
-        return Err("a variable of type void holds nothing".to_string());
-    }
-    let element = normalized(element);
-    let element_size = size_of(&element);
-    let text = match (array, count) {
-        (true, Some(count)) => format!("{element}[{count}]"),
-        (true, None) => format!("{element}[]"),
-        _ => element.clone(),
-    };
+    let element_size = store
+        .size_of(&element)
+        .ok()
+        .and_then(|size| u32::try_from(size).ok());
     Ok(ParsedType {
-        text,
-        element,
+        text: ty.spelled(store),
+        element: element.spelled(store),
         array,
         count,
         element_size,
     })
 }
 
-/// The type with its words single-spaced and its stars apart: `char*` is
-/// `char *`.
-fn normalized(ty: &str) -> String {
-    let stars = ty.chars().filter(|&c| c == '*').count();
-    let base = ty.replace('*', " ");
-    let base = base.split_whitespace().collect::<Vec<_>>().join(" ");
-    if stars == 0 {
-        base
-    } else {
-        format!("{base} {}", "*".repeat(stars))
+/// Why `ty` is no type a variable can have: `void`, or a function.
+fn variable_type(store: &TypeStore, ty: &Type) -> Result<(), String> {
+    match store.resolve(ty) {
+        Type::Prim(Prim::Void) => Err("a variable of type void holds nothing".to_string()),
+        Type::Function { .. } => Err(format!(
+            "{} is a function: a variable is a pointer to one",
+            ty.spelled(store)
+        )),
+        _ => Ok(()),
     }
-}
-
-/// The size in bytes of a type the lift knows; `None` for one it does not,
-/// a structure or a name it has no definition of.
-fn size_of(ty: &str) -> Option<u32> {
-    if ty.ends_with('*') {
-        return Some(8);
-    }
-    let words: Vec<&str> = ty
-        .split_whitespace()
-        .filter(|word| !matches!(*word, "const" | "volatile" | "signed" | "unsigned"))
-        .collect();
-    let bare = ty
-        .split_whitespace()
-        .any(|word| matches!(word, "signed" | "unsigned"));
-    Some(match words.join(" ").as_str() {
-        "" if bare => 4,
-        "char" | "_Bool" | "bool" | "int8_t" | "uint8_t" => 1,
-        "short" | "short int" | "int16_t" | "uint16_t" => 2,
-        "int" | "float" | "int32_t" | "uint32_t" => 4,
-        "long" | "long int" | "long long" | "long long int" | "double" | "int64_t" | "uint64_t"
-        | "size_t" | "ssize_t" | "intptr_t" | "uintptr_t" | "ptrdiff_t" => 8,
-        "long double" => 16,
-        _ => return None,
-    })
 }
 
 /// The type of a size the analyst gave no type for: the integer of the
@@ -209,12 +173,9 @@ fn default_type(size: u32) -> String {
 }
 
 /// The declaration of `name` of type `ty` as C writes it: `int i`, `char
-/// buf[16]`.
+/// buf[16]`, `int (*cb)(int)`.
 pub fn declarator(ty: &str, name: &str) -> String {
-    match ty.find('[') {
-        Some(open) => format!("{} {name}{}", ty[..open].trim_end(), &ty[open..]),
-        None => format!("{ty} {name}"),
-    }
+    crate::ctype::declarator(ty, name)
 }
 
 /// Whether `name` is a C identifier.
@@ -226,17 +187,17 @@ fn identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// An analyst's variable the lift makes: where it is, its name and type,
-/// and its element when it is an array of elements the lift knows the size
-/// of.
+/// An analyst's variable the lift makes: where it is, its name, and its
+/// type as declared and as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Made {
     pub(crate) offset: i64,
     pub(crate) size: u32,
     pub(crate) name: String,
     pub(crate) ty: String,
-    /// The element's type and size.
-    pub(crate) element: Option<(String, u32)>,
+    /// The type read, when the store knows its size: what its parts are
+    /// found in.
+    pub(crate) parsed: Option<Type>,
 }
 
 impl Made {
@@ -259,7 +220,11 @@ impl Made {
 
 /// The analyst's variables the lift makes, in the order given, and the
 /// notes saying why the others are refused.
-pub(crate) fn accept(words: &[StackVar], names: SlotNames) -> (Vec<Made>, Vec<String>) {
+pub(crate) fn accept(
+    words: &[StackVar],
+    names: SlotNames,
+    store: &TypeStore,
+) -> (Vec<Made>, Vec<String>) {
     let mut made: Vec<Made> = Vec::new();
     let mut notes = Vec::new();
     for word in words {
@@ -284,14 +249,13 @@ pub(crate) fn accept(words: &[StackVar], names: SlotNames) -> (Vec<Made>, Vec<St
             notes.push(refuse(format!("{name:?} is not a C identifier")));
             continue;
         }
-        let (ty, element) = match word.ty.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let (ty, parsed) = match word.ty.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             None => {
                 let ty = default_type(word.size);
-                let element =
-                    (!matches!(word.size, 1 | 2 | 4 | 8)).then(|| ("char".to_string(), 1));
-                (ty, element)
+                let parsed = crate::ctype::parse_type(store, &ty).ok();
+                (ty, parsed)
             }
-            Some(text) => match fitted(text, word.size) {
+            Some(text) => match fitted(store, text, word.size) {
                 Ok(fit) => fit,
                 Err(why) => {
                     notes.push(refuse(why));
@@ -304,7 +268,7 @@ pub(crate) fn accept(words: &[StackVar], names: SlotNames) -> (Vec<Made>, Vec<St
             size: word.size,
             name: name.clone(),
             ty,
-            element,
+            parsed,
         };
         if let Some(other) = made
             .iter()
@@ -331,41 +295,48 @@ pub(crate) fn accept(words: &[StackVar], names: SlotNames) -> (Vec<Made>, Vec<St
 }
 
 /// The type `text` fitted to `size` bytes: its declared spelling, and the
-/// element of an array whose element size the lift knows.
-fn fitted(text: &str, size: u32) -> Result<(String, Option<(String, u32)>), String> {
-    let parsed = parse_type(text)?;
+/// type read when its size is known.
+fn fitted(store: &TypeStore, text: &str, size: u32) -> Result<(String, Option<Type>), String> {
+    let parsed = parse_type_in(store, text)?;
+    let ty = crate::ctype::parse_type(store, text).map_err(|error| error.message)?;
     match (parsed.array, parsed.count, parsed.element_size) {
         (true, Some(count), Some(each)) => {
             let bytes = u64::from(count) * u64::from(each);
             if bytes != u64::from(size) {
                 return Err(format!("{} is {bytes} bytes, not {size}", parsed.text));
             }
-            Ok((parsed.text, Some((parsed.element, each))))
+            Ok((parsed.text, Some(ty)))
         }
         (true, None, Some(each)) => {
-            if !size.is_multiple_of(each) {
+            if each == 0 || !size.is_multiple_of(each) {
                 return Err(format!(
                     "{size} bytes are no whole number of {}, {each} bytes each",
                     parsed.element
                 ));
             }
-            Ok((
-                format!("{}[{}]", parsed.element, size / each),
-                Some((parsed.element, each)),
-            ))
+            let Type::Array(element, _) = ty else {
+                unreachable!("an array read as one");
+            };
+            let whole = Type::Array(element, Some(u64::from(size / each)));
+            Ok((whole.spelled(store), Some(whole)))
         }
         (true, _, None) => Ok((parsed.text, None)),
         (false, _, Some(bytes)) if bytes != size => {
             Err(format!("{} is {bytes} bytes, not {size}", parsed.text))
         }
-        (false, _, _) => Ok((parsed.text, None)),
+        (false, _, Some(_)) => Ok((parsed.text, Some(ty))),
+        (false, _, None) => Ok((parsed.text, None)),
     }
 }
 
 /// Read the lift's locals inside each of `made` as parts of it, declare it
 /// in their place, and note the ones refused because the function declares
 /// their name already. The variables made, with their names and types.
-pub(crate) fn make(function: &mut LiftedFunction, made: &[Made]) -> Vec<StackVar> {
+pub(crate) fn make(
+    function: &mut LiftedFunction,
+    made: &[Made],
+    store: &TypeStore,
+) -> Vec<StackVar> {
     let mut done = Vec::new();
     if function.thunk.is_some() {
         return done;
@@ -397,7 +368,7 @@ pub(crate) fn make(function: &mut LiftedFunction, made: &[Made]) -> Vec<StackVar
             continue;
         }
         for (name, offset, size, ty) in &inside {
-            let part = part_of(variable, *offset - variable.offset, *size, ty);
+            let part = part_of(variable, *offset - variable.offset, *size, ty, store);
             if let AstNode::Deref { target } = &part {
                 addresses.push((**target).clone());
             }
@@ -460,19 +431,25 @@ pub(crate) fn make(function: &mut LiftedFunction, made: &[Made]) -> Vec<StackVar
 }
 
 /// The part of `variable` the lift's local `at` bytes into it, `size` bytes
-/// wide and of type `ty`, reads as.
-fn part_of(variable: &Made, at: i64, size: u32, ty: &str) -> AstNode {
+/// wide and of type `ty`, reads as: the whole, an element or a member the
+/// bytes are exactly, or the bytes at the offset.
+fn part_of(variable: &Made, at: i64, size: u32, ty: &str, store: &TypeStore) -> AstNode {
     let whole = AstNode::var(variable.name.clone());
-    if at == 0 && size == variable.size && variable.element.is_none() {
-        return whole;
-    }
-    if let Some((_, each)) = &variable.element {
-        if size == *each && at % i64::from(*each) == 0 {
-            return AstNode::Intrinsic {
-                name: INDEX.to_string(),
-                args: vec![whole, AstNode::constant((at / i64::from(*each)) as u64, 8)],
-            };
+    let path = variable.parsed.as_ref().and_then(|parsed| {
+        let (path, leaf) = store.field_at(parsed, u64::try_from(at).ok()?, u64::from(size))?;
+        // Bytes read whole as a scalar are no array of them.
+        (!matches!(store.resolve(&leaf), Type::Array(..))).then_some(path)
+    });
+    match path {
+        Some(path) => return parts_node(whole, &path),
+        None if at == 0
+            && size == variable.size
+            && !matches!(variable.parsed, Some(Type::Array(..)))
+            && !variable.ty.ends_with(']') =>
+        {
+            return whole;
         }
+        None => {}
     }
     let address = AstNode::AddressOf {
         target: Box::new(whole),
@@ -495,6 +472,41 @@ fn part_of(variable: &Made, at: i64, size: u32, ty: &str) -> AstNode {
             target: Box::new(pointer),
         }),
     }
+}
+
+/// `base` followed along `path`: `base.inner.a[2]`, each member through
+/// [`crate::typed::member`], each element through [`INDEX`].
+pub(crate) fn parts_node(base: AstNode, path: &[Step]) -> AstNode {
+    path.iter().fold(base, |node, step| match step {
+        Step::Field(name) => crate::typed::member(node, name, false),
+        Step::Index(index) => AstNode::Intrinsic {
+            name: INDEX.to_string(),
+            args: vec![node, AstNode::constant(*index, 8)],
+        },
+    })
+}
+
+/// The variable a part names, `buf` of `buf[2]` and of `v.a[1].f`: the
+/// array or structure a run of elements and members starts from.
+pub fn part_root(node: &AstNode) -> Option<&str> {
+    match node {
+        AstNode::Var { name } => Some(name),
+        _ => {
+            if let Some((array, _)) = indexed(node) {
+                return part_root(array);
+            }
+            match crate::typed::member_of(node) {
+                Some((base, _, false)) => part_root(base),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Whether `node` is a part of a variable the analyst made: an element,
+/// `buf[2]`, or a member, `p.x`.
+pub fn is_part(node: &AstNode) -> bool {
+    indexed(node).is_some() || matches!(crate::typed::member_of(node), Some((_, _, false)))
 }
 
 /// Rewrite every node of `statements` with `f`, innermost first: the
@@ -533,12 +545,28 @@ mod tests {
         assert_eq!(parse_type("char*").unwrap().element_size, Some(8));
         assert_eq!(parse_type("struct point").unwrap().element_size, None);
         assert_eq!(parse_type("int[]").unwrap().count, None);
-        assert!(parse_type("int[2][2]").is_err());
+        // An array of arrays is an array of its rows.
+        assert_eq!(parse_type("int[2][3]").unwrap().element, "int[3]");
+        assert_eq!(parse_type("int[2][3]").unwrap().element_size, Some(12));
+        assert!(parse_type("int(int)").is_err());
         assert!(parse_type("int[0]").is_err());
         assert!(parse_type("void").is_err());
         assert!(parse_type("").is_err());
         assert_eq!(declarator("char[16]", "buf"), "char buf[16]");
         assert_eq!(declarator("int", "i"), "int i");
+        // Against the project's types, a structure has its size.
+        let mut store = TypeStore::default();
+        crate::ctype::parse_into(&mut store, "struct point { int x, y; };").unwrap();
+        assert_eq!(
+            parse_type_in(&store, "struct point").unwrap().element_size,
+            Some(8)
+        );
+        assert_eq!(
+            parse_type_in(&store, "struct point[2]")
+                .unwrap()
+                .element_size,
+            Some(8)
+        );
     }
 
     #[test]
@@ -549,6 +577,8 @@ mod tests {
             name: (!name.is_empty()).then(|| name.to_string()),
             ty: (!ty.is_empty()).then(|| ty.to_string()),
         };
+        let mut store = TypeStore::default();
+        crate::ctype::parse_into(&mut store, "struct pair { int a, b; };").unwrap();
         let (made, notes) = accept(
             &[
                 word(-0x20, 16, "buf", "char[]"),
@@ -560,8 +590,11 @@ mod tests {
                 word(-0x30, 0, "z", ""),
                 word(-0x40, 12, "p", "struct point"),
                 word(-0x48, 8, "buf", ""),
+                word(-0x58, 12, "q", "struct pair"),
+                word(-0x58, 8, "q", "struct pair"),
             ],
             SlotNames::Hex,
+            &store,
         );
         let names: Vec<(&str, &str)> = made
             .iter()
@@ -572,10 +605,16 @@ mod tests {
             [
                 ("buf", "char[16]"),
                 ("local_28", "long"),
-                ("p", "struct point")
+                ("p", "struct point"),
+                ("q", "struct pair")
             ]
         );
-        assert_eq!(made[0].element, Some(("char".to_string(), 1)));
+        assert_eq!(
+            made[0].parsed,
+            Some(Type::Array(Box::new(Type::Prim(Prim::Char)), Some(16)))
+        );
+        // A structure the types do not define is read at the size given.
+        assert_eq!(made[2].parsed, None);
         assert_eq!(
             notes,
             [
@@ -585,6 +624,7 @@ mod tests {
                 "2x is not made at [sp-0x30] 8 bytes: \"2x\" is not a C identifier",
                 "z is not made at [sp-0x30] 0 bytes: it has no size",
                 "buf is not made at [sp-0x48] 8 bytes: buf is made at [sp-0x20] 16 bytes already",
+                "q is not made at [sp-0x58] 12 bytes: struct pair is 8 bytes, not 12",
             ]
         );
     }

@@ -221,10 +221,17 @@ pub trait Symbols {
 
     /// The analyst's words on the variables of the function at `address`:
     /// which are merged, where one is split or has a new version, what
-    /// values one holds, by the names the lift declares, and the variables
-    /// made in its stack frame. None unless the image says.
+    /// values one holds, by the names the lift declares, the variables
+    /// made in its stack frame and the types given. None unless the image
+    /// says.
     fn variable_edits(&self, _address: u64) -> crate::merge::VariableEdits {
         crate::merge::VariableEdits::default()
+    }
+
+    /// The types the analyst defined ([`crate::types`]), which the
+    /// variables' types name; `None` for the platform's primitives alone.
+    fn types(&self) -> Option<std::sync::Arc<crate::types::TypeStore>> {
+        None
     }
 
     /// What the pointer to `address` lands on, when the image knows.
@@ -540,6 +547,22 @@ pub struct SwitchArm {
     pub values: Vec<i64>,
     /// The statements of the arm.
     pub body: Vec<Statement>,
+    /// The case values as the pseudocode spells them, beside `values`:
+    /// an enumerator's name where the index is an enumeration's variable
+    /// ([`crate::typed`]). Empty for the numbers.
+    pub labels: Vec<String>,
+}
+
+impl SwitchArm {
+    /// The case values as the pseudocode spells them: the labels when
+    /// there is one a value, the numbers otherwise.
+    pub fn spelled(&self) -> Vec<String> {
+        if self.labels.len() == self.values.len() {
+            self.labels.clone()
+        } else {
+            self.values.iter().map(i64::to_string).collect()
+        }
+    }
 }
 
 impl Statement {
@@ -930,7 +953,13 @@ fn lift_inner(
     // The analyst's words on the function's variables; the variables made
     // in its frame are read by the walk itself.
     let edits = symbols.variable_edits(entry);
-    let (made, refused) = crate::stack_vars::accept(&edits.stack_vars, options.stack_slot_names);
+    let store = symbols.types().unwrap_or_else(|| {
+        std::sync::Arc::new(crate::types::TypeStore::new(
+            crate::types::DataModel::of_abi(abi),
+        ))
+    });
+    let (made, refused) =
+        crate::stack_vars::accept(&edits.stack_vars, options.stack_slot_names, &store);
     lifter.covered = made.clone();
     if let Some(callee) = lifter.thunk(&chains)? {
         let function = LiftedFunction {
@@ -1056,7 +1085,9 @@ fn lift_inner(
     // The analyst's variables in the frame, read over the lift's locals
     // inside them before anything keys on their names.
     function.notes.extend(refused);
-    slots.made = crate::stack_vars::make(&mut function, &made);
+    slots.made = crate::stack_vars::make(&mut function, &made, &store);
+    // The types the analyst gave the lift's variables, by their lift names.
+    crate::typed::apply_var_types(&mut function, &edits.var_types, &store, &slots.made);
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
@@ -1069,6 +1100,8 @@ fn lift_inner(
         .map(|table| (table.site, table.base))
         .collect();
     crate::merge::apply_edits_with(&mut function, &edits, &SymbolSites(symbols), &tables);
+    // The members, elements and enumerators the types make of the body.
+    crate::typed::read_types(&mut function, &store);
     let high = if keep {
         function.body.clone()
     } else {

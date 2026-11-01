@@ -589,6 +589,39 @@ pub struct Annotation {
     /// change for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack_vars: Vec<StackVariable>,
+    /// On a function's record: the C types the analyst gave its variables,
+    /// each the variable's lift name — before renames, as a variable's
+    /// record keys on — and its type, `struct point *`, `enum state`, one
+    /// word per variable. The types name the project's own `types`. A
+    /// reader that does not know the field declares the lift's own types
+    /// and misreads nothing, so the format version does not change for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub var_types: Vec<VariableType>,
+}
+
+/// A C type the analyst gave one of a function's variables, on its record:
+/// `{"variable": "a", "type": "struct point *"}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableType {
+    /// The variable's lift name.
+    pub variable: String,
+    /// The C type: `struct point *`, `enum state`, `uint32_t`.
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+/// One of the analyst's type definitions, as the project keeps it: the
+/// name it goes by and its C, `{"name": "struct point", "c": "struct point
+/// { int x; int y; };"}`. The C is the definition: the layout is read from
+/// it each time the image is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeDefinition {
+    /// The name it goes by: a typedef's, or a tag's with its keyword,
+    /// `node_t`, `struct point`, `enum color`.
+    pub name: String,
+    /// Its C: one declaration, which may define more than the one name —
+    /// `typedef struct node { … } node_t;` defines `struct node` too.
+    pub c: String,
 }
 
 /// A variable the analyst made in a function's stack frame, on its
@@ -742,13 +775,15 @@ pub type VariableVersion = VariableSplit;
 /// The analyst's merges of one function's variables, `(keep, gone)`, its
 /// splits, `(variable, at)`, its new versions, `(variable, at)`, its
 /// pinned values, `(variable, at, min, max)`, `at` `None` for the whole
-/// function, and its stack variables, `(offset, size, name, type)`.
+/// function, its stack variables, `(offset, size, name, type)`, and the
+/// types given its variables, `(variable, type)`.
 pub type VariableWords = (
     Vec<(String, String)>,
     Vec<(String, u64)>,
     Vec<(String, u64)>,
     Vec<(String, Option<u64>, i64, i64)>,
     Vec<(i64, u32, Option<String>, Option<String>)>,
+    Vec<(String, String)>,
 );
 
 impl Annotation {
@@ -785,6 +820,7 @@ impl Annotation {
             versions: Vec::new(),
             values: Vec::new(),
             stack_vars: Vec::new(),
+            var_types: Vec::new(),
         }
     }
 
@@ -821,6 +857,7 @@ impl Annotation {
             versions: Vec::new(),
             values: Vec::new(),
             stack_vars: Vec::new(),
+            var_types: Vec::new(),
         }
     }
 
@@ -856,6 +893,7 @@ impl Annotation {
             versions: Vec::new(),
             values: Vec::new(),
             stack_vars: Vec::new(),
+            var_types: Vec::new(),
         }
     }
 
@@ -1078,6 +1116,7 @@ impl Annotation {
             && self.versions.is_empty()
             && self.values.is_empty()
             && self.stack_vars.is_empty()
+            && self.var_types.is_empty()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -1185,6 +1224,26 @@ impl Annotation {
         }
     }
 
+    /// Give the variable `variable` — its lift name — the C type `ty`: a
+    /// type already given it is replaced in its place.
+    pub fn set_var_type(&mut self, variable: &str, ty: &str) {
+        let word = VariableType {
+            variable: variable.to_string(),
+            ty: ty.to_string(),
+        };
+        match self.var_types.iter_mut().find(|v| v.variable == variable) {
+            Some(held) => *held = word,
+            None => self.var_types.push(word),
+        }
+    }
+
+    /// Take back the type given `variable`, and say whether there was one.
+    pub fn clear_var_type(&mut self, variable: &str) -> bool {
+        let before = self.var_types.len();
+        self.var_types.retain(|v| v.variable != variable);
+        self.var_types.len() != before
+    }
+
     /// Take back the stack variable made at `offset`, and say whether there
     /// was one.
     pub fn clear_stack_var(&mut self, offset: i64) -> bool {
@@ -1266,6 +1325,13 @@ pub struct ProjectFile {
     /// the image says, so the format version does not change for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_pointer: Option<String>,
+    /// The analyst's type definitions — structures, unions, enumerations
+    /// and typedefs — each its name and its C, in the order C reads them;
+    /// see [`TypeDefinition`]. A reader that does not know the field reads
+    /// the variables with the lift's own types and misreads nothing, so the
+    /// format version does not change for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<TypeDefinition>,
 }
 
 /// The layout the image is read under, as the analyst corrected it.
@@ -1344,6 +1410,7 @@ impl ProjectFile {
             annotations: Vec::new(),
             layout: Layout::default(),
             global_pointer: None,
+            types: Vec::new(),
         }
     }
 
@@ -1669,11 +1736,34 @@ impl ProjectFile {
         removable
     }
 
-    /// The analyst's merges, splits, new versions, pinned values and stack
-    /// variables of each function's variables, by the value of the
-    /// function's entry. A split, a version or a value at an address that
-    /// does not read is left out, and so is a value that says no value or
-    /// range.
+    /// The C types the variables of the project's functions are given —
+    /// the types given them and their stack variables' — each with what it
+    /// is the type of, `a of init`: what a type definition is in use by.
+    pub fn type_users(&self) -> Vec<(String, String)> {
+        let mut users = Vec::new();
+        for record in self.places().filter(|a| !a.block && a.variable.is_none()) {
+            let function = record
+                .name
+                .clone()
+                .unwrap_or_else(|| record.address.clone());
+            for word in &record.var_types {
+                users.push((format!("{} of {function}", word.variable), word.ty.clone()));
+            }
+            for word in &record.stack_vars {
+                if let Some(ty) = &word.ty {
+                    let name = word.name.clone().unwrap_or_else(|| word.spelled());
+                    users.push((format!("{name} of {function}"), ty.clone()));
+                }
+            }
+        }
+        users
+    }
+
+    /// The analyst's merges, splits, new versions, pinned values, stack
+    /// variables and types of each function's variables, by the value of
+    /// the function's entry. A split, a version or a value at an address
+    /// that does not read is left out, and so is a value that says no
+    /// value or range.
     pub fn variable_edits(&self) -> BTreeMap<u64, VariableWords> {
         let read = |words: &[VariableSplit]| -> Vec<(String, u64)> {
             words
@@ -1704,7 +1794,8 @@ impl ProjectFile {
                         || !a.splits.is_empty()
                         || !a.versions.is_empty()
                         || !a.values.is_empty()
-                        || !a.stack_vars.is_empty())
+                        || !a.stack_vars.is_empty()
+                        || !a.var_types.is_empty())
             })
             .filter_map(|a| {
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
@@ -1718,6 +1809,10 @@ impl ProjectFile {
                         a.stack_vars
                             .iter()
                             .map(|v| (v.offset, v.size, v.name.clone(), v.ty.clone()))
+                            .collect(),
+                        a.var_types
+                            .iter()
+                            .map(|v| (v.variable.clone(), v.ty.clone()))
                             .collect(),
                     ),
                 ))
@@ -2971,6 +3066,7 @@ mod tests {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 )
             )])
         );
@@ -3009,6 +3105,7 @@ mod tests {
                         ("a".to_string(), 0x40101b),
                         ("local_c".to_string(), 0x40102e)
                     ],
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 )
@@ -3050,6 +3147,7 @@ mod tests {
                         ("a".to_string(), None, 6, 6),
                         ("eax".to_string(), Some(0x401007), 0, 3)
                     ],
+                    Vec::new(),
                     Vec::new(),
                 )
             )])
@@ -3114,6 +3212,7 @@ mod tests {
                         ),
                         (-0x28, 8, None, None)
                     ],
+                    Vec::new(),
                 )
             )])
         );

@@ -896,6 +896,7 @@ mod tests {
     #[test]
     fn a_switch_keeps_the_cases_its_index_can_take() {
         let arm = |value: i64, at: u64| SwitchArm {
+            labels: Vec::new(),
             values: vec![value],
             body: vec![ret(c(value as u64 * 10), at)],
         };

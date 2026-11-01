@@ -2644,3 +2644,35 @@ fn the_global_pointer_of_each_function_is_listed_with_where_it_came_from() {
     assert!(!ok);
     assert!(stderr.contains("keeps no global pointer"), "{stderr}");
 }
+
+#[test]
+fn the_platform_types_follow_the_images_data_model() {
+    for (fixture_name, model, long) in [
+        ("sample.elf", "LP64", 8),
+        ("sample.exe", "LLP64", 4),
+        ("sample32.elf", "ILP32 (i386)", 4),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture(fixture_name))
+            .args(["types", "--json"])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["data_model"], model, "{fixture_name}");
+        let long_size = report["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "long")
+            .unwrap()["size"]
+            .clone();
+        assert_eq!(long_size, long, "{fixture_name}");
+        assert_eq!(report["types"], serde_json::json!([]));
+    }
+}

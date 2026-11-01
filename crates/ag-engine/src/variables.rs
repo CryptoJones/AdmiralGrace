@@ -136,10 +136,7 @@ fn parts_stored(statements: &[crate::lift::Statement], name: &str) -> Vec<u64> {
                 AstNode::AddressOf { target } => {
                     matches!(target.as_ref(), AstNode::Var { name: held } if held == name)
                 }
-                n => matches!(
-                    crate::stack_vars::indexed(n),
-                    Some((AstNode::Var { name: held }, _)) if held == name
-                ),
+                n => crate::stack_vars::is_part(n) && crate::stack_vars::part_root(n) == Some(name),
             }),
         },
         _ => false,

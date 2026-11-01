@@ -1884,6 +1884,7 @@ mod tests {
     #[test]
     fn each_case_of_a_switch_has_its_value() {
         let arm = |values: Vec<i64>, at: u64| SwitchArm {
+            labels: Vec::new(),
             values,
             body: vec![ret(var("a"), at)],
         };

@@ -473,6 +473,14 @@ impl Provider for BinaryProvider {
         )
     }
 
+    fn set_type_definitions(&self, definitions: &[ag_image::TypeText]) -> Result<bool, String> {
+        self.binary.set_type_definitions(definitions)
+    }
+
+    fn types(&self) -> Option<std::sync::Arc<ag_image::TypeStore>> {
+        Some(self.binary.types())
+    }
+
     fn merge_candidates(&self, address: u64) -> Vec<ag_image::MergeCandidate> {
         self.binary.merge_candidates(address).unwrap_or_default()
     }
