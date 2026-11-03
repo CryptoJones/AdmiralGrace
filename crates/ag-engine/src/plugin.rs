@@ -193,6 +193,9 @@ pub struct FunctionCode<'a> {
     /// The section's bytes, from `base`.
     pub bytes: &'a [u8],
     pub base: u64,
+    /// The names the image knows, by address: what a call names its
+    /// callee by, when the image has a name for the target.
+    pub names: &'a std::collections::BTreeMap<u64, String>,
 }
 
 /// A rewriter changes a function's medium-level graph — the blocks of

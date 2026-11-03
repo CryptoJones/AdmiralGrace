@@ -66,7 +66,7 @@ Seeded 2026-10-23 from two sources: the code review of the engine foundation at 
 - [x] Bytes pane for a program image: show the bytes around the selection — [#50](https://github.com/CryptoJones/AdmiralGrace/issues/50)
 - [x] Strings for a program image: scan the data sections and link each string to the code that uses it — [#51](https://github.com/CryptoJones/AdmiralGrace/issues/51)
 - [x] Open a raw binary in the workbench through ag-engine::Image — [#42](https://github.com/CryptoJones/AdmiralGrace/issues/42)
-- [ ] Read corpus addresses that name an address space (EXTERNAL:0xN) — [#491](https://github.com/CryptoJones/AdmiralGrace/issues/491)
+- [x] Read corpus addresses that name an address space (EXTERNAL:0xN) — [#491](https://github.com/CryptoJones/AdmiralGrace/issues/491)
 
 - [x] Add a kuna project-export provider (index.jsonl + .c/.h/.asm) to ag-corpus and ag-ui — [#4](https://github.com/CryptoJones/AdmiralGrace/issues/4)
 - [x] Use kuna's JSON surfaces to fill the navigator, inspector and graph panes — [#5](https://github.com/CryptoJones/AdmiralGrace/issues/5)
@@ -116,7 +116,7 @@ Filed 2026-10-26.
 ### Architectures and formats
 
 - [x] Decode 32-bit ARM and Thumb, with per-address mode switching — [#320](https://github.com/CryptoJones/AdmiralGrace/issues/320)
-- [ ] Decode and lift AArch64 — [#321](https://github.com/CryptoJones/AdmiralGrace/issues/321) — decoded, walked and listed (v0.21.0); the lift to pseudocode remains
+- [x] Decode and lift AArch64 — [#321](https://github.com/CryptoJones/AdmiralGrace/issues/321) — decoded, walked and listed (v0.21.0); lifted to pseudocode through the architecture seam (v0.71.0)
 - [x] Load a raw binary with a base address, entry point, file offset and length — [#322](https://github.com/CryptoJones/AdmiralGrace/issues/322) — a base of 0 is refused until sections carry a mapped flag
 - [x] Universal (FAT) Mach-O: list the slices and pick one — [#323](https://github.com/CryptoJones/AdmiralGrace/issues/323)
 

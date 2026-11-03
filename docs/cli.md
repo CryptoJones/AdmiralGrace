@@ -275,8 +275,10 @@ mode of each address comes from the image's symbols (a Thumb function's symbol h
 bit set), from the analyst's `mode` marks in a project file, and from the instructions
 themselves — AArch64 (`AARCH64:LE:64:...`), which has one instruction set, and 32-bit MIPS of
 either byte order (`MIPS:LE:32:default`, `MIPS:BE:32:default`); so it refuses an image of
-another architecture rather than printing nonsense. ARM, AArch64 and MIPS are decoded, walked
-and listed; they are not lifted to pseudocode yet.
+another architecture rather than printing nonsense. AArch64 is lifted to pseudocode: the
+arguments come in `x0`–`x7` and the result goes out in `x0`, as AAPCS64 says, and a function
+with an instruction the lift does not read is refused by name. ARM and MIPS are decoded,
+walked and listed; they are not lifted to pseudocode yet.
 
 A MIPS branch has a delay slot — the instruction after it runs before the branch goes
 anywhere — so the branch's block ends after its slot, and the fall-through, a call's return
