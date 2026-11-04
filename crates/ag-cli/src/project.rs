@@ -145,6 +145,18 @@ pub enum ProjectCmd {
         /// `hex` is how the analysis prints them and clears the record.
         format: String,
     },
+    /// Say which member of a union the access at an instruction means,
+    /// when the pseudocode would print the first member the bytes fit.
+    Union {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The instruction's address, with its space when it names one.
+        address: String,
+        /// The member's name, as the union declares it; `none` takes the
+        /// choice back and leaves it to the analysis.
+        field: String,
+    },
     /// Say where the jump table an indirect `jmp` reads is, when the
     /// analysis cannot work it out from the code.
     Switch {
@@ -711,6 +723,23 @@ pub fn run(
             })?;
             edit(&target, &file, TargetKind::Address, &address, |a| {
                 a.set_operand_format(Some(format))
+            })
+        }
+        ProjectCmd::Union {
+            file,
+            address,
+            field,
+        } => {
+            // The member's name is what the type declares; whether the
+            // union still has it is the lift's business when it reads, so
+            // a stale name is recorded and degrades, not refused here.
+            let name = if field.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(field.as_str())
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_union_field(name)
             })
         }
         ProjectCmd::Switch {
@@ -2352,6 +2381,9 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(format) = &annotation.operand_format {
         parts.push(format!("operands {format}"));
+    }
+    if let Some(field) = &annotation.union_field {
+        parts.push(format!("union field {field}"));
     }
     if let Some(table) = &annotation.jump_table {
         parts.push(format!("switch {table}"));

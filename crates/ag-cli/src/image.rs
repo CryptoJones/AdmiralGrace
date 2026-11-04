@@ -1009,6 +1009,7 @@ pub(crate) fn open_image(
         image.set_removable_stores(project.removable_stores());
         image.set_inlines(project.inlines());
         image.set_variable_edits(variable_edits(project));
+        image.set_union_fields(project.union_fields());
         if let Err(why) = image.set_type_definitions(&crate::types::texts(project)) {
             eprintln!("note: the project's types are not read: {why}");
         }

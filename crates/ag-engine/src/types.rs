@@ -878,9 +878,42 @@ impl TypeStore {
     /// bytes fit. `None` when the bytes are no member's: they straddle
     /// two, or are part of a scalar, or of a bit-field.
     pub fn field_at(&self, ty: &Type, offset: u64, size: u64) -> Option<(Vec<Step>, Type)> {
+        self.field_at_chosen(ty, offset, size, None)
+    }
+
+    /// [`TypeStore::field_at`], with the analyst's word: when the bytes
+    /// reach a union and `chosen` names one of its members whose bytes
+    /// they are, that member is taken where the walk would take the first
+    /// the bytes fit — `u.f` where it would read `u.i`. A name no member
+    /// answers with, or one whose bytes the access is not, is left alone:
+    /// the first member the bytes fit is taken, as before.
+    pub fn field_at_chosen(
+        &self,
+        ty: &Type,
+        offset: u64,
+        size: u64,
+        chosen: Option<&str>,
+    ) -> Option<(Vec<Step>, Type)> {
         let mut path = Vec::new();
-        let leaf = self.walk(ty, offset, size, &mut path, 0)?;
+        let leaf = self.walk(ty, offset, size, &mut path, 0, chosen)?;
         Some((path, leaf))
+    }
+
+    /// The members of the union `ty` is, under its typedefs, by name and
+    /// in declaration order; `None` when `ty` is no union or names none
+    /// of its members.
+    pub fn union_members(&self, ty: &Type) -> Option<Vec<String>> {
+        let (_, layout, union) = self.composite(ty)?;
+        if !union {
+            return None;
+        }
+        let names: Vec<String> = layout
+            .fields
+            .iter()
+            .filter(|field| field.bits.is_none())
+            .filter_map(|field| field.name.clone())
+            .collect();
+        (!names.is_empty()).then_some(names)
     }
 
     fn walk(
@@ -890,6 +923,7 @@ impl TypeStore {
         size: u64,
         path: &mut Vec<Step>,
         depth: usize,
+        chosen: Option<&str>,
     ) -> Option<Type> {
         if depth > 32 {
             return None;
@@ -910,16 +944,38 @@ impl TypeStore {
                     return None;
                 }
                 path.push(Step::Index(index));
-                if let Some(found) =
-                    self.walk(element, offset - index * each, size, path, depth + 1)
-                {
+                if let Some(found) = self.walk(
+                    element,
+                    offset - index * each,
+                    size,
+                    path,
+                    depth + 1,
+                    chosen,
+                ) {
                     return Some(found);
                 }
                 path.pop();
             }
             Type::Named(_) => {
-                let (_, layout, _) = self.composite(resolved)?;
-                for field in &layout.fields {
+                let (_, layout, union) = self.composite(resolved)?;
+                // The analyst's word about a union comes before its order:
+                // the named member, when the bytes are its own.
+                let order: Vec<&FieldLayout> = match chosen {
+                    Some(name) if union => {
+                        let mut fields: Vec<&FieldLayout> = Vec::new();
+                        if let Some(field) = layout.fields.iter().find(|field| {
+                            field.bits.is_none() && field.name.as_deref() == Some(name)
+                        }) {
+                            fields.push(field);
+                        }
+                        fields.extend(layout.fields.iter().filter(|field| {
+                            field.bits.is_none() && field.name.as_deref() != Some(name)
+                        }));
+                        fields
+                    }
+                    _ => layout.fields.iter().collect(),
+                };
+                for field in order {
                     if field.bits.is_some() {
                         continue;
                     }
@@ -932,9 +988,14 @@ impl TypeStore {
                             }
                             None => false,
                         };
-                        if let Some(found) =
-                            self.walk(&field.ty, offset - field.offset, size, path, depth + 1)
-                        {
+                        if let Some(found) = self.walk(
+                            &field.ty,
+                            offset - field.offset,
+                            size,
+                            path,
+                            depth + 1,
+                            chosen,
+                        ) {
                             return Some(found);
                         }
                         if pushed {
@@ -1890,6 +1951,38 @@ mod tests {
         assert_eq!(path(4, 8), None);
         let (_, leaf) = s.field_at(&outer, 12, 4).unwrap();
         assert_eq!(leaf, Type::Prim(Prim::Int));
+    }
+
+    #[test]
+    fn the_analysts_word_picks_which_union_member_an_access_means() {
+        let s = store(
+            DataModel::LP64,
+            "union value { int i; float f; long l; };\n\
+             struct holder { long id; union value v; };",
+        );
+        let holder = Type::Named("struct holder".to_string());
+        let path = |offset, size, chosen: Option<&str>| {
+            s.field_at_chosen(&holder, offset, size, chosen)
+                .map(|(p, _)| path_text(&p))
+        };
+        // Without the word, the first member the bytes fit is taken.
+        assert_eq!(path(8, 4, None), Some(".v.i".to_string()));
+        // The word names another member the bytes are: the walk takes it.
+        assert_eq!(path(8, 4, Some("f")), Some(".v.f".to_string()));
+        // A member the bytes are not is left alone: 8 bytes are `l`'s
+        // alone, so a word about `i` or `f` moves nothing.
+        assert_eq!(path(8, 8, Some("i")), Some(".v.l".to_string()));
+        // A name no member answers with is left alone too.
+        assert_eq!(path(8, 4, Some("nope")), Some(".v.i".to_string()));
+        // The word is only heard at a union: a structure's members are
+        // taken by offset, as always.
+        assert_eq!(path(0, 8, Some("f")), Some(".id".to_string()));
+        // The members a view cycles, in declaration order.
+        assert_eq!(
+            s.union_members(&Type::Named("union value".to_string())),
+            Some(vec!["i".to_string(), "f".to_string(), "l".to_string()])
+        );
+        assert_eq!(s.union_members(&holder), None, "a structure offers none");
     }
 
     #[test]

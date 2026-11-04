@@ -228,6 +228,13 @@ pub trait Symbols {
         crate::merge::VariableEdits::default()
     }
 
+    /// The analyst's word on which member of a union each instruction's
+    /// access means, by the address of each instruction that said — see
+    /// [`crate::typed`]. Nothing is chosen unless the image says.
+    fn union_fields(&self) -> BTreeMap<u64, String> {
+        BTreeMap::new()
+    }
+
     /// The types the analyst defined ([`crate::types`]), which the
     /// variables' types name; `None` for the platform's primitives alone.
     fn types(&self) -> Option<std::sync::Arc<crate::types::TypeStore>> {
@@ -1090,6 +1097,9 @@ fn lift_pass(
     // The analyst's words on the function's variables; the variables made
     // in its frame are read by the walk itself.
     let edits = symbols.variable_edits(entry);
+    // Which member of a union each instruction's access means, by the
+    // address of each instruction that said.
+    let union_fields = symbols.union_fields();
     let store = symbols.types().unwrap_or_else(|| {
         std::sync::Arc::new(crate::types::TypeStore::new(
             crate::types::DataModel::of_abi(abi),
@@ -1240,7 +1250,8 @@ fn lift_pass(
     // The analyst's variables in the frame, read over the lift's locals
     // inside them before anything keys on their names.
     function.notes.extend(refused);
-    slots.made = crate::stack_vars::make(&mut function, &made, &store);
+    slots.made =
+        crate::stack_vars::make(&mut function, &made, &store, &union_fields, &slots.accesses);
     // The types the analyst gave the lift's variables, by their lift names.
     crate::typed::apply_var_types(&mut function, &edits.var_types, &store, &slots.made, abi);
     let mut inferred = crate::propagate::Inferred::default();
@@ -1350,7 +1361,7 @@ fn lift_pass(
                 .map(|ty| (callee, ty))
         })
         .collect();
-    crate::typed::read_types(&mut function, &store, &returns);
+    crate::typed::read_types(&mut function, &store, &returns, &union_fields);
     let high = if keep {
         function.body.clone()
     } else {

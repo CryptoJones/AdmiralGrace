@@ -215,6 +215,23 @@ struct Reader<'a> {
     parts: BTreeMap<String, (String, Type, Fragment)>,
     /// The structures the calls to a function return, by its address.
     returns: &'a BTreeMap<u64, Type>,
+    /// The member of a union each instruction's access means, by the
+    /// address of each instruction that said.
+    union_fields: &'a BTreeMap<u64, String>,
+    /// The member the statement being read chose, kept while its nodes are
+    /// read; [`Reader::statements`] sets it for each.
+    chosen: std::cell::Cell<Option<&'a str>>,
+}
+
+impl<'a> Reader<'a> {
+    /// The member the analyst said the union access at one of the
+    /// statement's instructions means.
+    fn chosen_at(&self, addresses: &[u64]) -> Option<&'a str> {
+        addresses
+            .iter()
+            .find_map(|address| self.union_fields.get(address))
+            .map(String::as_str)
+    }
 }
 
 /// The integer, enumeration or pointer type `ty` as a width in bytes and
@@ -644,8 +661,11 @@ impl Reader<'_> {
     }
 
     /// The member a piece is exactly, read with the casts its width needs.
-    fn member(&self, piece: &Piece) -> Option<AstNode> {
-        let (path, leaf) = self.store.field_at(&piece.of, piece.offset, piece.size)?;
+    /// `chosen` is the member the analyst said the union access means.
+    fn member(&self, piece: &Piece, chosen: Option<&str>) -> Option<AstNode> {
+        let (path, leaf) =
+            self.store
+                .field_at_chosen(&piece.of, piece.offset, piece.size, chosen)?;
         if path.is_empty() {
             return None;
         }
@@ -686,7 +706,9 @@ impl Reader<'_> {
             return None;
         }
         let path = [1u64, 2, 4, 8, 16].iter().find_map(|&k| {
-            let (path, leaf) = self.store.field_at(&piece.of, piece.offset, k)?;
+            let (path, leaf) =
+                self.store
+                    .field_at_chosen(&piece.of, piece.offset, k, self.chosen.get())?;
             (!path.is_empty() && scalar_info(self.store, &leaf).is_some()).then_some(path)
         })?;
         let start = self.path_node(&piece.base, &path);
@@ -727,7 +749,7 @@ impl Reader<'_> {
             return None;
         }
         let piece = self.piece(node)?;
-        if let Some(member) = self.member(&piece) {
+        if let Some(member) = self.member(&piece, self.chosen.get()) {
             return Some(member);
         }
         if let AstNode::Deref { target } = node {
@@ -782,6 +804,7 @@ impl Reader<'_> {
 
     fn statements(&self, statements: &mut Vec<Statement>) {
         for statement in statements.iter_mut() {
+            self.chosen.set(self.chosen_at(&statement.addresses));
             statement.node =
                 self.statement_node(std::mem::replace(&mut statement.node, AstNode::Break));
             if let StatementKind::For { init, step, .. } = &mut statement.kind {
@@ -997,6 +1020,7 @@ pub(crate) fn read(
     function: &mut LiftedFunction,
     store: &TypeStore,
     returns: &BTreeMap<u64, Type>,
+    union_fields: &BTreeMap<u64, String>,
 ) -> bool {
     if function.thunk.is_some() || (store.keys().is_empty() && returns.is_empty()) {
         return false;
@@ -1008,6 +1032,8 @@ pub(crate) fn read(
         pointers: BTreeMap::new(),
         parts: BTreeMap::new(),
         returns,
+        union_fields,
+        chosen: std::cell::Cell::new(None),
     };
     let original = function.body.clone();
     let sites = each_node(&original);

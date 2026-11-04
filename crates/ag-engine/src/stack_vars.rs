@@ -53,7 +53,7 @@
 //! not made at [sp-0x20] 16 bytes: it overlaps key at [sp-0x18] 8 bytes`.
 //! Taking the word back gives the lift's own locals again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AstNode, BinaryOp};
 use crate::lift::{LiftedFunction, Placement, Statement, StatementKind, Variable};
@@ -336,6 +336,8 @@ pub(crate) fn make(
     function: &mut LiftedFunction,
     made: &[Made],
     store: &TypeStore,
+    union_fields: &BTreeMap<u64, String>,
+    accesses: &BTreeSet<(i64, u32, u64)>,
 ) -> Vec<StackVar> {
     let mut done = Vec::new();
     if function.thunk.is_some() {
@@ -344,6 +346,16 @@ pub(crate) fn make(
     let mut parts: BTreeMap<String, AstNode> = BTreeMap::new();
     let mut slots: BTreeMap<String, (&Made, i64)> = BTreeMap::new();
     let mut addresses: Vec<AstNode> = Vec::new();
+    // The member the analyst said the union access at a slot means: the
+    // word at the first instruction that reads or writes the slot and
+    // carries one. A part stands for every read of its local, so the one
+    // word is the one part.
+    let chosen_of = |offset: i64| -> Option<&str> {
+        union_fields
+            .iter()
+            .find(|(at, _)| accesses.iter().any(|(o, _, a)| *o == offset && a == *at))
+            .map(|(_, name)| name.as_str())
+    };
     for variable in made {
         let inside: Vec<(String, i64, u32, String)> = function
             .locals
@@ -369,7 +381,14 @@ pub(crate) fn make(
             continue;
         }
         for (name, offset, size, ty) in &inside {
-            let part = part_of(variable, *offset - variable.offset, *size, ty, store);
+            let part = part_of(
+                variable,
+                *offset - variable.offset,
+                *size,
+                ty,
+                store,
+                chosen_of(*offset),
+            );
             if let AstNode::Deref { target } = &part {
                 addresses.push((**target).clone());
             }
@@ -422,7 +441,14 @@ pub(crate) fn make(
                     (Some(width), AstNode::AddressOf { target: local }) => match local.as_ref() {
                         AstNode::Var { name } => slots.get(name).and_then(|(variable, at)| {
                             let size = parse_type_in(store, width).ok()?.element_size?;
-                            Some(part_of(variable, *at, size, width, store))
+                            Some(part_of(
+                                variable,
+                                *at,
+                                size,
+                                width,
+                                store,
+                                chosen_of(variable.offset + at),
+                            ))
                         }),
                         _ => None,
                     },
@@ -468,11 +494,20 @@ pub(crate) fn make(
 
 /// The part of `variable` the lift's local `at` bytes into it, `size` bytes
 /// wide and of type `ty`, reads as: the whole, an element or a member the
-/// bytes are exactly, or the bytes at the offset.
-fn part_of(variable: &Made, at: i64, size: u32, ty: &str, store: &TypeStore) -> AstNode {
+/// bytes are exactly, or the bytes at the offset. `chosen` is the member
+/// the analyst said the union access at the local's instruction means.
+fn part_of(
+    variable: &Made,
+    at: i64,
+    size: u32,
+    ty: &str,
+    store: &TypeStore,
+    chosen: Option<&str>,
+) -> AstNode {
     let whole = AstNode::var(variable.name.clone());
     let path = variable.parsed.as_ref().and_then(|parsed| {
-        let (path, leaf) = store.field_at(parsed, u64::try_from(at).ok()?, u64::from(size))?;
+        let (path, leaf) =
+            store.field_at_chosen(parsed, u64::try_from(at).ok()?, u64::from(size), chosen)?;
         // Bytes read whole as a scalar are no array of them.
         (!matches!(store.resolve(&leaf), Type::Array(..))).then_some(path)
     });

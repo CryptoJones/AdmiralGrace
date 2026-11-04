@@ -570,6 +570,30 @@ fn an_operand_format_is_recorded_and_hex_clears_it() {
 }
 
 #[test]
+fn a_union_field_is_recorded_and_none_clears_it() {
+    let file = TempFile::new("union");
+    let (ok, stdout, stderr) = project(&["union", "--file", &file.text(), "0x1161", "f"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("address 0x1161 now union field f"),
+        "{stdout}"
+    );
+
+    let report = show_json(&file);
+    assert_eq!(report["annotations"][0]["union_field"], serde_json::json!("f"));
+
+    let (ok, stdout, stderr) = project(&["union", "--file", &file.text(), "0x1161", "none"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("0x1161 cleared"), "{stdout}");
+    assert!(
+        show_json(&file)["annotations"]
+            .as_array()
+            .is_none_or(|a| a.is_empty()),
+        "no choice is no record"
+    );
+}
+
+#[test]
 fn a_jump_table_note_is_recorded_and_told_to_the_image() {
     let file = TempFile::new("switch");
     // The analyst says the table at 0x402000 has three entries, not six:
