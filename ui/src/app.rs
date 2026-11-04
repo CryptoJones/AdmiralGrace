@@ -240,6 +240,10 @@ pub enum Message {
     /// Show the constants in the selected instruction's operands the next
     /// way round: hex, signed, decimal, octal, as an address.
     EditOperandFormat,
+    /// Choose which member of a union the selected instruction's access
+    /// means: the next member of the union it reads, and back to the
+    /// analysis's own choice, which prints the first member the bytes fit.
+    EditUnionField,
     /// Take back the analyst's last change.
     EditUndo,
     /// Put back the change last taken back.
@@ -3147,6 +3151,7 @@ impl App {
             Message::EditBookmark
             | Message::EditMark(_)
             | Message::EditOperandFormat
+            | Message::EditUnionField
             | Message::EditNop
             | Message::EditOpaque
             | Message::EditDeleteType
@@ -3207,6 +3212,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_union_fields();
                 self.tell_global_pointer();
             }
         }
@@ -3611,6 +3617,35 @@ impl App {
             return;
         }
         self.refresh_listing();
+    }
+
+    /// Tell the analysis which member of a union each instruction's access
+    /// means, and read the function on screen again when that changed
+    /// anything.
+    fn tell_union_fields(&mut self) {
+        // The member's name means nothing until the union is defined.
+        self.tell_types();
+        let fields = self
+            .annotations
+            .annotations
+            .iter()
+            .filter(|a| a.variable.is_none() && a.register.is_none() && !a.block)
+            .filter_map(|a| {
+                let name = a.union_field()?.to_string();
+                let (value, _) = ag_corpus::parse_addr_space(&a.address).ok()?;
+                Some((value, name))
+            })
+            .collect();
+        if !self.provider.set_union_fields(fields) {
+            return;
+        }
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
+            self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
+        }
     }
 
     /// Tell the analysis the analyst's merges and splits of each
@@ -4377,6 +4412,45 @@ impl App {
                 self.refresh_listing();
             }
 
+            Message::EditUnionField => {
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select an instruction to choose its union field".into());
+                    return Task::none();
+                };
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose instruction to read".into());
+                    return Task::none();
+                };
+                let Some(members) = self.provider.union_members(function, address) else {
+                    self.notice = Some("The instruction reads no union".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.union_field().map(str::to_string));
+                // The members in order, and back to the analysis's own
+                // choice, which prints the first member the bytes fit. A
+                // name the union no longer has clears too.
+                let next = match &current {
+                    None => Some(members[0].clone()),
+                    Some(name) => match members.iter().position(|m| m == name) {
+                        Some(at) if at + 1 < members.len() => Some(members[at + 1].clone()),
+                        _ => None,
+                    },
+                };
+                let kind = self.kind_at(address);
+                self.annotations
+                    .annotation_mut(kind, &key)
+                    .set_union_field(next.as_deref());
+                self.annotations.prune();
+                self.notice = Some(match &next {
+                    Some(name) => format!("Union field of {key} is {name}"),
+                    None => format!("Union field of {key} left to the analysis"),
+                });
+            }
+
             Message::EditUndo => {
                 // While the analyst is typing into a prompt, the chord is
                 // about the typing, not the marks beneath it.
@@ -4401,6 +4475,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_union_fields();
                 self.tell_global_pointer();
             }
 
@@ -4426,6 +4501,7 @@ impl App {
                 self.tell_dead_stores();
                 self.tell_inlines();
                 self.tell_variable_edits();
+                self.tell_union_fields();
                 self.tell_global_pointer();
             }
 
@@ -7829,6 +7905,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("u"), true, true) => Message::EditMark(Mark::Undefined),
         // The constants of the selected instruction, the next way round.
         (Key::Character("n"), true, true) => Message::EditOperandFormat,
+        // Which member of a union the selected instruction reads.
+        (Key::Character("m"), true, true) => Message::EditUnionField,
         // Where the jump table the selected jmp reads is.
         (Key::Character("j"), true, true) => Message::EditSwitch,
         // An instruction written over the bytes at the selection.

@@ -293,6 +293,9 @@ struct Typed<'a> {
     store: &'a TypeStore,
     pointers: BTreeMap<String, Type>,
     enums: BTreeMap<String, Type>,
+    /// The member of a union each instruction's access means, by the
+    /// address of each instruction that said ([`crate::types::TypeStore::field_at_chosen`]).
+    union_fields: &'a BTreeMap<u64, String>,
 }
 
 /// Read the types of the variables of `function` into its body: the
@@ -301,14 +304,18 @@ struct Typed<'a> {
 /// variables hold ([`crate::fragments`]) — `returns` the structures the
 /// functions it calls return, by address. A variable a fragment gives a
 /// pointer's or an enumeration's type is read through it in turn.
+/// `union_fields` is the analyst's word on which member of a union each
+/// instruction's access means, by the address of each instruction that
+/// said.
 pub(crate) fn read_types(
     function: &mut LiftedFunction,
     store: &TypeStore,
     returns: &BTreeMap<u64, Type>,
+    union_fields: &BTreeMap<u64, String>,
 ) {
     for _ in 0..3 {
-        read_pointers(function, store);
-        if !crate::fragments::read(function, store, returns) {
+        read_pointers(function, store, union_fields);
+        if !crate::fragments::read(function, store, returns, union_fields) {
             break;
         }
     }
@@ -316,11 +323,16 @@ pub(crate) fn read_types(
 
 /// The members, elements and enumerators the typed pointers and
 /// enumerations of `function` make of its body.
-fn read_pointers(function: &mut LiftedFunction, store: &TypeStore) {
+fn read_pointers(
+    function: &mut LiftedFunction,
+    store: &TypeStore,
+    union_fields: &BTreeMap<u64, String>,
+) {
     let mut typed = Typed {
         store,
         pointers: BTreeMap::new(),
         enums: BTreeMap::new(),
+        union_fields,
     };
     for variable in function.params.iter().chain(&function.locals) {
         let Ok(ty) = crate::ctype::parse_type(store, &variable.ty) else {
@@ -350,17 +362,27 @@ fn read_pointers(function: &mut LiftedFunction, store: &TypeStore) {
 fn read_statements(statements: &mut Vec<Statement>, typed: &Typed) {
     let mut out = Vec::with_capacity(statements.len());
     for mut statement in std::mem::take(statements) {
-        if let Some(stores) = initializer_stores(&statement, typed) {
+        let chosen = typed.chosen_at(&statement.addresses);
+        if let Some(stores) = initializer_stores(&statement, typed, chosen) {
             out.extend(stores);
             continue;
         }
         statement.node = read_node(
             std::mem::replace(&mut statement.node, AstNode::Break),
             typed,
+            chosen,
         );
         if let StatementKind::For { init, step, .. } = &mut statement.kind {
-            init.node = read_node(std::mem::replace(&mut init.node, AstNode::Break), typed);
-            step.node = read_node(std::mem::replace(&mut step.node, AstNode::Break), typed);
+            init.node = read_node(
+                std::mem::replace(&mut init.node, AstNode::Break),
+                typed,
+                chosen,
+            );
+            step.node = read_node(
+                std::mem::replace(&mut step.node, AstNode::Break),
+                typed,
+                chosen,
+            );
         }
         if let StatementKind::Switch { arms } = &mut statement.kind {
             if let Some(ty) = enum_var(&statement.node, typed) {
@@ -384,9 +406,25 @@ fn read_statements(statements: &mut Vec<Statement>, typed: &Typed) {
     *statements = out;
 }
 
+impl Typed<'_> {
+    /// The member the analyst said the union access at one of the
+    /// statement's instructions means: the word at the first of them that
+    /// carries one.
+    fn chosen_at(&self, addresses: &[u64]) -> Option<&str> {
+        addresses
+            .iter()
+            .find_map(|address| self.union_fields.get(address))
+            .map(String::as_str)
+    }
+}
+
 /// The stores a struct initializer through a typed pointer stands for,
 /// each to its member, when every field is a member's.
-fn initializer_stores(statement: &Statement, typed: &Typed) -> Option<Vec<Statement>> {
+fn initializer_stores(
+    statement: &Statement,
+    typed: &Typed,
+    chosen: Option<&str>,
+) -> Option<Vec<Statement>> {
     let AstNode::Assign { lhs, rhs } = &statement.node else {
         return None;
     };
@@ -406,11 +444,11 @@ fn initializer_stores(statement: &Statement, typed: &Typed) -> Option<Vec<Statem
         let ty = crate::ctype::parse_type(typed.store, &field.ty).ok()?;
         let size = typed.store.size_of(&ty).ok()?;
         let at = offset.checked_add(i64::try_from(field.offset).ok()?)?;
-        let target = through(&pointer, at, size, None, typed)?;
+        let target = through(&pointer, at, size, None, typed, chosen)?;
         stores.push(Statement::plain(
             AstNode::Assign {
                 lhs: Box::new(target),
-                rhs: Box::new(read_node(field.value.clone(), typed)),
+                rhs: Box::new(read_node(field.value.clone(), typed, chosen)),
             },
             statement.addresses.clone(),
         ));
@@ -418,9 +456,10 @@ fn initializer_stores(statement: &Statement, typed: &Typed) -> Option<Vec<Statem
     Some(stores)
 }
 
-/// `node` with the types read into it, innermost first.
-fn read_node(node: AstNode, typed: &Typed) -> AstNode {
-    let read = crate::inline::map(node, &mut |n| read_one(n, typed));
+/// `node` with the types read into it, innermost first. `chosen` is the
+/// member the analyst said the union access at the statement means.
+fn read_node(node: AstNode, typed: &Typed, chosen: Option<&str>) -> AstNode {
+    let read = crate::inline::map(node, &mut |n| read_one(n, typed, chosen));
     // What is left of byte arithmetic on a typed pointer is said in bytes.
     crate::inline::map(read, &mut |n| match n {
         AstNode::Binary {
@@ -451,7 +490,7 @@ fn scales(name: &str, typed: &Typed) -> bool {
         .is_some_and(|pointee| typed.store.size_of(pointee).ok() != Some(1))
 }
 
-fn read_one(node: AstNode, typed: &Typed) -> AstNode {
+fn read_one(node: AstNode, typed: &Typed, chosen: Option<&str>) -> AstNode {
     match node {
         AstNode::Deref { target } => {
             if let AstNode::Cast {
@@ -459,7 +498,7 @@ fn read_one(node: AstNode, typed: &Typed) -> AstNode {
                 target: address,
             } = target.as_ref()
             {
-                if let Some(read) = load(ty, address, typed) {
+                if let Some(read) = load(ty, address, typed, chosen) {
                     return read;
                 }
             }
@@ -520,6 +559,71 @@ fn enum_side<'a>(node: &AstNode, typed: &'a Typed) -> Option<&'a Type> {
     }
 }
 
+/// The members of the union the access at `address` reads, in declaration
+/// order, for a view to cycle: the pointee of a typed pointer the
+/// statement at the address reads through, or the type of the variable it
+/// reads a part of. `None` when no statement is at the address or none of
+/// its accesses reads a union.
+pub fn union_access_at(
+    function: &LiftedFunction,
+    address: u64,
+    store: &TypeStore,
+) -> Option<Vec<String>> {
+    fn find_at(
+        statements: &[crate::lift::Statement],
+        address: u64,
+    ) -> Option<&crate::lift::Statement> {
+        statements.iter().find_map(|statement| {
+            if statement.addresses.contains(&address) {
+                return Some(statement);
+            }
+            statement
+                .children()
+                .into_iter()
+                .find_map(|child| find_at(child, address))
+        })
+    }
+    let statement = find_at(&function.body, address)?;
+    let declared = |name: &str| -> Option<Type> {
+        let ty = function
+            .params
+            .iter()
+            .chain(&function.locals)
+            .find(|variable| variable.name == name)?
+            .ty
+            .clone();
+        crate::ctype::parse_type(store, &ty).ok()
+    };
+    let found = std::cell::RefCell::new(None);
+    statement.node.any(&|node| {
+        let pointee = match node {
+            AstNode::Deref { target } => match target.as_ref() {
+                AstNode::Cast { ty, .. } => match crate::ctype::parse_type(store, ty).ok() {
+                    Some(Type::Pointer(pointee)) => Some(*pointee),
+                    _ => None,
+                },
+                _ => None,
+            },
+            // The variable itself is the union, or a pointer to one: the
+            // member reads through it either way.
+            AstNode::Var { name } => match declared(name).as_ref().map(|ty| store.resolve(ty)) {
+                Some(Type::Pointer(pointee)) => Some((**pointee).clone()),
+                Some(ty) => Some(ty.clone()),
+                None => None,
+            },
+            _ => None,
+        };
+        if let Some(pointee) = pointee {
+            if let Some(members) = store.union_members(&pointee) {
+                *found.borrow_mut() = Some(members);
+                return true;
+            }
+        }
+        false
+    });
+    found.into_inner()
+}
+
 /// The enumeration a switch's index is the variable of, under its casts.
 fn enum_var<'a>(node: &AstNode, typed: &'a Typed) -> Option<&'a Type> {
     match crate::slice::strip_casts(node) {
@@ -565,15 +669,16 @@ fn sign_extended(value: u64, width: u32) -> i64 {
 }
 
 /// A load or store `*(ty)address` read through a typed pointer: the
-/// member or element the bytes are.
-fn load(ty: &str, address: &AstNode, typed: &Typed) -> Option<AstNode> {
+/// member or element the bytes are. `chosen` is the member the analyst
+/// said the union access here means.
+fn load(ty: &str, address: &AstNode, typed: &Typed, chosen: Option<&str>) -> Option<AstNode> {
     let access = match crate::ctype::parse_type(typed.store, ty).ok()? {
         Type::Pointer(pointee) => *pointee,
         _ => return None,
     };
     let size = typed.store.size_of(&access).ok()?;
     let (pointer, offset, index) = decompose(address, typed)?;
-    through(&pointer, offset, size, index, typed)
+    through(&pointer, offset, size, index, typed, chosen)
 }
 
 /// The `size` bytes `offset` past the typed pointer `pointer` — and `index`
@@ -585,6 +690,7 @@ fn through(
     size: u64,
     index: Option<(AstNode, u64)>,
     typed: &Typed,
+    chosen: Option<&str>,
 ) -> Option<AstNode> {
     let pointee = typed.pointers.get(pointer)?;
     let store = typed.store;
@@ -597,7 +703,7 @@ fn through(
         if scale != each || !back.is_multiple_of(each) {
             return None;
         }
-        let (path, _) = store.field_at(pointee, 0, size)?;
+        let (path, _) = store.field_at_chosen(pointee, 0, size, chosen)?;
         let index = AstNode::binary(index, BinaryOp::Sub, AstNode::constant(back / each, 8));
         return Some(crate::stack_vars::parts_node(
             AstNode::Intrinsic {
@@ -614,7 +720,7 @@ fn through(
         // `p[i]`, or `p[i + k]`, of the pointee's own size.
         Some((index, scale)) if scale == each => {
             let index = plus(index, element);
-            let (path, _) = store.field_at(pointee, within, size)?;
+            let (path, _) = store.field_at_chosen(pointee, within, size, chosen)?;
             Some(crate::stack_vars::parts_node(
                 AstNode::Intrinsic {
                     name: crate::stack_vars::INDEX.to_string(),
@@ -642,7 +748,7 @@ fn through(
                 return None;
             }
             let into = within - field.offset;
-            let (path, _) = store.field_at(item, into % scale, size)?;
+            let (path, _) = store.field_at_chosen(item, into % scale, size, chosen)?;
             let array = member(base, field.name.as_deref()?, true);
             let indexed = AstNode::Intrinsic {
                 name: crate::stack_vars::INDEX.to_string(),
@@ -651,7 +757,7 @@ fn through(
             Some(crate::stack_vars::parts_node(indexed, &path))
         }
         None => {
-            let (path, leaf) = store.field_at(pointee, within, size)?;
+            let (path, leaf) = store.field_at_chosen(pointee, within, size, chosen)?;
             if matches!(store.resolve(&leaf), Type::Array(..)) {
                 return None;
             }
@@ -829,11 +935,16 @@ mod tests {
         stack_vars: Vec<StackVar>,
         var_types: Vec<(String, String)>,
         versions: Vec<(String, u64)>,
+        union_fields: Vec<(u64, String)>,
     }
 
     impl Symbols for World {
         fn function_name(&self, _address: u64) -> Option<String> {
             None
+        }
+
+        fn union_fields(&self) -> std::collections::BTreeMap<u64, String> {
+            self.union_fields.clone().into_iter().collect()
         }
 
         fn variable_edits(&self, _address: u64) -> VariableEdits {
@@ -881,6 +992,18 @@ mod tests {
         var_types: &[(&str, &str)],
         versions: &[(&str, u64)],
     ) -> (String, Vec<(String, String)>) {
+        lifted_union(bytes, stack_vars, var_types, versions, &[])
+    }
+
+    /// [`lifted`], with the analyst's word on which member of a union the
+    /// access at each address means.
+    fn lifted_union(
+        bytes: &[u8],
+        stack_vars: &[(i64, u32, &str, &str)],
+        var_types: &[(&str, &str)],
+        versions: &[(&str, u64)],
+        union_fields: &[(u64, &str)],
+    ) -> (String, Vec<(String, String)>) {
         let mut store = TypeStore::new(DataModel::LP64);
         crate::ctype::parse_into(&mut store, TYPES).unwrap();
         let world = World {
@@ -901,6 +1024,10 @@ mod tests {
             versions: versions
                 .iter()
                 .map(|(v, at)| (v.to_string(), *at))
+                .collect(),
+            union_fields: union_fields
+                .iter()
+                .map(|(at, name)| (*at, name.to_string()))
                 .collect(),
         };
         let mut ctx = X86IcedContext::default();
@@ -964,6 +1091,33 @@ mod tests {
         ];
         assert_eq!(
             c(&one, &[(-0x18, 4, "w", "union word")], &[]),
+            "int f(void)\n{\n  union word w;\n\n  w.i = 1;\n  return w.i;\n}"
+        );
+        // The analyst's word on which member the access means reads the
+        // same code as `w.f`: the store at 0x1004 and the load at 0x100b.
+        assert_eq!(
+            lifted_union(
+                &one,
+                &[(-0x18, 4, "w", "union word")],
+                &[],
+                &[],
+                &[(0x1004, "f"), (0x100b, "f")],
+            )
+            .0,
+            "int f(void)\n{\n  union word w;\n\n  w.f = 1;\n  return w.f;\n}"
+        );
+        // A word naming a member the bytes are not (a float the code reads
+        // as int) still moves the read to it; a word naming nothing the
+        // union has leaves the first member.
+        assert_eq!(
+            lifted_union(
+                &one,
+                &[(-0x18, 4, "w", "union word")],
+                &[],
+                &[],
+                &[(0x1004, "nope"), (0x100b, "nope")],
+            )
+            .0,
             "int f(void)\n{\n  union word w;\n\n  w.i = 1;\n  return w.i;\n}"
         );
         // An array of structures by element and member.
@@ -1167,7 +1321,12 @@ mod tests {
             thunk: None,
             return_reason: None,
         };
-        super::read_types(&mut function, &store, &Default::default());
+        super::read_types(
+            &mut function,
+            &store,
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(function.locals[0].ty, "struct node *");
         let text = emit_function(&function, &Options::default())
             .lines

@@ -538,6 +538,9 @@ pub struct Binary {
     /// The analyst's merges, splits, new versions and pinned values of
     /// each function's variables, by the function's entry.
     variable_edits: Mutex<BTreeMap<u64, VariableEdits>>,
+    /// The analyst's word on which member of a union each instruction's
+    /// access means, by the address of each instruction that said.
+    union_fields: Mutex<BTreeMap<u64, String>>,
     /// The analyst's types, built from the project's C under the image's
     /// data model; `None` for the platform's primitives alone.
     types: Mutex<Option<Arc<TypeStore>>>,
@@ -905,6 +908,7 @@ impl Binary {
             removable_stores: Mutex::new(BTreeMap::new()),
             inlines: Mutex::new(BTreeMap::new()),
             variable_edits: Mutex::new(BTreeMap::new()),
+            union_fields: Mutex::new(BTreeMap::new()),
             types: Mutex::new(None),
             inline_visiting: Mutex::new(HashSet::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
@@ -2086,6 +2090,52 @@ impl Binary {
             .ok()
             .and_then(|held| held.get(&address).cloned())
             .unwrap_or_default()
+    }
+
+    /// Tell the lift which member of a union each instruction's access
+    /// means — by the address of each instruction that said — and say
+    /// whether that changed anything. The pseudocode and the levels are
+    /// read again after; the walks are kept, since the choice changes no
+    /// function's graph.
+    pub fn set_union_fields(&self, fields: BTreeMap<u64, String>) -> bool {
+        if let Ok(mut held) = self.union_fields.lock() {
+            if *held == fields {
+                return false;
+            }
+            *held = fields;
+        } else {
+            return false;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        true
+    }
+
+    /// The member of a union the analyst said the access at `address`
+    /// means, when the record says.
+    pub fn union_field(&self, address: u64) -> Option<String> {
+        self.union_fields
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+    }
+
+    /// The members of the union the access at `address` in the function at
+    /// `function` reads, in declaration order, for the workbench to cycle:
+    /// the pointee of a typed pointer the instruction reads through, or the
+    /// type of the stack variable the instruction reads a part of. `None`
+    /// when the instruction reads no union, or the function is not lifted.
+    pub fn union_members(&self, function: u64, address: u64) -> Option<Vec<String>> {
+        let stages = self.stages(function).ok()?;
+        let store = self.types();
+        ag_engine::typed::union_access_at(&stages.function, address, &store)
     }
 
     /// The pairs of the variables of the function at `address` that could
@@ -4014,6 +4064,16 @@ impl Symbols for ImageSymbols<'_> {
     /// variables.
     fn variable_edits(&self, address: u64) -> VariableEdits {
         self.0.variable_edits(address)
+    }
+
+    /// The member of a union each instruction's access means, by address.
+    fn union_fields(&self) -> std::collections::BTreeMap<u64, String> {
+        self.0
+            .union_fields
+            .lock()
+            .ok()
+            .map(|held| (*held).clone())
+            .unwrap_or_default()
     }
 
     /// The analyst's types.

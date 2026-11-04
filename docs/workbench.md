@@ -607,6 +607,13 @@ The format reaches the listing and the graph, every constant of the one instruct
 `-` the analysis printed before a constant stays with it. `ag project operand` records the
 same choice.
 
+- **Union field** (Ctrl+Shift+M) chooses which member of a union the selected instruction's
+  access means. A union's members all lie at 0, so the code alone cannot tell them apart and
+  the pseudocode prints the first member the bytes fit; the choice cycles the union's members
+  in declaration order and back to the analysis's own choice, which leaves no record. The
+  pseudocode re-reads with it: `w.f` where it printed `w.i`. An instruction that reads no
+  union says so and records nothing. `ag project union` records the same choice.
+
 A `switch` compiled to a jump table reaches its cases through an indirect `jmp`, which the
 analysis recovers by itself when the code has the usual shape — `jmp [index*8 + table]`
 into an absolute table, or the position-independent `lea`/`movsxd`/`add`/`jmp` through a

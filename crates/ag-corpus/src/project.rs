@@ -502,6 +502,14 @@ pub struct Annotation {
     /// as the analysis printed them and misreads nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand_format: Option<String>,
+    /// Which member of a union the access at the instruction means, by
+    /// name, when the analyst said and this program reads the name: the
+    /// pseudocode prints `u.f` where it would print the first member the
+    /// bytes fit. A reader that does not know the field prints the first
+    /// member and misreads nothing, so the format version does not change
+    /// for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub union_field: Option<String>,
     /// Where the jump table the instruction reads is and how long, when
     /// the analyst said; see [`JumpTableNote`]. A reader that does not know
     /// the field recovers what it can from the code, as before.
@@ -799,6 +807,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            union_field: None,
             jump_table: None,
             patch: None,
             patch_text: None,
@@ -836,6 +845,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            union_field: None,
             jump_table: None,
             patch: None,
             patch_text: None,
@@ -872,6 +882,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            union_field: None,
             jump_table: None,
             patch: None,
             patch_text: None,
@@ -1020,6 +1031,21 @@ impl Annotation {
             .map(|format| format.label().to_string());
     }
 
+    /// Which member of a union the access at the instruction means, when
+    /// the record says.
+    pub fn union_field(&self) -> Option<&str> {
+        self.union_field.as_deref()
+    }
+
+    /// Record which union member the access at the instruction means, or
+    /// clear it with `None`; an empty name is no choice.
+    pub fn set_union_field(&mut self, name: Option<&str>) {
+        self.union_field = name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+    }
+
     /// The jump table the instruction reads, as the analyst said, when the
     /// record says and this program reads the spelling.
     pub fn jump_table(&self) -> Option<JumpTableNote> {
@@ -1096,6 +1122,7 @@ impl Annotation {
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.operand_format.is_none()
+            && self.union_field.is_none()
             && self.jump_table.is_none()
             && self.patch.is_none()
             && self.references.is_empty()
@@ -1856,6 +1883,21 @@ impl ProjectFile {
             .collect()
     }
 
+    /// The analyst's word on which member of a union each instruction's
+    /// access means, by the value of the address of each instruction that
+    /// said. A word on a spaced address keys on its value, as an override
+    /// does.
+    pub fn union_fields(&self) -> BTreeMap<u64, String> {
+        self.places()
+            .filter(|a| !a.block)
+            .filter_map(|a| {
+                let name = a.union_field.clone()?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, name))
+            })
+            .collect()
+    }
+
     /// The analyst's overrides, by the value of the address each is at —
     /// the branch or the indirect jump — the kind and whether it is
     /// allowed. A word on a spaced address keys on its value, as a jump
@@ -2075,6 +2117,42 @@ mod tests {
         assert_eq!(read, project);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_union_field_record_round_trips_and_keys_by_address() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Address, "0x1004");
+        assert!(record.is_empty());
+        record.set_union_field(Some("f"));
+        assert_eq!(record.union_field(), Some("f"));
+        assert!(!record.is_empty(), "a chosen member is a record");
+        // The empty name is no choice: the record says nothing.
+        record.set_union_field(Some("  "));
+        assert_eq!(record.union_field(), None);
+        assert!(record.is_empty());
+        record.set_union_field(Some("f"));
+        // Taking the word back gives an empty record again.
+        project
+            .annotation_mut(TargetKind::Address, "0x100b")
+            .set_union_field(Some("i"));
+        let read = ProjectFile::from_json(&project.to_json().unwrap()).expect("load");
+        assert_eq!(read, project, "the member's name survives the disk");
+        // The lift's word-by-address map, keyed on the value of each
+        // address that said, spaced or not.
+        project
+            .annotation_mut(TargetKind::Address, "EXTERNAL:0x1000")
+            .set_union_field(Some("l"));
+        assert_eq!(
+            project.union_fields(),
+            [
+                (0x1004, "f".to_string()),
+                (0x100b, "i".to_string()),
+                (0x1000, "l".to_string()),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<u64, String>>()
+        );
     }
 
     #[test]

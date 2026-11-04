@@ -128,6 +128,10 @@ A function's record carries `var_types`, the types given its variables by their 
   reads each access inside it as the member or element it is: `p.x`, `v.inner.g`,
   `v.a[2].f`; a union's first member the bytes fit. Bytes that are no member's read at their
   offset, `*(int *)((char *)&v + 2)`.
+- Which member of a union an access means is the analyst's word, not the code's: a union's
+  members all lie at 0. The word is said per instruction (`ag project … union`, **Edit ▸
+  Union field** in the workbench) and reads the access as that member, `w.f` where the
+  analysis prints `w.i`; a word naming no member the bytes are leaves the first it fits.
 - A variable given a pointer type (`ag project … var-type`) reads a load or store through it
   at a constant offset as the member there, `a->y`, past the first as `a[1].y`, an array
   member indexed by a register in the shape `a + 8 + b*4` as `a->counts[b]`; through a pointer

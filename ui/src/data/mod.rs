@@ -641,6 +641,20 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Tell the analysis which member of a union each instruction's access
+    /// means — by the address of each instruction that said — and say
+    /// whether that changed anything.
+    fn set_union_fields(&self, _fields: BTreeMap<u64, String>) -> bool {
+        false
+    }
+
+    /// The members of the union the access at `address` in the function at
+    /// `function` reads, in declaration order, for the analyst to cycle;
+    /// `None` when it reads no union.
+    fn union_members(&self, _function: u64, _address: u64) -> Option<Vec<String>> {
+        None
+    }
+
     /// The opaque predicates of the function at `function` — its branches
     /// decided whatever the input — each with the patch that takes it out,
     /// as the image reads now. A provider with no code of its own has none.

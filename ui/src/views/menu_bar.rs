@@ -158,6 +158,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditOperandFormat,
             )),
             Item::new(item_button(
+                "Union field (next member, then back to the analysis)",
+                "Ctrl+Shift+M",
+                Message::EditUnionField,
+            )),
+            Item::new(item_button(
                 "Decode from here as ARM or Thumb…",
                 "",
                 Message::EditMode,

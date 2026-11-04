@@ -513,6 +513,14 @@ impl Provider for BinaryProvider {
         self.binary.set_site_overrides(overrides)
     }
 
+    fn set_union_fields(&self, fields: BTreeMap<u64, String>) -> bool {
+        self.binary.set_union_fields(fields)
+    }
+
+    fn union_members(&self, function: u64, address: u64) -> Option<Vec<String>> {
+        self.binary.union_members(function, address)
+    }
+
     fn set_patches(&self, patches: BTreeMap<u64, Vec<u8>>) -> bool {
         self.binary.set_patches(patches)
     }
