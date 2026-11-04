@@ -63,6 +63,14 @@ use crate::types::{Step, Type, TypeStore};
 /// is the value, and no call.
 pub const FRAGMENT: &str = "__fragment";
 
+/// A bit-field's member read through a pointer: `__bits_arrow(p,
+/// "flags", 0, 3)`.
+pub const BITS_ARROW: &str = "__bits_arrow";
+
+/// A bit-field's member read on a value: `__bits_member(v, "flags",
+/// 0, 3)`.
+pub const BITS_MEMBER: &str = "__bits_member";
+
 /// `node`, annotated as the members `members` of a structure.
 pub fn annotated(node: AstNode, members: &str) -> AstNode {
     AstNode::Intrinsic {
@@ -337,6 +345,31 @@ impl Reader<'_> {
                     let (at, ty) = self
                         .store
                         .path_offset(&leaf, &[Step::Field(field.to_string())])?;
+                    return Some((root, of, offset + at, ty));
+                }
+                if let Some((base, field, bit_offset, bits, arrow)) =
+                    crate::typed::bits_member_of(node)
+                {
+                    let (root, of, offset, leaf) = if arrow {
+                        let AstNode::Var { name } = base else {
+                            return None;
+                        };
+                        let pointee = self.pointers.get(name)?;
+                        let deref = AstNode::Deref {
+                            target: Box::new(base.clone()),
+                        };
+                        (deref, pointee.clone(), 0, pointee.clone())
+                    } else {
+                        self.located(base)?
+                    };
+                    let (at, ty) = self.store.path_offset(
+                        &leaf,
+                        &[Step::Bits {
+                            name: field.to_string(),
+                            bit_offset,
+                            bits,
+                        }],
+                    )?;
                     return Some((root, of, offset + at, ty));
                 }
                 if let Some((array, index)) = crate::stack_vars::indexed(node) {
@@ -642,6 +675,30 @@ impl Reader<'_> {
             if let Some((Step::Field(name), rest)) = path.split_first() {
                 let first = crate::typed::member((**target).clone(), name, true);
                 return crate::stack_vars::parts_node(first, rest);
+            }
+            if let Some((
+                Step::Bits {
+                    name,
+                    bit_offset,
+                    bits,
+                },
+                rest,
+            )) = path.split_first()
+            {
+                // A bit-field is a scalar leaf: a path through it is
+                // no member.
+                if !rest.is_empty() {
+                    // The caller keeps no `None` for a missing member;
+                    // the whole structure is what the text says.
+                    return base.clone();
+                }
+                return crate::typed::bits_member(
+                    (**target).clone(),
+                    name,
+                    *bit_offset,
+                    *bits,
+                    true,
+                );
             }
         }
         crate::stack_vars::parts_node(base.clone(), path)

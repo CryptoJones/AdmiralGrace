@@ -546,10 +546,16 @@ fn part_of(
 }
 
 /// `base` followed along `path`: `base.inner.a[2]`, each member through
-/// [`crate::typed::member`], each element through [`INDEX`].
+/// [`crate::typed::member`], each element through [`INDEX`], a
+/// bit-field through [`crate::typed::bits_member`].
 pub(crate) fn parts_node(base: AstNode, path: &[Step]) -> AstNode {
     path.iter().fold(base, |node, step| match step {
         Step::Field(name) => crate::typed::member(node, name, false),
+        Step::Bits {
+            name,
+            bit_offset,
+            bits,
+        } => crate::typed::bits_member(node.clone(), name, *bit_offset, *bits, false),
         Step::Index(index) => AstNode::Intrinsic {
             name: INDEX.to_string(),
             args: vec![node, AstNode::constant(*index, 8)],
@@ -566,10 +572,13 @@ pub fn part_root(node: &AstNode) -> Option<&str> {
             if let Some((array, _)) = indexed(node) {
                 return part_root(array);
             }
-            match crate::typed::member_of(node) {
-                Some((base, _, false)) => part_root(base),
-                _ => None,
+            if let Some((base, _, false)) = crate::typed::member_of(node) {
+                return part_root(base);
             }
+            if let Some((base, _, _, _, false)) = crate::typed::bits_member_of(node) {
+                return part_root(base);
+            }
+            None
         }
     }
 }
@@ -577,7 +586,9 @@ pub fn part_root(node: &AstNode) -> Option<&str> {
 /// Whether `node` is a part of a variable the analyst made: an element,
 /// `buf[2]`, or a member, `p.x`.
 pub fn is_part(node: &AstNode) -> bool {
-    indexed(node).is_some() || matches!(crate::typed::member_of(node), Some((_, _, false)))
+    indexed(node).is_some()
+        || matches!(crate::typed::member_of(node), Some((_, _, false)))
+        || matches!(crate::typed::bits_member_of(node), Some((_, _, _, _, false)))
 }
 
 /// Rewrite every node of `statements` with `f`, innermost first: the

@@ -422,11 +422,14 @@ fn read(node: &AstNode, effects: &mut Effects) {
                 read(arg, effects);
             }
         }
-        // An element of an analyst's array, or a member, is memory, read.
+        // An element of an analyst's array, or a member, is memory,
+        // read — as is a bit-field's member: __bits_member, __bits_arrow.
         AstNode::Intrinsic { name, args }
             if name == crate::stack_vars::INDEX
                 || name == crate::typed::MEMBER
-                || name == crate::typed::ARROW =>
+                || name == crate::typed::ARROW
+                || name == crate::fragments::BITS_MEMBER
+                || name == crate::fragments::BITS_ARROW =>
         {
             effects.reads_memory = true;
             for arg in args {

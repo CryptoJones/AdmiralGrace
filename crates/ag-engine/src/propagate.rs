@@ -600,7 +600,16 @@ fn made_address(
     let mut path = Vec::new();
     let mut at = target.as_ref();
     loop {
-        if let Some((base, field, false)) = crate::typed::member_of(at) {
+        if let Some((base, field, bit_offset, bits, false)) =
+            crate::typed::bits_member_of(at)
+        {
+            path.push(crate::types::Step::Bits {
+                name: field.to_string(),
+                bit_offset,
+                bits,
+            });
+            at = base;
+        } else if let Some((base, field, false)) = crate::typed::member_of(at) {
             path.push(crate::types::Step::Field(field.to_string()));
             at = base;
         } else if let Some((array, AstNode::Constant { value: 0, .. })) =
@@ -1784,9 +1793,22 @@ pub(crate) fn tidy(
     let first_member = |node: &AstNode| -> Option<String> {
         let mut path = Vec::new();
         let mut at = node;
-        while let Some((base, field, false)) = crate::typed::member_of(at) {
-            path.push(crate::types::Step::Field(field.to_string()));
-            at = base;
+        loop {
+            if let Some((base, field, bit_offset, bits, false)) =
+                crate::typed::bits_member_of(at)
+            {
+                path.push(crate::types::Step::Bits {
+                    name: field.to_string(),
+                    bit_offset,
+                    bits,
+                });
+                at = base;
+            } else if let Some((base, field, false)) = crate::typed::member_of(at) {
+                path.push(crate::types::Step::Field(field.to_string()));
+                at = base;
+            } else {
+                break;
+            }
         }
         let AstNode::Var { name } = at else {
             return None;

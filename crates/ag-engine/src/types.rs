@@ -466,11 +466,18 @@ pub struct Layout {
     pub fields: Vec<FieldLayout>,
 }
 
-/// One step into a type: a member by name, or an element by index.
+/// One step into a type: a member by name, an element by index, or a
+/// named bit-field by name and its place in the unit of its declared
+/// type — its first bit, counted from that unit, and its width.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     Field(String),
     Index(u64),
+    Bits {
+        name: String,
+        bit_offset: u32,
+        bits: u32,
+    },
 }
 
 /// The path to bytes inside a type, `.inner.a[2].f`.
@@ -484,6 +491,10 @@ pub fn path_text(path: &[Step]) -> String {
             }
             Step::Index(index) => {
                 let _ = write!(out, "[{index}]");
+            }
+            Step::Bits { name, .. } => {
+                out.push('.');
+                out.push_str(name);
             }
         }
     }
@@ -873,10 +884,14 @@ impl TypeStore {
 
     /// The path to the `size` bytes at `offset` inside `ty`, and the type
     /// they are: a member whose bytes they are exactly, `.f`, inside
-    /// arrays and nested structures, `.a[2].f`, or the whole of an
-    /// aggregate when no member is. A union takes the first member the
-    /// bytes fit. `None` when the bytes are no member's: they straddle
-    /// two, or are part of a scalar, or of a bit-field.
+    /// arrays and nested structures, `.a[2].f`, a bit-field whose unit
+    /// the bytes are exactly — the unit the lift reads anything of it
+    /// at, so what the code reads there is the bit-field, `(unit >> off)
+    /// & mask` — or the whole of an aggregate when no member is. A
+    /// union takes the first member the bytes fit. `None` when the
+    /// bytes are no member's: they straddle two, are part of a scalar,
+    /// or reach only part of a bit-field's unit, which no one member
+    /// the bytes are exactly names.
     pub fn field_at(&self, ty: &Type, offset: u64, size: u64) -> Option<(Vec<Step>, Type)> {
         self.field_at_chosen(ty, offset, size, None)
     }
@@ -910,7 +925,6 @@ impl TypeStore {
         let names: Vec<String> = layout
             .fields
             .iter()
-            .filter(|field| field.bits.is_none())
             .filter_map(|field| field.name.clone())
             .collect();
         (!names.is_empty()).then_some(names)
@@ -930,6 +944,12 @@ impl TypeStore {
         }
         let resolved = self.resolve(ty);
         let whole = self.size_of(resolved).ok()?;
+        let covers_bit_unit = matches!(resolved, Type::Named(_))
+            && self.composite(resolved).is_some_and(|(_, layout, _)| {
+                layout.fields.iter().any(|field| {
+                    field.bits.is_some() && offset == field.offset && size == field.size
+                })
+            });
         if offset + size > whole && !matches!(resolved, Type::Array(_, None)) {
             return None;
         }
@@ -958,26 +978,59 @@ impl TypeStore {
             }
             Type::Named(_) => {
                 let (_, layout, union) = self.composite(resolved)?;
-                // The analyst's word about a union comes before its order:
-                // the named member, when the bytes are its own.
+                // The analyst's word about a union comes before its
+                // order, and it may name a bit-field as any member: the
+                // named one first, the rest in declaration order.
                 let order: Vec<&FieldLayout> = match chosen {
                     Some(name) if union => {
                         let mut fields: Vec<&FieldLayout> = Vec::new();
                         if let Some(field) = layout.fields.iter().find(|field| {
-                            field.bits.is_none() && field.name.as_deref() == Some(name)
+                            field.name.as_deref() == Some(name)
                         }) {
                             fields.push(field);
                         }
                         fields.extend(layout.fields.iter().filter(|field| {
-                            field.bits.is_none() && field.name.as_deref() != Some(name)
+                            field.name.as_deref() != Some(name)
                         }));
                         fields
                     }
                     _ => layout.fields.iter().collect(),
                 };
                 for field in order {
-                    if field.bits.is_some() {
-                        continue;
+                    if let Some((bit_offset, bits)) = field.bits {
+                        // The bytes a named bit-field's is, the whole
+                        // unit of its declared type: an access of the
+                        // unit is the bit-field's, read with its first
+                        // bit and width.
+                        if !(offset == field.offset && size == field.size) {
+                            continue;
+                        }
+                        // The unit is the bit-field's alone when no other
+                        // bit-field overlaps it: every bit-field sharing
+                        // its byte range, whatever declared type it came
+                        // from, is a member the bytes also are.
+                        if layout
+                            .fields
+                            .iter()
+                            .filter(|held| held.bits.is_some())
+                            .filter(|held| {
+                                held.offset < field.offset + field.size
+                                    && field.offset < held.offset + held.size
+                            })
+                            .count()
+                            != 1
+                        {
+                            continue;
+                        }
+                        let Some(name) = &field.name else {
+                            continue;
+                        };
+                        path.push(Step::Bits {
+                            name: name.clone(),
+                            bit_offset,
+                            bits,
+                        });
+                        return Some(field.ty.clone());
                     }
                     let end = field.offset + field.size;
                     if field.offset <= offset && offset + size <= end {
@@ -1006,7 +1059,7 @@ impl TypeStore {
             }
             _ => return None,
         }
-        (offset == 0 && size == whole).then(|| ty.clone())
+        (offset == 0 && size == whole && !covers_bit_unit).then(|| ty.clone())
     }
 
     /// Where the member or element `path` leads inside `ty`: its offset in
@@ -1018,6 +1071,34 @@ impl TypeStore {
         for step in path {
             let (at, inner) = match step {
                 Step::Field(name) => self.member_offset(&ty, name, 0)?,
+                Step::Bits {
+                    name,
+                    bit_offset,
+                    bits,
+                } => {
+                    let (at, found) = self.bit_offset(&ty, name, 0)?;
+                    // A step that no longer names this type's bit-field
+                    // with the first bit and width it carries is stale:
+                    // it resolves to nothing, not to whatever the name
+                    // now means.
+                    let Step::Bits {
+                        bit_offset: at_bit,
+                        bits: at_bits,
+                        ..
+                    } = found
+                    else {
+                        return None;
+                    };
+                    if at_bit != *bit_offset || at_bits != *bits {
+                        return None;
+                    }
+                    // The step holds the bit-field's declared type, as
+                    // `field_at` returns it for the leaf.
+                    let inner = self
+                        .member_type(&ty, name)
+                        .unwrap_or_else(|| ty.clone());
+                    (at, inner)
+                }
                 Step::Index(index) => {
                     let Type::Array(element, _) = self.resolve(&ty) else {
                         return None;
@@ -1044,9 +1125,56 @@ impl TypeStore {
                 Some(own) if own == name && field.bits.is_none() => {
                     return Some((field.offset, field.ty.clone()));
                 }
+                Some(own) if own == name => {
+                    return None;
+                }
                 None if field.bits.is_none() => {
                     if let Some((at, inner)) = self.member_offset(&field.ty, name, depth + 1) {
                         return Some((field.offset + at, inner));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The named bit-field `name` of the structure or union `ty` as a
+    /// path step, through its anonymous members; `None` when it is not
+    /// one.
+    pub fn bit_step(&self, ty: &Type, name: &str) -> Option<Step> {
+        self.bit_offset(ty, name, 0).map(|(_, step)| step)
+    }
+
+    /// The offset in bytes and the step of the bit-field `name` of the
+    /// structure or union `ty`, through its anonymous members.
+    fn bit_offset(
+        &self,
+        ty: &Type,
+        name: &str,
+        depth: usize,
+    ) -> Option<(u64, Step)> {
+        if depth > 32 {
+            return None;
+        }
+        let (_, layout, _) = self.composite(ty)?;
+        for field in &layout.fields {
+            match (&field.name, field.bits) {
+                (Some(own), Some((bit_offset, bits))) if own == name => {
+                    return Some((
+                        field.offset,
+                        Step::Bits {
+                            name: name.to_string(),
+                            bit_offset,
+                            bits,
+                        },
+                    ));
+                }
+                (None, None) => {
+                    // Only an anonymous member is searched: a named one
+                    // is C's `member.bitfield`, not `bitfield`.
+                    if let Some((at, step)) = self.bit_offset(&field.ty, name, depth + 1) {
+                        return Some((field.offset + at, step));
                     }
                 }
                 _ => {}
@@ -1924,6 +2052,88 @@ mod tests {
         let p = s.layout("struct p").unwrap();
         assert_eq!(p.fields[1].bits, Some((3, 30)));
         assert_eq!((p.size, p.align), (5, 1));
+    }
+
+    #[test]
+    fn an_access_to_a_bit_fields_unit_is_the_bit_field() {
+        let s = store(
+            DataModel::LP64,
+            "struct solo { unsigned flags : 3; };\n\
+             struct b { unsigned flags : 3; unsigned mode : 5; unsigned whole : 32; };\n\
+             struct pair { int x; struct b inner; unsigned solo : 3; };\n\
+             struct shared { unsigned a : 3; unsigned b : 30; };\n\
+             struct shared_pair { long tail; unsigned a : 3, b : 5; };\n\
+             struct full { unsigned a : 32; };\n\
+             struct exactly_shared { unsigned a : 3, b : 29; };\n\
+             struct mixed { unsigned char a : 3; unsigned b : 3; };\n\
+             union bit_union { unsigned x; unsigned flags : 3; };\n\
+             struct pack { struct __attribute__((packed)) { unsigned a : 3; unsigned b : 30; }; };",
+        );
+        let path = |key: &str, offset, size| {
+            s.field_at(&Type::Named(key.to_string()), offset, size)
+                .map(|(p, ty)| (path_text(&p), ty))
+        };
+        // The sole named bit-field in its int unit: the access is it,
+        // with its first bit and width.
+        assert_eq!(
+            path("struct solo", 0, 4),
+            Some((".flags".to_string(), Type::Prim(Prim::UInt)))
+        );
+        // `unsigned a:3; unsigned b:30;` does not share: `b` does not fit
+        // in the 29 bits left after `a`, so `b` is at offset 4 and the
+        // unit at 0 holds `a` alone — the access there is `.a`.
+        assert_eq!(
+            path("struct shared", 0, 4),
+            Some((".a".to_string(), Type::Prim(Prim::UInt)))
+        );
+        assert_eq!(
+            path("struct shared", 4, 4),
+            Some((".b".to_string(), Type::Prim(Prim::UInt)))
+        );
+        // `a:3, b:5` do share one int unit: the access is no one member's.
+        assert_eq!(path("struct shared_pair", 8, 4), None);
+        // Part of a unit is no member either.
+        assert_eq!(path("struct solo", 0, 2), None);
+        // `struct b`'s flags and mode share the int at 0, so `pair.inner`
+        // at 4 is no one member's; `pair.solo` at 12 is sole.
+        assert_eq!(path("struct pair", 4, 4), None);
+        assert_eq!(
+            path("struct pair", 12, 4),
+            Some((".solo".to_string(), Type::Prim(Prim::UInt)))
+        );
+        // A full-width bit-field (`a:32`) fills its unit alone.
+        assert_eq!(
+            path("struct full", 0, 4),
+            Some((".a".to_string(), Type::Prim(Prim::UInt)))
+        );
+        // `a:3, b:29` exactly fill one int unit (3+29=32): two members
+        // share it, so the access is no one member's.
+        assert_eq!(path("struct exactly_shared", 0, 4), None);
+        // `unsigned char a:3` at bit 0 followed by `unsigned b:3` with
+        // start 3 fits in its 32-bit unit, so `b` also starts at byte
+        // 0: the byte is shared whatever the declared types are, and
+        // neither is sole in it.
+        assert_eq!(path("struct mixed", 0, 1), None);
+        // The analyst's word may name a union's bit-field member.
+        assert_eq!(
+            s.field_at_chosen(&Type::Named("union bit_union".to_string()), 0, 4, Some("flags"))
+                .map(|(p, _)| path_text(&p)),
+            Some(".flags".to_string())
+        );
+        // The path and the inverse agree, and a bit-field is found by
+        // name through an anonymous member.
+        let b = Type::Named("struct solo".to_string());
+        let (path, _) = s.field_at(&b, 0, 4).unwrap();
+        assert_eq!(s.path_offset(&b, &path).map(|(at, _)| at), Some(0));
+        assert_eq!(
+            s.bit_step(&Type::Named("struct pack".to_string()), "b"),
+            Some(Step::Bits {
+                name: "b".to_string(),
+                bit_offset: 3,
+                bits: 30,
+            }),
+            "the packed inner is an anonymous member, so `b` is the outer's"
+        );
     }
 
     #[test]

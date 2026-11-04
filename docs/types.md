@@ -36,7 +36,13 @@ The store (`TypeStore`) holds the definitions by key under one data model and an
 size and alignment of any type, the layout of each structure and union, and the member at
 an offset: `field_at(type, offset, size)` gives the path to the bytes — `.inner.a[2].f` —
 when they are exactly a member's, inside nested structures and arrays, through anonymous
-members as C reaches them, a union's first member they fit.
+members as C reaches them, a union's first member they fit. The bytes that are the whole
+unit of a bit-field's declared type are the bit-field's when exactly one named bit-field of
+that type fills the unit: `field_at(…, 0, 4)` on `struct solo { unsigned flags : 3; };` is
+`.flags` in `unsigned`, read in pseudocode as `s.flags` (or `p->flags`) and printed as the
+whole-unit load/store — `s.flags = x;`, `return (s.flags >> 4) & 0xf;` where the lift's
+select reads the field at bit 4 — because the value the code names is the bit-field. When
+two bit-fields share a unit, or the access is part of a unit, it names no member as before.
 
 ## Data models
 
@@ -485,8 +491,6 @@ The model leaves room for the items that build on it:
   returned structure, and the other conventions to the INTEGER class the fragments read.
 - **The union field per instruction (#371)** replaces the first-member-that-fits choice, made
   in one place (`TypeStore::field_at`).
-- **Bit-field members (#372)** read the accesses to a bit-field's unit as the bit-field: the
-  layout already places each with its unit and first bit, and `field_at` skips them now.
 - **Attributes (#373)** — Microsoft's bit-field rule, base classes, `noreturn` and the rest —
   join `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
 - **Type libraries (#376)**, **platform types (#378)** and **header import (#379)** add

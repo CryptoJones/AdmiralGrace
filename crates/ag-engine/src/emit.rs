@@ -1749,6 +1749,33 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
                 }
             }
         }
+        // A bit-field's member, `v.f` or `p->f`; the C it is read as
+        // is the field itself, the shift and mask the lifter already
+        // holds.
+        AstNode::Intrinsic { .. } if crate::typed::bits_member_of(n).is_some() => {
+            let (base, field, _, _, arrow) =
+                crate::typed::bits_member_of(n).expect("checked above");
+            match (arrow, style.language) {
+                (true, Language::C | Language::ObjC) => {
+                    operand(base, out, style);
+                    out.push_str("->");
+                }
+                (true, Language::Rust) => {
+                    out.push_str("(*");
+                    operand(base, out, style);
+                    out.push_str(").");
+                }
+                _ if matches!(base, AstNode::Call { .. }) => {
+                    expr(base, out, false, style);
+                    out.push('.');
+                }
+                _ => {
+                    operand(base, out, style);
+                    out.push('.');
+                }
+            }
+            out.push_str(field);
+        }
         // An enumerator, by its name.
         AstNode::Intrinsic { .. } if crate::typed::enumerator_of(n).is_some() => {
             out.push_str(crate::typed::enumerator_of(n).expect("checked above"));
@@ -1843,6 +1870,7 @@ fn operand(n: &AstNode, out: &mut String, style: &Style) {
     if n.is_atom()
         || crate::stack_vars::indexed(n).is_some()
         || crate::typed::member_of(n).is_some()
+        || crate::typed::bits_member_of(n).is_some()
         || crate::typed::enumerator_of(n).is_some()
         || matches!(
             n,

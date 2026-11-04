@@ -82,6 +82,66 @@ pub fn member_of(node: &AstNode) -> Option<(&AstNode, &str, bool)> {
     }
 }
 
+/// A bit-field read: [`member`] with the bit-field's first bit and
+/// width beside the name — `__bits_arrow(p, "flags", 0, 3)` for a
+/// three-bit field at bit 0. The emitter prints the plain member,
+/// `p->flags`, in C: the value a bit-field is read as is the field
+/// itself, and what shifts it into place is the machine's; the typed
+/// medium keeps the expression.
+/// The member `field` of `base`, a bit-field of `bits` bits at bit
+/// `bit_offset`: `base.field` read as `(unit >> off) & mask`, or
+/// `base->field` when `arrow`.
+pub fn bits_member(base: AstNode, field: &str, bit_offset: u32, bits: u32, arrow: bool) -> AstNode {
+    AstNode::Intrinsic {
+        name: if arrow {
+            crate::fragments::BITS_ARROW
+        } else {
+            crate::fragments::BITS_MEMBER
+        }
+        .to_string(),
+        args: vec![
+            base,
+            AstNode::StringLiteral {
+                text: field.to_string(),
+            },
+            AstNode::constant(u64::from(bit_offset), 8),
+            AstNode::constant(u64::from(bits), 8),
+        ],
+    }
+}
+
+/// The base, the member, its first bit and its width, and whether
+/// through a pointer, of a bit-field `base.field` or `base->field`,
+/// when the node is one.
+pub fn bits_member_of(node: &AstNode) -> Option<(&AstNode, &str, u32, u32, bool)> {
+    match node {
+        AstNode::Intrinsic { name, args }
+            if name == crate::fragments::BITS_MEMBER || name == crate::fragments::BITS_ARROW =>
+        {
+            let (arrow, rest) = match name.as_str() {
+                m if m == crate::fragments::BITS_ARROW => (true, args.as_slice()),
+                _ => (false, args.as_slice()),
+            };
+            match rest {
+                [
+                    base,
+                    AstNode::StringLiteral { text },
+                    AstNode::Constant { value: bit_offset, .. },
+                    AstNode::Constant { value: bits, .. },
+                ] => Some((
+                    base,
+                    text.as_str(),
+                    u32::try_from(*bit_offset).ok()?,
+                    u32::try_from(*bits).ok()?,
+                    arrow,
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The enumerator `name` of value `value`, `width` bytes wide.
 pub fn enumerator(value: u64, width: u32, name: &str) -> AstNode {
     AstNode::Intrinsic {
@@ -770,6 +830,21 @@ fn through(
                     Some((Step::Field(name), rest)) => {
                         crate::stack_vars::parts_node(member(base, name, true), rest)
                     }
+                    Some((
+                        Step::Bits {
+                            name,
+                            bit_offset,
+                            bits,
+                        },
+                        rest,
+                    )) => {
+                        // A bit-field is a scalar leaf: a path through
+                        // it is no path.
+                        if !rest.is_empty() {
+                            return None;
+                        }
+                        bits_member(base, name, *bit_offset, *bits, true)
+                    }
                     Some((Step::Index(_), _)) => {
                         let first = AstNode::Intrinsic {
                             name: crate::stack_vars::INDEX.to_string(),
@@ -970,7 +1045,9 @@ mod tests {
         struct counts { long n; int a[4]; };\n\
         enum state { S_IDLE, S_READY, S_DONE };\n\
         enum mode { M_READ = 1, M_WRITE = 2, M_EXEC = 4 };\n\
-        struct node { struct node *next; int v; };";
+        struct node { struct node *next; int v; };\n\
+        struct flags { unsigned flags : 3; unsigned mode : 5; };\n\
+        struct solo { unsigned flags : 3; };";
 
     /// The pseudocode of `bytes` lifted as `f` under `TYPES`, with the
     /// analyst's stack variables and variable types, without the comment
@@ -1161,6 +1238,34 @@ mod tests {
                 &[("a", "struct point *")]
             ),
             "long f(struct point *a)\n{\n  return (char *)a + 6;\n}"
+        );
+    }
+
+    #[test]
+    fn an_access_to_a_bit_fields_unit_is_the_bit_field() {
+        // `struct solo { unsigned flags : 3; }` — the sole named
+        // bit-field in its int unit, so the access to the unit is the
+        // field: the store through a typed pointer reads `a->flags`.
+        assert_eq!(
+            c(&[0x89, 0x37, 0xc3], &[], &[("a", "struct solo *")]),
+            "void f(struct solo *a, int b)\n{\n  a->flags = b;\n  return;\n}"
+        );
+        // Two bit-fields in their int unit: the access is no one
+        // member's, and the typed read declines it.
+        assert_eq!(
+            c(&[0x8b, 0x07, 0xc3], &[], &[("a", "struct flags *")]),
+            "int f(struct flags *a)\n{\n  return *(int *)a;\n}"
+        );
+        // A stack variable of `struct solo`: its access is its field.
+        // push rbp; mov rbp, rsp; mov dword [rbp-0x10], 1;
+        // mov eax, [rbp-0x10]; pop rbp; ret
+        let code = [
+            0x55, 0x48, 0x89, 0xe5, 0xc7, 0x45, 0xf0, 0x01, 0x00, 0x00, 0x00, 0x8b, 0x45, 0xf0,
+            0x5d, 0xc3,
+        ];
+        assert_eq!(
+            c(&code, &[(-0x18, 4, "s", "struct solo")], &[]),
+            "int f(void)\n{\n  struct solo s;\n\n  s.flags = 1;\n  return s.flags;\n}"
         );
     }
 
