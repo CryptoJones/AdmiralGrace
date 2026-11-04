@@ -590,6 +590,36 @@ impl<'s, 'p> Walker<'s, 'p> {
     /// its index and the index.
     #[allow(clippy::type_complexity)]
     fn typed<'n>(&self, node: &'n AstNode) -> Option<(i64, Type, Option<u64>, Vec<&'n AstNode>)> {
+        if let Some((base, field, bit_offset, bits, arrow)) =
+            crate::typed::bits_member_of(node)
+        {
+            let step = [Step::Bits {
+                name: field.to_string(),
+                bit_offset,
+                bits,
+            }];
+            if arrow {
+                let AstNode::Var { name } = base else {
+                    return None;
+                };
+                let pointee = self.pointees.get(name)?;
+                let (at, ty) = self.store.path_offset(pointee, &step)?;
+                return Some((
+                    self.pointers[name].checked_add(i64::try_from(at).ok()?)?,
+                    ty,
+                    None,
+                    Vec::new(),
+                ));
+            }
+            let (offset, ty, stride, inner) = self.typed(base)?;
+            let (at, ty) = self.store.path_offset(&ty, &step)?;
+            return Some((
+                offset.checked_add(i64::try_from(at).ok()?)?,
+                ty,
+                stride,
+                inner,
+            ));
+        }
         if let Some((base, field, arrow)) = crate::typed::member_of(node) {
             let step = [Step::Field(field.to_string())];
             if arrow {

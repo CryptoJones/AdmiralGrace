@@ -195,7 +195,7 @@ Filed 2026-10-26.
 - [x] Smart structures: build a struct from the accesses to a pointer — [#369](https://github.com/CryptoJones/AdmiralGrace/issues/369)
 - [x] Type propagation with automatic array and struct detection — [#370](https://github.com/CryptoJones/AdmiralGrace/issues/370)
 - [x] Choose the union field per instruction — [#371](https://github.com/CryptoJones/AdmiralGrace/issues/371)
-- [ ] Bitfield struct members — [#372](https://github.com/CryptoJones/AdmiralGrace/issues/372)
+- [x] Bitfield struct members — [#372](https://github.com/CryptoJones/AdmiralGrace/issues/372)
 - [ ] Type attributes: packing, base classes, noreturn, pure, custom value locations and more — [#373](https://github.com/CryptoJones/AdmiralGrace/issues/373)
 - [ ] Model C++ classes, inheritance and virtual function tables — [#374](https://github.com/CryptoJones/AdmiralGrace/issues/374)
 - [ ] Parse MSVC and Itanium RTTI and build vtable structures — [#375](https://github.com/CryptoJones/AdmiralGrace/issues/375)
