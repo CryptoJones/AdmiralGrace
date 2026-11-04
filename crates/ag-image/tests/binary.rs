@@ -1738,7 +1738,7 @@ fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
     let binary = Binary::open(&path).expect("the AArch64 fixture loads");
     assert!(binary.language().starts_with("AARCH64:LE:64"), "{}", binary.language());
     assert!(binary.supports_disassembly());
-    assert!(!binary.supports_pseudocode());
+    assert!(binary.supports_pseudocode());
     assert!(!binary.is_arm(), "one instruction set: nothing to mark");
     assert_eq!(binary.mode_at(0x2_0000), None);
     assert!(!binary.set_modes(BTreeMap::from([(0x2_0000_u64, ArmMode::Thumb)])));
@@ -1765,8 +1765,21 @@ fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
         .iter()
         .flat_map(|block| &block.instructions)
         .any(|line| line.mnemonic == "bl" && line.call.is_some()));
-    let refused = binary.pseudocode(0x2_0000).expect_err("not lifted");
-    assert!(refused.reason.contains("AARCH64"), "{}", refused.reason);
+    // The lift: the signature, the call, and the loop read as C.
+    let add = binary.pseudocode(0x2_0000).expect("add is lifted");
+    let text = add.text();
+    assert!(text.contains("int add("), "{text}");
+    assert!(text.contains("return"), "{text}");
+    let sum = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "sum")
+        .expect("sum")
+        .address;
+    let sum = binary.pseudocode(sum).expect("sum is lifted");
+    let text = sum.text();
+    assert!(text.contains("add("), "{text}");
+    assert!(text.contains("while") || text.contains("do"), "{text}");
 }
 
 #[test]

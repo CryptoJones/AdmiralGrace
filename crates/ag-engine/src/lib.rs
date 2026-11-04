@@ -1,3 +1,4 @@
+pub mod aarch64;
 pub mod arch;
 pub mod arm;
 pub mod asm;

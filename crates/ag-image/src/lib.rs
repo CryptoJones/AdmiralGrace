@@ -675,12 +675,20 @@ impl Binary {
         let arm = ArmVariant::of_language(&language);
         // So is 32-bit MIPS.
         let mips = MipsVariant::of_language(&language);
+        // AArch64 decodes with the ARM decoder and lifts itself, through
+        // the architecture seam the engine built for plugins: the seam is
+        // what makes its pseudocode, levels and workbench views work.
+        let built_in = arm.filter(|arm| !arm.has_modes()).map(|_| {
+            Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>
+        });
         // A language no decoder reads may be a registered plugin's.
-        let plugin_arch = if bitness.is_none() && arm.is_none() && mips.is_none() {
-            ag_engine::plugin::architecture_for(&language)
-        } else {
-            None
-        };
+        let plugin_arch = built_in.or_else(|| {
+            if bitness.is_none() && arm.is_none() && mips.is_none() {
+                ag_engine::plugin::architecture_for(&language)
+            } else {
+                None
+            }
+        });
         let unbit = |address: u64| {
             if arm.is_some_and(|arm| arm.has_modes()) {
                 address & !1
@@ -3512,6 +3520,11 @@ impl Binary {
         {
             return Some(found);
         }
+        let names: std::collections::BTreeMap<u64, String> = self
+            .functions
+            .iter()
+            .map(|function| (function.address, function.name.clone()))
+            .collect();
         let code = ag_engine::plugin::FunctionCode {
             language: &self.language,
             address,
@@ -3520,6 +3533,7 @@ impl Binary {
             cfg,
             bytes: &decoded.bytes,
             base: decoded.base,
+            names: &names,
         };
         // An architecture that lifts the language and not this function
         // refuses it: the engine's lifter reads x86-64 alone.

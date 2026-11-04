@@ -693,7 +693,9 @@ and from the analyst:
   every other word; the image's word is kept as the project's `global_pointer`, a function's
   on its record.
 
-ARM, AArch64 and MIPS are decoded, walked and listed; they are not lifted to pseudocode yet,
+AArch64 is lifted to pseudocode — the arguments come in `x0`–`x7` and the result goes out in
+`x0`, as AAPCS64 says — and a function with an instruction the lift does not read is refused
+by name. ARM and MIPS are decoded, walked and listed; they are not lifted to pseudocode yet,
 and the assembler and the no-op fill are x86's. The ARM decode reads each section once from its start, so a `blx` that
 reaches backwards, or into another section, does not switch what was already read; the
 prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/

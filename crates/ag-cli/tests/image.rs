@@ -1635,8 +1635,14 @@ fn an_aarch64_executable_is_decoded_walked_and_listed() {
     assert!(report.lines().filter(|line| line.contains("->")).count() >= 2, "sum loops: {report}");
     let report = image("arm64.elf", &["calls"]);
     assert!(report.contains("add"), "{report}");
-    let (ok, stdout, stderr) = image_result("arm64.elf", &["pseudocode", "add"]);
-    assert!(!ok || stdout.contains("AARCH64"), "{stdout}{stderr}");
+    let report = image("arm64.elf", &["pseudocode", "add"]);
+    assert!(report.contains("int add("), "{report}");
+    let report = image("arm64.elf", &["pseudocode", "sum"]);
+    assert!(report.contains("add("), "{report}");
+    assert!(
+        report.contains("while") || report.contains("do {"),
+        "{report}"
+    );
 }
 
 #[test]

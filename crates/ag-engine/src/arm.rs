@@ -14,8 +14,9 @@
 //! What comes out is the engine's own [`DecodedInsn`]: the length, the flow
 //! read from the p-code the instruction lifts to, the address a literal-pool
 //! load reads, and the text SLEIGH prints. Operands and register uses are not
-//! filled in — the lifter does not read ARM yet — so the listing, the graph
-//! and the calls are what the decode serves.
+//! filled in — the AArch64 lift reads the p-code itself, through
+//! [`crate::aarch64`] — so the listing, the graph and the calls are what the
+//! decode serves.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -517,6 +518,74 @@ fn decode_with(
         }
     }
     Ok(decoded)
+}
+
+/// The p-code of the one instruction at `at`, with the text SLEIGH prints
+/// for it: what a lift reads. The bytes are the section's, from `base`.
+/// The context goes back to its defaults over the section first, as a
+/// whole decode leaves it: what one instruction sets speaks for its own
+/// address alone.
+pub(crate) fn instruction_ops(
+    variant: ArmVariant,
+    bytes: &[u8],
+    base: u64,
+    at: u64,
+) -> Result<(Vec<Op>, String, String)> {
+    ENGINES.with(|engines| {
+        let mut engines = engines.borrow_mut();
+        let sleigh = match engines.entry(variant.spec) {
+            std::collections::hash_map::Entry::Occupied(engine) => engine.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let mut sleigh = Sleigh::new(
+                    Box::new(SectionImage {
+                        base: 0,
+                        bytes: Vec::new(),
+                    }),
+                    Box::new(ContextInternal::new()),
+                );
+                sleigh
+                    .initialize_from_sla(variant.bytes())
+                    .map_err(|error| {
+                        anyhow::anyhow!("reading the ARM specification: {}", error.explain())
+                    })?;
+                slot.insert(sleigh)
+            }
+        };
+        sleigh.set_loader(Box::new(SectionImage {
+            base,
+            bytes: bytes.to_vec(),
+        }));
+        let ram = Rc::clone(
+            sleigh
+                .base()
+                .manager()
+                .get_space_by_name("ram")
+                .context("the ARM specification names no ram space")?,
+        );
+        let at_address = |offset: u64| Address::new(Rc::clone(&ram), offset);
+        let end = base.saturating_add(bytes.len() as u64);
+        sleigh.with_context_db_mut(|db| {
+            let defaults = db.get_default_value().to_vec();
+            for (word, value) in defaults.iter().enumerate() {
+                db.set_context_region(
+                    &at_address(base),
+                    &at_address(end),
+                    word as i32,
+                    u32::MAX,
+                    *value,
+                );
+            }
+        });
+        let mut ops = Ops::default();
+        let mut printed = Text::default();
+        let length = sleigh
+            .one_instruction_with_assembly(&mut ops, &mut printed, &at_address(at))
+            .map_err(|error| anyhow::anyhow!("{:?}", error.explain()))?;
+        if length == 0 {
+            return Err(anyhow::anyhow!("no instruction at {at:#x}"));
+        }
+        Ok((ops.0, printed.mnemonic, printed.operands))
+    })
 }
 
 /// The mode the context says `address` decodes in, as it stands now — the
