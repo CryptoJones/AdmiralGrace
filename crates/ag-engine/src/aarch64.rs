@@ -58,7 +58,8 @@
 //! What the interpreter does not understand — a select (`csinv`), an
 //! indirect branch, a vector register — refuses the function with the
 //! mnemonic, the way the x86-64 lifter refuses an instruction it does not
-//! read.
+//! read. A multiply-accumulate (`madd`) is not among them: it lowers to a
+//! multiply and an add, both read, and lifts.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -219,6 +220,9 @@ impl Value {
 /// What the last flag-setting instruction compared, read through the
 /// state after it ran: `a` and `b`, and the register a `subs` wrote the
 /// difference to — the condition then tests that register against zero.
+/// A `cmp` or `cmn` wrote its result to wzr and names no register: its
+/// condition compares `a` with `b`. A `tst` recorded the and of its
+/// operands against zero.
 #[derive(Debug, Clone, PartialEq)]
 struct Flags {
     a: AstNode,
@@ -853,6 +857,20 @@ impl Run<'_> {
                         },
                         b.node,
                     );
+                    // A `tst` is an and that sets the flags: the record
+                    // says what it masked, tested against zero, as the
+                    // add and sub handlers record what a `cmp` compared.
+                    if flags_producer
+                        && mnemonic == "tst"
+                        && matches!(op.opcode, OpCode::CPUI_INT_AND)
+                        && space_of(out) == "unique"
+                    {
+                        produced = Some(Flags {
+                            a: node.clone(),
+                            b: AstNode::constant(0, out.size),
+                            dest: None,
+                        });
+                    }
                     let value = Value {
                         node,
                         bits: out.size * 8,
@@ -1071,27 +1089,30 @@ impl Run<'_> {
         };
         let relation = match word {
             "b.eq" | "b.ne" => {
-                let index = flags.dest.ok_or_else(|| {
-                    NotLifted::new(format!("{word} at {at:#x} after a compare of two operands"))
-                })?;
-                let bits = self.regs[index].as_ref().map_or(64, |value| value.bits);
-                let value = self.read(index, bits, at)?.node;
-                let width = (bits / 8).max(1);
-                return Ok(AstNode::binary(
-                    value,
-                    if word == "b.eq" {
-                        BinaryOp::Equal
-                    } else {
-                        BinaryOp::NotEqual
-                    },
-                    AstNode::constant(0, width),
-                ));
+                let relation = if word == "b.eq" {
+                    BinaryOp::Equal
+                } else {
+                    BinaryOp::NotEqual
+                };
+                return Ok(match flags.dest {
+                    // A `subs` tests the register it wrote the
+                    // difference to, not the operands.
+                    Some(index) => {
+                        let bits = self.regs[index].as_ref().map_or(64, |value| value.bits);
+                        let value = self.read(index, bits, at)?.node;
+                        let width = (bits / 8).max(1);
+                        AstNode::binary(value, relation, AstNode::constant(0, width))
+                    }
+                    // A `cmp` or `cmn` wrote its result to wzr and named
+                    // no register: the condition compares the operands
+                    // the record kept.
+                    None => AstNode::binary(flags.a, relation, flags.b),
+                });
             }
             "b.lt" => BinaryOp::Less,
             "b.ge" => BinaryOp::GreaterEqual,
-            "b.lo" => BinaryOp::Less,
+            "b.lo" | "b.cc" => BinaryOp::Less,
             "b.hs" | "b.cs" => BinaryOp::GreaterEqual,
-            "b.cc" => BinaryOp::GreaterEqual,
             _ => {
                 return Err(NotLifted::new(format!(
                     "{word} at {at:#x} tests flags the lift does not read"
@@ -1131,11 +1152,13 @@ impl Run<'_> {
             kind: StatementKind::Plain,
         });
         // The result stands in `x0`; the rest of the caller-saved file is
-        // gone, the callee-saved registers and the frame remain.
+        // gone, the callee-saved registers and the frame remain. The
+        // flags go with them: what the callee compared is not ours.
         self.regs[0] = Some(Value::of(AstNode::var(&lhs), 64));
         for index in 1..19 {
             self.regs[index] = None;
         }
+        self.flags = None;
         *self.calls = true;
         Ok(())
     }
@@ -1391,9 +1414,17 @@ mod tests {
     #[test]
     fn a_function_structures_to_pseudocode() {
         let text = pseudocode_of("add");
-        println!("--- add ---\n{text}");
-        println!("--- sum ---\n{}", pseudocode_of("sum"));
         assert!(text.contains("int add("), "{text}");
+        // What the lift of `sum` really says: the do-while the loop
+        // structures to, the call with its arguments, the load through
+        // the walking pointer, and the loop-carried registers declared
+        // as locals.
+        let sum = pseudocode_of("sum");
+        assert!(sum.contains("while (x20 != 0)"), "{sum}");
+        assert!(sum.contains("a = sub_20000(a, b);"), "{sum}");
+        assert!(sum.contains("b = *(int *)x19;"), "{sum}");
+        assert!(sum.contains("long x19;"), "{sum}");
+        assert!(sum.contains("long x20;"), "{sum}");
     }
 
     #[test]
@@ -1417,5 +1448,151 @@ mod tests {
             .join("\n");
         assert!(text.contains("sub_20000"), "{text}");
         assert!(text.contains("if ("), "{text}");
+    }
+
+    /// A varnode in a named space, for feeding the interpreter by hand.
+    fn varnode(
+        space: kuna_base::space::spacetype,
+        name: &str,
+        offset: u64,
+        size: u32,
+    ) -> VarnodeData {
+        VarnodeData {
+            space: Some(std::rc::Rc::new(kuna_base::space::AddrSpace::new(
+                space, name, false, 8, 1, 0, 0, 0, 0,
+            ))),
+            offset,
+            size,
+        }
+    }
+
+    /// Run `f` over a fresh interpreter state carrying `flags`: enough
+    /// machinery for the condition and the flag record to be read, with
+    /// no blocks under it.
+    fn with_run<T>(flags: Option<Flags>, f: impl FnOnce(&mut Run) -> T) -> T {
+        let code: HashMap<u64, Decoded> = HashMap::new();
+        let names = BTreeMap::new();
+        let mut frame = Vec::new();
+        let made = BTreeMap::new();
+        let params = BTreeMap::new();
+        let mut new_params = Vec::new();
+        let mut locals = BTreeMap::new();
+        let mut returns: Option<u32> = None;
+        let mut calls = false;
+        let mut run = Run {
+            code: &code,
+            names: &names,
+            statements: Vec::new(),
+            frame: &mut frame,
+            made: &made,
+            params: &params,
+            new_params: &mut new_params,
+            locals: &mut locals,
+            returns: &mut returns,
+            calls: &mut calls,
+            flags,
+            regs: vec![None; GPRS],
+        };
+        f(&mut run)
+    }
+
+    /// The condition `word` reads from `flags`, as the emitter prints it.
+    fn condition_text(word: &str, flags: Flags) -> String {
+        with_run(Some(flags), |run| {
+            let cond = run
+                .condition(word, None, 0x20000)
+                .unwrap_or_else(|error| panic!("{word} refused: {}", error.reason));
+            crate::emit::emit_node(&cond).trim().to_string()
+        })
+    }
+
+    #[test]
+    fn b_cc_after_a_compare_tests_unsigned_lower() {
+        // Carry-clear is `b.lo` under its other name: the same `<`.
+        let flags = Flags {
+            a: AstNode::var("a"),
+            b: AstNode::constant(1, 4),
+            dest: None,
+        };
+        assert_eq!(condition_text("b.cc", flags.clone()), "a < 1;");
+        assert_eq!(condition_text("b.lo", flags), "a < 1;");
+    }
+
+    #[test]
+    fn b_eq_and_b_ne_after_a_cmp_compare_the_operands_the_cmp_compared() {
+        // A `cmp` wrote its result to wzr and named no register: the
+        // condition falls back to the operands the record kept.
+        let flags = Flags {
+            a: AstNode::var("a"),
+            b: AstNode::var("b"),
+            dest: None,
+        };
+        assert_eq!(condition_text("b.eq", flags.clone()), "a == b;");
+        assert_eq!(condition_text("b.ne", flags), "a != b;");
+    }
+
+    #[test]
+    fn tst_records_the_mask_it_tested() {
+        // `tst w0, #1` as the specification lowers it: the and into a
+        // temporary, the flags written from it. The record says what the
+        // and made, tested against zero, so `b.eq` reads the mask.
+        let and = Op {
+            opcode: OpCode::CPUI_INT_AND,
+            out: Some(varnode(
+                kuna_base::space::spacetype::IPTR_INTERNAL,
+                "unique",
+                0x1000,
+                4,
+            )),
+            inputs: vec![
+                varnode(
+                    kuna_base::space::spacetype::IPTR_PROCESSOR,
+                    "register",
+                    0x4000,
+                    4,
+                ),
+                varnode(kuna_base::space::spacetype::IPTR_CONSTANT, "const", 1, 4),
+            ],
+        };
+        let flag = Op {
+            opcode: OpCode::CPUI_COPY,
+            out: Some(varnode(
+                kuna_base::space::spacetype::IPTR_PROCESSOR,
+                "register",
+                0x100,
+                1,
+            )),
+            inputs: vec![varnode(
+                kuna_base::space::spacetype::IPTR_INTERNAL,
+                "unique",
+                0x1000,
+                4,
+            )],
+        };
+        let text = with_run(None, |run| {
+            let mut scratch = Scratch::default();
+            run.run_instruction(0x20000, "tst", &[and, flag], &mut scratch)
+                .expect("tst runs");
+            let cond = run
+                .condition("b.eq", None, 0x20004)
+                .expect("b.eq after a tst");
+            crate::emit::emit_node(&cond).trim().to_string()
+        });
+        assert_eq!(text, "(a & 1) == 0;");
+    }
+
+    #[test]
+    fn a_call_forgets_the_flags() {
+        // What the callee compared is not ours: a branch after a call
+        // tests flags the lift no longer has, and says so.
+        let flags = Flags {
+            a: AstNode::var("a"),
+            b: AstNode::constant(1, 4),
+            dest: None,
+        };
+        with_run(Some(flags), |run| {
+            run.emit_call(0x20000, 0x20008).expect("the call emits");
+            assert!(run.flags.is_none(), "the call left flags standing");
+        });
     }
 }
