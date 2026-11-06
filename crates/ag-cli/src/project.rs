@@ -1506,6 +1506,39 @@ pub enum TypesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Import the types a C header names, read through the compiler
+    /// preprocessor with the include paths and macros of the options.
+    /// With `--preview` it says what the header would define — each
+    /// definition's size and alignment, and what it held back — without
+    /// adding any; otherwise the definitions named, or every one,
+    /// are added
+    Import {
+        /// The header to read.
+        header: PathBuf,
+        /// The types to import by name; every one when absent.
+        names: Vec<String>,
+        /// An include path, `-I` (repeatable).
+        #[arg(long = "include", alias = "include-path")]
+        include: Vec<PathBuf>,
+        /// A macro, `-D`/`-U` as the compiler takes it (repeatable).
+        #[arg(long = "define")]
+        define: Vec<String>,
+        /// The preprocessor to run: `clang` or `gcc` (default: first found).
+        #[arg(long = "compiler", default_value = "")]
+        compiler: String,
+        /// The C standard: `c11`, `c17`, `c99`, … (default `c11`).
+        #[arg(long = "standard", default_value = "")]
+        standard: String,
+        /// The system's headers are out: only the include paths are read.
+        #[arg(long = "no-system-headers")]
+        no_system_headers: bool,
+        /// Say what the header would define, and add nothing.
+        #[arg(long)]
+        preview: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1848,6 +1881,75 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             for key in &found {
                 println!("{}", crate::types::summary(&store, key));
             }
+            Ok(0)
+        }
+        TypesCmd::Import {
+            header,
+            names,
+            include,
+            define,
+            compiler,
+            standard,
+            no_system_headers,
+            preview,
+            json,
+        } => {
+            let options = ag_image::headers::HeaderOptions {
+                compiler,
+                standard,
+                include_paths: include,
+                defines: define,
+                no_system_headers,
+                ..Default::default()
+            };
+            if preview {
+                let shown = ag_image::headers::preview(model, &held, &header, &options)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                if json {
+                    let list: Vec<serde_json::Value> = shown
+                        .definitions
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "name": d.name,
+                                "c": d.c,
+                                "size": d.size,
+                                "align": d.align,
+                            })
+                        })
+                        .collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "definitions": list,
+                            "skipped": shown.skipped.iter().map(|s| serde_json::json!({"name": s.name, "reason": s.reason})).collect::<Vec<_>>(),
+                        }))?
+                    );
+                    return Ok(0);
+                }
+                for d in &shown.definitions {
+                    let layout = match (d.size, d.align) {
+                        (Some(size), Some(align)) => format!("size {size}, align {align}"),
+                        _ => "no size".to_string(),
+                    };
+                    println!("{}: {layout}", d.name);
+                }
+                for skipped in &shown.skipped {
+                    println!("{}: held back ({})", skipped.name, skipped.reason);
+                }
+                if shown.definitions.is_empty() && shown.skipped.is_empty() {
+                    println!("{}: no types are defined", header.display());
+                }
+                return Ok(0);
+            }
+            let selection: Option<&[String]> = if names.is_empty() { None } else { Some(&names[..]) };
+            let (defined, added, said) =
+                ag_image::headers::import(model, &held, &header, &options, selection)
+                    .map_err(anyhow::Error::msg)?;
+            notes(&said);
+            project.types = crate::types::definitions(&defined);
+            project.save(file)?;
+            println!("{}: {} imported", file.display(), added.join(", "));
             Ok(0)
         }
     }

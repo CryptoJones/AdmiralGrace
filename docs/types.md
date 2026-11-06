@@ -621,5 +621,36 @@ them.
 - **Type libraries (#376)** add definitions to the store from the libraries an image imports; **type archives (#377)** share them between projects; **header import (#379)** adds
   definitions to the store from elsewhere than the project, the last with a preprocessor;
   **export as a header (#380)** writes `definition_text` in the store's order.
+
+### Importing types from C headers (#379)
+
+A header is imported the way a compiler reads it. The file goes through the
+system preprocessor — `clang` or `gcc -E`, first found on the path — with the
+standard, include paths and macros the options name: `-std=c11` by default,
+`-Iinclude`, `-DFOO=1`, and `-nostdinc` when the system's headers are out and
+the run is `clang`. Macros are expanded and includes followed, so a header that
+includes another and parameterizes a member by a macro reads whole.
+
+The preprocessed text is fed to the C type parser one declaration at a time.
+A definition whose name the platform already gives — `int32_t`, `size_t` —
+is not stored, and neither is a declaration without a body. A definition
+that does not read, or that names a type the header does not define, is held
+back with its error rather than stored as a placeholder: a project built on
+it would lift against a type of no known size. A name the store already
+defines is held once when the header's form is the same definition, and
+refused by name when the two differ.
+
+The preview says what the header would define — each definition's name,
+size and alignment as the store lays it out, and the held-back ones with
+why — without adding any to a project. The import adds a selection, or
+every definition the header names; the header previews before the selection
+is made, and the names it adds are reported. A whole-header import that
+drops a definition is refused: the header names it and it does not resolve,
+and silently importing the rest would hide why it was left out. Naming a
+subset asks only for those, and the rest stay for another import.
+
+The command is `ag project TARGET types import HEADER [NAME …]` with
+`--include`, `--define`, `--compiler`, `--standard`, `--no-system-headers`,
+`--preview` and `--json`.
 - **Cross references for types and members (#384)** follow the members and enumerators the
   pseudocode reads, which stand as the `__member`, `__arrow` and `__enumerator` intrinsics.
