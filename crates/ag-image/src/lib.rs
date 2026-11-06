@@ -90,6 +90,7 @@ pub use ag_engine::defuse::{
 };
 pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
 pub use ag_engine::ctype::{self as ctype, CError, TypeText};
+pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
 pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
@@ -2079,24 +2080,54 @@ impl Binary {
         }
     }
 
-    /// The types the analyst defined, built under the image's data model;
-    /// the platform's primitives alone until a project says more.
+    /// The platform this image is: its OS and architecture, from its
+    /// language, when its language names one.
+    pub fn platform(&self) -> Option<ag_engine::platform::Platform> {
+        ag_engine::platform::Platform::of_language(&self.language)
+    }
+
+    /// The types the analyst defined, built under the platform's data model;
+    /// the platform's defaults alone until a project says more.
     pub fn types(&self) -> Arc<TypeStore> {
         self.types
             .lock()
             .ok()
             .and_then(|held| held.clone())
-            .unwrap_or_else(|| Arc::new(TypeStore::new(self.data_model())))
+            .unwrap_or_else(|| self.default_types())
+    }
+
+    /// The platform's default types on their own: the defaults of
+    /// [`platform`](Binary::platform), or the primitives alone when its
+    /// language names no platform.
+    fn default_types(&self) -> Arc<TypeStore> {
+        Arc::new(
+            self.platform()
+                .map(ag_engine::platform::default_store)
+                .unwrap_or_else(|| TypeStore::new(self.data_model())),
+        )
     }
 
     /// Read the analyst's type definitions — each a name and its C, in the
     /// order the project keeps them — under the image's data model, and
     /// say whether that changed anything; the pseudocode and the levels are
     /// read again after. A definition that does not read is refused with
-    /// what was wrong, and the types read before are kept.
+    /// what was wrong, and the types read before are kept. The definitions
+    /// open on the platform's defaults and the user's platform types, so
+    /// a project's definition corrects a platform one where both define
+    /// a name.
     pub fn set_type_definitions(&self, definitions: &[TypeText]) -> Result<bool, String> {
-        let (store, _) = ag_engine::ctype::build(self.data_model(), definitions)?;
-        let store = (!definitions.is_empty()).then(|| Arc::new(store));
+        let store = match self.platform() {
+            Some(platform) => {
+                let (store, _) =
+                    ag_engine::platform::effective(platform, definitions)?;
+                Some(Arc::new(store))
+            }
+            None => {
+                let (store, _) =
+                    ag_engine::ctype::build(self.data_model(), definitions)?;
+                (!definitions.is_empty()).then(|| Arc::new(store))
+            }
+        };
         if let Ok(mut held) = self.types.lock() {
             if *held == store {
                 return Ok(false);

@@ -2998,7 +2998,11 @@ fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
     let (ok, stdout, _) = types(&["show", "--json"]);
     assert!(ok);
     let shown: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(shown[0]["members"][2]["offset"], 8);
+    let point_shown = shown
+        .as_array()
+        .and_then(|types| types.iter().find(|ty| ty["name"] == "struct point"))
+        .expect("struct point is shown");
+    assert_eq!(point_shown["members"][2]["offset"], 8);
     let (ok, stdout, _) = types(&["search", "TAG", "--in", "member"]);
     assert!(ok);
     assert_eq!(stdout, "struct point  (struct, 0x10 bytes)\n");
@@ -3067,7 +3071,7 @@ fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
         "{text}"
     );
     let listed = image("structs.elf", &["types"]);
-    assert!(listed.starts_with("data model LP64\n"), "{listed}");
+    assert!(listed.contains("data model LP64\n"), "{listed}");
     assert!(listed.contains("/* 0x10 */ long tag;"), "{listed}");
     for word in ["a", "b"] {
         let (ok, _, stderr) = project_with(

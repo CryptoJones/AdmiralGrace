@@ -2999,6 +2999,7 @@ fn types(image: &Binary, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "platform": image.platform().map(|p| p.name()),
                 "data_model": store.model().name,
                 "pointer": store.model().pointer,
                 "primitives": crate::types::primitives_json(&store),
@@ -3007,6 +3008,8 @@ fn types(image: &Binary, json: bool) -> Result<i32> {
         );
         return Ok(0);
     }
+    println!("platform: {}", image.platform().map_or_else(|| "unknown".to_string(), |p| p.name()));
+    println!();
     print!("{}", crate::types::primitives_text(&store));
     let names = store.names();
     if names.is_empty() {

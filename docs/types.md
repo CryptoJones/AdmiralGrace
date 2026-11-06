@@ -509,6 +509,34 @@ Equality is on the name and the `c`, so the sync is two-sided with no
 common ancestor, and neither side is ever deleted by a sync. See
 `ag docs archive` for the format and the full command reference.
 
+## Platform types (#378)
+
+An image is read under the platform it is: an operating system and an
+architecture — `windows/x86-64`, `linux/aarch64`, `macos/arm64`,
+`linux/x86` — each carrying the types its images name. A PE is Windows,
+a Mach-O is macOS, an ELF is Linux, and raw bytes are what their
+language id says; the SLEIGH id's width picks 32- or 64-bit x86, so a
+32-bit ELF reads under `linux/x86` and the `ILP32 (i386)` model. Each
+platform ships default C types — the Windows SDK's `HANDLE`, `DWORD`,
+`SIZE_T`, `SECURITY_ATTRIBUTES`, the Linux and macOS C libraries' `FILE`,
+`timeval`, `sockaddr_in`, `pthread_t`, `sigaction` — read under the
+platform's data model (LLP64 for Windows 64, LP64 elsewhere at 64 bits,
+ILP32 at 32). They open on the store before the project's types, so a
+project definition corrects a platform one where both define a name,
+and the builtin type libraries (#376) add only what neither holds;
+`ag image … types` reports the platform and lists the merged store,
+and every type check — variable types, stack variables, `struct-from`
+— reads against it.
+
+The analyst extends a platform in a file of their own, per platform:
+`$XDG_CONFIG_HOME/ag/platform/<os>-<arch>.h` or
+`~/.config/ag/platform/<os>-<arch>.h`, in the same C dialect as the
+project's types. `ag platform list` names the platforms the engine
+knows, `ag platform show windows/x86-64` prints one's defaults and
+its user types, and `ag platform path windows/x86-64` creates the
+file and prints where it lives. The user types layer above the
+defaults and below the project's, so the project still wins.
+
 ## What comes later
 
 The model leaves room for the items that build on it:
@@ -590,7 +618,7 @@ them.
 - **Attributes (#373)** — Microsoft's bit-field rule and the remaining custom attributes
   beyond `noreturn`, `pure`, calling conventions, base classes and based pointers — join
   `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
-- **Type libraries (#376)** add definitions to the store from the libraries an image imports; **type archives (#377)** share them between projects; **platform types (#378)** and **header import (#379)** add
+- **Type libraries (#376)** add definitions to the store from the libraries an image imports; **type archives (#377)** share them between projects; **header import (#379)** adds
   definitions to the store from elsewhere than the project, the last with a preprocessor;
   **export as a header (#380)** writes `definition_text` in the store's order.
 - **Cross references for types and members (#384)** follow the members and enumerators the

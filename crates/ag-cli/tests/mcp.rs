@@ -922,7 +922,12 @@ fn the_types_and_a_variables_type_go_through_the_server() {
         serde_json::json!(["struct point", "point_t"])
     );
     assert_eq!(json(1)["data_model"], "LP64");
-    assert_eq!(json(1)["types"][0]["size"], 16);
+    let listed = json(1);
+    let point_in_list = listed["types"]
+        .as_array()
+        .and_then(|types| types.iter().find(|ty| ty["name"] == "struct point"))
+        .expect("struct point is listed");
+    assert_eq!(point_in_list["size"], 16);
     let point = json(2);
     assert_eq!(point["name"], "struct point");
     assert_eq!(point["members"][2]["name"], "tag");
@@ -956,7 +961,12 @@ fn the_types_and_a_variables_type_go_through_the_server() {
         text(7)
     );
     assert_eq!(json(9)["removed"], serde_json::json!(["point_t"]));
-    assert_eq!(json(10)["types"], serde_json::json!(["struct point"]));
+    let final_types = json(10)["types"].clone();
+    assert!(
+        final_types.as_array().is_some_and(|types| types.iter().any(|name| name == "struct point")),
+        "struct point still listed: {final_types}"
+    );
+    assert_eq!(json(10)["defined"], serde_json::json!(["point"]));
     let saved = std::fs::read_to_string(&project).expect("the project is saved");
     assert!(saved.contains("struct point { long x, y; };"), "{saved}");
     let _ = std::fs::remove_file(&project);

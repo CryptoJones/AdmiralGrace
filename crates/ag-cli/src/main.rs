@@ -13,6 +13,7 @@ mod docs;
 mod export;
 mod image;
 mod mcp;
+mod platform;
 mod plugins;
 mod project;
 mod run;
@@ -202,6 +203,12 @@ enum Cmd {
     Archive {
         #[command(subcommand)]
         cmd: archive::ArchiveCmd,
+    },
+    /// The platform types an image reads under: list the platforms, show
+    /// one's defaults, and find the file the analyst edits.
+    Platform {
+        #[command(subcommand)]
+        cmd: platform::PlatformCmd,
     },
 }
 
@@ -468,6 +475,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             catalog::run(format, check.then_some(path.as_path()))
         }
         Cmd::Archive { cmd } => archive::run(cmd),
+        Cmd::Platform { cmd } => platform::run(cmd),
     }
 }
 

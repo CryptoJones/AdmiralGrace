@@ -3842,9 +3842,16 @@ impl App {
             return Vec::new();
         };
         let within = self.bottom.types_in.unwrap_or(ag_image::TypeSearch::Any);
+        let held: std::collections::HashSet<&str> = self
+            .annotations
+            .types
+            .iter()
+            .map(|def| def.name.as_str())
+            .collect();
         store
             .search(&self.bottom.types_filter, within)
             .into_iter()
+            .filter(|key| held.contains(key.as_str()))
             .map(|key| {
                 let kind = store.get(&key).map_or("", |d| d.kind());
                 let size = match store.size_of(&ag_image::Type::Named(key.clone())) {
