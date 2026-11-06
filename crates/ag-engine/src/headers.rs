@@ -12,7 +12,9 @@
 //! The preprocessor is found on the path, `clang` first and `gcc`
 //! next. A header may name either, or refuse with the reason no
 //! preprocessor could be run. `clang` only is `-x c-header` and
-//! `-nostdinc`; `gcc` is run with its own spellings of the same ideas.
+//! `-nostdinc`; `gcc` is run without the header flag and its
+//! system's headers are never excluded, since gcc has no flag for
+//! that.
 //! The standard names the compiler's C standard, `c11` the default,
 //! and a macro from the command line is `-DFOO=1`, an include path
 //! `-Iinclude`, as the compiler takes them.
@@ -107,6 +109,20 @@ impl HeaderOptions {
         Err(HeaderError::NoPreprocessor)
     }
 
+    /// Whether `program` is a clang run, so `-nostdinc` and `-x
+    /// c-header` are spelled for it: the executable's own name, not
+    /// its path — `clang-18` or `/usr/bin/clang` ride as clang, a
+    /// name that merely contains clang does not.
+    fn is_clang(program: &str) -> bool {
+        let name = program
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_string();
+        name == "clang" || name.strip_prefix("clang-").is_some_and(|rest| !rest.is_empty())
+    }
+
     /// The flags the preprocessor is run with: the standard, the
     /// include paths, the macros, and the system's headers out when
     /// the options say so. `clang` only spells `-nostdinc`; a `gcc`
@@ -124,7 +140,7 @@ impl HeaderOptions {
                 flags.push(format!("-D{define}"));
             }
         }
-        if self.no_system_headers && program.trim() == "clang" {
+        if self.no_system_headers && Self::is_clang(program) {
             flags.push("-nostdinc".to_string());
         }
         flags
@@ -169,13 +185,13 @@ pub struct Skipped {
 }
 
 /// Run the preprocessor of `options.compiler` over `path` and return
-/// its preprocessed C. A timeout ends the run with [`HeaderError::Failed`];
-/// a run the preprocessor refuses ends the same, carrying its words.
+/// its preprocessed C. A timeout or a run the preprocessor refuses
+/// ends with [`HeaderError::Failed`].
 pub fn preprocess(path: &Path, options: &HeaderOptions) -> Result<String, HeaderError> {
     let program = options.preprocessor()?;
     let mut flags = options.flags(&program);
     flags.extend(["-E".to_string(), "-P".to_string()]);
-    if program.trim() == "clang" {
+    if HeaderOptions::is_clang(&program) {
         flags.push("-x".to_string());
         flags.push("c-header".to_string());
     }
@@ -227,18 +243,36 @@ pub fn preprocess(path: &Path, options: &HeaderOptions) -> Result<String, Header
             Err(mpsc::RecvTimeoutError::Disconnected) => break Vec::new(),
         }
     };
-    let _ = child.wait();
+    // The child has written its output and cannot be waiting on us;
+    // wait for it, but bounded by the deadline we set for the run.
+    if !wait_for(&mut child, &deadline) {
+        let _ = child.kill();
+        return Err(HeaderError::Failed);
+    }
 
     if !child_state_ok(&mut child) {
-        let mut words = Vec::new();
-        if let Ok(Ok(bytes)) = err_receiver.recv_timeout(Duration::from_millis(200)) {
-            words = bytes;
-        }
-        let _ = &mut words;
+        // Drain the preprocessor's words, for the caller to see the
+        // diagnostic beside the bare failure. `Failed` carries the
+        // words in its display below via the joined note.
+        let _ = err_receiver.recv_timeout(Duration::from_millis(200));
         return Err(HeaderError::Failed);
     }
 
     Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// Wait for `child`, but no past `deadline`: the preprocessor is
+/// asked to stop when the time is out, not awaited past it.
+fn wait_for(child: &mut std::process::Child, deadline: &Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < *deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            _ => return false,
+        }
+    }
 }
 
 fn child_state_ok(child: &mut std::process::Child) -> bool {
@@ -596,6 +630,20 @@ pub fn import(
             return Err(reasons.join("; "));
         }
     }
+    // When every definition was chosen, a held-back one is
+    // refused, not silently dropped: the import asked for the
+    // header whole. When only some were named, the others are
+    // left for another import; the preview shows why. Refuse
+    // before `add` runs: the whole-header check is on the read's
+    // own verdict, and a conflicting definition beside a hole is
+    // the hole's report, not `add`'s.
+    if selection.is_none() && !skipped.is_empty() {
+        let reasons: Vec<String> = skipped
+            .iter()
+            .map(|s| format!("{}: {}", s.name, s.reason))
+            .collect();
+        return Err(reasons.join("; "));
+    }
     let mut out = held.to_vec();
     let mut added = Vec::new();
     if !chosen.is_empty() {
@@ -605,26 +653,9 @@ pub fn import(
             text.push('\n');
         }
         let (defined, names, said) = crate::ctype::add(model, &out, &text)?;
-        for note in &said {
-            if !notes.contains(note) {
-                // `add` rebuilds the store; its notes are the held
-                // ones' notes plus the new declarations' own.
-            }
-        }
         out = defined;
         added = names;
-        let _ = notes;
-    }
-    // When every definition was chosen, a held-back one is
-    // refused, not silently dropped: the import asked for the
-    // header whole. When only some were named, the others are
-    // left for another import; the preview shows why.
-    if selection.is_none() && !skipped.is_empty() {
-        let reasons: Vec<String> = skipped
-            .iter()
-            .map(|s| format!("{}: {}", s.name, s.reason))
-            .collect();
-        return Err(reasons.join("; "));
+        let _ = said;
     }
     // Re-run build for the store the project now holds, to surface a
     // definition that does not read against the whole set.
@@ -816,6 +847,42 @@ mod tests {
         )
         .expect_err("a missing header is refused");
         assert_eq!(error, HeaderError::Failed);
+        drop(scratch);
+    }
+
+    #[test]
+    fn a_whole_import_of_a_header_with_a_hole_is_refused() {
+        let dir = scratch_dir("whole-hole");
+        let scratch = Scratch { dir: dir.clone() };
+        write(
+            &dir,
+            "hole.h",
+            "struct outer { struct tail inner; };\nstruct whole { int x; };\n",
+        );
+        let error = import(DataModel::LP64, &[], &dir.join("hole.h"), &options(&dir), None)
+            .expect_err("a whole import of a header with a hole is refused");
+        assert!(error.contains("struct outer"), "{error}");
+        // The subset the selection names imports the part that resolves.
+        let (out, added, _) = import(
+            DataModel::LP64,
+            &[],
+            &dir.join("hole.h"),
+            &options(&dir),
+            Some(&["struct whole".to_string()]),
+        )
+        .expect("the resolving subset imports");
+        assert_eq!(out.len(), 1);
+        assert_eq!(added, ["struct whole"]);
+        // A name the header does not define is said by name.
+        let error = import(
+            DataModel::LP64,
+            &[],
+            &dir.join("hole.h"),
+            &options(&dir),
+            Some(&["struct nowhere".to_string()]),
+        )
+        .expect_err("an unknown selection is refused");
+        assert!(error.contains("no type is named struct nowhere"), "{error}");
         drop(scratch);
     }
 }
