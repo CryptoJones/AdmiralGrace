@@ -81,6 +81,58 @@ fn the_import_slots_are_the_got_entries_the_dynamic_relocations_name() {
 }
 
 #[test]
+fn a_pe_image_names_its_imports_by_library_name_and_ordinal() {
+    use ag_engine::typelib::{Import, TypeLibSet};
+    use ag_engine::types::DataModel;
+
+    // A mingw-built exe that imports KERNEL32.dll by name (`Sleep`) and by
+    // ordinal (`GetLastError`, ordinal 490, exported NONAME).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/imports.exe");
+    let image = Image::open(&path).expect("the PE loads");
+    let imports = image.import_slots_with_library();
+    assert!(!imports.is_empty(), "the PE's imports are read");
+
+    // Every slot is a VMA: the image base plus the IAT RVA.
+    let base = image.load_base().expect("a PE has an image base");
+    assert!(imports.iter().all(|import| import.slot >= base));
+
+    // The named import carries its library and name.
+    let sleep = imports
+        .iter()
+        .find(|import| import.name.as_deref() == Some("Sleep"))
+        .expect("Sleep is imported by name");
+    assert_eq!(sleep.library.as_deref(), Some("KERNEL32.dll"));
+    assert_eq!(sleep.ordinal, None);
+
+    // The ordinal import carries its library and number and no name.
+    let ordinal = imports
+        .iter()
+        .find(|import| import.ordinal == Some(490))
+        .expect("GetLastError is imported by ordinal 490");
+    assert_eq!(ordinal.library.as_deref(), Some("KERNEL32.dll"));
+    assert_eq!(ordinal.name, None);
+
+    // The type libraries answer both: the name directly, the ordinal through
+    // the library's ordinal table (#376).
+    let set = TypeLibSet::builtin(DataModel::of_language(&image.language()));
+    assert_eq!(
+        sleep.prototype(&set).map(|p| p.name.as_str()),
+        Some("Sleep")
+    );
+    assert_eq!(
+        ordinal.prototype(&set).map(|p| p.name.as_str()),
+        Some("GetLastError")
+    );
+
+    // An ELF import has no library and no ordinal, only the name.
+    let elf = sample();
+    let elf_imports = elf.import_slots_with_library();
+    assert!(elf_imports
+        .iter()
+        .all(|import: &Import| import.library.is_none() && import.ordinal.is_none()));
+}
+
+#[test]
 fn bytes_outside_every_section_are_none() {
     let image = sample();
     assert!(image.bytes_from(0xdead_0000).is_none());

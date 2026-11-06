@@ -1,22 +1,4 @@
-// The prototypes of the library functions type propagation knows
-// (`ag_engine::propagate`, docs/types.md, Propagation).
-//
-// The file is C, read by the engine's own parser under the image's data
-// model: the types first — what the prototypes name besides C's
-// primitives — then one prototype a function. Every parameter is named,
-// and the name is dropped. `const` is read and dropped, as everywhere.
-//
-// A buffer parameter whose length another argument gives carries the
-// annotation `/* size: N */`, N the length's argument counted from 1, or
-// `/* size: N*M */` for a count of elements of a size: a stack slot whose
-// address is passed there with a constant length is made an array of that
-// many bytes, `char local_48[64]` for `fgets(&local_48, 64, f)`.
-//
-// To teach the engine a function, add its prototype here; a name already
-// here is taken once, the first. A function called under an import's or a
-// stub's decoration — `strlen@plt`, `__imp_ReadFile`, `_strlen`,
-// `j_strlen` — is found by its plain name. Type libraries (#376) are the
-// general form of this table.
+// libc: the C library and POSIX prototypes and the types they name.
 
 // ---- the types ------------------------------------------------------------
 
@@ -177,23 +159,3 @@ int accept(int fd, struct sockaddr *addr, socklen_t *len);
 ssize_t send(int fd, const void *buf, size_t len, int flags);
 ssize_t recv(int fd, void *buf /* size: 3 */, size_t len, int flags);
 
-// ---- Windows ----------------------------------------------------------------
-
-HANDLE CreateFileA(LPCSTR name, DWORD access, DWORD share, LPVOID security, DWORD disposition, DWORD flags, HANDLE templ);
-BOOL ReadFile(HANDLE file, LPVOID buf /* size: 3 */, DWORD count, DWORD *read, LPVOID overlapped);
-BOOL WriteFile(HANDLE file, const void *buf, DWORD count, DWORD *written, LPVOID overlapped);
-BOOL CloseHandle(HANDLE handle);
-DWORD GetLastError(void);
-LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD type, DWORD protect);
-BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD type);
-HANDLE GetProcessHeap(void);
-LPVOID HeapAlloc(HANDLE heap, DWORD flags, SIZE_T size);
-BOOL HeapFree(HANDLE heap, DWORD flags, LPVOID p);
-HMODULE LoadLibraryA(LPCSTR name);
-HMODULE GetModuleHandleA(LPCSTR name);
-void *GetProcAddress(HMODULE module, LPCSTR name);
-int MessageBoxA(HANDLE window, LPCSTR text, LPCSTR caption, UINT type);
-void Sleep(DWORD milliseconds);
-void ExitProcess(UINT code);
-DWORD GetTickCount(void);
-int lstrlenA(LPCSTR s);

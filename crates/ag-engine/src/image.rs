@@ -959,6 +959,132 @@ impl Image {
             .map(|(_, name)| name)
     }
 
+    /// What an image imports: a slot, its library, its name, its ordinal.
+    /// See [`crate::typelib::Import`] and [`Image::imports`]; this keeps
+    /// the historic `(slot, name)` form.
+    pub fn import_slots_with_library(&self) -> Vec<crate::typelib::Import> {
+        // PE keeps the library and the ordinal forms, `import_slots` is
+        // the backwards-compatible name-only read (name-less ordinals are
+        // dropped there; here they are kept).
+        let pe = self.pe_imports();
+        if !pe.is_empty() {
+            return pe;
+        }
+        // ELF and Mach-O imports are named: a name and no library; a name
+        // the shell would strip is still a name.
+        self.import_slots()
+            .into_iter()
+            .map(|(slot, name)| crate::typelib::Import {
+                slot,
+                library: None,
+                name: Some(name),
+                ordinal: None,
+            })
+            .collect()
+    }
+
+    /// The PE import descriptors: each import's library, its import address
+    /// table entries, named by hint/name or by ordinal. Empty for a non-PE
+    /// image or one whose imports the `object` reader does not give.
+    fn pe_imports(&self) -> Vec<crate::typelib::Import> {
+        use object::read::pe::{PeFile32, PeFile64};
+        use object::read::Object as _;
+
+        if self.object().is_none() {
+            return Vec::new();
+        }
+        let Ok(file) = object::File::parse(self.bytes.as_slice()) else {
+            return Vec::new();
+        };
+        if file.format() != object::BinaryFormat::Pe {
+            return Vec::new();
+        }
+        let bytes: &[u8] = &self.bytes;
+        let is_64 = file.is_64();
+        // `ImportTable` does the descriptor/thunk walking, hint/name reads and
+        // ordinal test for us. The IAT slot is the image base plus the
+        // FirstThunk RVA plus the thunk index — a VMA, the way an ELF's GOT
+        // slots are VMAs; the loader fills the IAT, the decompiler reads the
+        // thunk list.
+        let base = self.load_base().unwrap_or(0);
+        fn collect<'a, Pe: object::read::pe::ImageNtHeaders>(
+            pe: &object::read::pe::PeFile<'a, Pe, &'a [u8]>,
+            base: u64,
+            out: &mut Vec<crate::typelib::Import>,
+        ) {
+            use object::endian::LittleEndian as LE;
+            let Ok(Some(table)) = pe.import_table() else {
+                return;
+            };
+            let Ok(mut descriptors) = table.descriptors() else {
+                return;
+            };
+            let Ok(Some(first)) = descriptors.next() else {
+                return;
+            };
+            let mut all: Vec<&object::pe::ImageImportDescriptor> = vec![first];
+            while let Ok(Some(descriptor)) = descriptors.next() {
+                let descriptor: &object::pe::ImageImportDescriptor = descriptor;
+                all.push(descriptor);
+            }
+            for descriptor in all {
+                let name_rva = descriptor.name.get(LE);
+                let library = table
+                    .name(name_rva)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
+                let ilt_rva = descriptor.original_first_thunk.get(LE);
+                let ilt_rva = if ilt_rva != 0 {
+                    ilt_rva
+                } else {
+                    descriptor.first_thunk.get(LE)
+                };
+                let first_thunk = descriptor.first_thunk.get(LE);
+                let Ok(mut thunks) = table.thunks(ilt_rva) else {
+                    continue;
+                };
+                let mut index = 0usize;
+                while let Ok(Some(thunk)) = thunks.next::<Pe>() {
+                    let slot = base
+                        + first_thunk as u64
+                        + (index as u64) * (std::mem::size_of::<Pe::ImageThunkData>() as u64);
+                    match table.import::<Pe>(thunk) {
+                        Ok(object::read::pe::Import::Ordinal(ordinal)) => {
+                            out.push(crate::typelib::Import {
+                                slot,
+                                library: library.clone(),
+                                name: None,
+                                ordinal: Some(ordinal as u64),
+                            });
+                        }
+                        Ok(object::read::pe::Import::Name(_, name)) => {
+                            let name = String::from_utf8(name.to_vec()).ok();
+                            out.push(crate::typelib::Import {
+                                slot,
+                                library: library.clone(),
+                                name,
+                                ordinal: None,
+                            });
+                        }
+                        Err(_) => {}
+                    }
+                    index += 1;
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        if is_64 {
+            if let Ok(pe) = PeFile64::parse(bytes) {
+                collect::<object::pe::ImageNtHeaders64>(&pe, base, &mut out);
+            }
+        } else if let Ok(pe) = PeFile32::parse(bytes) {
+            collect::<object::pe::ImageNtHeaders32>(&pe, base, &mut out);
+        }
+        out.sort_by_key(|import| import.slot);
+        out
+    }
+
     /// The import slots of an x86 ELF as `(slot, name)`: the GOT entries the
     /// run-time loader fills with the address of a named symbol, by a
     /// `GLOB_DAT` or `JUMP_SLOT` dynamic relocation.
