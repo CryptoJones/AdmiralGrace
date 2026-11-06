@@ -1405,9 +1405,10 @@ impl Server {
                     }
                     None => self.change_file(|file| file.global_pointer = value)?,
                 }
-                self.image.set_global_pointer_words(crate::image::global_pointer_words(
-                    &self.project()?.file,
-                ));
+                self.image
+                    .set_global_pointer_words(crate::image::global_pointer_words(
+                        &self.project()?.file,
+                    ));
                 let functions: Vec<u64> = match function {
                     Some(address) => vec![address],
                     None => self

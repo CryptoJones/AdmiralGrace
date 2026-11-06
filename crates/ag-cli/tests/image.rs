@@ -1650,7 +1650,10 @@ fn an_aarch64_executable_is_decoded_walked_and_listed() {
     assert!(report.contains("add w0, w1, w0"), "{report}");
     assert!(report.contains("ret"), "{report}");
     let report = image("arm64.elf", &["cfg", "sum"]);
-    assert!(report.lines().filter(|line| line.contains("->")).count() >= 2, "sum loops: {report}");
+    assert!(
+        report.lines().filter(|line| line.contains("->")).count() >= 2,
+        "sum loops: {report}"
+    );
     let report = image("arm64.elf", &["calls"]);
     assert!(report.contains("add"), "{report}");
     let report = image("arm64.elf", &["pseudocode", "add"]);
@@ -1723,7 +1726,13 @@ fn the_dead_code_option_drops_what_nothing_uses() {
     // Dropped: neither, and the local they needed goes with them.
     let report = image(
         "sample.elf",
-        &["pseudocode", "deregister_tm_clones", "--option", "dead-code", "drop"],
+        &[
+            "pseudocode",
+            "deregister_tm_clones",
+            "--option",
+            "dead-code",
+            "drop",
+        ],
     );
     assert!(!report.contains("rax"), "{report}");
     assert!(!report.contains("if ("), "{report}");
@@ -2206,7 +2215,10 @@ fn the_formatting_options_reach_the_command_line() {
         "{broken}"
     );
     // Wrapped at a narrow column: printf's arguments on two lines.
-    let wrapped = image("sample.elf", &["pseudocode", "main", "--option", "wrap", "16"]);
+    let wrapped = image(
+        "sample.elf",
+        &["pseudocode", "main", "--option", "wrap", "16"],
+    );
     assert!(
         wrapped.contains("  printf(\"%ld\\n\",\n      v2);"),
         "{wrapped}"
@@ -2301,7 +2313,10 @@ fn a_run_of_field_stores_reads_as_a_struct_initializer() {
     assert!(cpp.contains("*(int *)((char *)a + 4) = 2;"), "{cpp}");
     assert!(!cpp.contains("struct {"), "{cpp}");
     // The emulator stores each field: the run writes the three fields.
-    let run = image_json("structs.elf", &["emulate", "init", "--arg", "0x5000", "--arg", "9"]);
+    let run = image_json(
+        "structs.elf",
+        &["emulate", "init", "--arg", "0x5000", "--arg", "9"],
+    );
     assert!(
         run.to_string().contains("wrote 3 fields at 0x5000"),
         "{run}"
@@ -2700,7 +2715,9 @@ fn the_platform_types_follow_the_images_data_model() {
             .clone();
         assert_eq!(long_size, long, "{fixture_name}");
         assert!(
-            report["types"].as_array().is_some_and(|types| !types.is_empty()),
+            report["types"]
+                .as_array()
+                .is_some_and(|types| !types.is_empty()),
             "platform types fill the store: {fixture_name}"
         );
         assert!(

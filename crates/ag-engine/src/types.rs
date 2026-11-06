@@ -819,7 +819,9 @@ impl TypeStore {
             return false;
         };
         c.methods.iter().any(|m| m.is_virtual)
-            || c.base_classes.iter().any(|base| self.has_vtable_seen(base, visited))
+            || c.base_classes
+                .iter()
+                .any(|base| self.has_vtable_seen(base, visited))
     }
 
     /// Whether `key`'s own layout holds a vtable pointer: it has virtual
@@ -843,7 +845,10 @@ impl TypeStore {
             return Err(format!("{} is incomplete", shown_key(key)));
         };
         if union && !composite.base_classes.is_empty() {
-            return Err(format!("{} is a union: a union has no base classes", shown_key(key)));
+            return Err(format!(
+                "{} is a union: a union has no base classes",
+                shown_key(key)
+            ));
         }
         if union && composite.methods.iter().any(|m| m.is_virtual) {
             return Err(format!(
@@ -876,7 +881,11 @@ impl TypeStore {
                 .map_err(|why| format!("a base of {} is not laid out: {why}", shown_key(key)))?;
             let malign = capped(malign);
             align = align.max(malign);
-            let offset = if union { 0 } else { round_up(bit.div_ceil(8), malign) };
+            let offset = if union {
+                0
+            } else {
+                round_up(bit.div_ceil(8), malign)
+            };
             fields.push(FieldLayout {
                 name: None,
                 ty: base_ty.clone(),
@@ -898,7 +907,11 @@ impl TypeStore {
                 .map_err(|why| format!("{} is not laid out: {why}", shown_key(key)))?;
             let valign = capped(valign);
             align = align.max(valign);
-            let offset = if union { 0 } else { round_up(bit.div_ceil(8), valign) };
+            let offset = if union {
+                0
+            } else {
+                round_up(bit.div_ceil(8), valign)
+            };
             fields.push(FieldLayout {
                 name: None,
                 ty: vptr,
@@ -1137,14 +1150,19 @@ impl TypeStore {
                 let order: Vec<&FieldLayout> = match chosen {
                     Some(name) if union => {
                         let mut fields: Vec<&FieldLayout> = Vec::new();
-                        if let Some(field) = layout.fields.iter().find(|field| {
-                            field.name.as_deref() == Some(name)
-                        }) {
+                        if let Some(field) = layout
+                            .fields
+                            .iter()
+                            .find(|field| field.name.as_deref() == Some(name))
+                        {
                             fields.push(field);
                         }
-                        fields.extend(layout.fields.iter().filter(|field| {
-                            field.name.as_deref() != Some(name)
-                        }));
+                        fields.extend(
+                            layout
+                                .fields
+                                .iter()
+                                .filter(|field| field.name.as_deref() != Some(name)),
+                        );
                         fields
                     }
                     _ => layout.fields.iter().collect(),
@@ -1247,9 +1265,7 @@ impl TypeStore {
                     }
                     // The step holds the bit-field's declared type, as
                     // `field_at` returns it for the leaf.
-                    let inner = self
-                        .member_type(&ty, name)
-                        .unwrap_or_else(|| ty.clone());
+                    let inner = self.member_type(&ty, name).unwrap_or_else(|| ty.clone());
                     (at, inner)
                 }
                 Step::Index(index) => {
@@ -1306,12 +1322,7 @@ impl TypeStore {
 
     /// The offset in bytes and the step of the bit-field `name` of the
     /// structure or union `ty`, through its anonymous members.
-    fn bit_offset(
-        &self,
-        ty: &Type,
-        name: &str,
-        depth: usize,
-    ) -> Option<(u64, Step)> {
+    fn bit_offset(&self, ty: &Type, name: &str, depth: usize) -> Option<(u64, Step)> {
         if depth > 32 {
             return None;
         }
@@ -1672,7 +1683,9 @@ impl TypeStore {
                 // Base classes first: write each base's members as the base
                 // appears at offset 0 (the first non-empty base).
                 for base in &c.base_classes {
-                    if let Some(Definition::Struct(bc) | Definition::Union(bc)) = self.definitions.get(base) {
+                    if let Some(Definition::Struct(bc) | Definition::Union(bc)) =
+                        self.definitions.get(base)
+                    {
                         if let Some(members) = &bc.members {
                             for member in members {
                                 out.push_str(&pad);
@@ -1685,7 +1698,9 @@ impl TypeStore {
                 let fields = self.layouts.get(key).map(|l| &l.fields);
                 let base_offset = c.base_classes.len() + usize::from(self.vtable_here(c));
                 let mut end: u64 = if base_offset > 0 {
-                    fields.and_then(|f| f.get(base_offset - 1)).map_or(0, |f| f.offset + f.size)
+                    fields
+                        .and_then(|f| f.get(base_offset - 1))
+                        .map_or(0, |f| f.offset + f.size)
                 } else {
                     0
                 };
@@ -2193,7 +2208,10 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
                 let conv_text = attrs.calling_convention.clone();
                 if let Some(conv) = &conv_text {
                     if inner.starts_with("(*") {
-                        let body = inner.trim_start_matches('(').trim_end_matches(')').to_string();
+                        let body = inner
+                            .trim_start_matches('(')
+                            .trim_end_matches(')')
+                            .to_string();
                         inner = format!("({conv} {body})({params_text})");
                     } else if inner.is_empty() {
                         let _ = write!(inner, "{conv}({params_text})");
@@ -2219,7 +2237,11 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
                 ty = ret;
             }
             Type::BasedPointer { base, pointee } => {
-                inner = if inner.is_empty() { format!("__based({})", base.spelled(store)) } else { format!("__based({}) {inner}", base.spelled(store)) };
+                inner = if inner.is_empty() {
+                    format!("__based({})", base.spelled(store))
+                } else {
+                    format!("__based({}) {inner}", base.spelled(store))
+                };
                 ty = pointee;
             }
             Type::Prim(_) | Type::Named(_) => break,
@@ -2234,7 +2256,9 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
     };
     if inner.is_empty() {
         base_text
-    } else if inner.starts_with('[') || inner.starts_with('(') && !inner.starts_with("(*") && !inner.starts_with("(__") {
+    } else if inner.starts_with('[')
+        || inner.starts_with('(') && !inner.starts_with("(*") && !inner.starts_with("(__")
+    {
         format!("{base_text}{inner}")
     } else {
         format!("{base_text} {inner}")
@@ -2296,7 +2320,11 @@ mod tests {
             (16, 8, named(&[("", 0), ("data", 8)]))
         );
         assert!(store.has_vtable("struct c"));
-        assert!(store.definition_text("struct c", true).unwrap().find("class c").is_some());
+        assert!(store
+            .definition_text("struct c", true)
+            .unwrap()
+            .find("class c")
+            .is_some());
     }
 
     #[test]
@@ -2316,7 +2344,10 @@ mod tests {
 
     #[test]
     fn non_virtual_methods_add_no_vtable_pointer() {
-        let store = store(DataModel::LP64, "class c { int f(int); int y; }; struct s { int h(void); int z; };");
+        let store = store(
+            DataModel::LP64,
+            "class c { int f(int); int y; }; struct s { int h(void); int z; };",
+        );
         assert_eq!(layout(&store, "struct c"), (4, 4, named(&[("y", 0)])));
         assert_eq!(layout(&store, "struct s"), (4, 4, named(&[("z", 0)])));
         assert!(!store.has_vtable("struct c"));
@@ -2505,8 +2536,13 @@ mod tests {
         assert_eq!(path("struct mixed", 0, 1), None);
         // The analyst's word may name a union's bit-field member.
         assert_eq!(
-            s.field_at_chosen(&Type::Named("union bit_union".to_string()), 0, 4, Some("flags"))
-                .map(|(p, _)| path_text(&p)),
+            s.field_at_chosen(
+                &Type::Named("union bit_union".to_string()),
+                0,
+                4,
+                Some("flags")
+            )
+            .map(|(p, _)| path_text(&p)),
             Some(".flags".to_string())
         );
         // The path and the inverse agree, and a bit-field is found by
@@ -2744,7 +2780,10 @@ mod tests {
             header.contains("\nstruct node {\n    int value;\n    struct node *next;\n};\n"),
             "{header}"
         );
-        assert!(header.contains("\ntypedef struct node node_t;\n"), "{header}");
+        assert!(
+            header.contains("\ntypedef struct node node_t;\n"),
+            "{header}"
+        );
         assert!(header.contains("\ntypedef int32_t my_int;\n"), "{header}");
         assert!(header.contains("\ntypedef size_t count_t;\n"), "{header}");
         assert!(
@@ -2771,7 +2810,10 @@ mod tests {
             header.contains("#ifndef ADMIRALGRACE_TYPES_H\n"),
             "{header}"
         );
-        assert!(header.contains("#define ADMIRALGRACE_TYPES_H\n"), "{header}");
+        assert!(
+            header.contains("#define ADMIRALGRACE_TYPES_H\n"),
+            "{header}"
+        );
         assert!(
             header.contains("\n#endif /* ADMIRALGRACE_TYPES_H */\n"),
             "{header}"
@@ -2831,7 +2873,7 @@ mod tests {
             &mut store,
             "typedef void __stdcall (*cb_t)(int);\n\
              struct seg { long *base; char __based(base) *bp; };\n\
-             struct base { long x; }; struct derived : public base { long y; };", 
+             struct base { long x; }; struct derived : public base { long y; };",
         )
         .unwrap();
         assert_eq!(
@@ -2854,13 +2896,21 @@ mod tests {
             ret: Box::new(Type::Prim(Prim::Int)),
             params: vec![Type::Prim(Prim::Int)],
             variadic: false,
-            attrs: TypeAttrs { calling_convention: Some("__cdecl".into()), noreturn: false, pure: true },
+            attrs: TypeAttrs {
+                calling_convention: Some("__cdecl".into()),
+                noreturn: false,
+                pure: true,
+            },
         };
         let b = Type::Function {
             ret: Box::new(Type::Prim(Prim::Int)),
             params: vec![Type::Prim(Prim::Int)],
             variadic: false,
-            attrs: TypeAttrs { calling_convention: Some("__cdecl".into()), noreturn: false, pure: true },
+            attrs: TypeAttrs {
+                calling_convention: Some("__cdecl".into()),
+                noreturn: false,
+                pure: true,
+            },
         };
         assert_eq!(a, b);
         assert_eq!(a.spelled(&store), "int __cdecl(int) __attribute__((pure))");
@@ -2887,5 +2937,4 @@ mod tests {
             Some((8, Type::Prim(Prim::Long)))
         );
     }
-
 }

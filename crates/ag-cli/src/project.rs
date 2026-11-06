@@ -1148,14 +1148,9 @@ pub fn run(
             address,
             variable,
             name,
-        } => edit_named(
-            &target,
-            &file,
-            Named::Variable,
-            &address,
-            &variable,
-            |a| a.name = Some(name),
-        ),
+        } => edit_named(&target, &file, Named::Variable, &address, &variable, |a| {
+            a.name = Some(name)
+        }),
         ProjectCmd::Stores {
             file,
             address,
@@ -1167,28 +1162,18 @@ pub fn run(
                 "keep" => false,
                 other => anyhow::bail!("the state is drop or keep, not {other:?}"),
             };
-            edit_named(
-                &target,
-                &file,
-                Named::Variable,
-                &address,
-                &variable,
-                |a| a.drop_stores = drop,
-            )
+            edit_named(&target, &file, Named::Variable, &address, &variable, |a| {
+                a.drop_stores = drop
+            })
         }
         ProjectCmd::Reg {
             file,
             address,
             register,
             name,
-        } => edit_named(
-            &target,
-            &file,
-            Named::Register,
-            &address,
-            &register,
-            |a| a.name = Some(name),
-        ),
+        } => edit_named(&target, &file, Named::Register, &address, &register, |a| {
+            a.name = Some(name)
+        }),
     }
 }
 
@@ -1836,11 +1821,7 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             println!("{}: {gone} removed", file.display());
             Ok(0)
         }
-        TypesCmd::Show {
-            name,
-            json,
-            header,
-        } => {
+        TypesCmd::Show { name, json, header } => {
             if header {
                 print!("{}", image.types_header());
                 return Ok(0);
@@ -1954,7 +1935,11 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
                 }
                 return Ok(0);
             }
-            let selection: Option<&[String]> = if names.is_empty() { None } else { Some(&names[..]) };
+            let selection: Option<&[String]> = if names.is_empty() {
+                None
+            } else {
+                Some(&names[..])
+            };
             let (defined, added, said) =
                 ag_image::headers::import(model, &held, &header, &options, selection)
                     .map_err(anyhow::Error::msg)?;
@@ -2336,8 +2321,7 @@ fn edit_named(
     change: impl FnOnce(&mut Annotation),
 ) -> Result<i32> {
     let mut project = open_project(target, file)?;
-    let key = ag_corpus::project::canonical_address(address)
-        .unwrap_or_else(|| address.to_string());
+    let key = ag_corpus::project::canonical_address(address).unwrap_or_else(|| address.to_string());
     match named {
         Named::Variable => change(project.variable_mut(&key, thing)),
         Named::Register => change(project.register_mut(&key, thing)),

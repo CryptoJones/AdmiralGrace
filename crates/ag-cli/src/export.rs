@@ -272,7 +272,10 @@ pub fn run(
         };
 
         writer.write_json(&json, &report)?;
-        writer.write(&asm, listing_text(image, address, &disassembly, false).as_bytes())?;
+        writer.write(
+            &asm,
+            listing_text(image, address, &disassembly, false).as_bytes(),
+        )?;
 
         index.push(IndexFunctionJson {
             address,

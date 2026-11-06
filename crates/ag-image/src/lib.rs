@@ -43,16 +43,14 @@ use std::sync::{Arc, Mutex};
 use iced_x86::Formatter as _;
 
 use ag_engine::arm::ArmVariant;
-use ag_engine::global_pointer::{self as gp, Convention, ImageHints, InsnFacts};
-use ag_engine::mips::MipsVariant;
 use ag_engine::ast::AstNode;
 use ag_engine::cfgwalk::{resolve_branches_among, Entries, TableHint};
 use ag_engine::cpu_context::{CpuContext, DecodedInsn, Flow, X86IcedContext};
-use ag_engine::emit::{
-    emit_function_in, emit_function_sliced, emit_function_valued, Callees,
-};
+use ag_engine::emit::{emit_function_in, emit_function_sliced, emit_function_valued, Callees};
+use ag_engine::global_pointer::{self as gp, Convention, ImageHints, InsnFacts};
 use ag_engine::lift::{lift_function, Pointee, Stages, Symbols};
 use ag_engine::liveness::{result_use_after, CallSiteUse, ResultUse};
+use ag_engine::mips::MipsVariant;
 use ag_engine::pipeline::Disasm;
 use ag_engine::ProcedureCfg;
 use ag_engine::{Abi, Image};
@@ -62,7 +60,16 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::{Halt, HaltReason, JumpTable};
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
+pub use ag_engine::ctype::{self as ctype, CError, TypeText};
+pub use ag_engine::defuse::{
+    DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
+};
 pub use ag_engine::emulate::{self as emulate, Limits as EmulationLimits, Run as Emulation};
+pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
+pub use ag_engine::global_pointer::{
+    GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
+};
+pub use ag_engine::headers::{self as headers, HeaderError, HeaderOptions};
 pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
@@ -72,37 +79,28 @@ pub use ag_engine::objc::{
     ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
 };
 pub use ag_engine::opaque::Opaque;
-pub use ag_engine::slice::{Criterion as SliceCriterion, Direction as SliceDirection};
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
-pub use ag_engine::swift::{
-    SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
-};
-pub use ag_engine::pvs::{PossibleValues, StatementValues};
-pub use ag_engine::values::PinnedValue;
-pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
-pub use ag_engine::global_pointer::{
-    GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
-};
-pub use ag_engine::stack_offsets::StackOffset;
-pub use ag_engine::defuse::{
-    DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
-};
-pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
-pub use ag_engine::ctype::{self as ctype, CError, TypeText};
-pub use ag_engine::headers::{self as headers, HeaderError, HeaderOptions};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
-pub use ag_engine::types::{
-    self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
-    Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
-};
+pub use ag_engine::pvs::{PossibleValues, StatementValues};
+pub use ag_engine::slice::{Criterion as SliceCriterion, Direction as SliceDirection};
 pub use ag_engine::smart_struct::{
     self as smart_struct, Access as StructAccess, Accesses as StructAccesses, DraftMember,
     Merged as MergedStruct, StructDraft,
 };
+pub use ag_engine::stack_offsets::StackOffset;
+pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
+pub use ag_engine::swift::{
+    SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
+};
+pub use ag_engine::types::{
+    self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
+    Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
+};
+pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
-pub use ag_engine::Placement;
 pub use ag_engine::Bitness;
+pub use ag_engine::Placement;
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
 pub mod graph_export;
@@ -2127,13 +2125,11 @@ impl Binary {
     pub fn set_type_definitions(&self, definitions: &[TypeText]) -> Result<bool, String> {
         let store = match self.platform() {
             Some(platform) => {
-                let (store, _) =
-                    ag_engine::platform::effective(platform, definitions)?;
+                let (store, _) = ag_engine::platform::effective(platform, definitions)?;
                 Some(Arc::new(store))
             }
             None => {
-                let (store, _) =
-                    ag_engine::ctype::build(self.data_model(), definitions)?;
+                let (store, _) = ag_engine::ctype::build(self.data_model(), definitions)?;
                 (!definitions.is_empty()).then(|| Arc::new(store))
             }
         };
