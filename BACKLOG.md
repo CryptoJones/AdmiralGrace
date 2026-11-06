@@ -198,7 +198,7 @@ Filed 2026-10-26.
 - [x] Bitfield struct members — [#372](https://github.com/CryptoJones/AdmiralGrace/issues/372)
 - [x] Type attributes: packing, base classes, noreturn, pure, custom value locations and more — [#373](https://github.com/CryptoJones/AdmiralGrace/issues/373)
 - [x] Model C++ classes, inheritance and virtual function tables — [#374](https://github.com/CryptoJones/AdmiralGrace/issues/374)
-- [ ] Parse MSVC and Itanium RTTI and build vtable structures — [#375](https://github.com/CryptoJones/AdmiralGrace/issues/375)
+- [x] Parse MSVC and Itanium RTTI and build vtable structures — [#375](https://github.com/CryptoJones/AdmiralGrace/issues/375)
 - [ ] Type libraries: per-library types and signatures, applied by import name — [#376](https://github.com/CryptoJones/AdmiralGrace/issues/376)
 - [ ] Type archives shared across projects — [#377](https://github.com/CryptoJones/AdmiralGrace/issues/377)
 - [ ] Platform types per OS and architecture, editable by the user — [#378](https://github.com/CryptoJones/AdmiralGrace/issues/378)

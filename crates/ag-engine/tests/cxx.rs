@@ -99,9 +99,92 @@ fn the_cxx_references_invert_the_vtable_refs() {
 }
 
 #[test]
+fn the_rtti_names_the_si_base() {
+    let image = cxx();
+    let metadata = image.cxx().expect("the fixture carries C++ classes");
+    let derived = &metadata.classes["derived"];
+    assert_eq!(derived.base_classes.len(), 1);
+    let base = &derived.base_classes[0];
+    assert_eq!(base.class, "base");
+    assert_eq!(base.offset, 0);
+    assert!(base.is_public);
+    assert!(!base.is_virtual);
+    assert!(metadata.classes["base"].base_classes.is_empty());
+}
+
+#[test]
+fn the_rtti_names_the_vmi_bases_in_order() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cxx_mi.elf");
+    let image = Image::open(&path).expect("the MI fixture loads");
+    let metadata = image.cxx().expect("the fixture carries C++ classes");
+    let multi = &metadata.classes["multi"];
+    assert_eq!(multi.type_info, Some(0x402040));
+    assert_eq!(multi.base_classes.len(), 2);
+    let primary = &multi.base_classes[0];
+    assert_eq!(primary.class, "base");
+    assert_eq!(primary.offset, 0);
+    assert!(primary.is_public);
+    assert!(!primary.is_virtual);
+    // The secondary base sits a pointer-width after the primary's data.
+    let secondary = &multi.base_classes[1];
+    assert_eq!(secondary.class, "side");
+    assert_eq!(secondary.offset, 16);
+    assert!(secondary.is_public);
+    assert!(!secondary.is_virtual);
+}
+
+#[test]
+fn the_vtable_carries_two_groups_for_mi() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cxx_mi.elf");
+    let image = Image::open(&path).expect("the MI fixture loads");
+    let metadata = image.cxx().expect("the fixture carries C++ classes");
+    let multi = &metadata.classes["multi"];
+    assert_eq!(multi.vtable_groups.len(), 2);
+    let primary = &multi.vtable_groups[0];
+    assert_eq!(primary.address, 0x4020a8);
+    assert_eq!(primary.offset_to_top, 0);
+    assert_eq!(primary.owner, "multi");
+    assert_eq!(primary.slots, vec![0, 1]);
+    let secondary = &multi.vtable_groups[1];
+    assert_eq!(secondary.address, 0x4020c8);
+    assert_eq!(secondary.offset_to_top, -16);
+    assert_eq!(secondary.owner, "multi");
+    assert_eq!(secondary.slots, vec![2]);
+    // A single-base class carries one group.
+    let base = &metadata.classes["base"];
+    assert_eq!(base.vtable_groups.len(), 1);
+}
+
+#[test]
 fn a_c_image_has_no_cxx_classes() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.elf");
     let image = Image::open(&path).expect("the sample ELF loads");
     assert!(image.cxx().is_none());
     assert!(image.cxx_references().is_none());
+}
+
+#[test]
+fn the_rtti_names_virtual_bases() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cxx_vi.elf");
+    let image = Image::open(&path).expect("the VI fixture loads");
+    let metadata = image.cxx().expect("the fixture carries C++ classes");
+    // left and right each virtually inherit vbase: the flag word carries
+    // the virtual bit (0x1) with public (0x2), and the offset to the top.
+    let left = &metadata.classes["left"];
+    assert_eq!(left.base_classes.len(), 1);
+    let vb = &left.base_classes[0];
+    assert_eq!(vb.class, "vbase");
+    assert!(vb.is_virtual);
+    assert!(vb.is_public);
+    assert_eq!(vb.offset, -32);
+    // diamond inherits left and right non-virtually: public, not virtual,
+    // the second base displaced by one subobject.
+    let diamond = &metadata.classes["diamond"];
+    assert_eq!(diamond.base_classes.len(), 2);
+    assert_eq!(diamond.base_classes[0].class, "left");
+    assert!(!diamond.base_classes[0].is_virtual);
+    assert_eq!(diamond.base_classes[0].offset, 0);
+    assert_eq!(diamond.base_classes[1].class, "right");
+    assert!(!diamond.base_classes[1].is_virtual);
+    assert_eq!(diamond.base_classes[1].offset, 8);
 }

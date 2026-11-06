@@ -547,7 +547,17 @@ them. The vtable's words, after its two header words, hold the implementations
 in declaration order, named by the symbol at the address each holds. A vtable
 ends where the next begins, or where a word is no function address. The ABI's
 own classes — `__cxxabiv1::__class_type_info` and its kin — name no class of
-the program. [`Image::cxx`](ag_engine::image::Image::cxx) reads the metadata
+the program. The RTTI names each class's bases as well: the Itanium
+`_ZTI<class>` structures (`si_class_type_info` for one base, `vmi_class_type_info`
+for several, with each base's offset, public access and virtual flag) and, on PE,
+the Microsoft `??_R0`–`??_R4` hierarchy give each class a `base_classes` list,
+and a vtable reached with more than one base carries one group per base, each
+with its `offset_to_top`, its owning type, and the slot indices its entries hold,
+in [`CppClass::vtable_groups`]. Every group header stores the derived class's
+type information, so a group's owner is the derived class, primary or secondary
+alike. The Itanium path is verified against ELF fixtures for single, multiple
+and virtual inheritance; the Microsoft path is best-effort — it is read from
+the locator and hierarchy tables but has no PE fixture yet. [`Image::cxx`](ag_engine::image::Image::cxx) reads the metadata
 once, under the image's own data model, and [`Image::cxx_references`] hands
 the cross references: the slots by address, the class and index each names, and
 the virtual functions by implementation address. [`simplify_template_name`]
