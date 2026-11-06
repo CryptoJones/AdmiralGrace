@@ -13,6 +13,20 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use kuna_analysis::loadimage_object::ObjectLoadImage;
 
+/// The C++ cross references of an image, seen from either side.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CxxReferences {
+    /// The vtable slots, by slot address: the class and index the slot
+    /// names.
+    pub vtable_refs: BTreeMap<u64, (String, usize)>,
+    /// The virtual functions, by implementation address: the demangled
+    /// name.
+    pub vfunc_names: BTreeMap<u64, String>,
+    /// The vtable slots that stand in each vtable, by the vtable's
+    /// address.
+    pub vtable_users: BTreeMap<u64, Vec<u64>>,
+}
+
 /// One named section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
@@ -45,6 +59,8 @@ pub struct Image {
     mangled: std::cell::OnceCell<BTreeMap<u64, MangledName>>,
     /// The Swift metadata the image carries, read once when asked.
     swift: std::cell::OnceCell<Option<crate::swift::SwiftMetadata>>,
+    /// The C++ metadata the image carries, read once when asked.
+    cxx: std::cell::OnceCell<Option<crate::cxx::CppMetadata>>,
     /// The functions the unwind data names, by start, read once when asked.
     unwind: std::cell::OnceCell<BTreeMap<u64, u64>>,
 }
@@ -348,6 +364,7 @@ impl Image {
                         objc: std::cell::OnceCell::new(),
                         mangled: std::cell::OnceCell::new(),
                         swift: std::cell::OnceCell::new(),
+                        cxx: std::cell::OnceCell::new(),
                         unwind: std::cell::OnceCell::new(),
                     });
                 }
@@ -367,6 +384,7 @@ impl Image {
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),
+            cxx: std::cell::OnceCell::new(),
             unwind: std::cell::OnceCell::new(),
         })
     }
@@ -439,6 +457,7 @@ impl Image {
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),
+            cxx: std::cell::OnceCell::new(),
             unwind: std::cell::OnceCell::new(),
         })
     }
@@ -457,6 +476,53 @@ impl Image {
         self.swift
             .get_or_init(|| self.object().and_then(|_| crate::swift::read(&self.bytes)))
             .as_ref()
+    }
+
+    /// The C++ metadata the image carries — its classes with their
+    /// vtables and virtual functions — when it is not a relocatable
+    /// object and its symbols name any.
+    pub fn cxx(&self) -> Option<&crate::cxx::CppMetadata> {
+        self.cxx
+            .get_or_init(|| {
+                self.object().and_then(|_| {
+                    let model = crate::types::DataModel::of_language(&self.language());
+                    let little = !self.language().starts_with("MIPS:BE");
+                    crate::cxx::read_with_model(&self.bytes, model, little)
+                })
+            })
+            .as_ref()
+    }
+
+    /// The C++ cross references the image carries: how a vtable is a
+    /// reference from its slots to a class. `None` for an image with no
+    /// C++ classes.
+    ///
+    /// [`CxxReferences`] holds the slots the vtables hold — a slot's
+    /// address, the class and index it names, and the implementation the
+    /// slot points at — and the inverse the metadata makes possible: the
+    /// slots that stand in each vtable.
+    pub fn cxx_references(&self) -> Option<CxxReferences> {
+        let metadata = self.cxx()?;
+        Some(CxxReferences {
+            vtable_refs: metadata.vtable_refs.clone(),
+            vfunc_names: metadata.vfunc_names.clone(),
+            vtable_users: metadata
+                .classes
+                .values()
+                .filter_map(|class| {
+                    let vtable = class.vtable?;
+                    let mut slots: Vec<u64> = metadata
+                        .vtable_refs
+                        .iter()
+                        .filter_map(|(slot, (name, _))| {
+                            (name == &class.name).then_some(*slot)
+                        })
+                        .collect();
+                    slots.sort_unstable();
+                    (!slots.is_empty()).then_some((vtable, slots))
+                })
+                .collect(),
+        })
     }
 
     /// The functions the unwind data names — `.eh_frame`, `.pdata`, a

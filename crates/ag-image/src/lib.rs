@@ -493,6 +493,8 @@ pub struct Binary {
     objc: Option<ObjcMetadata>,
     /// The Swift metadata the image carries, when it carries any.
     swift: Option<SwiftMetadata>,
+    /// The C++ metadata the image carries, when it carries any.
+    cxx: Option<ag_engine::cxx::CppMetadata>,
     sections: Vec<SectionInfo>,
     functions: Vec<Function>,
     data: Vec<DataSymbol>,
@@ -883,6 +885,7 @@ impl Binary {
             slice: image.slice().cloned(),
             objc: image.objc().cloned(),
             swift: image.swift().cloned(),
+            cxx: image.cxx().cloned(),
             sections,
             functions,
             data,
@@ -1024,6 +1027,13 @@ impl Binary {
     /// `Type.method#N`.
     pub fn swift(&self) -> Option<&SwiftMetadata> {
         self.swift.as_ref()
+    }
+
+    /// The C++ metadata the image carries — its classes with their vtables
+    /// and virtual functions — when it carries any. The methods' code is
+    /// already in the function list under the names their symbols spell.
+    pub fn cxx(&self) -> Option<&ag_engine::cxx::CppMetadata> {
+        self.cxx.as_ref()
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
@@ -1423,6 +1433,9 @@ impl Binary {
         }
         if let Some(swift) = &mut self.swift {
             swift.shift(delta);
+        }
+        if let Some(cxx) = &mut self.cxx {
+            cxx.shift(delta);
         }
     }
 

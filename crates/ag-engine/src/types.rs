@@ -398,6 +398,19 @@ impl Type {
     }
 }
 
+/// One method of a C++ class, as defined. A method lives outside the layout:
+/// it is not stored in the object, so it is no member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Method {
+    /// The method's name.
+    pub name: String,
+    /// The method's type, always a function type.
+    pub ty: Type,
+    /// Whether the method is virtual: it occupies a slot in the class's
+    /// vtable, in the order the virtual methods are declared.
+    pub is_virtual: bool,
+}
+
 /// One member of a structure or union, as defined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -425,9 +438,14 @@ pub struct Composite {
     pub aligned: Option<u64>,
     /// The base classes of a structure, `struct derived : public base`'s
     /// bases, in order. Laid out first, as the model puts the first
-    /// non-empty base at offset 0 (#373; #374 models the rest of C++
-    /// inheritance).
+    /// non-empty base at offset 0 (#373; #374 adds the virtual function
+    /// table and the methods).
     pub base_classes: Vec<String>,
+    /// `class`, spelled where a structure would be: a C++ class.
+    pub is_class: bool,
+    /// The methods of a C++ class, in order. The virtual ones are also the
+    /// vtable's slots, in the order they are declared.
+    pub methods: Vec<Method>,
 }
 
 /// An enumeration.
@@ -460,11 +478,17 @@ impl Definition {
     /// `typedef`.
     pub fn kind(&self) -> &'static str {
         match self {
+            Definition::Struct(c) if c.is_class => "class",
             Definition::Struct(_) => "struct",
             Definition::Union(_) => "union",
             Definition::Enum(_) => "enum",
             Definition::Typedef(_) => "typedef",
         }
+    }
+
+    /// Whether the definition is a C++ class.
+    pub fn is_class(&self) -> bool {
+        matches!(self, Definition::Struct(c) if c.is_class)
     }
 
     /// Whether the definition is complete: a structure, union or
@@ -774,7 +798,41 @@ impl TypeStore {
         }
     }
 
-    /// Lay the structure or union `key` out.
+    /// Whether the structure or union `key` starts with a vtable pointer:
+    /// a composite with virtual methods, or a composite whose base holds
+    /// one.
+    pub fn has_vtable(&self, key: &str) -> bool {
+        let mut visited = std::collections::HashSet::new();
+        self.has_vtable_seen(key, &mut visited)
+    }
+
+    fn has_vtable_seen(&self, key: &str, visited: &mut std::collections::HashSet<String>) -> bool {
+        if !visited.insert(key.to_string()) {
+            // A base that reaches back to itself: it holds no vtable of
+            // its own, so the cycle adds nothing.
+            return false;
+        }
+        let Some(c) = (match self.definitions.get(key) {
+            Some(Definition::Struct(c)) => Some(c),
+            _ => None,
+        }) else {
+            return false;
+        };
+        c.methods.iter().any(|m| m.is_virtual)
+            || c.base_classes.iter().any(|base| self.has_vtable_seen(base, visited))
+    }
+
+    /// Whether `key`'s own layout holds a vtable pointer: it has virtual
+    /// methods and no base already holds one. A derived class shares its
+    /// base's pointer at offset 0 and holds no second one.
+    fn vtable_here(&self, composite: &Composite) -> bool {
+        composite.methods.iter().any(|m| m.is_virtual)
+            && !composite
+                .base_classes
+                .iter()
+                .any(|base| self.has_vtable(base))
+    }
+
     fn compute_layout(&self, key: &str) -> Result<Layout, String> {
         let (composite, union) = match self.definitions.get(key) {
             Some(Definition::Struct(c)) => (c, false),
@@ -787,6 +845,17 @@ impl TypeStore {
         if union && !composite.base_classes.is_empty() {
             return Err(format!("{} is a union: a union has no base classes", shown_key(key)));
         }
+        if union && composite.methods.iter().any(|m| m.is_virtual) {
+            return Err(format!(
+                "{} is a union: a union has no virtual methods, and so no vtable pointer",
+                shown_key(key)
+            ));
+        }
+        // A class with virtual methods holds a vtable pointer. It is
+        // laid out only when a base does not already hold one: the first
+        // base that is non-empty carries it at its own start, so a
+        // derived class shares the base's, at offset 0.
+        let vtable = self.vtable_here(composite);
         let cap = if composite.packed {
             Some(1)
         } else {
@@ -818,6 +887,28 @@ impl TypeStore {
             size = size.max(offset + bsize);
             if !union {
                 bit = (offset + bsize) * 8;
+            }
+        }
+        // The vtable pointer: directly after the base classes, at the
+        // next aligned position — offset 0 unless a base is in the way.
+        if vtable {
+            let vptr = Type::Pointer(Box::new(Type::Prim(Prim::Void)));
+            let (vsize, valign) = self
+                .size_align(&vptr)
+                .map_err(|why| format!("{} is not laid out: {why}", shown_key(key)))?;
+            let valign = capped(valign);
+            align = align.max(valign);
+            let offset = if union { 0 } else { round_up(bit.div_ceil(8), valign) };
+            fields.push(FieldLayout {
+                name: None,
+                ty: vptr,
+                offset,
+                size: vsize,
+                bits: None,
+            });
+            size = size.max(offset + vsize);
+            if !union {
+                bit = (offset + vsize) * 8;
             }
         }
         let count = members.len();
@@ -1463,7 +1554,11 @@ impl TypeStore {
     fn inline_body(&self, key: &str) -> String {
         match self.definitions.get(key) {
             Some(Definition::Struct(c) | Definition::Union(c)) => {
-                let kind = key.split(' ').next().unwrap_or("struct");
+                let kind = if c.is_class {
+                    "class"
+                } else {
+                    key.split(' ').next().unwrap_or("struct")
+                };
                 let mut out = String::from(kind);
                 if let Some(tag) = &c.tag {
                     out.push(' ');
@@ -1550,7 +1645,11 @@ impl TypeStore {
         let mut out = String::new();
         match self.definitions.get(key) {
             Some(Definition::Struct(c) | Definition::Union(c)) => {
-                let kind = key.split(' ').next().unwrap_or("struct");
+                let kind = if c.is_class {
+                    "class"
+                } else {
+                    key.split(' ').next().unwrap_or("struct")
+                };
                 out.push_str(kind);
                 if c.packed {
                     out.push_str(" __attribute__((packed))");
@@ -1584,7 +1683,7 @@ impl TypeStore {
                     }
                 }
                 let fields = self.layouts.get(key).map(|l| &l.fields);
-                let base_offset = c.base_classes.len();
+                let base_offset = c.base_classes.len() + usize::from(self.vtable_here(c));
                 let mut end: u64 = if base_offset > 0 {
                     fields.and_then(|f| f.get(base_offset - 1)).map_or(0, |f| f.offset + f.size)
                 } else {
@@ -1649,6 +1748,24 @@ impl TypeStore {
                         }
                     }
                 }
+                // Methods stand after the members; their declarations
+                // hold no layout.
+                for method in &c.methods {
+                    out.push_str(&pad);
+                    if method.is_virtual {
+                        out.push_str("virtual ");
+                    }
+                    out.push_str(&member_text_with(
+                        &Member {
+                            name: Some(method.name.clone()),
+                            ty: method.ty.clone(),
+                            bits: None,
+                        },
+                        self,
+                        None,
+                    ));
+                    out.push_str(";\n");
+                }
                 if layout && !key.starts_with("union") {
                     if let Some(l) = self.layouts.get(key) {
                         if l.size > end {
@@ -1700,7 +1817,10 @@ impl TypeStore {
         };
         let members = c.members.as_ref()?;
         let fields = &self.layouts.get(key)?.fields;
-        let base_offset = c.base_classes.len();
+        // The vtable pointer is a field no member backs, at the head of
+        // the members a class with one declares; the members pair with
+        // the fields after it, the way the layout lays them.
+        let base_offset = c.base_classes.len() + usize::from(self.vtable_here(c));
         let text = self.body_text(key, false, 0);
         let head = text.split(" {\n").next()?.to_string();
         let mut out = Vec::new();
@@ -2074,6 +2194,45 @@ mod tests {
         assert_eq!(DataModel::of_language("ARM:LE:32:v8").name, "ILP32");
         assert_eq!(DataModel::of_language("MIPS:BE:32:default").name, "ILP32");
         assert_eq!(DataModel::of_language("x86:LE:32:default:windows").wchar, 2);
+    }
+
+    #[test]
+    fn a_class_with_virtual_methods_holds_a_vtable_pointer_at_zero() {
+        let store = store(
+            DataModel::LP64,
+            "class c { virtual int f(int); virtual int g(); int data; };",
+        );
+        // The vtable pointer at 0, the data after it, the size rounded.
+        assert_eq!(
+            layout(&store, "struct c"),
+            (16, 8, named(&[("", 0), ("data", 8)]))
+        );
+        assert!(store.has_vtable("struct c"));
+        assert!(store.definition_text("struct c", true).unwrap().find("class c").is_some());
+    }
+
+    #[test]
+    fn a_derived_class_shares_its_bases_vtable_pointer() {
+        let store = store(
+            DataModel::LP64,
+            "class base { virtual int f(int); int a; };\n\
+             class derived : public base { virtual int f(int); int b; };",
+        );
+        // One vtable pointer, the base's at 0, and no second.
+        assert_eq!(
+            layout(&store, "struct derived"),
+            (24, 8, named(&[("", 0), ("b", 16)]))
+        );
+        assert!(store.has_vtable("struct derived"));
+    }
+
+    #[test]
+    fn non_virtual_methods_add_no_vtable_pointer() {
+        let store = store(DataModel::LP64, "class c { int f(int); int y; }; struct s { int h(void); int z; };");
+        assert_eq!(layout(&store, "struct c"), (4, 4, named(&[("y", 0)])));
+        assert_eq!(layout(&store, "struct s"), (4, 4, named(&[("z", 0)])));
+        assert!(!store.has_vtable("struct c"));
+        assert!(!store.has_vtable("struct s"));
     }
 
     #[test]

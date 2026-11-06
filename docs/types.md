@@ -514,8 +514,45 @@ and `virtual` are skipped where the base list is read. The full C++ inheritance 
 access control, virtual inheritance, vtables — stays with #374.
 
 A based pointer, `char __based(void*) *p`, is `Type::BasedPointer { base, pointee }`,
-pointer-sized and scalar, with the base kept for what the analyst wrote. #374 and #387
-own the rest of C++ classes and per-function property editing.
+pointer-sized and scalar, with the base kept for what the analyst wrote. #387
+owns per-function property editing.
+
+### C++ classes and vtables (#374)
+
+A `class` is a structure the parser reads with the `class` keyword, `is_class` on
+its composite, and its `definition_text` and class listing render it as a class.
+Access labels — `public:`, `private:`, `protected:` — are skipped where the body
+is read, and the members they guard are kept in declaration order; a missing
+label body reads under no label, as the source wrote it.
+
+A class with virtual methods holds a vtable pointer. The pointer is laid out at
+offset 0, pointer-sized and pointer-aligned, and every member follows it. A
+derived class whose base holds one shares the base's pointer at offset 0 and
+holds no second; a derived class with a vtabled base is offset by the base's
+size. A composite with no virtual methods takes no vtable pointer, and `struct`
+still reads as a structure: a virtual method in a structure makes the structure
+a class for layout purposes without renaming it.
+
+Methods are kept on the composite, in declaration order, each with its
+`is_virtual` flag, and rendered after the members. `definition_text` round-trips:
+a class's rendered form re-parses to the same layout, and a duplicate
+definition is an error the parser reports. `member_texts` pairs each own member
+with its own layout, past the bases and the vtable pointer, as the layout lays
+them.
+
+The image's own vtables come from [`ag_engine::cxx`], read from the symbols the
+image carries: an Itanium `_ZTV<class>` on ELF and Mach-O, a Microsoft `??_7`
+on PE, each with its type information and constructor when the image holds
+them. The vtable's words, after its two header words, hold the implementations
+in declaration order, named by the symbol at the address each holds. A vtable
+ends where the next begins, or where a word is no function address. The ABI's
+own classes — `__cxxabiv1::__class_type_info` and its kin — name no class of
+the program. [`Image::cxx`](ag_engine::image::Image::cxx) reads the metadata
+once, under the image's own data model, and [`Image::cxx_references`] hands
+the cross references: the slots by address, the class and index each names, and
+the virtual functions by implementation address. [`simplify_template_name`]
+keeps a demangled template's arguments whole, nested as the source nests
+them.
 - **Attributes (#373)** — Microsoft's bit-field rule and the remaining custom attributes
   beyond `noreturn`, `pure`, calling conventions, base classes and based pointers — join
   `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
