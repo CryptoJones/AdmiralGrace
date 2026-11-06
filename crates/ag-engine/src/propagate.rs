@@ -91,6 +91,9 @@ pub struct Prototype {
     pub params: Vec<Type>,
     /// Whether it takes more after them, `...`.
     pub variadic: bool,
+    /// The calling convention and noreturn/pure attributes the
+    /// declaration carries (#373).
+    pub attrs: crate::types::TypeAttrs,
     /// The buffers whose length other arguments give: the buffer's
     /// parameter and the parameters whose product is its length in bytes,
     /// each counted from 0.
@@ -232,6 +235,28 @@ fn read_prototype(store: &TypeStore, declaration: &str) -> Option<Prototype> {
         .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .map_or(0, |at| at + 1);
     let name = head[name_start..].to_string();
+    let mut attrs = crate::types::TypeAttrs::default();
+    for word in head.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '(' || c == ')')) {
+        let word = word.trim_matches(|c| c == ' ' || c == '(' || c == ')');
+        match word {
+            "__declspec(noreturn)" | "_Noreturn" => attrs.noreturn = true,
+            "__attribute__((noreturn))" => attrs.noreturn = true,
+            "__declspec(pure)" | "__attribute__((pure))" => attrs.pure = true,
+            cb if matches!(cb, "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall" | "__clrcall") => {
+                attrs.calling_convention = Some(cb.to_string());
+            }
+            _ => {}
+        }
+    }
+    // The head is truncated at the first `(`, so a declspec or attribute
+    // run never survives into it: the word loop above is the whole read.
+    // A bare substring pass here (a name containing "pure" flagged every
+    // `is_pure` as pure) only invented false positives, so it is gone.
+    for cb in ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"] {
+        if head.contains(cb) {
+            attrs.calling_convention = Some(cb.to_string());
+        }
+    }
     let ret = crate::ctype::parse_type(store, head[..name_start].trim()).ok()?;
     let mut params = Vec::new();
     let mut variadic = false;
@@ -258,6 +283,7 @@ fn read_prototype(store: &TypeStore, declaration: &str) -> Option<Prototype> {
         ret,
         params,
         variadic,
+        attrs,
         sizes,
     })
 }
@@ -2741,5 +2767,19 @@ mod tests {
             solved[&0x10].variables["q"],
             ("char *".to_string(), "p plus an offset at 0x14".to_string())
         );
+    }
+
+    #[test]
+    fn a_prototype_head_is_read_for_attributes_by_word_not_substring() {
+        // A function whose name merely contains "pure" is not pure.
+        let store = TypeStore::new(DataModel::LP64);
+        let p = read_prototype(&store, "int is_pure(void);").unwrap();
+        assert!(!p.attrs.pure);
+        assert!(!p.attrs.noreturn);
+        // A real attribute word in the head is still read.
+        let p = read_prototype(&store, "_Noreturn void bail(void);").unwrap();
+        assert!(p.attrs.noreturn);
+        let p = read_prototype(&store, "void __stdcall f(int n);").unwrap();
+        assert_eq!(p.attrs.calling_convention.as_deref(), Some("__stdcall"));
     }
 }
