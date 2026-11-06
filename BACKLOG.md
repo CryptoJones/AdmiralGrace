@@ -200,7 +200,7 @@ Filed 2026-10-26.
 - [x] Model C++ classes, inheritance and virtual function tables — [#374](https://github.com/CryptoJones/AdmiralGrace/issues/374)
 - [x] Parse MSVC and Itanium RTTI and build vtable structures — [#375](https://github.com/CryptoJones/AdmiralGrace/issues/375)
 - [x] Type libraries: per-library types and signatures, applied by import name — [#376](https://github.com/CryptoJones/AdmiralGrace/issues/376)
-- [ ] Type archives shared across projects — [#377](https://github.com/CryptoJones/AdmiralGrace/issues/377)
+- [x] Type archives shared across projects — [#377](https://github.com/CryptoJones/AdmiralGrace/issues/377)
 - [ ] Platform types per OS and architecture, editable by the user — [#378](https://github.com/CryptoJones/AdmiralGrace/issues/378)
 - [ ] Import types from C headers with compiler flags — [#379](https://github.com/CryptoJones/AdmiralGrace/issues/379)
 - [ ] Export types as a C header — [#380](https://github.com/CryptoJones/AdmiralGrace/issues/380)

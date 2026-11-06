@@ -49,6 +49,11 @@ regenerated, and the annotations stay.
 | `global_pointer` | The value the analyst says the global pointer register — MIPS's `gp` — holds in every function, `0x2a1f0`, over what the image says: a function's prologue, the `_gp` symbol, the GOT's start and 0x7ff0. A function's record may say otherwise for that function. Left out when the image says. A reader that does not know the field reads the operands through the pointer as the image says, so the format version does not change for it. |
 | `types` | The analyst's type definitions, in the order C reads them, each `{"name": "struct point", "c": "struct point { int x; int y; long tag; };"}`: the name it goes by — a typedef's, or a tag's with its keyword — and its C, one top-level declaration, which may define more than the one name (`typedef struct node { … } node_t;` defines `struct node` too) and carries the `#pragma pack(push, N)` … `#pragma pack(pop)` it was read under. The C is the definition; the layout is computed from it, under the image's data model, each time the image is read, and a definition that does not read is reported and the types read before kept. See `docs/types.md`. Left out when there are none. A reader that does not know the field reads the variables with the lift's own types and misreads nothing, so the format version does not change for it. |
 
+The `types` list is what `ag archive` shares: a type archive (`.agarchive`)
+holds the same `{"name", "c"}` entries for several projects to sync, and
+`ag archive status --project FILE ARCHIVE` says where each stands between
+a project and the archive. See `ag docs archive` for that format.
+
 ## An annotation
 
 An annotation is one address's worth of the analyst's decisions.

@@ -493,6 +493,22 @@ is read either way. `--option auto-structs on` adds the drafts.
 `-` — as does `--json` (`type_source`), the MCP `variables` tool and the workbench's Variables
 pane.
 
+## Type archives (#377)
+
+One definition may serve several projects: the file of types they sync
+with is a type archive (`.agarchive`), `{"format": 1, "types": [...]}` —
+each entry a `name` and its `c`, as the project's `types` holds them,
+carrying no target of its own. `ag archive push --project FILE
+ARCHIVE` puts the project's types into the archive; `pull` brings the
+archive's into the project; `status` says where every name stands
+between the two sides — `in-sync`, `project-only`, `archive-only`,
+`conflict` — and `resolve` settles one conflict by changing one side
+alone. A conflict is settled with `--keep project` or `--keep archive`,
+per type, and without the word both sides are kept and the command fails.
+Equality is on the name and the `c`, so the sync is two-sided with no
+common ancestor, and neither side is ever deleted by a sync. See
+`ag docs archive` for the format and the full command reference.
+
 ## What comes later
 
 The model leaves room for the items that build on it:
@@ -574,7 +590,7 @@ them.
 - **Attributes (#373)** — Microsoft's bit-field rule and the remaining custom attributes
   beyond `noreturn`, `pure`, calling conventions, base classes and based pointers — join
   `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
-- **Type libraries (#376)**, **platform types (#378)** and **header import (#379)** add
+- **Type libraries (#376)** add definitions to the store from the libraries an image imports; **type archives (#377)** share them between projects; **platform types (#378)** and **header import (#379)** add
   definitions to the store from elsewhere than the project, the last with a preprocessor;
   **export as a header (#380)** writes `definition_text` in the store's order.
 - **Cross references for types and members (#384)** follow the members and enumerators the

@@ -80,6 +80,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/scripting.md"),
     },
     Doc {
+        topic: "archive",
+        summary: "Type archives shared across projects: push, pull, per-type status and conflict choice.",
+        readme_sections: &[],
+        body: include_str!("../../../docs/archive.md"),
+    },
+    Doc {
         topic: "workbench",
         summary: "The panes of ag-ui, and the kuna JSON surfaces it reads.",
         readme_sections: &["Desktop workbench"],

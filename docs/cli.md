@@ -622,6 +622,30 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 
+## Type archives shared across projects: `ag archive`
+
+A type archive (`.agarchive`) is one file of types several projects sync
+with: each a `name` and its `c`, as a project stores them. `ag archive`
+pushes a project's types into it and pulls the archive's into a project,
+says where every name stands between the two sides, and settles a name
+both sides hold differently with the analyst's choice. See `ag docs
+archive` for the format itself.
+
+```sh
+ag archive create shared.agarchive --from ls.agproj
+ag archive status --project ls.agproj shared.agarchive
+ag archive pull --project ls.agproj shared.agarchive --keep archive
+```
+
+| Command | What it does |
+|---|---|
+| `ag archive create ARCHIVE [--from PROJECT]` | Creates an empty archive, or one seeded with the types a project file holds. Refuses a path already there. |
+| `ag archive show ARCHIVE [--json]` | The archive's types with their C; `--json` as `{"name", "c"}` entries. |
+| `ag archive push --project PROJECT ARCHIVE [--keep project\|archive] [--json]` | Pushes the project's types into the archive. Without `--keep`, a conflict leaves both sides kept and exits 1; with it, the side named wins. |
+| `ag archive pull --project PROJECT ARCHIVE [--keep project\|archive] [--json]` | Pulls the archive's types into the project, the same way round; a project not there yet is made. |
+| `ag archive status --project PROJECT ARCHIVE [--json]` | Where every name stands, in name order: `in-sync`, `project-only`, `archive-only` or `conflict`; `--json` carries the `c` each side holds. |
+| `ag archive resolve --project PROJECT ARCHIVE NAME --keep project\|archive` | Settles one conflict by changing one side alone. Refuses a name that is not a conflict. |
+
 ## A program under the debugger: `ag debug`
 
 ```bash
