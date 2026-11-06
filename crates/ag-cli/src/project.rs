@@ -1492,8 +1492,12 @@ pub enum TypesCmd {
         /// The definition; every one when absent.
         name: Option<String>,
         /// Report as JSON.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "header")]
         json: bool,
+        /// Write the definitions as a C header instead: every one as C,
+        /// with its guard and the includes its spellings need.
+        #[arg(long, conflicts_with = "name")]
+        header: bool,
     },
     /// The definitions whose name, members or C hold TEXT, in any case
     Search {
@@ -1832,7 +1836,15 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             println!("{}: {gone} removed", file.display());
             Ok(0)
         }
-        TypesCmd::Show { name, json } => {
+        TypesCmd::Show {
+            name,
+            json,
+            header,
+        } => {
+            if header {
+                print!("{}", image.types_header());
+                return Ok(0);
+            }
             let store = image.types();
             let keys: Vec<String> = match &name {
                 Some(name) => vec![store

@@ -652,5 +652,25 @@ subset asks only for those, and the rest stay for another import.
 The command is `ag project TARGET types import HEADER [NAME …]` with
 `--include`, `--define`, `--compiler`, `--standard`, `--no-system-headers`,
 `--preview` and `--json`.
+
+### Exporting types as a C header (#380)
+
+The project's types can be written back out as a C header the analyst
+keeps with the rest of the work: every definition in the store's order —
+so a type that holds another by value comes after it — with a guard
+(`ADMIRALGRACE_TYPES_H`), `<stdint.h>` when a fixed-width type is
+spelled and `<stddef.h>` when one of `size_t`, `wchar_t` and their kin
+is. A definition read under `#pragma pack(N)` is wrapped in the pragma
+around it; C++ class definitions open an `#ifdef __cplusplus` section,
+since they are not C. What is written is `definition_text` with no
+layout comments, so the header reads as the C the types were defined
+in, and it round-trips through `types add` and `types import`.
+
+The command is `ag image FILE types --header` (or
+`ag project TARGET types show --header`), the same text the MCP
+`export_types_header` tool returns, and the file `ag image export`
+writes as `types.h` in the export directory. The header holds the
+types the image is read with — the platform's defaults and the
+project's — as `ag image … types` prints them.
 - **Cross references for types and members (#384)** follow the members and enumerators the
   pseudocode reads, which stand as the `__member`, `__arrow` and `__enumerator` intrinsics.

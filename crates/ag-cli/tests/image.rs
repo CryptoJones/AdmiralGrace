@@ -1019,6 +1019,7 @@ const WHOLE_IMAGE_FILES: &[&str] = &[
     "info.json",
     "strings.json",
     "symbols.json",
+    "types.h",
 ];
 
 #[test]
@@ -1124,6 +1125,23 @@ fn an_export_of_an_objective_c_image_writes_its_header_and_the_rest_do_not() {
         "{files:?}"
     );
     assert!(!files.contains(&"swift.json".to_string()), "{files:?}");
+    // Every export carries the types as a C header, the same text
+    // `ag image types --header` prints.
+    assert!(files.contains(&"types.h".to_string()), "{files:?}");
+    let types_h = std::fs::read_to_string(dir.path().join("types.h")).expect("types.h");
+    assert_eq!(types_h, image("sample.elf", &["types", "--header"]));
+    assert!(
+        types_h.starts_with("// The types of the project, as C: written by AdmiralGrace\n"),
+        "{types_h}"
+    );
+    assert!(
+        types_h.contains("#ifndef ADMIRALGRACE_TYPES_H\n"),
+        "{types_h}"
+    );
+    assert!(
+        types_h.contains("\n#endif /* ADMIRALGRACE_TYPES_H */\n"),
+        "{types_h}"
+    );
 
     let dir = ExportDir::new("swift");
     let (ok, _, stderr) = export("sample_swift_x86", &dir, &[]);

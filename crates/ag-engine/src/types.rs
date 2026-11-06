@@ -1853,6 +1853,69 @@ impl TypeStore {
         }
     }
 
+    /// Every named definition as C, written to be included by another
+    /// header: a guard, `<stdint.h>` when a fixed-width type is spelled
+    /// (and `<stddef.h>` when one of `size_t`, `wchar_t` and their kin is),
+    /// and each [`definition_text`](Self::definition_text) in the order
+    /// the store defined it — so a type that holds another by value comes
+    /// after it. A definition read under `#pragma pack(N)` is wrapped in
+    /// the pragma around it. C++ class definitions, which are not C,
+    /// stand under `#ifdef __cplusplus`.
+    pub fn header(&self) -> String {
+        let names = self.names();
+        let mut fixed = false;
+        let mut standard = false;
+        for key in names.iter().copied() {
+            if let Some(text) = self.definition_text(key, false) {
+                fixed |= needs_fixed(&text);
+                standard |= needs_standard(&text);
+            }
+        }
+        let mut out = String::new();
+        out.push_str("// The types of the project, as C: written by AdmiralGrace\n");
+        out.push_str("// under the data model the image's platform lays them out.\n");
+        out.push_str("#ifndef ADMIRALGRACE_TYPES_H\n");
+        out.push_str("#define ADMIRALGRACE_TYPES_H\n");
+        if fixed {
+            out.push_str("#include <stdint.h>\n");
+        }
+        if standard {
+            out.push_str("#include <stddef.h>\n");
+        }
+        // Each C++ class definition stands under its own `#ifdef
+        // __cplusplus`, in the store's order — so it never swallows the
+        // C definitions that follow it (a C consumer then never sees
+        // them), and a type that holds another by value still comes
+        // after it.
+        for key in names.iter().copied() {
+            let Some(text) = self.definition_text(key, false) else {
+                continue;
+            };
+            out.push('\n');
+            let class = self
+                .get(key)
+                .is_some_and(|definition| definition.is_class());
+            if class {
+                out.push_str("#ifdef __cplusplus\n");
+            }
+            match self.pack_of(key) {
+                Some(pack) => {
+                    let _ = writeln!(out, "#pragma pack(push, {pack})");
+                    let _ = writeln!(out, "{text}");
+                    out.push_str("#pragma pack(pop)\n");
+                }
+                None => {
+                    let _ = writeln!(out, "{text}");
+                }
+            }
+            if class {
+                out.push_str("#endif /* __cplusplus */\n");
+            }
+        }
+        out.push_str("\n#endif /* ADMIRALGRACE_TYPES_H */\n");
+        out
+    }
+
     /// The definitions `ty` needs before it in C, their own needs first,
     /// in the order they were defined: every structure, union, enumeration
     /// and typedef it names, through pointers too.
@@ -2006,6 +2069,31 @@ impl TypeStore {
             _ => None,
         }
     }
+}
+
+/// Whether the C `text` spells a fixed-width type, which lives in
+/// `<stdint.h>`.
+fn needs_fixed(text: &str) -> bool {
+    [
+        "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t",
+    ]
+    .iter()
+    .any(|ty| text.contains(ty))
+}
+
+/// Whether the C `text` spells a type `<stddef.h>` declares: `size_t`,
+/// `ssize_t`, `wchar_t`, `ptrdiff_t`, `intptr_t` and `uintptr_t`.
+fn needs_standard(text: &str) -> bool {
+    [
+        "size_t",
+        "ssize_t",
+        "wchar_t",
+        "ptrdiff_t",
+        "intptr_t",
+        "uintptr_t",
+    ]
+    .iter()
+    .any(|ty| text.contains(ty))
 }
 
 /// Whether `key` is an anonymous definition's.
@@ -2629,6 +2717,112 @@ mod tests {
             s.needed_by(&[Type::Named("node_t".to_string())]),
             ["struct node", "node_t"]
         );
+    }
+
+    #[test]
+    fn a_header_is_the_definitions_in_the_stores_order_with_a_guard() {
+        let s = store(
+            DataModel::LP64,
+            "struct node { int value; struct node *next; };\n\
+             typedef struct node node_t;\n\
+             typedef int32_t my_int;\n\
+             typedef size_t count_t;",
+        );
+        let header = s.header();
+        assert!(
+            header.starts_with(
+                "// The types of the project, as C: written by AdmiralGrace\n\
+                 // under the data model the image's platform lays them out.\n\
+                 #ifndef ADMIRALGRACE_TYPES_H\n\
+                 #define ADMIRALGRACE_TYPES_H\n\
+                 #include <stdint.h>\n\
+                 #include <stddef.h>\n"
+            ),
+            "{header}"
+        );
+        assert!(
+            header.contains("\nstruct node {\n    int value;\n    struct node *next;\n};\n"),
+            "{header}"
+        );
+        assert!(header.contains("\ntypedef struct node node_t;\n"), "{header}");
+        assert!(header.contains("\ntypedef int32_t my_int;\n"), "{header}");
+        assert!(header.contains("\ntypedef size_t count_t;\n"), "{header}");
+        assert!(
+            header.ends_with("\n#endif /* ADMIRALGRACE_TYPES_H */\n"),
+            "{header}"
+        );
+        // In the store's order, as `definition_text` spells them.
+        let node = header.find("struct node {").unwrap();
+        let node_t = header.find("typedef struct node node_t;").unwrap();
+        let my_int = header.find("typedef int32_t my_int;").unwrap();
+        let count_t = header.find("typedef size_t count_t;").unwrap();
+        assert!(
+            node < node_t && node_t < my_int && my_int < count_t,
+            "{header}"
+        );
+        assert!(!header.contains("/* 0x"), "{header}");
+    }
+
+    #[test]
+    fn an_empty_store_has_a_guard_and_no_definitions() {
+        let store = TypeStore::new(DataModel::LP64);
+        let header = store.header();
+        assert!(
+            header.contains("#ifndef ADMIRALGRACE_TYPES_H\n"),
+            "{header}"
+        );
+        assert!(header.contains("#define ADMIRALGRACE_TYPES_H\n"), "{header}");
+        assert!(
+            header.contains("\n#endif /* ADMIRALGRACE_TYPES_H */\n"),
+            "{header}"
+        );
+        assert!(!header.contains("#include <stdint.h>"), "{header}");
+        assert!(!header.contains("#include <stddef.h>"), "{header}");
+    }
+
+    #[test]
+    fn a_packed_definition_is_wrapped_in_its_pragma() {
+        let s = store(
+            DataModel::LP64,
+            "#pragma pack(2)\nstruct odd { char c; int n; };\n#pragma pack()\n",
+        );
+        let header = s.header();
+        assert!(
+            header.contains(
+                "#pragma pack(push, 2)\nstruct odd {\n    char c;\n    int n;\n};\n#pragma pack(pop)\n"
+            ),
+            "{header}"
+        );
+    }
+
+    #[test]
+    fn a_class_opens_the_cplusplus_section() {
+        let s = store(
+            DataModel::LP64,
+            "class c { virtual int f(int); int data; };\nstruct s { int x; };",
+        );
+        let header = s.header();
+        assert!(header.contains("#ifdef __cplusplus\n"), "{header}");
+        assert!(header.contains("class c {"), "{header}");
+        assert!(header.contains("#endif /* __cplusplus */\n"), "{header}");
+        // The class sits under the guard, the C struct after the class
+        // does not: the guard closes before anything else. Both come
+        // in the store's order.
+        let open = header.find("#ifdef __cplusplus").unwrap();
+        let klass = header.find("class c {").unwrap();
+        let close = header.find("#endif /* __cplusplus */").unwrap();
+        let c_struct = header.find("struct s {").unwrap();
+        assert!(
+            open < klass && klass < close && close < c_struct,
+            "{header}"
+        );
+    }
+
+    #[test]
+    fn an_ssize_t_spelling_needs_the_standard_include() {
+        let s = store(DataModel::LP64, "typedef ssize_t my_ssize;");
+        let header = s.header();
+        assert!(header.contains("#include <stddef.h>\n"), "{header}");
     }
     #[test]
     fn function_attrs_and_based_pointers_layout() {

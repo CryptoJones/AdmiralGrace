@@ -342,8 +342,12 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
         /// Report as JSON.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "header")]
         json: bool,
+        /// Write the types as a C header instead: every definition as C,
+        /// with its guard and the includes its spellings need.
+        #[arg(long)]
+        header: bool,
     },
     /// The structure the accesses through a pointer variable draft: one
     /// member each offset and width the function reads or writes through
@@ -1336,7 +1340,9 @@ pub fn run(
             variables(&image, &target, json, project.as_ref())
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
-        ImageCmd::Types { json, .. } => types(&image, json),
+        ImageCmd::Types {
+            json, header, ..
+        } => types(&image, json, header),
         ImageCmd::StructFrom {
             function,
             variable,
@@ -2988,7 +2994,11 @@ pub(crate) fn stack_frame_of(
 /// `ag image FILE stack FUNCTION`: the function's frame, slot by slot.
 /// `ag image FILE types`: the platform's primitives and the project's
 /// definitions, with their layouts.
-fn types(image: &Binary, json: bool) -> Result<i32> {
+fn types(image: &Binary, json: bool, header: bool) -> Result<i32> {
+    if header {
+        print!("{}", image.types_header());
+        return Ok(0);
+    }
     let store = image.types();
     if json {
         let defined: Vec<serde_json::Value> = store

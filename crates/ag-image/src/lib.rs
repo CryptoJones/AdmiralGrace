@@ -1045,6 +1045,14 @@ impl Binary {
             .map(ObjcMetadata::header)
     }
 
+    /// The types the image is read with, as a C header: every definition
+    /// [`types`](Binary::types) holds — the platform's defaults and the
+    /// project's — as C, with its guard and the includes its spellings
+    /// need. The same file `ag image export` writes as `types.h`.
+    pub fn types_header(&self) -> String {
+        self.types().header()
+    }
+
     /// The Swift metadata the image carries — its types with their fields
     /// and methods, its protocols — when it carries any. A vtable's methods
     /// are already in the function list, under their symbols' names or

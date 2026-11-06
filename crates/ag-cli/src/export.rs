@@ -20,6 +20,7 @@
 //!   calls.json                 ag image calls --json
 //!   objc.json                  ag image objc --json, when the image has Objective-C
 //!   objc.h                     ag image objc --header, the same as a header
+//!   types.h                    ag image types --header, the types as a C header
 //!   swift.json                 ag image swift --json, when the image has Swift
 //!   functions/<address>.json   cfg, calls, data references, pseudocode or the reason
 //!   functions/<address>.asm    ag image disasm <address>
@@ -55,6 +56,7 @@ const FILES: &[(&str, &str)] = &[
     ("calls.json", "The whole call graph: `ag image calls --json`."),
     ("objc.json", "The Objective-C the image describes — classes, categories, protocols — when it describes any: `ag image objc --json`."),
     ("objc.h", "The same as an Objective-C header, when the image describes any: `ag image objc --header`."),
+    ("types.h", "The types the image is read with, as a C header: `ag image types --header`."),
     ("swift.json", "The Swift the image describes — types, fields, conformances, protocols — when it describes any: `ag image swift --json`."),
     ("functions/<address>.json", "One function: its control-flow graph (`cfg`), its calls and callers (`calls`), the data it refers to (`data`), and its pseudocode or the reason it has none (`pseudocode`)."),
     ("functions/<address>.asm", "The listing of the function, as `ag image disasm` prints it."),
@@ -228,6 +230,7 @@ pub fn run(
         writer.write_json("objc.json", &objc_json(image))?;
         writer.write("objc.h", header.as_bytes())?;
     }
+    writer.write("types.h", image.types_header().as_bytes())?;
     if image.swift().is_some() {
         writer.write_json("swift.json", &swift_json(image))?;
     }
