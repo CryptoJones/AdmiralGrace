@@ -403,15 +403,23 @@ ag image ./propagate.elf variables line         # local_48  char[64] … from fg
 | compared with a pointer, or a pointer with an offset added | that pointer (a structure's pointer plus an offset is `void *`) | `compared with p at …`, `p plus an offset at …` |
 | read only through unsigned casts — an unsigned comparison, a zero extension | the unsigned integer of its width | `used unsigned at 0x401003` |
 
-The prototypes are C in `crates/ag-engine/src/prototypes.h` — a few dozen of the C library's,
-POSIX's and Windows' common functions, with the types they name (`FILE`, `struct timeval`,
-`struct timespec`, `struct tm`, `struct sockaddr_in`, `HANDLE`, `DWORD` …) — read by the parser
-under the image's data model. A function is found under an import's or a stub's decoration,
-`strlen@plt`, `__imp_ReadFile`, `_strlen`, `j_strlen`. Adding a prototype to the file teaches it;
-a buffer whose length another argument gives carries `/* size: N */`, the length's argument
-counted from 1, or `/* size: N*M */` for a count of elements of a size. The library's types are
-known to every lift beside the project's, which win where both define a name, and the
-transpiler writes the ones the functions name. Type libraries (#376) generalise the table.
+The prototypes are C in the type libraries under `crates/ag-engine/src/typelib/` —
+`libc.h` (the C library and POSIX), `kernel32.h` and `user32.h` (Windows), and the Linux
+syscall table — a few dozen of the common functions, with the types they name (`FILE`,
+`struct timeval`, `struct timespec`, `struct tm`, `struct sockaddr_in`, `HANDLE`, `DWORD` …),
+read by the parser under the image's data model. A function is found under an import's or a
+stub's decoration, `strlen@plt`, `__imp_ReadFile`, `_strlen`, `j_strlen`. Adding a prototype
+to a library's file teaches it; a buffer whose length another argument gives carries
+`/* size: N */`, the length's argument counted from 1, or `/* size: N*M */` for a count of
+elements of a size. The library's types are known to every lift beside the project's, which
+win where both define a name, and the transpiler writes the ones the functions name.
+
+The libraries are also what an image's imports are typed from (#376). A PE names each import
+by library and by name or ordinal; where the library of that name knows the function — by
+name, or by the `#[ordinal(N)]` a DLL export carries — the import takes its prototype, and an
+import by ordinal is shown by name (`GetLastError`, ordinal 490, not `ord_490`). A syscall is
+a function named by number: `#[syscall(N)]` gives a number its prototype, and the built-in
+Linux table covers the common x86-64 `syscall` numbers.
 
 ### Directions
 

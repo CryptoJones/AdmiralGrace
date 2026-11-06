@@ -41,6 +41,7 @@ pub mod swift;
 pub mod swift_demangle;
 pub mod transpile;
 pub mod typed;
+pub mod typelib;
 pub mod types;
 pub mod unwind;
 pub mod values;

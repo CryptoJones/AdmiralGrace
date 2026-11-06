@@ -810,10 +810,32 @@ impl Binary {
         // through the GOT reads. They name the function at the other end.
         // An import's name is demangled too, and a stub the loader named by
         // the import's scope and name alone takes the import's full name,
-        // where one import alone has that short name.
+        // where one import alone has that short name. A PE imports by
+        // ordinal as well as by name; where the type libraries know the
+        // ordinal's function, the import takes its name (#376).
+        let typelib = ag_engine::typelib::TypeLibSet::builtin(DataModel::of_language(&language));
         let mut imports: BTreeMap<u64, String> = BTreeMap::new();
         let mut imports_by_short: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        for (slot, name) in image.import_slots() {
+        for import in image.import_slots_with_library() {
+            let slot = import.slot;
+            let name = match import.name {
+                Some(name) => name,
+                None => match import.ordinal {
+                    // Ordinal spaces are per-DLL: the number resolves in
+                    // the import's own library alone, so ws2_32's 62 is
+                    // not kernel32's CloseHandle.
+                    Some(ordinal) => import
+                        .library
+                        .as_deref()
+                        .and_then(|library| typelib.library(library))
+                        .and_then(|library| library.by_ordinal(ordinal))
+                        .map(|prototype| prototype.name.clone())
+                        .unwrap_or_else(|| format!("ord_{ordinal}")),
+                    // A hint/name whose bytes are not UTF-8: a name was
+                    // there, it just does not read.
+                    None => format!("unnamed_{slot:x}"),
+                },
+            };
             let shown = match ag_engine::demangle::demangle(&name) {
                 Some(plain) => {
                     if let Some(short) = ag_engine::demangle::demangle_short(&name) {
@@ -5194,6 +5216,31 @@ mod tests {
         assert_eq!(binary.import_at(0x3fd8), Some("__libc_start_main"));
         assert_eq!(binary.import_at(0x4010), None, "completed.0 is data");
         assert_eq!(binary.imports().len(), 6, "{:?}", binary.imports());
+    }
+
+    #[test]
+    fn a_pe_import_by_ordinal_takes_its_name_from_the_type_libraries() {
+        // The mingw-built exe imports KERNEL32.dll's `Sleep` by name and
+        // `GetLastError` by ordinal 490 (exported NONAME). The type libraries
+        // know kernel32's ordinals, so the ordinal import is shown by name
+        // like a named one (#376).
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/imports.exe");
+        let binary = Binary::open(&path).expect("the PE loads");
+        let imports = binary.imports();
+        assert!(
+            imports.values().any(|name| name == "Sleep"),
+            "the named import: {imports:?}"
+        );
+        assert!(
+            imports.values().any(|name| name == "GetLastError"),
+            "the ordinal import named from the library: {imports:?}"
+        );
+        // No import is left as a bare `ord_N`: every one the libraries know
+        // is named.
+        assert!(
+            !imports.values().any(|name| name.starts_with("ord_")),
+            "no unnamed ordinals: {imports:?}"
+        );
     }
 
     #[test]

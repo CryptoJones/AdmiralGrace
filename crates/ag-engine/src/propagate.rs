@@ -8,8 +8,9 @@
 //!
 //! - **a known prototype**: a value passed to `strlen` is a `char *`, the
 //!   result of `fopen` a `FILE *` — the prototypes of the C library's,
-//!   POSIX's and Windows' common functions, C text in `prototypes.h`, read
-//!   by [`crate::ctype`] under the image's data model. A function of the
+//!   POSIX's and Windows' common functions, C text in the type libraries of
+//!   [`crate::typelib`] (`typelib/libc.h` and its kin), read by
+//!   [`crate::ctype`] under the image's data model. A function of the
 //!   image named as one of them takes its prototype's types itself;
 //! - **the analyst's types** (`var_types`), which are never changed and
 //!   are carried to what they reach;
@@ -51,7 +52,7 @@
 //! element, as long as a comparison of the index with a constant bounds it
 //! or to the next slot the code reaches; a slot whose address is passed
 //! where a prototype takes a buffer of a constant length (`/* size: N */`
-//! in `prototypes.h`) is a `char` array of that length, or an array of the
+//! in a type library) is a `char` array of that length, or an array of the
 //! prototype's element; one passed where a prototype or the analyst's type
 //! of the callee's parameter takes a known structure is that structure;
 //! and, under `auto-structs on`, an address-taken run reached at several
@@ -73,9 +74,6 @@ use crate::ctype::TypeText;
 use crate::lift::{LiftedFunction, Placement, Statement, StatementKind};
 use crate::stack_vars::StackVar;
 use crate::types::{DataModel, Prim, Type, TypeStore};
-
-/// The prototypes and the types they name, as C.
-const PROTOTYPES: &str = include_str!("prototypes.h");
 
 /// The most rounds [`solve`] carries the types over every link.
 pub const ROUNDS: usize = 16;
@@ -185,11 +183,66 @@ fn declarations(source: &str) -> Vec<String> {
     out
 }
 
+/// The known prototypes and the types they name, read from the built-in
+/// type libraries ([`crate::typelib`]): libc, kernel32, user32 and the
+/// Linux syscall table, each read against libc's types. The ordinals and
+/// syscall numbers ride along in the set; the propagation reads the plain
+/// names.
 fn read_library(model: DataModel) -> Library {
+    let set = crate::typelib::TypeLibSet::builtin(model);
+    let mut store = TypeStore::new(model);
+    let definitions = set.definitions();
+    for definition in &definitions {
+        let _ = crate::ctype::parse_into(&mut store, &definition.c);
+    }
+    Library {
+        definitions,
+        store,
+        prototypes: set
+            .prototypes()
+            .map(|prototype| (prototype.name.clone(), prototype.clone()))
+            .collect(),
+    }
+}
+
+/// What [`read_library_as`] reads out of one library's C text: its type
+/// definitions, its prototypes by name, and its prototypes by ordinal and by
+/// syscall number.
+pub type LibraryRead = (
+    Vec<TypeText>,
+    Vec<Prototype>,
+    BTreeMap<u64, Prototype>,
+    BTreeMap<u64, Prototype>,
+);
+
+/// One library's C text, read as [`crate::typelib`] reads it: the type
+/// definitions and the prototypes, with an `#[ordinal(N)]` or
+/// `#[syscall(N)]` line routing its prototype to the ordinal or syscall
+/// table.
+///
+/// `base`, when given, is another library's C text whose *definitions* seed
+/// the store before `source` is read, but are not collected as this
+/// library's own: kernel32 names `HANDLE` and `DWORD`, and the syscalls name
+/// `off_t` and `struct sockaddr`, all of which libc defines. Reading a
+/// library against its base alone leaves those names unresolved `Named`
+/// placeholders; with the base they become the real pointer and integer
+/// types. Only `source`'s declarations come back as definitions, so a set's
+/// definitions never repeat the base's.
+pub fn read_library_as(source: &str, base: Option<&str>, model: DataModel) -> LibraryRead {
     let mut store = TypeStore::new(model);
     let mut definitions = Vec::new();
-    let mut prototypes = BTreeMap::new();
-    for declaration in declarations(PROTOTYPES) {
+    let mut prototypes = Vec::new();
+    let mut by_ordinal = BTreeMap::new();
+    let mut by_syscall = BTreeMap::new();
+    if let Some(base) = base {
+        for declaration in declarations(base) {
+            let head = declaration.split_whitespace().next().unwrap_or("");
+            if matches!(head, "struct" | "union" | "enum" | "typedef") {
+                let _ = crate::ctype::parse_into(&mut store, &format!("{declaration};"));
+            }
+        }
+    }
+    for declaration in declarations(source) {
         let head = declaration.split_whitespace().next().unwrap_or("");
         if matches!(head, "struct" | "union" | "enum" | "typedef") {
             let c = format!("{declaration};");
@@ -199,17 +252,47 @@ fn read_library(model: DataModel) -> Library {
             }
             continue;
         }
-        if let Some(prototype) = read_prototype(&store, &declaration) {
-            prototypes
-                .entry(prototype.name.clone())
-                .or_insert(prototype);
+        let (route, number, without): (Option<&str>, u64, String) = match routed(&declaration) {
+            Some((kind, number, body)) => (Some(kind), number, body),
+            None => (None, 0, declaration.clone()),
+        };
+        if let Some(prototype) = read_prototype(&store, &without) {
+            match route {
+                // A DLL export has a name and an ordinal both, so an
+                // ordinal routes the prototype to the number *and* keeps
+                // its name; a syscall is named by its number alone.
+                Some("ordinal") => {
+                    by_ordinal
+                        .entry(number)
+                        .or_insert_with(|| prototype.clone());
+                    prototypes.push(prototype);
+                }
+                Some("syscall") => {
+                    by_syscall.entry(number).or_insert(prototype);
+                }
+                _ => prototypes.push(prototype),
+            }
         }
     }
-    Library {
-        definitions,
-        store,
-        prototypes,
-    }
+    (definitions, prototypes, by_ordinal, by_syscall)
+}
+
+/// The opening `#[ordinal(N)]` or `#[syscall(N)]` of a prototype, with the
+/// rest of its text, when it carries one.
+fn routed(declaration: &str) -> Option<(&'static str, u64, String)> {
+    let text = declaration.trim();
+    let (kind, body) = text
+        .strip_prefix("#[ordinal(")
+        .map(|rest| ("ordinal", rest))
+        .or_else(|| {
+            text.strip_prefix("#[syscall(")
+                .map(|rest| ("syscall", rest))
+        })?;
+    let close = body.find(")]")?;
+    let number: u64 = body[..close].trim().parse().ok()?;
+    let prototype = body[close + 2..].trim_start();
+    let prototype = (!prototype.is_empty()).then(|| prototype.to_string())?;
+    Some((kind, number, prototype))
 }
 
 /// The name a type declaration defines: `struct timeval`, `FILE`.
