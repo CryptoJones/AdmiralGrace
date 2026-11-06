@@ -10,16 +10,31 @@
 //! The vtable's words, after the offset to the top of its hierarchy and
 //! the pointer to that type information, hold the addresses of the
 //! implementations — one per virtual function, in the order the class
-//! declares them. An image that holds no such symbols has no classes to
-//! speak of.
+//! declares them. The type information carries the hierarchy: the
+//! Itanium `si_class_type_info` (`_ZTI<class>`, three words) names the
+//! single base; `vmi_class_type_info` packs the base count and, per
+//! base, its type information with flags (public at bit 1, virtual at
+//! bit 0) and the offset words, the signed offset above the pointer
+//! and the offset to the top below. The Microsoft descriptor
+//! ``??_R0?<class>@@@8`` names the class as `.?AV<class>@@`; the
+//! complete object locator ``??_R4<class>@@6B@`` points at the
+//! hierarchy descriptor, whose base-class array names every base with
+//! its virtual disposition, displacement, protected displacement and
+//! attributes (access at bits 0..=1, virtual at bit 3). A vtable with
+//! several bases stands as several groups: the primary at the vtable
+//! symbol, then one per secondary base, each headed by its offset to
+//! the top and the type information of the base the group belongs to.
+//! An image that holds no such symbols has no classes to speak of.
 //!
 //! [`CppMetadata`] is that reading: every class the image names, its
 //! vtable's address, its type information's and its constructor's when
-//! the image holds them, and the virtual functions in the order the
-//! vtable holds them, each with the implementation it points at. It is
-//! read from the image's bytes the way the Objective-C metadata is
-//! ([`crate::objc`]), and kept on the [`Image`](crate::image::Image)
-//! behind the same kind of one-cell cache.
+//! the image holds them, the base classes the RTTI names, the vtable's
+//! groups, and the virtual functions in the order the vtable holds
+//! them, each with the implementation it points at. It is read from the
+//! image's bytes the way the Objective-C metadata is
+//! ([`crate::objc`]), and kept on the
+//! [`Image`](crate::image::Image) behind the same kind of one-cell
+//! cache.
 //!
 //! [`simplify_template_name`] reads the other way a name is spelled: a
 //! template instance's mangled name demangles with every argument
@@ -56,6 +71,41 @@ pub struct Vfunc {
     pub slot: usize,
 }
 
+/// One group of a vtable: the slots one base class of the hierarchy
+/// occupies. The primary group stands at the vtable symbol itself; each
+/// secondary base follows, headed by its own offset to the top.
+/// `offset_to_top` is the `this` adjustment that group applies, as the
+/// header spells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VtableGroup {
+    /// The address of the group's header — the primary group is the
+    /// vtable's own address.
+    pub address: u64,
+    /// The offset to the top, as the group's header holds it: 0 for the
+    /// primary, negative for a secondary base.
+    pub offset_to_top: i64,
+    /// Whose table the group is. The ABI stores the derived class's type
+    /// information in every group header — the primary and each secondary
+    /// alike — so this is the derived class for all of them.
+    pub owner: String,
+    /// The slots' indices into the class's vtable entries, in order.
+    pub slots: Vec<usize>,
+}
+
+/// One base class the RTTI names, with how `this` reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RttiBase {
+    /// The base class, as its type information names it.
+    pub class: String,
+    /// The offset of the base in the object, as the RTTI holds it: the
+    /// primary base at 0, each secondary at its displacement.
+    pub offset: i64,
+    /// Whether the base is public (#375 reads the flag the ABI sets).
+    pub is_public: bool,
+    /// Whether the base is virtual: the subobject is shared.
+    pub is_virtual: bool,
+}
+
 /// One C++ class the image names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CppClass {
@@ -73,6 +123,12 @@ pub struct CppClass {
     /// The address of the constructor (`<class>::<class>`), when the
     /// image holds one.
     pub constructor: Option<u64>,
+    /// The base classes the RTTI names, in RTTI order, each with its
+    /// offset, access and virtual flags.
+    pub base_classes: Vec<RttiBase>,
+    /// The vtable's groups: the primary group first, then one per
+    /// secondary base.
+    pub vtable_groups: Vec<VtableGroup>,
 }
 
 /// The C++ classes an image carries.
@@ -104,6 +160,9 @@ impl CppMetadata {
             shift_opt(&mut class.constructor);
             for vfunc in &mut class.vfuncs {
                 shift_opt(&mut vfunc.implementation);
+            }
+            for group in &mut class.vtable_groups {
+                group.address = group.address.wrapping_add(delta);
             }
         }
         self.vtable_refs = std::mem::take(&mut self.vtable_refs)
@@ -189,6 +248,8 @@ pub(crate) fn read_with_model(
                 vfuncs: Vec::new(),
                 type_info,
                 constructor,
+                base_classes: Vec::new(),
+                vtable_groups: Vec::new(),
             },
         );
         if metadata.classes.len() >= CppMetadata::MOST_CLASSES {
@@ -220,6 +281,34 @@ pub(crate) fn read_with_model(
         let next = sorted.get(i + 1).copied();
         ends.insert(address, next.unwrap_or(u64::MAX));
     }
+    // Every type information the image names, by address: an Itanium
+    // `_ZTI<class>` (two words) or Microsoft ``??_R0`` (four), the class
+    // each names. A vtable header or an RTTI base entry is one of these
+    // addresses, so the check is the gate for reading further.
+    let mut type_infos: BTreeMap<u64, String> = BTreeMap::new();
+    for (address, name) in &symbols {
+        if is_type_info(name) {
+            if let Some(class) = type_info_class(name) {
+                type_infos.entry(*address).or_insert(class);
+            }
+        }
+    }
+    // The class names come from RTTI where the image carries it: the
+    // Itanium `si`/`vmi` layout or the Microsoft hierarchy. A class with
+    // no RTTI has no bases to read and one vtable group.
+    let microsoft = microsoft_hierarchy_bases(bytes, &symbols, little);
+    for class in metadata.classes.values_mut() {
+        let mut bases = Vec::new();
+        if let Some(type_info) = class.type_info {
+            bases = read_rtti_bases(bytes, type_info, model, little, &type_infos);
+            if bases.is_empty() {
+                // The Microsoft descriptor names only the class; the
+                // hierarchy is read from its locator instead.
+                bases = microsoft.get(&type_info).cloned().unwrap_or_default();
+            }
+        }
+        class.base_classes = bases;
+    }
     for (class, address, header) in &tables {
         let Some(mut bytes) = section_bytes_of(bytes, *address) else {
             continue;
@@ -229,53 +318,85 @@ pub(crate) fn read_with_model(
                 bytes = bytes.get(..usize::try_from(end - *address).unwrap_or(0)).unwrap_or(&[]);
             }
         }
-        let Some(entry) = metadata.classes.get_mut(class) else {
-            continue;
-        };
         let width = usize::try_from(model.pointer).unwrap_or(8);
         if width != 4 && width != 8 {
             continue;
         }
-        for (index, slot) in bytes
-            .get(header * width..)
-            .unwrap_or(&[])
+        // The vtable's words are the image's own pointers: the image's
+        // byte order, its width.
+        let words: Vec<u64> = bytes
             .chunks(width)
-            .take(CppMetadata::MOST_SLOTS)
-            .enumerate()
-        {
-            if slot.len() != width {
-                break;
-            }
-            // The vtable's words are the image's own pointers: the
-            // image's byte order, its width.
-            let implementation = match slot.try_into() {
-                Ok(bytes) => {
-                    let raw: [u8; 8] = if width == 8 {
-                        bytes
-                    } else if little {
-                        let mut wide = [0u8; 8];
-                        wide[..4].copy_from_slice(&bytes[..4]);
-                        wide
-                    } else {
-                        let mut wide = [0u8; 8];
-                        wide[4..].copy_from_slice(&bytes[..4]);
-                        wide
-                    };
-                    if little {
-                        u64::from_le_bytes(raw)
-                    } else {
-                        u64::from_be_bytes(raw)
-                    }
+            .filter_map(|slot| {
+                if slot.len() != width {
+                    return None;
                 }
-                Err(_) => continue,
-            };
-            if implementation == 0 {
+                let raw: [u8; 8] = if width == 8 {
+                    slot.try_into().ok()?
+                } else if little {
+                    let mut wide = [0u8; 8];
+                    wide[..4].copy_from_slice(&slot[..4]);
+                    wide
+                } else {
+                    let mut wide = [0u8; 8];
+                    wide[4..].copy_from_slice(&slot[..4]);
+                    wide
+                };
+                Some(if little {
+                    u64::from_le_bytes(raw)
+                } else {
+                    u64::from_be_bytes(raw)
+                })
+            })
+            .take(CppMetadata::MOST_SLOTS)
+            .collect();
+        // Walk the slots, breaking the vtable into its Itanium groups:
+        // a secondary group opens with (negative offset, type
+        // information) where the previous group closed, and its slots
+        // continue the class's slot count. A Microsoft vtable is one
+        // group, from the first virtual function.
+        // A secondary group opens where the previous closed: its header
+        // is (negative offset, type information) — neither of which is a
+        // function the tables name. The group is recorded, with its
+        // offset and the base it stands for, and the walk resumes at its
+        // first slot; the slot count runs on across groups.
+        let mut groups: Vec<VtableGroup> = Vec::new();
+        let mut slot_index = 0usize;
+        let mut cursor = *header;
+        let mut pending: Option<VtableGroup> = Some(VtableGroup {
+            address: *address,
+            offset_to_top: 0,
+            owner: class.clone(),
+            slots: Vec::new(),
+        });
+        while cursor < words.len() {
+            let word = words[cursor];
+            if word == 0 {
                 break;
             }
-            // A slot holds an implementation, or a word past the table's
-            // end. The next vtable's words fail here: a type-information
-            // address is no function the tables name.
-            let Some(name) = names.get(&implementation) else {
+            // A word that names no function the tables name ends the
+            // current group — and only opens a new one for an Itanium
+            // secondary header, the (negative offset, type info) pair.
+            if !names.contains_key(&word) {
+                if *header != 2 || word as i64 >= 0 || cursor + 1 >= words.len() {
+                    break;
+                }
+                let next = words[cursor + 1];
+                let Some(owner) = type_infos.get(&next) else {
+                    break;
+                };
+                if !pending.as_ref().is_none_or(|pending| pending.slots.is_empty()) {
+                    groups.push(pending.take().expect("a pending group stands here"));
+                }
+                pending = Some(VtableGroup {
+                    address: address + (cursor as u64) * width as u64,
+                    offset_to_top: word as i64,
+                    owner: owner.clone(),
+                    slots: Vec::new(),
+                });
+                cursor += 2;
+                continue;
+            }
+            let Some(name) = names.get(&word) else {
                 break;
             };
             let name = name.clone();
@@ -284,18 +405,386 @@ pub(crate) fn read_with_model(
             }
             metadata
                 .vtable_refs
-                .insert(*address + (*header as u64) * width as u64 + index as u64 * width as u64, (class.clone(), index));
+                .insert(*address + (cursor as u64) * width as u64, (class.clone(), slot_index));
             metadata
                 .vfunc_names
-                .insert(implementation, name.clone());
-            entry.vfuncs.push(Vfunc {
-                name,
-                implementation: Some(implementation),
-                slot: index,
-            });
+                .insert(word, name.clone());
+            let entry = metadata.classes.get_mut(class);
+            if let Some(entry) = entry {
+                entry.vfuncs.push(Vfunc {
+                    name,
+                    implementation: Some(word),
+                    slot: slot_index,
+                });
+            }
+            if let Some(group) = pending.as_mut() {
+                group.slots.push(slot_index);
+            }
+            slot_index += 1;
+            cursor += 1;
+        }
+        if let Some(group) = pending {
+            if !group.slots.is_empty() {
+                // `pending` is `Some` while a group is being walked;
+                // an empty tail group — a header the table ends
+                // before — names no slots and is not a group.
+                // (`take` above left it `None` only while a secondary
+                // header is being consumed, which is also empty.)
+                groups.push(group);
+            }
+        }
+        if let Some(entry) = metadata.classes.get_mut(class) {
+            entry.vtable_groups = groups;
         }
     }
     Some(metadata)
+}
+
+/// One word read: [`read_rtti_bases`] and the Microsoft hierarchy read
+/// the image's words through this so both layouts share one cursor.
+struct ImageWords<'a> {
+    bytes: &'a [u8],
+    width: usize,
+    little: bool,
+}
+
+impl<'a> ImageWords<'a> {
+    fn new(bytes: &'a [u8], width: usize, little: bool) -> Self {
+        Self {
+            bytes,
+            width,
+            little,
+        }
+    }
+
+    fn word_at(&self, vma: u64) -> Option<u64> {
+        let section = section_bytes_of(self.bytes, vma)?;
+        let chunk = section.get(..self.width)?;
+        let raw: [u8; 8] = if self.width == 8 {
+            chunk.try_into().ok()?
+        } else if self.little {
+            let mut wide = [0u8; 8];
+            wide[..4].copy_from_slice(&chunk[..4]);
+            wide
+        } else {
+            let mut wide = [0u8; 8];
+            wide[4..].copy_from_slice(&chunk[..4]);
+            wide
+        };
+        Some(if self.little {
+            u64::from_le_bytes(raw)
+        } else {
+            u64::from_be_bytes(raw)
+        })
+    }
+
+    /// The `n`-byte lane at `vma`: a 4-byte word of a 32-bit image, a
+    /// 2-byte word, a byte — every lane is the image's own byte order.
+    fn narrow_at(&self, vma: u64, n: usize) -> Option<u64> {
+        let section = section_bytes_of(self.bytes, vma)?;
+        let chunk = section.get(..n)?;
+        let raw: [u8; 8] = if self.little {
+            let mut wide = [0u8; 8];
+            wide[..n].copy_from_slice(chunk);
+            wide
+        } else {
+            let mut wide = [0u8; 8];
+            wide[8 - n..].copy_from_slice(chunk);
+            wide
+        };
+        Some(if self.little {
+            u64::from_le_bytes(raw)
+        } else {
+            u64::from_be_bytes(raw)
+        })
+    }
+
+    /// The bytes at `vma` as a Latin-1 string, at most `max` long.
+    fn string_at(&self, vma: u64, max: usize) -> Option<String> {
+        let section = section_bytes_of(self.bytes, vma)?;
+        let end = section.iter().position(|&b| b == 0).unwrap_or(section.len());
+        let text = section.get(..end.min(max))?;
+        Some(text.iter().map(|&b| b as char).collect())
+    }
+}
+
+/// Read the base classes of the class whose type information stands at
+/// `type_info`, in RTTI order. The Itanium `si_class_type_info` (`_ZTI`
+/// with three words) names its single base; `vmi_class_type_info` packs
+/// the base count into the high half of the third word and reads that
+/// many (base type information, flag/offset) pairs, low bit 1 for
+/// public, bit 0 for virtual. The Microsoft descriptor reads the
+/// s dword at +8 in `.?AV<class>@@`; no base is named there, so the
+/// hierarchy is read from ``??_R4`` instead and this path names none.
+/// A type information with fewer than three words names no base.
+fn read_rtti_bases(
+    bytes: &[u8],
+    type_info: u64,
+    model: crate::types::DataModel,
+    little: bool,
+    type_infos: &BTreeMap<u64, String>,
+) -> Vec<RttiBase> {
+    let width = usize::try_from(model.pointer).unwrap_or(8);
+    if width != 4 && width != 8 {
+        return Vec::new();
+    }
+    let reader = ImageWords::new(bytes, width, little);
+    let word = |index: u64| reader.word_at(type_info + index * width as u64);
+    // Two words: `class_type_info` — vtable pointer, name — names no
+    // base. Three: `si_class_type_info` names its one base in the third
+    // word. `vmi_class_type_info` packs the base count into the third
+    // word's high half (the low half carries the flags) and reads that
+    // many (base type information, flag/offset) pairs after it.
+    let Some(third) = word(2) else {
+        return Vec::new();
+    };
+    // A counts word whose high half is a plausible base count is the packed
+    // count; its pairs follow. The class-flag low half is 0 for a plain
+    // class and nonzero when the class virtually inherits (the diamond's
+    // header carries 0x2), so the branch is confirmed by the first pair's
+    // base word naming a known type information. Any other third word that
+    // is a known type information names that base alone; a two-word
+    // `class_type_info` reads its neighbour's name pointer here, which
+    // names no type information, so it still yields no base.
+    let flags = third & 0xffff_ffff;
+    let base_count = (third >> 32) as usize;
+    let looks_vmi = (1..=64).contains(&base_count)
+        && flags <= 0xff
+        && word(3).is_some_and(|w| type_infos.contains_key(&w));
+    if looks_vmi {
+        let mut bases = Vec::new();
+        for i in 0..base_count {
+            let entry = 3 + 2 * i as u64;
+            let Some(base_addr) = word(entry) else {
+                break;
+            };
+            let Some(class) = type_infos.get(&base_addr) else {
+                continue;
+            };
+            let Some(first) = word(entry + 1) else {
+                break;
+            };
+            // The flag/offset word: the signed offset above the pointer,
+            // the offset to the top below it; low bits 0x1 for virtual,
+            // 0x2 for public — as cxxabi.h's masks write them.
+            bases.push(RttiBase {
+                class: class.clone(),
+                offset: (first as i64) >> 8,
+                is_public: first & 0x2 != 0,
+                is_virtual: first & 0x1 != 0,
+            });
+        }
+        return bases;
+    }
+    if let Some(class) = type_infos.get(&third) {
+        return vec![RttiBase {
+            class: class.clone(),
+            offset: 0,
+            // The si_class_type_info stores no access flag at all: the
+            // ABI's single-base record carries only the base pointer, so
+            // public is the contract this reader reports, not a read bit.
+            is_public: true,
+            is_virtual: false,
+        }];
+    }
+    Vec::new()
+}
+
+/// The class the Microsoft type-name string `text` — the `.?AV<class>@@`
+/// the ``??_R0?<class>@@@8`` descriptor holds at +8 — names: the class
+/// before the closing `@@`, or the name it demangles to when the string
+/// spells no `.?AV`. `None` when neither holds a class.
+fn microsoft_name_class(text: &str) -> Option<String> {
+    let stem = text.strip_prefix(".?A").unwrap_or(text);
+    // The kind letter follows `.?A`: V names a class, U a struct or union.
+    // It is part of the mangling, never part of the class's name.
+    let stem = stem.strip_prefix(['V', 'U']).unwrap_or(stem);
+    let stem = stem.strip_suffix("X{}").unwrap_or(stem);
+    if let Some(class) = stem.strip_suffix("@@").or_else(|| stem.strip_suffix("@@@")) {
+        // `Class@@`: the last `@@` closes the mangled name; a
+        // templated name carries its arguments before it, as the
+        // demangler spells them.
+        let class = class.strip_suffix("@").unwrap_or(class);
+        if class.is_empty() {
+            return None;
+        }
+        if class.contains('@') && !class.contains('[') {
+            // MSVC spells a scoped name innermost-first:
+            // `.?AVShape@geometry@@` is `geometry::Shape`, and
+            // `.?AVInner@Mid@Outer@@` is `Outer::Mid::Inner`.
+            let parts: Vec<&str> = class.split('@').filter(|p| !p.is_empty()).collect();
+            if parts.len() >= 2 {
+                let full = parts.iter().rev().copied().collect::<Vec<_>>().join("::");
+                if full != text {
+                    return Some(full);
+                }
+            }
+        }
+        // A bare class: `base@@`, `Shape@@`. `type_info_class`'s
+        // demangle of `??_R0?AVbase@@@8` reads `base` the same way.
+        let plain = demangle_symbol(&format!("??_R0?AV{class}@@@8"))
+            .and_then(|plain| {
+                plain
+                    .strip_prefix("`RTTI ")
+                    .unwrap_or(&plain)
+                    .strip_prefix("typeinfo name for ")
+                    .unwrap_or(&plain)
+                    .strip_prefix(".?AV")
+                    .unwrap_or(&plain)
+                    .split('[')
+                    .next()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| class.to_string());
+        return (!plain.is_empty()).then_some(plain);
+    }
+    // The string itself is a demangled name: `base`, `geometry::Shape`.
+    (!text.is_empty()).then_some(text.to_string())
+}
+
+/// The image base the RVAs stand against: the lowest non-zero section
+/// address when the image links at one. `None` when the image has no
+/// sections or none of them starts above zero.
+fn image_base_of(bytes: &[u8]) -> Option<u64> {
+    let Ok(file) = object::File::parse(bytes) else {
+        return None;
+    };
+    let mut base = u64::MAX;
+    for section in file.sections() {
+        base = base.min(section.address());
+    }
+    (base != 0 && base != u64::MAX).then_some(base)
+}
+
+/// The Microsoft base classes for each class whose locator the image
+/// holds, in hierarchy order, by the class's type-information address.
+/// The locator ``??_R4<class>@@6B@`` holds `pHierarchyDescriptor` at
+/// +16, the RVA of the hierarchy descriptor relative to the image base.
+/// The hierarchy descriptor holds `numBaseClasses` at +8 and
+/// `pBaseClassArray` at +12, an array of 6-word base-class descriptors
+/// ({ `pTypeDescriptor` RVA, `numContainedBases`, `mdisp`, `pdisp`,
+/// `vdisp`, `attributes` }); element 0 is the class itself. Each base's
+/// ``??_R0`` names the base at +8. A class with no locator names no
+/// bases, so this map holds none for it.
+fn microsoft_hierarchy_bases(
+    bytes: &[u8],
+    symbols: &[(u64, String)],
+    little: bool,
+) -> BTreeMap<u64, Vec<RttiBase>> {
+    let Some(base) = image_base_of(bytes) else {
+        return BTreeMap::new();
+    };
+    let reader = ImageWords::new(bytes, 4, little);
+    let mut result: BTreeMap<u64, Vec<RttiBase>> = BTreeMap::new();
+    for (locator, name) in symbols {
+        if !name.starts_with("??_R4") {
+            continue;
+        }
+        let Some(class) = locator_class(name) else {
+            continue;
+        };
+        let Some(type_info) = symbols
+            .iter()
+            .find(|(_, n)| is_type_info(n) && type_info_class(n).as_deref() == Some(class.as_str()))
+            .map(|(a, _)| *a)
+        else {
+            continue;
+        };
+        result.insert(
+            type_info,
+            microsoft_bases_for(bytes, *locator, base, &reader, symbols),
+        );
+    }
+    result
+}
+
+/// The bases of the class whose locator stands at `locator`. Element 0
+/// of the array is the class itself and is skipped.
+fn microsoft_bases_for(
+    _bytes: &[u8],
+    locator: u64,
+    base: u64,
+    reader: &ImageWords<'_>,
+    symbols: &[(u64, String)],
+) -> Vec<RttiBase> {
+    let Some(hierarchy_rva) = reader.narrow_at(locator + 16, 4) else {
+        return Vec::new();
+    };
+    let hierarchy = base + hierarchy_rva;
+    let Some(num_bases) = reader.narrow_at(hierarchy + 8, 4) else {
+        return Vec::new();
+    };
+    // The array holds one more entry than numBaseClasses; element 0 is
+    // the class itself.
+    let count = usize::try_from(num_bases).unwrap_or(0).min(16);
+    let Some(array_rva) = reader.narrow_at(hierarchy + 12, 4) else {
+        return Vec::new();
+    };
+    let array = base + array_rva;
+    let mut bases = Vec::new();
+    for index in 0..=count {
+        let entry = array + index as u64 * 24;
+        if index == 0 {
+            continue;
+        }
+        let Some(descriptor_rva) = reader.narrow_at(entry, 4) else {
+            break;
+        };
+        let Some(class) = descriptor_class_at(base + descriptor_rva, reader, symbols) else {
+            continue;
+        };
+        let mdisp = reader.narrow_at(entry + 8, 4).unwrap_or(0);
+        let attributes = reader.narrow_at(entry + 20, 4).unwrap_or(0);
+        bases.push(RttiBase {
+            class,
+            offset: i64::from(mdisp as u32 as i32),
+            is_public: (attributes & 0x3) == 2,
+            is_virtual: attributes & 0x8 != 0,
+        });
+    }
+    bases
+}
+
+/// The class the complete object locator `name` — ``??_R4<class>@@6B@``
+/// — belongs to.
+fn locator_class(name: &str) -> Option<String> {
+    let plain = demangle_symbol(name)?;
+    // The demangler spells `` `<class>::`vftable' `` for the locator's
+    // table; the class stands before the table's `` ::` `` qualifier.
+    if let Some((class, _)) = plain.rsplit_once("::`") {
+        let class = class.trim();
+        return (!class.is_empty()).then_some(class.to_string());
+    }
+    // `complete object locator for <class>` fallback.
+    plain
+        .split("complete object locator for ")
+        .nth(1)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The class the base-class descriptor at `va` names, via its ``??_R0``
+/// descriptor's name string at +8. `None` when the descriptor names none.
+fn descriptor_class_at(
+    va: u64,
+    reader: &ImageWords<'_>,
+    symbols: &[(u64, String)],
+) -> Option<String> {
+    // A PE type descriptor is { vftable, spare, name }: the `.?AV<class>@@`
+    // string stands inline at +8. (An earlier branch read +8 as a 4-byte
+    // pointer and resolved it as a VA, not an RVA — dead on a real PE,
+    // where the name is inline, and removed.)
+    if let Some(text) = reader.string_at(va + 8, 256) {
+        if let Some(class) = microsoft_name_class(&text) {
+            return Some(class);
+        }
+    }
+    // Last resort: the symbol at `va`, if any, is the descriptor's own.
+    symbols
+        .iter()
+        .find(|(a, _)| *a == va)
+        .and_then(|(_, n)| type_info_class(n))
 }
 
 /// The name `mangled` demangles under, with a version suffix dropped. A
