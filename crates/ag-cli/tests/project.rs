@@ -3090,6 +3090,73 @@ fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
 }
 
 #[test]
+fn the_types_are_exported_as_a_c_header() {
+    let file = TempFile::new("types-header");
+    let types = |args: &[&str]| -> (bool, String, String) {
+        let text = file.text();
+        let mut all = vec!["types", "--file", &text];
+        all.extend(args);
+        project_with("sample.elf", &all)
+    };
+    let (ok, _, stderr) = types(&[
+        "add",
+        "struct point { int x; int y; };\ntypedef struct node { struct node *next; struct point at; } node_t;",
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, header, stderr) = types(&["show", "--header"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        header.starts_with(
+            "// The types of the project, as C: written by AdmiralGrace\n\
+             // under the data model the image's platform lays them out.\n\
+             #ifndef ADMIRALGRACE_TYPES_H\n\
+             #define ADMIRALGRACE_TYPES_H\n"
+        ),
+        "{header}"
+    );
+    assert!(
+        header.contains("\nstruct point {\n    int x;\n    int y;\n};\n"),
+        "{header}"
+    );
+    assert!(
+        header.contains(
+            "\nstruct node {\n    struct node *next;\n    struct point at;\n};\n\ntypedef struct node node_t;\n"
+        ),
+        "{header}"
+    );
+    assert!(
+        header.ends_with("\n#endif /* ADMIRALGRACE_TYPES_H */\n"),
+        "{header}"
+    );
+    assert!(!header.contains("/* 0x"), "{header}");
+    // The store's order: point before node, so the by-value member reads.
+    let point = header.find("struct point {").unwrap();
+    let node = header.find("struct node {").unwrap();
+    assert!(point < node, "{header}");
+    // `ag image types --header` is the same text, with the platform
+    // defaults the project types sit on.
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("sample.elf"))
+        .args(["types", "--header", "--project", &file.text()])
+        .output()
+        .expect("the ag binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let from_image = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(from_image.contains("struct point {"), "{from_image}");
+    assert!(from_image.contains("node_t;"), "{from_image}");
+    // `--header` takes no single name and no JSON.
+    let (ok, _, stderr) = types(&["show", "point", "--header"]);
+    assert!(!ok, "{stderr}");
+    let (ok, _, stderr) = types(&["show", "--header", "--json"]);
+    assert!(!ok, "{stderr}");
+}
+
+#[test]
 fn types_are_imported_from_a_c_header_with_the_preprocessor_flags() {
     let file = TempFile::new("header-import");
     let types = |args: &[&str]| -> (bool, String, String) {

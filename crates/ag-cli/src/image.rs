@@ -342,8 +342,12 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
         /// Report as JSON.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "header")]
         json: bool,
+        /// Write the types as a C header instead: every definition as C,
+        /// with its guard and the includes its spellings need.
+        #[arg(long)]
+        header: bool,
     },
     /// The structure the accesses through a pointer variable draft: one
     /// member each offset and width the function reads or writes through
@@ -1014,7 +1018,9 @@ pub(crate) fn open_image(
             eprintln!("note: the project's types are not read: {why}");
         }
         let words = global_pointer_words(project);
-        if words != ag_image::GlobalPointerWords::default() && !image.set_global_pointer_words(words) {
+        if words != ag_image::GlobalPointerWords::default()
+            && !image.set_global_pointer_words(words)
+        {
             eprintln!(
                 "note: the project's global pointer means nothing to {}: it keeps none the engine follows",
                 image.language()
@@ -1336,7 +1342,7 @@ pub fn run(
             variables(&image, &target, json, project.as_ref())
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
-        ImageCmd::Types { json, .. } => types(&image, json),
+        ImageCmd::Types { json, header, .. } => types(&image, json, header),
         ImageCmd::StructFrom {
             function,
             variable,
@@ -1829,7 +1835,10 @@ fn disasm(image: &Binary, target: &str, json: bool, stack_offsets: bool) -> Resu
         return Ok(0);
     }
 
-    print!("{}", listing_text(image, address, &disassembly, stack_offsets));
+    print!(
+        "{}",
+        listing_text(image, address, &disassembly, stack_offsets)
+    );
 
     Ok(0)
 }
@@ -2988,7 +2997,11 @@ pub(crate) fn stack_frame_of(
 /// `ag image FILE stack FUNCTION`: the function's frame, slot by slot.
 /// `ag image FILE types`: the platform's primitives and the project's
 /// definitions, with their layouts.
-fn types(image: &Binary, json: bool) -> Result<i32> {
+fn types(image: &Binary, json: bool, header: bool) -> Result<i32> {
+    if header {
+        print!("{}", image.types_header());
+        return Ok(0);
+    }
     let store = image.types();
     if json {
         let defined: Vec<serde_json::Value> = store
@@ -3008,7 +3021,12 @@ fn types(image: &Binary, json: bool) -> Result<i32> {
         );
         return Ok(0);
     }
-    println!("platform: {}", image.platform().map_or_else(|| "unknown".to_string(), |p| p.name()));
+    println!(
+        "platform: {}",
+        image
+            .platform()
+            .map_or_else(|| "unknown".to_string(), |p| p.name())
+    );
     println!();
     print!("{}", crate::types::primitives_text(&store));
     let names = store.names();

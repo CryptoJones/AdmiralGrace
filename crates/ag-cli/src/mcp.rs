@@ -577,6 +577,11 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "export_types_header",
+            description: "The types the image is read with as a C header: every definition as C, with its guard and the includes its spellings need, as `ag image types --header` gives it and `ag image export` writes as `types.h`.",
+            schema: json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
             name: "search_types",
             description: "The project's types whose name, members or C hold `text`, in any case: `in` is `name`, `member`, `text` or `any` (the default).",
             schema: json!({
@@ -1400,9 +1405,10 @@ impl Server {
                     }
                     None => self.change_file(|file| file.global_pointer = value)?,
                 }
-                self.image.set_global_pointer_words(crate::image::global_pointer_words(
-                    &self.project()?.file,
-                ));
+                self.image
+                    .set_global_pointer_words(crate::image::global_pointer_words(
+                        &self.project()?.file,
+                    ));
                 let functions: Vec<u64> = match function {
                     Some(address) => vec![address],
                     None => self
@@ -1527,6 +1533,7 @@ impl Server {
                     .ok_or_else(|| format!("no type is named {}", wanted.trim()))?;
                 Ok(Answer::json(crate::types::type_json(&store, &key)))
             }
+            "export_types_header" => Ok(Answer::text(self.image.types_header())),
             "search_types" => {
                 let store = self.image.types();
                 let within = optional_text("in")?.unwrap_or_default();
@@ -2797,6 +2804,7 @@ mod tests {
                 "get_type",
                 "define_types",
                 "remove_type",
+                "export_types_header",
                 "search_types",
                 "set_variable_type",
                 "infer_struct",
