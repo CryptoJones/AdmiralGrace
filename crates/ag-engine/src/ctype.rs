@@ -39,7 +39,9 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::types::{Composite, Definition, Enumeration, Member, Prim, Type, TypeAttrs, TypeStore};
+use crate::types::{
+    Composite, Definition, Enumeration, Member, Method, Prim, Type, TypeAttrs, TypeStore,
+};
 
 /// Why C text was not read: where, and what was wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,6 +674,8 @@ struct Specs {
     typedef: bool,
     base: Type,
     func_attrs: TypeAttrs,
+    /// A C++ method's `virtual`.
+    is_virtual: bool,
 }
 
 /// The attributes read on a structure.
@@ -1029,11 +1033,14 @@ impl<'a> Parser<'a> {
         let mut words: Vec<String> = Vec::new();
         let mut base: Option<Type> = None;
         let mut any = false;
+        let mut is_virtual = false;
         let mut func_attrs = TypeAttrs::default();
         while let Tok::Ident(word) = self.peek().clone() {
             let word = word.as_str();
             if word == "typedef" {
                 typedef = true;
+            } else if word == "virtual" {
+                is_virtual = true;
             } else if STORAGE.contains(&word) {
                 if word == "_Noreturn" {
                     func_attrs.noreturn = true;
@@ -1059,7 +1066,7 @@ impl<'a> Parser<'a> {
                 words.push(word.trim_matches('_').replace("signed__", "signed"));
             } else if word == "bool" && base.is_none() && words.is_empty() {
                 base = Some(Type::Prim(Prim::Bool));
-            } else if word == "struct" || word == "union" || word == "enum" {
+            } else if word == "struct" || word == "union" || word == "enum" || word == "class" {
                 if base.is_some() || !words.is_empty() {
                     return Err(self.error_here(format!("{word} follows a type already")));
                 }
@@ -1095,6 +1102,8 @@ impl<'a> Parser<'a> {
         if !any {
             return Ok(None);
         }
+        // The `virtual` of `virtual int f(int)` in a class body is read
+        // into Specs above, before the return type it precedes.
         let base = match base {
             Some(base) => base,
             None if words.is_empty() => {
@@ -1105,7 +1114,7 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error_here(format!("{} is not a type", words.join(" "))))?,
             ),
         };
-        Ok(Some(Specs { typedef, base, func_attrs }))
+        Ok(Some(Specs { typedef, base, func_attrs, is_virtual }))
     }
 
     fn note_qualifier(&mut self) {
@@ -1339,6 +1348,10 @@ impl<'a> Parser<'a> {
     /// `struct`/`union` after its keyword: a reference to its tag, or a
     /// definition.
     fn composite_specifier(&mut self, kind: &str) -> Result<Type, CError> {
+        // `class` shares the storage and lookup with `struct` and only marks
+        // itself; its key is still `struct <tag>`.
+        let is_class = kind == "class";
+        let kind = if is_class { "struct" } else { kind };
         let mut attrs = Attrs::default();
         self.attributes(&mut attrs)?;
         if let Some(n) = self.pending_align.take() {
@@ -1472,6 +1485,7 @@ impl<'a> Parser<'a> {
         }
         let outer_defining = std::mem::take(&mut self.defining);
         let mut members = Vec::new();
+        let mut methods = Vec::new();
         loop {
             self.directives()?;
             if self.eat("}") {
@@ -1490,7 +1504,40 @@ impl<'a> Parser<'a> {
             if self.eat(";") {
                 continue;
             }
-            self.member_declaration(&mut members)?;
+            // An access specifier — `public:` — names no member.
+            if self.eat_access() {
+                continue;
+            }
+            // A constructor or destructor of the class whose body this
+            // is has no return type: the class's own name, optionally
+            // preceded by `~`, followed by `(`. It is a method like
+            // any other, stored the same way.
+            if let Some((is_destructor, name, lookahead)) = self.constructor_shape(&key) {
+                for _ in 0..lookahead {
+                    self.advance();
+                }
+                self.expect("(", "the parameters of the method")?;
+                let (params, variadic) = self.parameters()?;
+                if !self.eat(";") {
+                    return Err(self.error_here(format!(
+                        "expected ; after the {}.{}({}, not {}",
+                        if is_destructor { "destructor" } else { "constructor" },
+                        key,
+                        name,
+                        self.shown()
+                    )));
+                }
+                let name = if is_destructor { format!("~{name}") } else { name };
+                let ty = Type::Function {
+                    ret: Box::new(Type::Prim(Prim::Void)),
+                    params,
+                    variadic,
+                    attrs: TypeAttrs::default(),
+                };
+                methods.push(Method { name, ty, is_virtual: false });
+                continue;
+            }
+            self.member_declaration(&mut members, &mut methods)?;
         }
         self.attributes(&mut attrs)?;
         let composite = Composite {
@@ -1500,6 +1547,8 @@ impl<'a> Parser<'a> {
             packed: attrs.packed,
             aligned: attrs.aligned,
             base_classes: base_classes.clone(),
+            is_class,
+            methods,
         };
         let definition = if kind == "union" {
             Definition::Union(composite)
@@ -1515,8 +1564,65 @@ impl<'a> Parser<'a> {
         Ok(Type::Named(key))
     }
 
+    /// Whether the next tokens are an access specifier — `public:`,
+    /// `private:`, `protected:` — eating them when they are.
+    fn eat_access(&mut self) -> bool {
+        let at = self.token().clone();
+        // An access label names no member, so `public: int x;` is just
+        // `int x;` with a label before it. The colon is looked for
+        // before anything is eaten: `public` without one is not a label,
+        // and the declaration that starts with it stands.
+        if matches!(self.peek(), Tok::Ident(w) if w == "public" || w == "private" || w == "protected") {
+            if !matches!(self.peek_at(1), Tok::Punct(":")) {
+                return false;
+            }
+            let Tok::Ident(word) = self.peek().clone() else {
+                return false;
+            };
+            self.advance();
+            self.advance();
+            self.notes.push(format!(
+                "{}:{}: the access specifier {word} is skipped",
+                at.line, at.column
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// Whether the next tokens declare a constructor or destructor of
+    /// the class being defined: the class's own name, optionally with
+    /// `~` before it, followed by `(`. Returns the destructor flag, the
+    /// class's bare name, and how many tokens to eat to reach `(`.
+    fn constructor_shape(&self, key: &str) -> Option<(bool, String, usize)> {
+        let base = key
+            .strip_prefix("struct ")
+            .or_else(|| key.strip_prefix("union "))
+            .unwrap_or(key);
+        let mut ahead = 0usize;
+        // `explicit` may stand before the name.
+        if matches!(self.peek_at(ahead), Tok::Ident(w) if w == "explicit") {
+            ahead += 1;
+        }
+        let mut is_destructor = false;
+        if matches!(self.peek_at(ahead), Tok::Punct("~")) {
+            is_destructor = true;
+            ahead += 1;
+        }
+        match self.peek_at(ahead) {
+            Tok::Ident(word) if word == base && matches!(self.peek_at(ahead + 1), Tok::Punct("(")) => {
+                Some((is_destructor, word.clone(), ahead + 1))
+            }
+            _ => None,
+        }
+    }
+
     /// One member declaration of a structure or union, through its `;`.
-    fn member_declaration(&mut self, members: &mut Vec<Member>) -> Result<(), CError> {
+    fn member_declaration(
+        &mut self,
+        members: &mut Vec<Member>,
+        methods: &mut Vec<Method>,
+    ) -> Result<(), CError> {
         let at = self.token().clone();
         let Some(specs) = self.specifiers()? else {
             return Err(self.error_here(format!("expected a member, not {}", self.shown())));
@@ -1580,11 +1686,40 @@ impl<'a> Parser<'a> {
                 };
                 let ty = self.apply(specs.base.clone(), ops, &here)?;
                 if matches!(ty, Type::Function { .. }) {
-                    return Err(CError {
-                        line: here.line,
-                        column: here.column,
-                        message: format!("{name} is a function: a member is a pointer to one"),
+                    // `= 0` after a virtual method makes it pure virtual.
+                    let mut pure_virtual = false;
+                    if self.eat("=") {
+                        let at = self.token().clone();
+                        let value = self.constant()?;
+                        if value != 0 {
+                            return Err(CError {
+                                line: at.line,
+                                column: at.column,
+                                message: "a method binds no initializer".to_string(),
+                            });
+                        }
+                        if !specs.is_virtual {
+                            return Err(CError {
+                                line: at.line,
+                                column: at.column,
+                                message: "only a virtual method is pure virtual".to_string(),
+                            });
+                        }
+                        pure_virtual = true;
+                    }
+                    // A method of a C++ class: it is not stored in the
+                    // object, so it stands apart from the members.
+                    methods.push(Method {
+                        name,
+                        ty,
+                        is_virtual: specs.is_virtual || pure_virtual,
                     });
+                    // Like a member, a method ends at its `,` or its
+                    // `;`: more declarators may share its declaration.
+                    if !self.eat(",") {
+                        break;
+                    }
+                    continue;
                 }
                 if members
                     .iter()
@@ -1849,6 +1984,9 @@ impl<'a> Parser<'a> {
             }
         }
         let mut suffixes = Vec::new();
+        if name.is_none() && abstract_ok {
+            // An abstract declarator in a parameter list: `int` alone.
+        }
         loop {
             if self.eat("[") {
                 if self.eat("]") {
@@ -1899,9 +2037,6 @@ impl<'a> Parser<'a> {
         }
         ops.extend(suffixes.into_iter().rev());
         ops.extend(inner);
-        if name.is_none() && !abstract_ok {
-            return Ok((None, ops));
-        }
         Ok((name, ops))
     }
 
@@ -1910,7 +2045,7 @@ impl<'a> Parser<'a> {
     fn names_type(&self, word: &str) -> bool {
         BASIC.contains(&word)
             || QUALIFIERS.contains(&word)
-            || matches!(word, "struct" | "union" | "enum" | "bool")
+            || matches!(word, "class" | "struct" | "union" | "enum" | "bool")
             || Prim::named(word).is_some()
             || matches!(self.store.get(word), Some(Definition::Typedef(_)))
     }
@@ -2492,9 +2627,10 @@ mod tests {
             "1:10: c of struct s is 9 bits wide, wider than its 8 bits"
         );
         assert_eq!(fails("/* open"), "1:1: the comment is not closed");
+        // A method declaration is not an error: it is a method, not a member.
         assert_eq!(
-            fails("struct s { int f(void); };"),
-            "1:16: f is a function: a member is a pointer to one"
+            fails("class s { int f(void); }; class s { int g(void); };"),
+            "1:35: struct s is defined already"
         );
         assert_eq!(
             fails("#pragma pack(3)\n"),
@@ -2681,6 +2817,58 @@ mod tests {
         assert_eq!(members[0].1.offset, 16);
         assert_eq!(members[1].1.offset, 24);
         assert_eq!(members[0].1.name.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn a_class_parses_with_access_labels_and_virtual_methods() {
+        let (store, _) = read(
+            "class c { public: virtual int f(int), g(); private: int x; protected: int y; int h(); };\n\
+             class d : public c { int f(int); };",
+        );
+        assert!(store.definition_text("struct c", true).unwrap().find("class c").is_some());
+        // Members in order, methods in declaration order.
+        assert_eq!(store.member_names("struct c"), ["x", "y"]);
+        // The vtable pointer: `x` at 8, `y` at 12, size 16.
+        assert_eq!(store.size_of(&Type::Named("struct c".into())), Ok(16));
+        let layout = store.layout("struct c").unwrap();
+        assert_eq!(layout.fields[1].offset, 8);
+        assert_eq!(layout.fields[2].offset, 12);
+        assert!(store.has_vtable("struct c"));
+        // No second vtable pointer in the derived class.
+        assert_eq!(store.size_of(&Type::Named("struct d".into())), Ok(16));
+    }
+
+    #[test]
+    fn a_constructor_and_destructor_are_methods_of_their_class() {
+        let (store, _) = read(
+            "class c { c(); c(int); explicit c(float); ~c(); virtual int f(int) = 0; int x; };",
+        );
+        // Two methods from the constructors, one from the destructor,
+        // one virtual: order the class declares them in.
+        let text = store.definition_text("struct c", true).unwrap();
+        for name in ["c(", "c(int", "c(float", "~c(", "f(int"] {
+            assert!(text.contains(name), "{name} missing from:\n{text}");
+        }
+        assert!(store.has_vtable("struct c"));
+        // Pure virtual `f` still claims the vtable; the constructors do not.
+        assert_eq!(store.size_of(&Type::Named("struct c".into())), Ok(16));
+    }
+
+    #[test]
+    fn a_class_definition_round_trips_through_definition_text() {
+        let (store, _) = read("struct base { virtual int f(int); virtual int g(); int data; };");
+        let text = store.definition_text("struct base", false).unwrap();
+        let (again, _) = {
+            let mut store2 = TypeStore::new(DataModel::LP64);
+            parse_into(&mut store2, &text).unwrap();
+            (store2, ())
+        };
+        assert_eq!(store.size_of(&Type::Named("struct base".into())), Ok(16));
+        assert_eq!(again.size_of(&Type::Named("struct base".into())), Ok(16));
+        assert_eq!(
+            again.definition_text("struct base", true),
+            store.definition_text("struct base", true)
+        );
     }
 
     #[test]
