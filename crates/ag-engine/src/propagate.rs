@@ -153,7 +153,7 @@ pub fn library(model: DataModel) -> Arc<Library> {
 
 /// The declarations of `source`, each without its `;`, with the comments
 /// inside them kept: split at each `;` outside braces.
-fn declarations(source: &str) -> Vec<String> {
+pub(crate) fn declarations(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut depth = 0i32;
@@ -296,7 +296,7 @@ fn routed(declaration: &str) -> Option<(&'static str, u64, String)> {
 }
 
 /// The name a type declaration defines: `struct timeval`, `FILE`.
-fn definition_name(declaration: &str) -> String {
+pub(crate) fn definition_name(declaration: &str) -> String {
     let words: Vec<&str> = declaration
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())

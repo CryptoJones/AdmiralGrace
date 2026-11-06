@@ -2681,7 +2681,15 @@ fn the_platform_types_follow_the_images_data_model() {
             .unwrap()["size"]
             .clone();
         assert_eq!(long_size, long, "{fixture_name}");
-        assert_eq!(report["types"], serde_json::json!([]));
+        assert!(
+            report["types"].as_array().is_some_and(|types| !types.is_empty()),
+            "platform types fill the store: {fixture_name}"
+        );
+        assert!(
+            report["platform"].is_string(),
+            "platform is named: {fixture_name}: {}",
+            report["platform"]
+        );
     }
 }
 

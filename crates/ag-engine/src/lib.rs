@@ -26,6 +26,7 @@ pub mod mips;
 pub mod objc;
 pub mod opaque;
 pub mod options;
+pub mod platform;
 pub mod pipeline;
 pub mod plugin;
 pub mod propagate;

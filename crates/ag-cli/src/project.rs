@@ -984,9 +984,7 @@ pub fn run(
             if let Some(ty) = &ty {
                 let project = open_project(&target, &file)?;
                 let image = image_under(&target, &project)?;
-                let (store, _) =
-                    ag_image::ctype::build(image.data_model(), &crate::types::texts(&project))
-                        .unwrap_or_default();
+                let store = image.types();
                 ag_image::parse_type_in(&store, ty).map_err(anyhow::Error::msg)?;
             }
             let address = function_key(&target, &file, &function)?;
@@ -1591,12 +1589,16 @@ fn number(text: &str) -> Result<u64> {
 /// — under the layout it records.
 fn image_under(target: &Path, project: &ProjectFile) -> Result<ag_image::Binary> {
     let layout = layout_of(project)?;
-    open_target(
+    let image = open_target(
         target,
         raw_of_project(project)?.as_ref(),
         project.target.slice.as_deref(),
         &layout,
-    )
+    )?;
+    if let Err(why) = image.set_type_definitions(&crate::types::texts(project)) {
+        eprintln!("note: the project's types are not read: {why}");
+    }
+    Ok(image)
 }
 
 /// Read `target` under the layout `project` now records, so a layout the
@@ -1674,8 +1676,7 @@ fn var_type(target: &Path, file: &Path, function: &str, variable: &str, ty: &str
     }
     let project = open_project(target, file)?;
     let image = image_under(target, &project)?;
-    let (store, _) = ag_image::ctype::build(image.data_model(), &crate::types::texts(&project))
-        .map_err(|why| anyhow::anyhow!("the project's types are not read: {why}"))?;
+    let store = image.types();
     let parsed = ag_image::ctype::parse_type(&store, ty)
         .map_err(|error| anyhow::anyhow!("{ty} is not a type: {}", error.message))?;
     let spelled = parsed.spelled(&store);
@@ -1799,7 +1800,7 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             Ok(0)
         }
         TypesCmd::Show { name, json } => {
-            let (store, _) = ag_image::ctype::build(model, &held).map_err(anyhow::Error::msg)?;
+            let store = image.types();
             let keys: Vec<String> = match &name {
                 Some(name) => vec![store
                     .key_of(name)
@@ -1831,7 +1832,7 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             let within = ag_image::TypeSearch::parse(&within).ok_or_else(|| {
                 anyhow::anyhow!("{within:?} is not where a search looks: name, member, text or any")
             })?;
-            let (store, _) = ag_image::ctype::build(model, &held).map_err(anyhow::Error::msg)?;
+            let store = image.types();
             let found = store.search(&text, within);
             if json {
                 let shown: Vec<serde_json::Value> = found
