@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
+mod archive;
 mod catalog;
 mod debug;
 mod docs;
@@ -196,6 +197,11 @@ enum Cmd {
         /// The committed document `--check` reads.
         #[arg(long, default_value = "docs/options.md", requires = "check")]
         path: PathBuf,
+    },
+    /// Sync a project's types with a type archive shared across projects.
+    Archive {
+        #[command(subcommand)]
+        cmd: archive::ArchiveCmd,
     },
 }
 
@@ -461,6 +467,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
             };
             catalog::run(format, check.then_some(path.as_path()))
         }
+        Cmd::Archive { cmd } => archive::run(cmd),
     }
 }
 

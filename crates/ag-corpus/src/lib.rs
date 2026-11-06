@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod archive;
 pub mod kuna;
 pub mod objc;
 pub mod project;

@@ -166,7 +166,10 @@ fn a_line_comment_keeps_its_placement_in_the_file() {
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
     assert_eq!(annotations.len(), 1, "{report}");
-    assert_eq!(annotations[0]["comment"], serde_json::json!("the loop head"));
+    assert_eq!(
+        annotations[0]["comment"],
+        serde_json::json!("the loop head")
+    );
     assert_eq!(
         annotations[0]["comment_above"],
         serde_json::json!(true),
@@ -210,10 +213,19 @@ fn a_label_and_a_variable_name_their_own_records() {
 
     // A local of the function at the entry is a different thing from the
     // function: it keeps its own record beside it.
-    let (ok, stdout, stderr) =
-        project(&["var", "--file", &file.text(), "0x1149", "local_10", "envelope"]);
+    let (ok, stdout, stderr) = project(&[
+        "var",
+        "--file",
+        &file.text(),
+        "0x1149",
+        "local_10",
+        "envelope",
+    ]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("variable 0x1149::local_10 now name envelope"), "{stdout}");
+    assert!(
+        stdout.contains("variable 0x1149::local_10 now name envelope"),
+        "{stdout}"
+    );
 
     // A label at the same address shares the function's record: the entry
     // label is the function's name.
@@ -222,7 +234,11 @@ fn a_label_and_a_variable_name_their_own_records() {
 
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
-    assert_eq!(annotations.len(), 2, "one address record, one variable: {report}");
+    assert_eq!(
+        annotations.len(),
+        2,
+        "one address record, one variable: {report}"
+    );
     let address_record = annotations
         .iter()
         .find(|a| a["variable"].is_null())
@@ -248,14 +264,20 @@ fn a_register_names_its_own_record() {
 
     // A register of the function at the entry is a third thing at the
     // address: its own record, keyed on the register's name.
-    let (ok, stdout, stderr) =
-        project(&["reg", "--file", &file.text(), "0x1149", "rax", "result"]);
+    let (ok, stdout, stderr) = project(&["reg", "--file", &file.text(), "0x1149", "rax", "result"]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("register 0x1149::rax now name result"), "{stdout}");
+    assert!(
+        stdout.contains("register 0x1149::rax now name result"),
+        "{stdout}"
+    );
 
     let report = show_json(&file);
     let annotations = report["annotations"].as_array().expect("the annotations");
-    assert_eq!(annotations.len(), 2, "one address record, one register: {report}");
+    assert_eq!(
+        annotations.len(),
+        2,
+        "one address record, one register: {report}"
+    );
     let address_record = annotations
         .iter()
         .find(|a| a["variable"].is_null() && a["register"].is_null())
@@ -580,7 +602,10 @@ fn a_union_field_is_recorded_and_none_clears_it() {
     );
 
     let report = show_json(&file);
-    assert_eq!(report["annotations"][0]["union_field"], serde_json::json!("f"));
+    assert_eq!(
+        report["annotations"][0]["union_field"],
+        serde_json::json!("f")
+    );
 
     let (ok, stdout, stderr) = project(&["union", "--file", &file.text(), "0x1161", "none"]);
     assert!(ok, "{stderr}");
@@ -1756,12 +1781,26 @@ fn a_site_override_is_recorded_and_told_to_the_image() {
     // A word at the compare before the branch is not the branch's.
     let (ok, _, stderr) = project_with(
         "switch.elf",
-        &["override", "--file", &file.text(), "0x401003", "invert", "clear"],
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401003",
+            "invert",
+            "clear",
+        ],
     );
     assert!(ok, "{stderr}");
     let (ok, _, stderr) = project_with(
         "switch.elf",
-        &["override", "--file", &file.text(), "0x401000", "guard", "off"],
+        &[
+            "override",
+            "--file",
+            &file.text(),
+            "0x401000",
+            "guard",
+            "off",
+        ],
     );
     assert!(ok, "{stderr}");
     let (ok, text) = classify(&file, "pseudocode");
@@ -1883,16 +1922,27 @@ fn a_fold_off_word_keeps_the_comparison_a_constant_condition_folded_from() {
         &["override", "--file", &file.text(), "0x10a1", "fold", "off"],
     );
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("address 0x10a1 now override fold off"), "{stdout}");
+    assert!(
+        stdout.contains("address 0x10a1 now override fold off"),
+        "{stdout}"
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_ag"))
         .arg("image")
         .arg(fixture("sample.elf"))
-        .args(["pseudocode", "deregister_tm_clones", "--project", &file.text()])
+        .args([
+            "pseudocode",
+            "deregister_tm_clones",
+            "--project",
+            &file.text(),
+        ])
         .output()
         .expect("the ag binary runs");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("if (&completed.0 != &completed.0) {"), "{text}");
+    assert!(
+        text.contains("if (&completed.0 != &completed.0) {"),
+        "{text}"
+    );
     assert!(!text.contains("if (0) {"), "{text}");
 }
 
@@ -1901,7 +1951,12 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     let file = TempFile::new("stores");
     let deregister = |file: &TempFile, json: bool| -> String {
         let path = file.text();
-        let mut args = vec!["pseudocode", "deregister_tm_clones", "--project", path.as_str()];
+        let mut args = vec![
+            "pseudocode",
+            "deregister_tm_clones",
+            "--project",
+            path.as_str(),
+        ];
         if json {
             args.push("--json");
         }
@@ -1924,8 +1979,7 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     // the JSON says so line by line while the text keeps them.
     let (ok, _, stderr) = project(&["rename", "--file", &file.text(), "0x1090", "dereg"]);
     assert!(ok, "{stderr}");
-    let report: serde_json::Value =
-        serde_json::from_str(&deregister(&file, true)).expect("JSON");
+    let report: serde_json::Value = serde_json::from_str(&deregister(&file, true)).expect("JSON");
     let lines = report["lines"].as_array().expect("the lines");
     // By the line's exact text: the indentation tells the final `return`
     // from the one inside the dead branch.
@@ -1938,20 +1992,17 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
             .unwrap()
     };
     assert!(dead("  rax = &completed.0;"), "{report}");
-    assert!(dead("  if (0) { // constant: &completed.0 != &completed.0"), "{report}");
+    assert!(
+        dead("  if (0) { // constant: &completed.0 != &completed.0"),
+        "{report}"
+    );
     assert!(dead("      return;"), "{report}");
     assert!(!dead("  return;"), "{report}");
     assert!(!dead("  void *rax;"), "{report}");
 
     // The analyst's word on `rax`: its dead store goes, the rest stays.
-    let (ok, stdout, stderr) = project(&[
-        "stores",
-        "--file",
-        &file.text(),
-        "0x1090",
-        "rax",
-        "drop",
-    ]);
+    let (ok, stdout, stderr) =
+        project(&["stores", "--file", &file.text(), "0x1090", "rax", "drop"]);
     assert!(ok, "{stderr}");
     assert!(
         stdout.contains("variable 0x1090::rax now dead stores dropped"),
@@ -1960,7 +2011,10 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     let text = deregister(&file, false);
     assert!(!text.contains("rax = &completed.0;"), "{text}");
     assert!(text.contains("if (0) {"), "{text}");
-    assert!(text.contains("rax = _ITM_deregisterTMCloneTable;"), "a read store stays: {text}");
+    assert!(
+        text.contains("rax = _ITM_deregisterTMCloneTable;"),
+        "a read store stays: {text}"
+    );
     let report = show_json(&file);
     let variable = report["annotations"]
         .as_array()
@@ -1971,27 +2025,14 @@ fn a_variables_dead_stores_are_marked_and_dropped_on_the_analysts_word() {
     assert_eq!(variable["drop_stores"], serde_json::json!(true));
 
     // `keep` puts the store back and takes the record off.
-    let (ok, stdout, stderr) = project(&[
-        "stores",
-        "--file",
-        &file.text(),
-        "0x1090",
-        "rax",
-        "keep",
-    ]);
+    let (ok, stdout, stderr) =
+        project(&["stores", "--file", &file.text(), "0x1090", "rax", "keep"]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains("variable 0x1090::rax cleared"), "{stdout}");
     let text = deregister(&file, false);
     assert!(text.contains("rax = &completed.0;"), "{text}");
 
-    let (ok, _, stderr) = project(&[
-        "stores",
-        "--file",
-        &file.text(),
-        "0x1090",
-        "rax",
-        "maybe",
-    ]);
+    let (ok, _, stderr) = project(&["stores", "--file", &file.text(), "0x1090", "rax", "maybe"]);
     assert!(!ok);
     assert!(stderr.contains("drop or keep"), "{stderr}");
 }
@@ -3357,4 +3398,204 @@ fn a_structure_is_made_from_a_pointers_accesses_updated_and_taken_back() {
     assert!(ok);
     assert!(body.contains("void *v1;"), "{body}");
     assert!(!body.contains("field_0"), "{body}");
+}
+
+#[test]
+fn type_archives_are_created_pushed_pulled_and_resolved_by_status() {
+    let project_file = TempFile::new("archive-project");
+    let archive_file = TempFile::new("archive-shared");
+    let p = project_file.text();
+    let a = archive_file.text();
+    let target = "structs.elf";
+
+    // Create an archive seeded from a project with two types.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &p,
+            "add",
+            "struct point { int x, y; }; struct box { int w; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&["create", &a, "--from", &p]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("2 types"), "{stdout}");
+    // A second create at the same path is refused.
+    let (ok, _, stderr) = archive_with(&["create", &a]);
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    // Status: both in-sync; show lists them; JSON names the status.
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &p, &a]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("struct point") && stdout.contains("in-sync"),
+        "{stdout}"
+    );
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &p, &a, "--json"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("\"status\": \"in-sync\""), "{stdout}");
+    let (ok, stdout, stderr) = archive_with(&["show", &a]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point { int x, y; };"), "{stdout}");
+
+    // A new project type is project-only until pushed.
+    let (ok, _, stderr) = project_with(
+        target,
+        &["types", "--file", &p, "add", "struct local_ { char c; };"],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &p, &a]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("struct local_") && stdout.contains("project-only"),
+        "{stdout}"
+    );
+    let (ok, stdout, stderr) = archive_with(&["push", "--project", &p, &a]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("pushed 1 type"), "{stdout}");
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &p, &a, "--json"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("\"status\": \"in-sync\""), "{stdout}");
+
+    // Pull into a fresh project: the archive's types land there.
+    let other = TempFile::new("archive-other");
+    let q = other.text();
+    let (ok, stdout, stderr) = archive_with(&["pull", "--project", &q, &a]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("pulled 3 types"), "{stdout}");
+    let (ok, stdout, stderr) = project_with(target, &["types", "--file", &q, "show", "point"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("int x"), "{stdout}");
+
+    // A conflict: the second project redefines a name the archive holds.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &q,
+            "replace",
+            "struct point",
+            "struct point { long x, y; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &q, &a]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("conflict"), "{stdout}");
+    // Pull without a choice fails with the sides kept.
+    let (ok, _, stderr) = archive_with(&["pull", "--project", &q, &a]);
+    assert!(!ok);
+    assert!(stderr.contains("conflict on struct point"), "{stderr}");
+    let (ok, stdout, stderr) = project_with(target, &["types", "--file", &q, "show", "point"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("long x"), "{stdout}");
+    // Pull --keep archive takes the archive's C into the project.
+    let (ok, stdout, stderr) = archive_with(&["pull", "--project", &q, &a, "--keep", "archive"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("pulled 1 type"), "{stdout}");
+    let (ok, stdout, stderr) = project_with(target, &["types", "--file", &q, "show", "point"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("int x"), "{stdout}");
+
+    // Resolve settles one conflict by changing one side alone.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &q,
+            "replace",
+            "struct point",
+            "struct point { long x, y, z; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&[
+        "resolve",
+        "--project",
+        &q,
+        &a,
+        "struct point",
+        "--keep",
+        "project",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("project keeps"), "{stdout}");
+    let (ok, stdout, stderr) = archive_with(&["show", &a, "--json"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("long x, y, z"), "{stdout}");
+    // In-sync is no conflict: resolve is refused.
+    let (ok, _, stderr) = archive_with(&[
+        "resolve",
+        "--project",
+        &q,
+        &a,
+        "struct box",
+        "--keep",
+        "project",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("not a conflict"), "{stderr}");
+
+    // Push --keep archive keeps the archive's side where they conflict.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &q,
+            "replace",
+            "struct box",
+            "struct box { long w; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&["push", "--project", &q, &a, "--keep", "archive"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("in-sync"), "{stdout}");
+    let read = std::fs::read_to_string(&a).expect("the archive is written");
+    assert!(read.contains("int w"), "{read}");
+    // And --keep project takes the project's.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &q,
+            "replace",
+            "struct box",
+            "struct box { long w; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = archive_with(&["push", "--project", &q, &a, "--keep", "project"]);
+    assert!(ok, "{stderr}");
+    let read = std::fs::read_to_string(&a).expect("the archive is written");
+    assert!(read.contains("long w"), "{read}");
+    // A bad --keep word is refused.
+    let (ok, _, stderr) = archive_with(&["pull", "--project", &q, &a, "--keep", "theirs"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("--keep takes project or archive"),
+        "{stderr}"
+    );
+}
+
+/// Run `ag archive <args>`.
+fn archive_with(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("archive")
+        .args(args)
+        .output()
+        .expect("the ag binary runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
