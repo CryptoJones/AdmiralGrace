@@ -41,9 +41,15 @@ carries no target of its own: one archive serves every project.
 - `ag archive push --project PROJECT ARCHIVE [--keep project|archive] [--json]`
   — the project's types into the archive: every name the project holds
   goes in; a name in-sync is left, one the archive alone holds untouched.
+  An archive not there yet is made on the first push, and the push says
+  so on stderr.
 - `ag archive pull --project PROJECT ARCHIVE [--keep project|archive] [--json]`
   — the archive's types into the project, the same way round. A project
-  file not there yet is made, with the archive's types in it.
+  file not there yet is made, with the archive's types in it. The
+  archive itself must exist: a pull from a missing path is refused, not
+  read as empty. The same goes for `show`, `status`, and `resolve` — a
+  missing archive is an error, so a mistyped path is never read as an
+  empty, divergent shared archive.
 - `ag archive status --project PROJECT ARCHIVE [--json]` — where every
   name stands between the two sides, in name order: `in-sync` (both hold
   the name with the same `c`), `project-only`, `archive-only`, `conflict`

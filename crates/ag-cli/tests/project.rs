@@ -3502,6 +3502,33 @@ fn type_archives_are_created_pushed_pulled_and_resolved_by_status() {
     assert!(ok, "{stderr}");
     assert!(stdout.contains("int x"), "{stdout}");
 
+    // Pull --keep project keeps the project's C and the archive's too:
+    // nothing is pulled where they conflict.
+    let (ok, _, stderr) = project_with(
+        target,
+        &[
+            "types",
+            "--file",
+            &q,
+            "replace",
+            "struct box",
+            "struct box { short w; };",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = archive_with(&["pull", "--project", &q, &a, "--keep", "project"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("pulled 0 types"), "{stdout}");
+    let read = std::fs::read_to_string(&a).expect("the archive is written");
+    assert!(read.contains("int w"), "{read}");
+    // The conflict is still there, in both files' favour neither side.
+    let (ok, stdout, stderr) = archive_with(&["status", "--project", &q, &a]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("conflict"), "{stdout}");
+    let (ok, stdout, stderr) = project_with(target, &["types", "--file", &q, "show", "box"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("short w"), "{stdout}");
+
     // Resolve settles one conflict by changing one side alone.
     let (ok, _, stderr) = project_with(
         target,
@@ -3525,17 +3552,18 @@ fn type_archives_are_created_pushed_pulled_and_resolved_by_status() {
         "project",
     ]);
     assert!(ok, "{stderr}");
-    assert!(stdout.contains("project keeps"), "{stdout}");
+    assert!(stdout.contains("kept project"), "{stdout}");
     let (ok, stdout, stderr) = archive_with(&["show", &a, "--json"]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains("long x, y, z"), "{stdout}");
-    // In-sync is no conflict: resolve is refused.
+    // In-sync is no conflict: resolve is refused. `struct point` is
+    // in-sync again after the resolve above.
     let (ok, _, stderr) = archive_with(&[
         "resolve",
         "--project",
         &q,
         &a,
-        "struct box",
+        "struct point",
         "--keep",
         "project",
     ]);

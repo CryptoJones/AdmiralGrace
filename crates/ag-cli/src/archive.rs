@@ -146,13 +146,22 @@ pub fn run(cmd: ArchiveCmd) -> Result<i32> {
     }
 }
 
-/// Read the archive at `archive`, written when the path does not exist
-/// yet: a missing file is an empty archive, made on first push.
+/// Read the archive at `archive`; a missing file is an error, so a
+/// mistyped path is not read as an empty, divergent archive.
 fn open_archive(archive: &Path) -> Result<TypeArchive> {
-    if archive.exists() {
-        TypeArchive::load(archive)
-    } else {
-        Ok(TypeArchive::new())
+    TypeArchive::load(archive)
+}
+
+/// Read the archive at `archive`, or an empty one when the path is not
+/// there yet: push creates a missing archive on first write, and says so.
+fn open_archive_or_new(archive: &Path) -> Result<TypeArchive> {
+    match TypeArchive::load(archive) {
+        Ok(held) => Ok(held),
+        Err(_) if !archive.exists() => {
+            eprintln!("note: {} does not exist yet; a new archive is made there", archive.display());
+            Ok(TypeArchive::new())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -186,7 +195,13 @@ fn create(archive: &Path, from: Option<&Path>) -> Result<i32> {
     );
     let mut created = TypeArchive::new();
     if let Some(from) = from {
-        let project = open_project_file(from)?;
+        anyhow::ensure!(
+            from.exists(),
+            "the project file {} does not exist: --from names a file there is",
+            from.display()
+        );
+        let project = ProjectFile::load(from)
+            .with_context(|| format!("reading the project file {}", from.display()))?;
         for definition in &project.types {
             created.set(ArchiveType::from(definition.clone()));
         }
@@ -214,7 +229,7 @@ fn show(archive: &Path, json: bool) -> Result<i32> {
         println!("{}: no types in the archive", archive.display());
     }
     for entry in &held.types {
-        println!("{}\n", entry.c);
+        println!("{}\n{}\n", entry.name, entry.c);
     }
     Ok(0)
 }
@@ -230,7 +245,11 @@ fn sync(
 ) -> Result<i32> {
     let choice = keep_choice(&keep)?;
     let mut project = open_project_file(project_file)?;
-    let mut archive = open_archive(archive_file)?;
+    let mut archive = if pushing {
+        open_archive_or_new(archive_file)?
+    } else {
+        open_archive(archive_file)?
+    };
     let mut rows = archive::status(&project.types, &archive);
     let conflicts: Vec<String> = rows
         .iter()
@@ -427,16 +446,7 @@ fn resolve(
         println!("{}", serde_json::to_string_pretty(&after)?);
         return Ok(0);
     }
-    println!(
-        "{}: {} keeps {}",
-        name.trim(),
-        choice.label(),
-        if choice == ConflictChoice::KeepProject {
-            project_file.display()
-        } else {
-            archive_file.display()
-        }
-    );
+    println!("{}: kept {}", name.trim(), choice.label());
     Ok(0)
 }
 

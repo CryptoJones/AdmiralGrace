@@ -77,9 +77,8 @@ impl TypeArchive {
         }
     }
 
-    /// Read the archive at `path`; a missing file reads as an empty
-    /// archive, as [`crate::project::ProjectFile::load`] reads a path a
-    /// caller checks ahead of time.
+    /// Read the archive at `path`; a missing file is an error — callers
+    /// that create on first write check for it themselves.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading the type archive {}", path.display()))?;
@@ -111,6 +110,14 @@ impl TypeArchive {
             );
         }
         let archive: TypeArchive = serde_json::from_str(raw).context("parsing the type archive")?;
+        // Two entries of one name would collapse to the last in status();
+        // a hand-edited file is refused rather than misread.
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in &archive.types {
+            if !seen.insert(entry.name.clone()) {
+                bail!("the archive holds {} twice", entry.name);
+            }
+        }
         Ok(archive)
     }
 
