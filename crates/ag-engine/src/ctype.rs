@@ -39,7 +39,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::types::{Composite, Definition, Enumeration, Member, Prim, Type, TypeStore};
+use crate::types::{Composite, Definition, Enumeration, Member, Prim, Type, TypeAttrs, TypeStore};
 
 /// Why C text was not read: where, and what was wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,6 +671,7 @@ fn char_literal(text: &str) -> Option<(u64, usize)> {
 struct Specs {
     typedef: bool,
     base: Type,
+    func_attrs: TypeAttrs,
 }
 
 /// The attributes read on a structure.
@@ -680,11 +681,26 @@ struct Attrs {
     aligned: Option<u64>,
 }
 
+fn is_calling_convention(word: &str) -> Option<&'static str> {
+    match word {
+        "__cdecl" | "cdecl" => Some("__cdecl"),
+        "__stdcall" | "stdcall" => Some("__stdcall"),
+        "__fastcall" | "fastcall" => Some("__fastcall"),
+        "__thiscall" | "thiscall" => Some("__thiscall"),
+        "__vectorcall" | "vectorcall" => Some("__vectorcall"),
+        "__clrcall" | "clrcall" => Some("__clrcall"),
+        _ => None,
+    }
+}
+
+
+
 /// One step of a declarator, applied to the type inside out.
 enum Op {
     Pointer,
     Array(Option<u64>),
-    Function(Vec<Type>, bool),
+    Based(Box<Type>),
+    Function(Vec<Type>, bool, TypeAttrs),
 }
 
 struct Parser<'a> {
@@ -703,6 +719,8 @@ struct Parser<'a> {
     defining: Vec<String>,
     /// The enumerators of the enumeration being read, for its own values.
     local_constants: BTreeMap<String, i64>,
+    pending_align: Option<u64>,
+    pending_conv: Option<String>,
 }
 
 const QUALIFIERS: &[&str] = &[
@@ -759,6 +777,8 @@ impl<'a> Parser<'a> {
             declarations: Vec::new(),
             defining: Vec::new(),
             local_constants: BTreeMap::new(),
+            pending_align: None,
+            pending_conv: None,
         }
     }
 
@@ -919,8 +939,27 @@ impl<'a> Parser<'a> {
         if !self.is_punct(";") {
             loop {
                 let at = self.token().clone();
-                let (name, ops) = self.declarator(false)?;
+                let (name, mut ops) = self.declarator(false)?;
                 self.attributes_skipped("a declarator")?;
+                // A convention or noreturn/pure spelled in the specifiers
+                // (MSVC): `__stdcall int (*f)(int)` is a pointer to a
+                // __stdcall function. It belongs on the function type;
+                // an attr spelled after the parameters (`__cdecl`) wins.
+                for op in &mut ops {
+                    if let Op::Function(_, _, attrs) = op {
+                        let mut merged = specs.func_attrs.clone();
+                        if attrs.calling_convention.is_some() {
+                            merged.calling_convention = attrs.calling_convention.clone();
+                        }
+                        if attrs.noreturn {
+                            merged.noreturn = true;
+                        }
+                        if attrs.pure {
+                            merged.pure = true;
+                        }
+                        *attrs = merged;
+                    }
+                }
                 let Some(name) = name else {
                     return Err(self.error_here("the declaration names nothing".to_string()));
                 };
@@ -959,6 +998,11 @@ impl<'a> Parser<'a> {
         }
         let end_token = self.token().clone();
         self.expect(";", "after the declaration")?;
+        // A pending align or convention that no composite or function type of
+        // this declaration consumed belongs to no later one: `__declspec(align(16))
+        // int x; struct s { char c; };` must not raise s's alignment.
+        self.pending_align = None;
+        self.pending_conv = None;
         if self.defining.is_empty() {
             return Ok(());
         }
@@ -985,21 +1029,27 @@ impl<'a> Parser<'a> {
         let mut words: Vec<String> = Vec::new();
         let mut base: Option<Type> = None;
         let mut any = false;
+        let mut func_attrs = TypeAttrs::default();
         while let Tok::Ident(word) = self.peek().clone() {
             let word = word.as_str();
             if word == "typedef" {
                 typedef = true;
             } else if STORAGE.contains(&word) {
+                if word == "_Noreturn" {
+                    func_attrs.noreturn = true;
+                }
             } else if QUALIFIERS.contains(&word) {
                 self.note_qualifier();
+            } else if let Some(conv) = is_calling_convention(word) {
+                func_attrs.calling_convention = Some(conv.to_string());
             } else if word == "__attribute__" || word == "__attribute" {
-                self.attributes_skipped("a declaration")?;
+                // Declaration-level: the calling convention and noreturn/pure
+                // may appear either side of the return type; keep them.
+                self.function_attrs(&mut func_attrs)?;
                 any = true;
                 continue;
             } else if word == "__declspec" {
-                self.advance();
-                self.balanced_skipped()?;
-                self.note_here("__declspec is skipped".to_string());
+                self.function_attrs(&mut func_attrs)?;
                 any = true;
                 continue;
             } else if BASIC.contains(&word) {
@@ -1055,7 +1105,7 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error_here(format!("{} is not a type", words.join(" "))))?,
             ),
         };
-        Ok(Some(Specs { typedef, base }))
+        Ok(Some(Specs { typedef, base, func_attrs }))
     }
 
     fn note_qualifier(&mut self) {
@@ -1090,6 +1140,126 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    /// Function attributes at the position, read into `out`: the calling
+    /// convention, `noreturn`/`pure`, from both `__attribute__((…))` and
+    /// `__declspec(…)`.
+    fn function_attrs(&mut self, out: &mut TypeAttrs) -> Result<(), CError> {
+        loop {
+            if self.is_word("__attribute__") || self.is_word("__attribute") {
+                self.advance();
+                self.expect("(", "after __attribute__")?;
+                self.expect("(", "after __attribute__(")?;
+                loop {
+                    if self.eat(")") {
+                        break;
+                    }
+                    let Tok::Ident(word) = self.peek().clone() else {
+                        return Err(self.error_here(format!("expected an attribute, not {}", self.shown())));
+                    };
+                    self.advance();
+                    let bare = word.trim_matches('_');
+                    if let Some(conv) = is_calling_convention(&word).or_else(|| is_calling_convention(bare)) {
+                        out.calling_convention = Some(conv.to_string());
+                        self.balanced_skipped()?;
+                    } else {
+                        match bare {
+                            "noreturn" => {
+                                out.noreturn = true;
+                                self.balanced_skipped()?;
+                            }
+                            "pure" => {
+                                out.pure = true;
+                                self.balanced_skipped()?;
+                            }
+                            "always_inline" => { /* an enablement, not a property: consumed */ self.balanced_skipped()?; }
+                            _ => {
+                                self.balanced_skipped()?;
+                                self.note_here(format!("the attribute {word} is skipped"));
+                            }
+                        }
+                    }
+                    if !self.eat(",") {
+                        self.expect(")", "after the attributes")?;
+                        break;
+                    }
+                }
+                self.expect(")", "after __attribute__((…))")?;
+            } else if self.is_word("__declspec") {
+                self.advance();
+                self.declspec_read(out)?;
+            } else if self.is_word("_Noreturn") {
+                out.noreturn = true;
+                self.advance();
+            } else if let Tok::Ident(w) = self.peek().clone() {
+                let Some(conv) = is_calling_convention(&w) else {
+                    break;
+                };
+                out.calling_convention = Some(conv.to_string());
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn declspec_read(&mut self, out: &mut TypeAttrs) -> Result<(), CError> {
+        if !self.eat("(") {
+            return Ok(());
+        }
+        loop {
+            if self.eat(")") {
+                break;
+            }
+            if let Tok::Ident(word) = self.peek().clone() {
+                let bare = word.trim_matches('_');
+                self.advance();
+                if let Some(conv) = is_calling_convention(&word).or_else(|| is_calling_convention(bare)) {
+                    out.calling_convention = Some(conv.to_string());
+                    self.balanced_skipped()?;
+                } else {
+                    match bare {
+                        "noreturn" => { out.noreturn = true; self.balanced_skipped()?; }
+                        "pure" => { out.pure = true; self.balanced_skipped()?; }
+                        "noinline" => { /* consumed, no property we keep */ self.balanced_skipped()?; }
+                        "align" => {
+                            let n = if self.eat("(") {
+                                let n = self.constant()?;
+                                self.expect(")", "after align")?;
+                                if n > 0 && (n as u64).is_power_of_two() {
+                                    Some(n as u64)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            match n {
+                                Some(n) => {
+                                    self.pending_align = Some(n);
+                                }
+                                None => {
+                                    self.note_here("the declspec align is skipped".to_string());
+                                }
+                            }
+                        }
+                        _ => {
+                            self.balanced_skipped()?;
+                            self.note_here(format!("the attribute {word} is skipped"));
+                        }
+                    }
+                }
+            } else {
+                return Err(self.error_here(format!("expected a declspec attribute, not {}", self.shown())));
+            }
+            if !self.eat(",") {
+                self.expect(")", "after __declspec")?;
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// `__attribute__((…))` lists at the position, read for `packed` and
@@ -1141,15 +1311,25 @@ impl<'a> Parser<'a> {
 
     /// Attributes where the parser keeps none, noted.
     fn attributes_skipped(&mut self, on: &str) -> Result<(), CError> {
+        if self.is_word("__declspec") {
+            let mut discarded = TypeAttrs::default();
+            let token = self.token().clone();
+            self.declspec_read(&mut discarded)?;
+            self.notes.push(format!(
+                "{}:{}: an attribute on {on} is skipped: __declspec is read on a declaration",
+                token.line, token.column
+            ));
+            return Ok(());
+        }
         if !(self.is_word("__attribute__") || self.is_word("__attribute")) {
             return Ok(());
         }
-        let mut attrs = Attrs::default();
+        let mut discarded = TypeAttrs::default();
         let token = self.token().clone();
-        self.attributes(&mut attrs)?;
-        if attrs.packed || attrs.aligned.is_some() {
+        self.function_attrs(&mut discarded)?;
+        if !discarded.is_empty() {
             self.notes.push(format!(
-                "{}:{}: an attribute on {on} is skipped: packed and aligned are read on a structure",
+                "{}:{}: an attribute on {on} is skipped: function attributes are read on a function",
                 token.line, token.column
             ));
         }
@@ -1161,6 +1341,41 @@ impl<'a> Parser<'a> {
     fn composite_specifier(&mut self, kind: &str) -> Result<Type, CError> {
         let mut attrs = Attrs::default();
         self.attributes(&mut attrs)?;
+        if let Some(n) = self.pending_align.take() {
+            attrs.aligned = Some(n);
+        }
+        // `__declspec(align(N))` on a struct raises its alignment.
+        if self.is_word("__declspec") {
+            let at = self.token().clone();
+            self.advance();
+            if self.eat("(") {
+                loop {
+                    if self.eat(")") { break; }
+                    if let Tok::Ident(word) = self.peek().clone() {
+                        self.advance();
+                        if word == "align" && self.eat("(") {
+                            let n = self.constant()?;
+                            if n > 0 && (n as u64).is_power_of_two() {
+                                attrs.aligned = Some(n as u64);
+                            }
+                            self.expect(")", "after align")?;
+                        } else {
+                            self.balanced_skipped()?;
+                            self.notes.push(format!(
+                                "{}:{}: the attribute {word} is skipped",
+                                at.line, at.column
+                            ));
+                        }
+                    } else {
+                        return Err(self.error_here(format!("expected a declspec attribute, not {}", self.shown())));
+                    }
+                    if !self.eat(",") {
+                        self.expect(")", "after __declspec")?;
+                        break;
+                    }
+                }
+            }
+        }
         let tag = match self.peek().clone() {
             Tok::Ident(word) if !word.starts_with('#') => {
                 self.advance();
@@ -1168,6 +1383,30 @@ impl<'a> Parser<'a> {
             }
             _ => None,
         };
+        let mut base_classes: Vec<String> = Vec::new();
+        if self.eat(":") {
+            loop {
+                // Access specifiers and `virtual` are skipped where the
+                // base list is read; the base itself is a `struct base`.
+                while matches!(self.peek(), Tok::Ident(w) if w == "public" || w == "private" || w == "protected" || w == "virtual") {
+                    self.advance();
+                }
+                if self.is_word("struct") {
+                    self.advance();
+                }
+                let base = match self.peek().clone() {
+                    Tok::Ident(word) if !word.starts_with('#') => {
+                        self.advance();
+                        word
+                    }
+                    _ => return Err(self.error_here(format!("expected a base class, not {}", self.shown()))),
+                };
+                base_classes.push(format!("struct {base}"));
+                if !self.eat(",") {
+                    break;
+                }
+            }
+        }
         if !self.is_punct("{") {
             let Some(tag) = tag else {
                 return Err(self.error_here(format!(
@@ -1260,6 +1499,7 @@ impl<'a> Parser<'a> {
             pack: self.pack,
             packed: attrs.packed,
             aligned: attrs.aligned,
+            base_classes: base_classes.clone(),
         };
         let definition = if kind == "union" {
             Definition::Union(composite)
@@ -1315,7 +1555,22 @@ impl<'a> Parser<'a> {
                     bits: Some(width),
                 });
             } else {
-                let (name, ops) = self.declarator(false)?;
+                let (name, mut ops) = self.declarator(false)?;
+                for op in &mut ops {
+                    if let Op::Function(_, _, attrs) = op {
+                        let mut merged = specs.func_attrs.clone();
+                        if attrs.calling_convention.is_some() {
+                            merged.calling_convention = attrs.calling_convention.clone();
+                        }
+                        if attrs.noreturn {
+                            merged.noreturn = true;
+                        }
+                        if attrs.pure {
+                            merged.pure = true;
+                        }
+                        *attrs = merged;
+                    }
+                }
                 let Some(name) = name else {
                     return Err(CError {
                         line: here.line,
@@ -1508,19 +1763,71 @@ impl<'a> Parser<'a> {
     /// type from the specifiers'. With `abstract`, a name is not needed.
     fn declarator(&mut self, abstract_ok: bool) -> Result<(Option<String>, Vec<Op>), CError> {
         let mut stars = 0usize;
+        let mut based: Option<Type> = None;
         loop {
+            if self.is_word("__based") {
+                self.advance();
+                self.expect("(", "after __based")?;
+                let at = self.token().clone();
+                let Some(specs) = self.specifiers()? else {
+                    // A bare name, the base variable (`__based(base)`): keep
+                    // it as a named type; its size does not affect the
+                    // based pointer, which is pointer-sized.
+                    match self.peek().clone() {
+                        Tok::Ident(word) if !word.starts_with('#') => {
+                            self.advance();
+                            let base = Type::Named(word);
+                            based = Some(base);
+                            self.expect(")", "after __based")?;
+                            if self.eat("*") {
+                                // consumed: no extra Pointer op
+                            }
+                            stars += 1;
+                            continue;
+                        }
+                        _ => return Err(self.error_here(format!("expected a based type, not {}", self.shown()))),
+                    }
+                };
+                let (_, ops) = self.declarator(true)?;
+                based = Some(self.apply(specs.base, ops, &at)?);
+                self.expect(")", "after __based")?;
+                // The star after `__based(...)` is the based pointer itself.
+                if self.eat("*") {
+                    // consumed: no extra Pointer op
+                }
+                stars += 1;
+                continue;
+            }
             if self.eat("*") {
                 stars += 1;
                 continue;
             }
-            if let Tok::Ident(word) = self.peek() {
-                if QUALIFIERS.contains(&word.as_str()) {
+            if let Tok::Ident(word) = self.peek().clone() {
+                let word = word.as_str();
+                if let Some(conv) = is_calling_convention(word) {
+                    self.pending_conv = Some(conv.to_string());
+                    self.advance();
+                    continue;
+                }
+                if word == "__declspec" {
+                    let mut discarded = TypeAttrs::default();
+                    self.function_attrs(&mut discarded)?;
+                    if discarded.calling_convention.is_some() {
+                        self.pending_conv = discarded.calling_convention.clone();
+                    }
+                    continue;
+                }
+                if QUALIFIERS.contains(&word) {
                     self.note_qualifier();
                     self.advance();
                     continue;
                 }
                 if word == "__attribute__" {
-                    self.attributes_skipped("a pointer")?;
+                    let mut inner = TypeAttrs::default();
+                    self.function_attrs(&mut inner)?;
+                    if inner.calling_convention.is_some() {
+                        self.pending_conv = inner.calling_convention.clone();
+                    }
                     continue;
                 }
             }
@@ -1562,12 +1869,34 @@ impl<'a> Parser<'a> {
             } else if self.is_punct("(") {
                 self.advance();
                 let (params, variadic) = self.parameters()?;
-                suffixes.push(Op::Function(params, variadic));
+                let mut attrs = TypeAttrs::default();
+                self.function_attrs(&mut attrs)?;
+                suffixes.push(Op::Function(params, variadic, attrs));
             } else {
                 break;
             }
         }
-        let mut ops: Vec<Op> = (0..stars).map(|_| Op::Pointer).collect();
+        if let Some(conv) = self.pending_conv.clone() {
+            let mut applied = false;
+            for op in suffixes.iter_mut().chain(inner.iter_mut()) {
+                if let Op::Function(_, _, attrs) = op {
+                    attrs.calling_convention = Some(conv.clone());
+                    applied = true;
+                }
+            }
+            if applied {
+                self.pending_conv = None;
+            }
+        }
+        let mut ops: Vec<Op> = Vec::new();
+        for n in 0..stars {
+            if n == 0 && based.is_some() {
+                let base = based.take().unwrap();
+                ops.push(Op::Based(Box::new(base)));
+            } else {
+                ops.push(Op::Pointer);
+            }
+        }
         ops.extend(suffixes.into_iter().rev());
         ops.extend(inner);
         if name.is_none() && !abstract_ok {
@@ -1591,7 +1920,17 @@ impl<'a> Parser<'a> {
     fn nested_follows(&self) -> bool {
         match self.peek_at(1) {
             Tok::Punct("*") | Tok::Punct("(") | Tok::Punct("[") => true,
-            Tok::Ident(word) => !self.names_type(word) && !word.starts_with("__attribute"),
+            Tok::Ident(word) => {
+                // `(__stdcall *cb)` is a nested declarator, not a parameter
+                // list; the first token after the parenthesis is a calling
+                // convention when a `*` follows it.
+                is_calling_convention(word).is_some()
+                    && matches!(self.peek_at(2), Tok::Punct("*") | Tok::Punct("("))
+                    || (!self.names_type(word)
+                        && !word.starts_with("__attribute")
+                        && !word.starts_with("__declspec")
+                        && is_calling_convention(word).is_none())
+            }
             _ => false,
         }
     }
@@ -1619,7 +1958,22 @@ impl<'a> Parser<'a> {
             let Some(specs) = self.specifiers()? else {
                 return Err(self.error_here(format!("expected a parameter, not {}", self.shown())));
             };
-            let (_, ops) = self.declarator(true)?;
+            let (_, mut ops) = self.declarator(true)?;
+            for op in &mut ops {
+                if let Op::Function(_, _, attrs) = op {
+                    let mut merged = specs.func_attrs.clone();
+                    if attrs.calling_convention.is_some() {
+                        merged.calling_convention = attrs.calling_convention.clone();
+                    }
+                    if attrs.noreturn {
+                        merged.noreturn = true;
+                    }
+                    if attrs.pure {
+                        merged.pure = true;
+                    }
+                    *attrs = merged;
+                }
+            }
             let ty = self.apply(specs.base, ops, &at)?;
             // An array or a function parameter is a pointer.
             let ty = match ty {
@@ -1656,7 +2010,11 @@ impl<'a> Parser<'a> {
                     }
                     Type::Array(Box::new(ty), count)
                 }
-                Op::Function(params, variadic) => {
+                Op::Based(base) => Type::BasedPointer {
+                    base,
+                    pointee: Box::new(ty),
+                },
+                Op::Function(params, variadic, attrs) => {
                     if matches!(ty, Type::Function { .. } | Type::Array(..)) {
                         return Err(fail("a function returns no array or function".to_string()));
                     }
@@ -1664,6 +2022,7 @@ impl<'a> Parser<'a> {
                         ret: Box::new(ty),
                         params,
                         variadic,
+                        attrs,
                     }
                 }
             };
@@ -1684,13 +2043,28 @@ impl<'a> Parser<'a> {
                 message: "typedef names no type here".to_string(),
             });
         }
-        let (name, ops) = self.declarator(true)?;
+        let (name, mut ops) = self.declarator(true)?;
         if let Some(name) = name {
             return Err(CError {
                 line: at.line,
                 column: at.column,
                 message: format!("{name} is a name, not part of the type"),
             });
+        }
+        for op in &mut ops {
+            if let Op::Function(_, _, attrs) = op {
+                let mut merged = specs.func_attrs.clone();
+                if attrs.calling_convention.is_some() {
+                    merged.calling_convention = attrs.calling_convention.clone();
+                }
+                if attrs.noreturn {
+                    merged.noreturn = true;
+                }
+                if attrs.pure {
+                    merged.pure = true;
+                }
+                *attrs = merged;
+            }
         }
         self.apply(specs.base, ops, &at)
     }
@@ -2207,4 +2581,163 @@ mod tests {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["n_t", "struct n"]);
     }
+    #[test]
+    fn calling_conventions_noreturn_and_pure_are_read() {
+        let (store, _) = read(
+            "typedef void __stdcall (*cb_t)(int);\n\
+             typedef void __declspec(noreturn) (*die_t)(void);\n\
+             typedef int __attribute__((pure)) (*pure_t)(int);\n\
+             typedef void __fastcall __attribute__((noreturn)) (*fast_t)(int);\n\
+             _Noreturn typedef void (*no_t)(void);",
+        );
+        assert_eq!(spelled(&store, "cb_t"), "void (__stdcall *)(int)");
+        assert_eq!(spelled(&store, "die_t"), "void (*)(void) __attribute__((noreturn))");
+        assert_eq!(spelled(&store, "pure_t"), "int (*)(int) __attribute__((pure))");
+        assert_eq!(spelled(&store, "fast_t"), "void (__fastcall *)(int) __attribute__((noreturn))");
+        assert_eq!(spelled(&store, "no_t"), "void (*)(void) __attribute__((noreturn))");
+        // A convention on the typedef's return is kept, one after the params too.
+        let (store, _) = read("typedef __stdcall int (*cb_t)(int) __cdecl;");
+        assert_eq!(spelled(&store, "cb_t"), "int (__cdecl *)(int)");
+        let (store, _) = read("typedef int __attribute__((pure)) f_t(int);");
+        assert_eq!(spelled(&store, "f_t"), "int(int) __attribute__((pure))");
+    }
+
+    #[test]
+    fn based_pointers_are_read_and_laid_out() {
+        let (store, _) = read(
+            "struct seg { long *base; char __based(base) *bp; };",
+        );
+        assert_eq!(store.size_of(&Type::Named("struct seg".into())), Ok(16));
+        let (store, _) = read(
+            "struct seg { char __based(char*) *bp; int tail; };",
+        );
+        assert_eq!(store.size_of(&Type::Named("struct seg".into())), Ok(16));
+        // spelling keeps the base.
+        let (store, _) = read("typedef char __based(void*) *based_char;");
+        assert_eq!(spelled(&store, "based_char"), "char __based(void *)");
+    }
+
+    #[test]
+    fn base_classes_are_read_and_laid_out() {
+        let (store, _) = read(
+            "struct base { long x; long y; };\n\
+             struct derived : public base { long z; };",
+        );
+        assert_eq!(store.size_of(&Type::Named("struct derived".into())), Ok(24));
+        let layout = store.layout("struct derived").unwrap();
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[0].size, 16);
+        assert_eq!(layout.fields[1].offset, 16);
+        assert_eq!(
+            store.definition_text("struct derived", false).unwrap(),
+            "struct derived : struct base {\n    long x;\n    long y;\n    long z;\n};"
+        );
+        // multiple bases
+        let (store, _) = read(
+            "struct a { int x; };\nstruct b { int y; };\nstruct multi : a, b { int z; };",
+        );
+        assert_eq!(store.size_of(&Type::Named("struct multi".into())), Ok(12));
+        // packs still cap
+        let (store, _) = read(
+            "#pragma pack(push, 4)\nstruct packed_base { int x; };\n#pragma pack(pop)\nstruct d2 : struct packed_base { long y; };", 
+        );
+        assert_eq!(store.size_of(&Type::Named("struct d2".into())), Ok(16));
+    }
+
+    #[test]
+    fn convention_pointer_spelling_round_trips() {
+        // `void (__stdcall *d_t)(int)` is the canonical MSVC spelling and
+        // the one declaration_with emits; both must parse to the same type.
+        let (store, _) = read("typedef void (__stdcall *d_t)(int);");
+        assert_eq!(spelled(&store, "d_t"), "void (__stdcall *)(int)");
+        let text = store.definition_text("d_t", false).unwrap();
+        let (again, _) = {
+            let mut store2 = TypeStore::new(DataModel::LP64);
+            parse_into(&mut store2, &text).unwrap();
+            (store2, ())
+        };
+        assert_eq!(spelled(&again, "d_t"), "void (__stdcall *)(int)");
+        // trailing _Noreturn after the parameters parses
+        let (store, _) = read("typedef void (*f)(void) _Noreturn;");
+        assert_eq!(spelled(&store, "f"), "void (*)(void) __attribute__((noreturn))");
+    }
+
+    #[test]
+    fn declspec_align_before_the_keyword_is_kept() {
+        let (store, _) = read("__declspec(align(16)) struct s { long x; };");
+        assert_eq!(store.size_of(&Type::Named("struct s".into())), Ok(16));
+        assert_eq!(store.layout("struct s").unwrap().align, 16);
+    }
+
+    #[test]
+    fn layout_in_comments_uses_true_member_offsets_with_bases() {
+        let (store, _) = read("struct base { long x; long y; }; struct d : base { long z; long w; };");
+        let text = store.definition_text("struct d", true).unwrap();
+        assert!(text.contains("/* 0x10 */ long z;"), "{text}");
+        assert!(text.contains("/* 0x18 */ long w;"), "{text}");
+        // member_texts pairs each own member with its own layout
+        let (_, members) = store.member_texts("struct d").unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].1.offset, 16);
+        assert_eq!(members[1].1.offset, 24);
+        assert_eq!(members[0].1.name.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn unions_have_no_base_classes() {
+        let mut store = TypeStore::new(DataModel::LP64);
+        let err = parse_into(&mut store, "struct base { long x; }; union u : base { long y; };").unwrap_err();
+        assert!(err.to_string().contains("union has no base classes"), "{err}");
+    }
+
+    #[test]
+    fn base_members_are_found_by_name() {
+        let (store, _) = read("struct base { long x; long y; }; struct d : base { long z; };");
+        assert_eq!(store.member_type(&Type::Named("struct d".into()), "x"), Some(Type::Prim(Prim::Long)));
+        assert_eq!(store.member_names("struct d"), ["x", "y", "z"]);
+    }
+
+    #[test]
+    fn named_based_pointers_spell_and_round_trip() {
+        let (store, _) = read("typedef char __based(void*) *based_char;");
+        assert_eq!(spelled(&store, "based_char"), "char __based(void *)");
+        let text = store.definition_text("based_char", false).unwrap();
+        let (again, _) = {
+            let mut store2 = TypeStore::new(DataModel::LP64);
+            parse_into(&mut store2, &text).unwrap();
+            (store2, ())
+        };
+        assert_eq!(spelled(&again, "based_char"), "char __based(void *)");
+    }
+
+    #[test]
+    fn a_declspec_align_does_not_leak_to_the_next_declaration() {
+        // The align belongs to `x`, whose type is skipped; `struct s` must
+        // keep its own alignment, not inherit 16.
+        let (store, _) = read("__declspec(align(16)) int x;\nstruct s { char c; };");
+        assert_eq!(store.size_of(&Type::Named("struct s".into())), Ok(1));
+        assert_eq!(store.layout("struct s").unwrap().align, 1);
+    }
+
+    #[test]
+    fn a_declarator_convention_does_not_leak_to_the_next_typedef() {
+        // The __stdcall rides on the variable `p`, not on the next typedef's
+        // function-pointer type.
+        let (store, _) = read("void * __stdcall p;\ntypedef void (*cb)(int);");
+        assert_eq!(spelled(&store, "cb"), "void (*)(int)");
+    }
+
+    #[test]
+    fn a_named_function_typedef_with_a_convention_round_trips() {
+        let (store, _) = read("typedef __stdcall int f_t(int);");
+        let text = store.definition_text("f_t", false).unwrap();
+        assert_eq!(text, "typedef int __stdcall f_t(int);");
+        let (again, _) = {
+            let mut store2 = TypeStore::new(DataModel::LP64);
+            parse_into(&mut store2, &text).unwrap();
+            (store2, ())
+        };
+        assert_eq!(spelled(&again, "f_t"), "int __stdcall(int)");
+    }
+
 }

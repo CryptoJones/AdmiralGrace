@@ -315,6 +315,29 @@ impl Prim {
     }
 }
 
+/// The attributes a function type carries: the calling convention it uses,
+/// and whether it never returns (`noreturn`) or reads only the state its
+/// arguments reach (`pure`).  #373.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct TypeAttrs {
+    /// The calling convention, MSVC's `__cdecl` and friends, or `None` for
+    /// the default.
+    pub calling_convention: Option<String>,
+    /// `__attribute__((noreturn))`, `__declspec(noreturn)` or `_Noreturn`:
+    /// the function never returns.
+    pub noreturn: bool,
+    /// `__attribute__((pure))` or `__declspec(noinline)`-kin: the result
+    /// depends only on the arguments.
+    pub pure: bool,
+}
+
+impl TypeAttrs {
+    /// Whether any attribute is set.
+    pub fn is_empty(&self) -> bool {
+        self.calling_convention.is_none() && !self.noreturn && !self.pure
+    }
+}
+
 /// A C type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
@@ -324,12 +347,16 @@ pub enum Type {
     Pointer(Box<Type>),
     /// An array of the type, of a count when it says one: `int[4]`, `int[]`.
     Array(Box<Type>, Option<u64>),
+    /// A based pointer, MSVC's `__based(ptr)`: the pointee addressed by
+    /// `base` plus the stored offset. Laid out like the platform pointer.
+    BasedPointer { base: Box<Type>, pointee: Box<Type> },
     /// A function: its return type, its parameters' types, and whether it
     /// takes more after them, `...`.
     Function {
         ret: Box<Type>,
         params: Vec<Type>,
         variadic: bool,
+        attrs: TypeAttrs,
     },
     /// A type a definition names, by the definition's key: `struct point`,
     /// `union value`, `enum color`, or a typedef's name, `node_t`.
@@ -354,6 +381,10 @@ impl Type {
         match self {
             Type::Prim(_) => {}
             Type::Pointer(inner) | Type::Array(inner, _) => inner.names(out),
+            Type::BasedPointer { base, pointee } => {
+                base.names(out);
+                pointee.names(out);
+            }
             Type::Function { ret, params, .. } => {
                 ret.names(out);
                 for param in params {
@@ -392,6 +423,11 @@ pub struct Composite {
     pub packed: bool,
     /// `__attribute__((aligned(N)))`: the alignment raised to N.
     pub aligned: Option<u64>,
+    /// The base classes of a structure, `struct derived : public base`'s
+    /// bases, in order. Laid out first, as the model puts the first
+    /// non-empty base at offset 0 (#373; #374 models the rest of C++
+    /// inheritance).
+    pub base_classes: Vec<String>,
 }
 
 /// An enumeration.
@@ -682,7 +718,7 @@ impl TypeStore {
     pub fn is_scalar(&self, ty: &Type) -> bool {
         match self.resolve(ty) {
             Type::Prim(p) => *p != Prim::Void,
-            Type::Pointer(_) => true,
+            Type::Pointer(_) | Type::BasedPointer { .. } => true,
             Type::Named(key) => matches!(self.definitions.get(key), Some(Definition::Enum(_))),
             _ => false,
         }
@@ -705,6 +741,7 @@ impl TypeStore {
                 .layout(&self.model)
                 .ok_or_else(|| "void has no size".to_string()),
             Type::Pointer(_) => Ok((self.model.pointer, self.model.pointer)),
+            Type::BasedPointer { .. } => Ok((self.model.pointer, self.model.pointer)),
             Type::Array(inner, count) => {
                 let (size, align) = self.size_align(inner)?;
                 match count {
@@ -747,6 +784,9 @@ impl TypeStore {
         let Some(members) = &composite.members else {
             return Err(format!("{} is incomplete", shown_key(key)));
         };
+        if union && !composite.base_classes.is_empty() {
+            return Err(format!("{} is a union: a union has no base classes", shown_key(key)));
+        }
         let cap = if composite.packed {
             Some(1)
         } else {
@@ -758,6 +798,28 @@ impl TypeStore {
         // The next free bit, from the start.
         let mut bit: u64 = 0;
         let mut size: u64 = 0;
+        // Base classes are laid out first, each at the next aligned
+        // position; the first non-empty base thus stands at offset 0.
+        for base in &composite.base_classes {
+            let base_ty = Type::Named(base.clone());
+            let (bsize, malign) = self
+                .size_align(&base_ty)
+                .map_err(|why| format!("a base of {} is not laid out: {why}", shown_key(key)))?;
+            let malign = capped(malign);
+            align = align.max(malign);
+            let offset = if union { 0 } else { round_up(bit.div_ceil(8), malign) };
+            fields.push(FieldLayout {
+                name: None,
+                ty: base_ty.clone(),
+                offset,
+                size: bsize,
+                bits: None,
+            });
+            size = size.max(offset + bsize);
+            if !union {
+                bit = (offset + bsize) * 8;
+            }
+        }
         let count = members.len();
         for (index, member) in members.iter().enumerate() {
             let what = || match &member.name {
@@ -1120,6 +1182,9 @@ impl TypeStore {
             return None;
         }
         let (_, layout, _) = self.composite(ty)?;
+        // A named member of this struct shadows anything reachable through a
+        // base class or an anonymous embed, so the named fields are scanned
+        // before recursing into the unnamed ones.
         for field in &layout.fields {
             match &field.name {
                 Some(own) if own == name && field.bits.is_none() => {
@@ -1128,12 +1193,14 @@ impl TypeStore {
                 Some(own) if own == name => {
                     return None;
                 }
-                None if field.bits.is_none() => {
-                    if let Some((at, inner)) = self.member_offset(&field.ty, name, depth + 1) {
-                        return Some((field.offset + at, inner));
-                    }
-                }
                 _ => {}
+            }
+        }
+        for field in &layout.fields {
+            if field.name.is_none() && field.bits.is_none() {
+                if let Some((at, inner)) = self.member_offset(&field.ty, name, depth + 1) {
+                    return Some((field.offset + at, inner));
+                }
             }
         }
         None
@@ -1297,7 +1364,7 @@ impl TypeStore {
             Type::Prim(_) => Err(format!(
                 "{spelled} has a member of floating type, which System V passes in vector registers"
             )),
-            Type::Pointer(_) => Ok(()),
+            Type::Pointer(_) | Type::BasedPointer { .. } => Ok(()),
             Type::Array(element, _) => self.integer_members(element, spelled, depth + 1),
             resolved @ Type::Named(_) => {
                 if self.enumeration(resolved).is_some() {
@@ -1327,6 +1394,9 @@ impl TypeStore {
     /// reached through anonymous members as C reaches it.
     pub fn member_type(&self, ty: &Type, name: &str) -> Option<Type> {
         let (composite, _, _) = self.composite(ty)?;
+        // Own members first, so a derived member shadows a base member of the
+        // same name (C++ lookup): the base is consulted only when the struct's
+        // own members — including anonymous embeds — do not name it.
         for member in composite.members.as_deref().unwrap_or(&[]) {
             match &member.name {
                 Some(own) if own == name => return Some(member.ty.clone()),
@@ -1336,6 +1406,11 @@ impl TypeStore {
                     }
                 }
                 _ => {}
+            }
+        }
+        for base in &composite.base_classes {
+            if let Some(found) = self.member_type(&Type::Named(base.clone()), name) {
+                return Some(found);
             }
         }
         None
@@ -1393,6 +1468,10 @@ impl TypeStore {
                 if let Some(tag) = &c.tag {
                     out.push(' ');
                     out.push_str(tag);
+                }
+                if !c.base_classes.is_empty() {
+                    out.push_str(" : ");
+                    out.push_str(&c.base_classes.join(", "));
                 }
                 out.push_str(" {");
                 for member in c.members.as_deref().unwrap_or(&[]) {
@@ -1483,14 +1562,36 @@ impl TypeStore {
                     out.push(' ');
                     out.push_str(tag);
                 }
+                if !c.base_classes.is_empty() {
+                    out.push_str(" : ");
+                    out.push_str(&c.base_classes.join(", "));
+                }
                 let Some(members) = &c.members else {
                     return out;
                 };
                 out.push_str(" {\n");
+                // Base classes first: write each base's members as the base
+                // appears at offset 0 (the first non-empty base).
+                for base in &c.base_classes {
+                    if let Some(Definition::Struct(bc) | Definition::Union(bc)) = self.definitions.get(base) {
+                        if let Some(members) = &bc.members {
+                            for member in members {
+                                out.push_str(&pad);
+                                out.push_str(&member_text_with(member, self, None));
+                                out.push_str(";\n");
+                            }
+                        }
+                    }
+                }
                 let fields = self.layouts.get(key).map(|l| &l.fields);
-                let mut end = 0u64;
+                let base_offset = c.base_classes.len();
+                let mut end: u64 = if base_offset > 0 {
+                    fields.and_then(|f| f.get(base_offset - 1)).map_or(0, |f| f.offset + f.size)
+                } else {
+                    0
+                };
                 for (index, member) in members.iter().enumerate() {
-                    let field = fields.and_then(|f| f.get(index));
+                    let field = fields.and_then(|f| f.get(index + base_offset));
                     if layout {
                         if let Some(field) = field {
                             if field.bits.is_none() && field.offset > end {
@@ -1599,10 +1700,11 @@ impl TypeStore {
         };
         let members = c.members.as_ref()?;
         let fields = &self.layouts.get(key)?.fields;
+        let base_offset = c.base_classes.len();
         let text = self.body_text(key, false, 0);
         let head = text.split(" {\n").next()?.to_string();
         let mut out = Vec::new();
-        for (member, field) in members.iter().zip(fields) {
+        for (member, field) in members.iter().zip(fields.iter().skip(base_offset)) {
             let inline = match &member.ty {
                 Type::Named(inner) if is_anonymous(inner) => Some(self.body_text(inner, false, 1)),
                 _ => None,
@@ -1666,6 +1768,9 @@ impl TypeStore {
                 for member in c.members.as_deref().unwrap_or(&[]) {
                     member.ty.names(&mut names);
                 }
+                for base in &c.base_classes {
+                    names.insert(base.clone());
+                }
             }
             Some(Definition::Typedef(ty)) => ty.names(&mut names),
             _ => {}
@@ -1681,6 +1786,9 @@ impl TypeStore {
         let mut out = Vec::new();
         match self.definitions.get(key) {
             Some(Definition::Struct(c) | Definition::Union(c)) => {
+                for base in &c.base_classes {
+                    out.extend(self.member_names(base));
+                }
                 for member in c.members.as_deref().unwrap_or(&[]) {
                     if let Some(name) = &member.name {
                         out.push(name.clone());
@@ -1861,6 +1969,7 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
                 ret,
                 params,
                 variadic,
+                attrs,
             } => {
                 let mut list: Vec<String> = params.iter().map(|p| p.spelled(store)).collect();
                 if *variadic {
@@ -1869,8 +1978,41 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
                 if list.is_empty() {
                     list.push("void".to_string());
                 }
-                let _ = write!(inner, "({})", list.join(", "));
+                let params_text = list.join(", ");
+                // A calling convention goes inside the pointer's parens,
+                // `void (__stdcall *)(int)`, when the type is a pointer to
+                // a function; `int __stdcall (int)` stays trailing.
+                let conv_text = attrs.calling_convention.clone();
+                if let Some(conv) = &conv_text {
+                    if inner.starts_with("(*") {
+                        let body = inner.trim_start_matches('(').trim_end_matches(')').to_string();
+                        inner = format!("({conv} {body})({params_text})");
+                    } else if inner.is_empty() {
+                        let _ = write!(inner, "{conv}({params_text})");
+                    } else {
+                        // A named function type spells the convention before
+                        // the name, `int __stdcall f_t(int)` — glued to the
+                        // name it would not reparse.
+                        inner = format!("{conv} {inner}({params_text})");
+                    }
+                } else {
+                    let _ = write!(inner, "({params_text})");
+                }
+                let mut suffix = String::new();
+                if attrs.noreturn {
+                    suffix.push_str(" __attribute__((noreturn))");
+                }
+                if attrs.pure {
+                    suffix.push_str(" __attribute__((pure))");
+                }
+                if !suffix.is_empty() {
+                    inner.push_str(&suffix);
+                }
                 ty = ret;
+            }
+            Type::BasedPointer { base, pointee } => {
+                inner = if inner.is_empty() { format!("__based({})", base.spelled(store)) } else { format!("__based({}) {inner}", base.spelled(store)) };
+                ty = pointee;
             }
             Type::Prim(_) | Type::Named(_) => break,
         }
@@ -1884,7 +2026,7 @@ fn declaration_with(base: &Option<String>, ty: &Type, name: &str, store: &TypeSt
     };
     if inner.is_empty() {
         base_text
-    } else if inner.starts_with('[') || inner.starts_with('(') && !inner.starts_with("(*") {
+    } else if inner.starts_with('[') || inner.starts_with('(') && !inner.starts_with("(*") && !inner.starts_with("(__") {
         format!("{base_text}{inner}")
     } else {
         format!("{base_text} {inner}")
@@ -2329,4 +2471,68 @@ mod tests {
             ["struct node", "node_t"]
         );
     }
+    #[test]
+    fn function_attrs_and_based_pointers_layout() {
+        let mut store = TypeStore::new(DataModel::LP64);
+        crate::ctype::parse_into(
+            &mut store,
+            "typedef void __stdcall (*cb_t)(int);\n\
+             struct seg { long *base; char __based(base) *bp; };\n\
+             struct base { long x; }; struct derived : public base { long y; };", 
+        )
+        .unwrap();
+        assert_eq!(
+            store.size_of(&Type::BasedPointer {
+                base: Box::new(Type::Named("struct seg".into())),
+                pointee: Box::new(Type::Prim(Prim::Char)),
+            }),
+            Ok(8)
+        );
+        assert!(store.is_scalar(&Type::BasedPointer {
+            base: Box::new(Type::Prim(Prim::Void)),
+            pointee: Box::new(Type::Prim(Prim::Char)),
+        }));
+        let layout = store.layout("struct derived").unwrap();
+        assert_eq!(layout.size, 16);
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[1].offset, 8);
+        assert_eq!(layout.fields[1].name.as_deref(), Some("y"));
+        let a = Type::Function {
+            ret: Box::new(Type::Prim(Prim::Int)),
+            params: vec![Type::Prim(Prim::Int)],
+            variadic: false,
+            attrs: TypeAttrs { calling_convention: Some("__cdecl".into()), noreturn: false, pure: true },
+        };
+        let b = Type::Function {
+            ret: Box::new(Type::Prim(Prim::Int)),
+            params: vec![Type::Prim(Prim::Int)],
+            variadic: false,
+            attrs: TypeAttrs { calling_convention: Some("__cdecl".into()), noreturn: false, pure: true },
+        };
+        assert_eq!(a, b);
+        assert_eq!(a.spelled(&store), "int __cdecl(int) __attribute__((pure))");
+    }
+
+    #[test]
+    fn a_derived_member_shadows_a_base_member() {
+        let store = store(
+            DataModel::LP64,
+            "struct base { long x; long y; };\nstruct d : base { int x; };",
+        );
+        let d = Type::Named("struct d".into());
+        // C++ lookup: the derived's own x wins over the base's.
+        assert_eq!(store.member_type(&d, "x"), Some(Type::Prim(Prim::Int)));
+        // and the offset path finds the derived's x at 16, not the base's at 0.
+        assert_eq!(
+            store.path_offset(&d, &[Step::Field("x".into())]),
+            Some((16, Type::Prim(Prim::Int)))
+        );
+        // a name only the base has is still found through the base.
+        assert_eq!(store.member_type(&d, "y"), Some(Type::Prim(Prim::Long)));
+        assert_eq!(
+            store.path_offset(&d, &[Step::Field("y".into())]),
+            Some((8, Type::Prim(Prim::Long)))
+        );
+    }
+
 }

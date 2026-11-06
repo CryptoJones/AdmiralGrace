@@ -20,13 +20,15 @@ A type (`ag_engine::types::Type`) is one of:
 | a primitive | `void`, `_Bool`, `char`, `signed char`, `unsigned char`, `short`, `int`, `long`, `long long` and their unsigned forms, `float`, `double`, `long double`, and the platform typedefs `int8_t` … `uint64_t`, `wchar_t`, `size_t`, `ssize_t`, `intptr_t`, `uintptr_t`, `ptrdiff_t`, known without a definition |
 | a pointer | to any type, `struct node *` |
 | an array | of a type, of a count or of none, `int[4]`, `char[]` |
-| a function | its return type, its parameters' types and whether it ends in `...`; a variable or member is a pointer to one |
+| a function | its return type, its parameters' types and whether it ends in `...`, and the attributes of #373: the calling convention (`__cdecl`, `__stdcall`, …), `noreturn` and `pure`; a variable or member is a pointer to one |
+| a based pointer | MSVC's `__based(ptr)`, `#373`: the pointee addressed by a base, laid out like the platform pointer (`char __based(void*) *`) |
 | a name | a definition's key: `struct point`, `union value`, `enum color`, or a typedef's name, `node_t` |
 
 A definition is a structure or union — its tag, its members (each a name, a type and, for a
-bit-field, a width), the `#pragma pack` it was read under, and whether it is `packed` or
-`aligned(N)` — an enumeration — its tag, the integer it is held in and its enumerators with
-their values — or a typedef. A structure named before it is defined, `struct node *next`, is
+bit-field, a width), the `#pragma pack` it was read under, whether it is `packed` or
+`aligned(N)`, and — `#373` — its base classes, `struct derived : public base`, laid out
+first, the first non-empty base at offset 0 — an enumeration — its tag, the integer it is
+held in and its enumerators with their values — or a typedef. A structure named before it is defined, `struct node *next`, is
 declared and incomplete: a pointer to it is whole, a member or variable of it is refused
 until it is defined. A structure holding itself by value, directly or through another, is
 refused the same way, so a cycle by value cannot be made; one through pointers is a list or
@@ -491,8 +493,32 @@ The model leaves room for the items that build on it:
   returned structure, and the other conventions to the INTEGER class the fragments read.
 - **The union field per instruction (#371)** replaces the first-member-that-fits choice, made
   in one place (`TypeStore::field_at`).
-- **Attributes (#373)** — Microsoft's bit-field rule, base classes, `noreturn` and the rest —
-  join `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
+
+### Type attributes (#373)
+
+Function types carry `TypeAttrs` — the calling convention spelled MSVC-style
+(`__cdecl`, `__stdcall`, `__fastcall`, `__thiscall`, `__vectorcall`, `__clrcall`), and
+`noreturn`/`pure` — read from `_Noreturn`, `__attribute__((noreturn))`/`__attribute__((pure))`,
+`__declspec(noreturn)`/`__declspec(pure)` and bare convention words, in any position, with a
+suffix attribute after the parameters (`typedef __stdcall int (*cb)(int) __cdecl;` — the
+last convention wins). `__declspec(align(N))` on a structure raises its alignment, and a
+`__declspec` elsewhere is skipped with a note.
+
+A structure's base classes, `struct derived : public base`, are laid out first, each
+aligned, the first non-empty base at offset 0, and rendered back by `definition_text`
+with the base's members already in place. That flattened rendering is for display: the
+base clause and the copied members both appear, so re-parsing the text of a struct with
+bases counts the base's members twice. A derived member shadows a base member of the
+same name in `member_type` and in the offset path, as C++ lookup does. Access specifiers
+and `virtual` are skipped where the base list is read. The full C++ inheritance model —
+access control, virtual inheritance, vtables — stays with #374.
+
+A based pointer, `char __based(void*) *p`, is `Type::BasedPointer { base, pointee }`,
+pointer-sized and scalar, with the base kept for what the analyst wrote. #374 and #387
+own the rest of C++ classes and per-function property editing.
+- **Attributes (#373)** — Microsoft's bit-field rule and the remaining custom attributes
+  beyond `noreturn`, `pure`, calling conventions, base classes and based pointers — join
+  `packed` and `aligned` on `Composite`; the parser notes the attributes it skips.
 - **Type libraries (#376)**, **platform types (#378)** and **header import (#379)** add
   definitions to the store from elsewhere than the project, the last with a preprocessor;
   **export as a header (#380)** writes `definition_text` in the store's order.
