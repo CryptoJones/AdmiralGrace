@@ -90,6 +90,7 @@ pub use ag_engine::defuse::{
 };
 pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
 pub use ag_engine::ctype::{self as ctype, CError, TypeText};
+pub use ag_engine::headers::{self as headers, HeaderError, HeaderOptions};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
 pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,

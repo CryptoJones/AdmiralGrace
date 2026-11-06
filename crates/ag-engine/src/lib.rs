@@ -16,6 +16,7 @@ pub mod emulate;
 pub mod fragments;
 pub mod frame;
 pub mod global_pointer;
+pub mod headers;
 pub mod il;
 pub mod image;
 pub mod inline;

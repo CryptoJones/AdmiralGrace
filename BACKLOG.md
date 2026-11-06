@@ -202,7 +202,7 @@ Filed 2026-10-26.
 - [x] Type libraries: per-library types and signatures, applied by import name — [#376](https://github.com/CryptoJones/AdmiralGrace/issues/376)
 - [x] Type archives shared across projects — [#377](https://github.com/CryptoJones/AdmiralGrace/issues/377)
 - [x] Platform types per OS and architecture, editable by the user — [#378](https://github.com/CryptoJones/AdmiralGrace/issues/378)
-- [ ] Import types from C headers with compiler flags — [#379](https://github.com/CryptoJones/AdmiralGrace/issues/379)
+- [x] Import types from C headers with compiler flags — [#379](https://github.com/CryptoJones/AdmiralGrace/issues/379)
 - [ ] Export types as a C header — [#380](https://github.com/CryptoJones/AdmiralGrace/issues/380)
 - [ ] Port types and signatures from another project by matching symbols — [#381](https://github.com/CryptoJones/AdmiralGrace/issues/381)
 - [ ] Import COM interface types by GUID — [#382](https://github.com/CryptoJones/AdmiralGrace/issues/382)

@@ -3090,6 +3090,60 @@ fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
 }
 
 #[test]
+fn types_are_imported_from_a_c_header_with_the_preprocessor_flags() {
+    let file = TempFile::new("header-import");
+    let types = |args: &[&str]| -> (bool, String, String) {
+        let text = file.text();
+        let mut all = vec!["types", "--file", &text];
+        all.extend(args);
+        project_with("structs.elf", &all)
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "ag-header-cli-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the header dir is made");
+    let header = dir.join("many.h");
+    std::fs::write(
+        &header,
+        "struct point { int x, y; };\nstruct line { struct point a, b; };\nstruct outer { struct tail inner; };\n",
+    )
+    .expect("the header is written");
+    let (ok, stdout, stderr) = types(&[
+        "import",
+        header.to_str().expect("the header path is UTF-8"),
+        "--preview",
+        "--include",
+        dir.to_str().expect("the include dir is UTF-8"),
+        "--no-system-headers",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point: size 8, align 4"), "{stdout}");
+    assert!(stdout.contains("struct line: size 16, align 4"), "{stdout}");
+    assert!(stdout.contains("struct outer: held back"), "{stdout}");
+    let (ok, _, stderr) = types(&["show"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = types(&[
+        "import",
+        header.to_str().expect("the header path is UTF-8"),
+        "struct point",
+        "--include",
+        dir.to_str().expect("the include dir is UTF-8"),
+        "--no-system-headers",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point imported"), "{stdout}");
+    let (ok, _, stderr) = types(&["show"]);
+    assert!(ok, "{stderr}");
+    let _ = types(&["remove", "line"]);
+    let _ = types(&["remove", "point"]);
+    let _ = types(&["remove", "struct point"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_enumerations_variable_reads_its_constants_as_enumerators() {
     let file = TempFile::new("enum");
     let (ok, _, stderr) = project_with(
