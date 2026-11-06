@@ -582,6 +582,18 @@ fn tools() -> Vec<Tool> {
             schema: json!({ "type": "object", "properties": {} }),
         },
         Tool {
+            name: "port_types",
+            description: "Port the types another project holds onto this one, matching functions by their symbols: a symbol both images name is the same function, so its variable types move with it and every definition they name is added. With `preview` it only says what would move; otherwise the matched types and signatures are written to the project. A definition held with different C, or a variable already typed differently, is held back with why. `from` is the source project's path.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "The project file to port from." },
+                    "preview": { "type": "boolean", "description": "Say what would move, and write nothing." },
+                },
+                "required": ["from"]
+            }),
+        },
+        Tool {
             name: "search_types",
             description: "The project's types whose name, members or C hold `text`, in any case: `in` is `name`, `member`, `text` or `any` (the default).",
             schema: json!({
@@ -1534,6 +1546,120 @@ impl Server {
                 Ok(Answer::json(crate::types::type_json(&store, &key)))
             }
             "export_types_header" => Ok(Answer::text(self.image.types_header())),
+            "port_types" => {
+                let from = text("from")?;
+                let preview = match arguments.get("preview") {
+                    Some(Value::Bool(preview)) => *preview,
+                    None | Some(Value::Null) => false,
+                    Some(_) => return Err("\"preview\" is a boolean".to_string()),
+                };
+                self.reload()?;
+                let source_file = ProjectFile::load(std::path::Path::new(&from))
+                    .map_err(|error| format!("reading {from}: {error:#}"))?;
+                let (source, source_symbols) = crate::port::source_of_project(&source_file);
+                let source_image = match source_file.target.path.as_deref() {
+                    Some(path) => {
+                        let raw = crate::project::raw_of_project(&source_file)
+                            .map_err(|error| format!("{error:#}"))?;
+                        let layout = crate::project::layout_of(&source_file)
+                            .map_err(|error| format!("{error:#}"))?;
+                        crate::project::open_target(
+                            std::path::Path::new(path),
+                            raw.as_ref(),
+                            source_file.target.slice.as_deref(),
+                            &layout,
+                        )
+                        .ok()
+                    }
+                    None => None,
+                };
+                let source_image = match source_image {
+                    Some(image) => crate::port::image_of(&image, Some(&source_file)),
+                    None => source_symbols,
+                };
+                let dest_image = crate::port::image_of(&self.image, Some(&self.project()?.file));
+                let mut held = crate::port::held_of_project(&self.project()?.file);
+                for fun in self.image.functions() {
+                    let key = format!("{:#x}", fun.address);
+                    if let Ok(declared) = self.image.variables(fun.address) {
+                        for variable in declared {
+                            held.declared
+                                .entry(key.clone())
+                                .or_default()
+                                .insert(variable.name);
+                        }
+                    }
+                }
+                let shown = crate::port::preview(&source, &source_image, &dest_image, &held)
+                    .map_err(|error| error.to_string())?;
+                if preview {
+                    return Ok(Answer::json(
+                        serde_json::to_value(crate::project::port_json(&shown))
+                            .map_err(|error| error.to_string())?,
+                    ));
+                }
+                let result = crate::port::apply(&source, &source_image, &dest_image, &held)
+                    .map_err(|error| error.to_string())?;
+                let definitions = result.definitions.clone();
+                let applied = result.applied.clone();
+                let applied_stack = result.applied_stack.clone();
+                self.change_file(|file| {
+                    file.types = crate::types::definitions(&definitions);
+                    for word in &applied {
+                        file.annotation_mut(TargetKind::Function, &word.address)
+                            .set_var_type(&word.variable, &word.ty);
+                    }
+                    for stack in &applied_stack {
+                        file.annotation_mut(TargetKind::Function, &stack.address)
+                            .set_stack_var(
+                                stack.word.offset,
+                                stack.word.size,
+                                stack.word.name.as_deref(),
+                                stack.word.ty.as_deref(),
+                            );
+                    }
+                })?;
+                self.image.set_type_definitions(&definitions)?;
+                Ok(Answer::json(json!({
+                    "added": result.added,
+                    "ported": result
+                        .definitions
+                        .iter()
+                        .map(|d| json!({"name": d.name, "c": d.c}))
+                        .collect::<Vec<_>>(),
+                    "functions": result
+                        .functions
+                        .iter()
+                        .map(|f| json!({
+                            "symbol": f.symbol,
+                            "source": f.source,
+                            "dest": f.dest,
+                            "var_types": f.var_types.iter().map(|w| json!({"variable": w.variable, "type": w.ty})).collect::<Vec<_>>(),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "unmatched": result
+                        .unmatched
+                        .iter()
+                        .map(|u| json!({"source": u.source, "reason": u.reason}))
+                        .collect::<Vec<_>>(),
+                    "held_types": result
+                        .held_types
+                        .iter()
+                        .map(|h| json!({"name": h.name, "reason": h.reason}))
+                        .collect::<Vec<_>>(),
+                    "held_signatures": result
+                        .held_signatures
+                        .iter()
+                        .map(|h| json!({"function": h.function, "variable": h.variable, "reason": h.reason}))
+                        .collect::<Vec<_>>(),
+                    "applied": result
+                        .applied
+                        .iter()
+                        .map(|w| json!({"address": w.address, "variable": w.variable, "type": w.ty}))
+                        .collect::<Vec<_>>(),
+                    "notes": result.notes,
+                })))
+            }
             "search_types" => {
                 let store = self.image.types();
                 let within = optional_text("in")?.unwrap_or_default();
@@ -2805,6 +2931,7 @@ mod tests {
                 "define_types",
                 "remove_type",
                 "export_types_header",
+                "port_types",
                 "search_types",
                 "set_variable_type",
                 "infer_struct",

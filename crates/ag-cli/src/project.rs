@@ -1528,6 +1528,27 @@ pub enum TypesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Port the types and signatures another project holds onto this
+    /// one, matching functions by their symbols: a symbol both images
+    /// name is the same function, so its variable types move with it
+    /// and every definition they name is added. A definition the
+    /// destination already holds with different C is held back by
+    /// name, and a signature whose variable is already typed
+    /// differently, which does not read, or whose type names a
+    /// definition neither project defines, is held back with why.
+    /// With `--preview` it says what would move and adds nothing;
+    /// otherwise the matched types and signatures are written to the
+    /// project
+    Port {
+        /// The project to port from.
+        from: PathBuf,
+        /// Say what would move, and write nothing.
+        #[arg(long)]
+        preview: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1949,7 +1970,203 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             println!("{}: {} imported", file.display(), added.join(", "));
             Ok(0)
         }
+        TypesCmd::Port { from, preview, json } => port_types(target, file, &from, preview, json),
     }
+}
+
+/// The source project of `from`, its symbols as its image spells them,
+/// and the destination's held project a port reads.
+///
+/// The source image is read where the source project says its target
+/// is, raw as it says too; a source project that names no target holds
+/// only its carried types and the functions it renamed itself.
+fn port_inputs(
+    target: &Path,
+    file: &Path,
+    from: &Path,
+) -> Result<(
+    crate::port::SourceProject,
+    crate::port::SymbolImage,
+    crate::port::HeldProject,
+    crate::port::SymbolImage,
+)> {
+    let source_file = ProjectFile::load(from)
+        .with_context(|| format!("reading {}", from.display()))?;
+    let (source, source_symbols) = crate::port::source_of_project(&source_file);
+    let source_image = match source_file.target.path.as_deref() {
+        Some(path) => {
+            let target_path = PathBuf::from(path);
+            let layout = layout_of(&source_file)?;
+            let raw = raw_of_project(&source_file)?;
+            open_target(
+                &target_path,
+                raw.as_ref(),
+                source_file.target.slice.as_deref(),
+                &layout,
+            )
+            .ok()
+        }
+        None => None,
+    };
+    let source_image = match source_image {
+        Some(image) => crate::port::image_of(&image, Some(&source_file)),
+        None => source_symbols,
+    };
+    let mut project = open_project(target, file)?;
+    let dest_image = image_under(target, &project)?;
+    let dest_image_held = crate::port::image_of(&dest_image, Some(&project));
+    let mut dest = crate::port::held_of_project(&project);
+    // The variables the destination's image declares at each matched
+    // function: a port holds back a signature for one it does not.
+    for fun in dest_image.functions() {
+        let key = format!("{:#x}", fun.address);
+        if let Ok(declared) = dest_image.variables(fun.address) {
+            for variable in declared {
+                dest.declared
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(variable.name);
+            }
+        }
+    }
+    let _ = &mut project;
+    Ok((source, source_image, dest, dest_image_held))
+}
+
+/// `ag project TARGET types port FROM`: carry the types of the project
+/// of `FROM` onto the project of `FILE`, matching functions by symbol.
+///
+/// `preview` says what would move and what is held back, and writes
+/// nothing; otherwise the report is written to `FILE`: the definitions
+/// are added, and each applied word is set on its function's record.
+/// Returns 0 with a report, or 1 when something was held back.
+fn port_types(
+    target: &Path,
+    file: &Path,
+    from: &Path,
+    preview: bool,
+    json: bool,
+) -> Result<i32> {
+    let (source, source_image, held, dest_image) = port_inputs(target, file, from)?;
+    let shown = crate::port::preview(&source, &source_image, &dest_image, &held)
+        .map_err(anyhow::Error::msg)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&port_json(&shown))?
+        );
+        return Ok(0);
+    }
+    for note in &shown.notes {
+        eprintln!("note: {note}");
+    }
+    for def in &shown.definitions {
+        println!("{}: ported", def.name);
+    }
+    for fun in &shown.functions {
+        for word in &fun.var_types {
+            println!(
+                "{} {}: {}: {}",
+                fun.symbol, fun.dest, word.variable, word.ty
+            );
+        }
+    }
+    for unmatched in &shown.unmatched {
+        println!("{}: unmatched ({})", unmatched.source, unmatched.reason);
+    }
+    for held in &shown.held_types {
+        println!("{}: held back ({})", held.name, held.reason);
+    }
+    for held in &shown.held_signatures {
+        println!(
+            "{}: held back ({})",
+            held.function, held.reason
+        );
+    }
+    if shown.functions.is_empty() && shown.definitions.is_empty() {
+        println!(
+            "{}: no types to port",
+            from.display()
+        );
+    }
+    if preview {
+        return Ok(0);
+    }
+    let result = crate::port::apply(&source, &source_image, &dest_image, &held)
+        .map_err(anyhow::Error::msg)?;
+    let mut project = open_project(target, file)?;
+    project.types = crate::types::definitions(&result.definitions);
+    for word in &result.applied {
+        project
+            .annotation_mut(TargetKind::Function, &word.address)
+            .set_var_type(&word.variable, &word.ty);
+    }
+    for stack in &result.applied_stack {
+        project
+            .annotation_mut(TargetKind::Function, &stack.address)
+            .set_stack_var(
+                stack.word.offset,
+                stack.word.size,
+                stack.word.name.as_deref(),
+                stack.word.ty.as_deref(),
+            );
+    }
+    project.prune();
+    project.save(file)?;
+    let carried = result.applied.len() + result.applied_stack.len();
+    println!(
+        "{}: {} type{}, {} signature{} ported",
+        file.display(),
+        result.added.len(),
+        if result.added.len() == 1 { "" } else { "s" },
+        carried,
+        if carried == 1 { "" } else { "s" }
+    );
+    Ok(0)
+}
+
+/// The port the preview holds, as JSON.
+pub(crate) fn port_json(shown: &crate::port::PortPreview) -> serde_json::Value {
+    serde_json::json!({
+        "added": shown.added,
+        "ported": shown
+            .definitions
+            .iter()
+            .map(|d| serde_json::json!({"name": d.name, "c": d.c}))
+            .collect::<Vec<_>>(),
+        "functions": shown
+            .functions
+            .iter()
+            .map(|f| serde_json::json!({
+                "symbol": f.symbol,
+                "source": f.source,
+                "dest": f.dest,
+                "var_types": f.var_types.iter().map(|w| serde_json::json!({"variable": w.variable, "type": w.ty})).collect::<Vec<_>>(),
+                "stack_vars": f.stack_vars.iter().map(|w| serde_json::json!({"offset": w.offset, "size": w.size})).collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>(),
+        "unmatched": shown
+            .unmatched
+            .iter()
+            .map(|u| serde_json::json!({"source": u.source, "reason": u.reason}))
+            .collect::<Vec<_>>(),
+        "held_types": shown
+            .held_types
+            .iter()
+            .map(|h| serde_json::json!({"name": h.name, "reason": h.reason}))
+            .collect::<Vec<_>>(),
+        "held_signatures": shown
+            .held_signatures
+            .iter()
+            .map(|h| serde_json::json!({"function": h.function, "variable": h.variable, "reason": h.reason}))
+            .collect::<Vec<_>>(),
+        "applied": shown
+            .applied
+            .iter()
+            .map(|(address, word)| serde_json::json!({"address": address, "variable": word.variable, "type": word.ty}))
+            .collect::<Vec<_>>(),
+        "notes": shown.notes,
+    })
 }
 
 /// Move the image to `base`, or put it back with `none`.

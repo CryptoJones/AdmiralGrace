@@ -15,6 +15,7 @@ mod image;
 mod mcp;
 mod platform;
 mod plugins;
+mod port;
 mod project;
 mod run;
 mod skill;
