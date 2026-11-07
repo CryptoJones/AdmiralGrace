@@ -5560,10 +5560,14 @@ impl<'a> Lifter<'a> {
                     Some(temp) => {
                         let temp = *temp;
                         let name = self.temps[temp].name.clone();
-                        let uses = all
+                        // Count the reads, not the statements that make
+                        // them: `add eax, eax` reads the result twice, and
+                        // inlining the call into both operands would make
+                        // the call twice over.
+                        let uses: usize = all
                             .iter()
-                            .filter(|(_, other, _)| other.reads_var(&name))
-                            .count();
+                            .map(|(_, other, _)| crate::inline::occurrences(other, &name))
+                            .sum();
                         let next_reads = statements
                             .get(i + 1)
                             .is_some_and(|(_, next, _)| next.reads_var(&name));
@@ -7170,6 +7174,17 @@ mod tests {
         assert_eq!(
             c(&code),
             "int f(void)\n{\n  int v1;\n\n  v1 = f();\n  return g() + v1;\n}"
+        );
+    }
+
+    #[test]
+    fn a_call_result_read_twice_by_one_instruction_is_a_temporary() {
+        // call f; add eax, eax; ret: the next instruction reads the result
+        // twice, so it is held in a variable and the call is made once.
+        let code = [0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x01, 0xc0, 0xc3];
+        assert_eq!(
+            c(&code),
+            "int f(void)\n{\n  int v1;\n\n  v1 = f();\n  return v1 + v1;\n}"
         );
     }
 
