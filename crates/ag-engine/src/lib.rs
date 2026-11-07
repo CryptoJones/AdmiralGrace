@@ -5,6 +5,7 @@ pub mod asm;
 pub mod ast;
 pub mod cfg;
 pub mod cfgwalk;
+pub mod com;
 pub mod cpu_context;
 pub mod ctype;
 pub mod cxx;
@@ -27,11 +28,11 @@ pub mod mips;
 pub mod objc;
 pub mod opaque;
 pub mod options;
-pub mod platform;
 pub mod pipeline;
+pub mod platform;
 pub mod plugin;
-pub mod propagate;
 pub mod procedure;
+pub mod propagate;
 pub mod pvs;
 pub mod register;
 pub mod slice;
@@ -57,16 +58,13 @@ pub use cfg::{
 };
 pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
 pub use emit::{Line, Pseudocode};
+pub use frame::{FrameRow, Region, StackFrame};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};
 pub use lift::{
     Abi, LiftedFunction, LowStatement, NotLifted, Placement, StageChain, Stages, Statement,
     StatementKind,
 };
-pub use frame::{FrameRow, Region, StackFrame};
-pub use stack_offsets::{stack_offsets, StackOffset};
-pub use stack_vars::StackVar;
-pub use variables::{VariableInfo, VariableKind};
 pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{
@@ -75,4 +73,7 @@ pub use plugin::{
 };
 pub use procedure::FunctionSignature;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};
+pub use stack_offsets::{stack_offsets, StackOffset};
+pub use stack_vars::StackVar;
 pub use structure::{Node, Terminator};
+pub use variables::{VariableInfo, VariableKind};

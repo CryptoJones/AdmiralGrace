@@ -349,6 +349,17 @@ pub enum ImageCmd {
         #[arg(long)]
         header: bool,
     },
+    /// The COM types the image names by GUID: the GUIDs found in its data,
+    /// filed as interfaces and classes, each with its address and the
+    /// statement that names it; with `--header` the types as a C header
+    Com {
+        /// Report as JSON.
+        #[arg(long, conflicts_with = "header")]
+        json: bool,
+        /// Write it as a C header instead.
+        #[arg(long)]
+        header: bool,
+    },
     /// The structure the accesses through a pointer variable draft: one
     /// member each offset and width the function reads or writes through
     /// it — through its copies and, one level deep, the callees it is
@@ -1342,6 +1353,7 @@ pub fn run(
             variables(&image, &target, json, project.as_ref())
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
+        ImageCmd::Com { json, header } => com(&image, json, header),
         ImageCmd::Types { json, header, .. } => types(&image, json, header),
         ImageCmd::StructFrom {
             function,
@@ -2997,6 +3009,57 @@ pub(crate) fn stack_frame_of(
 /// `ag image FILE stack FUNCTION`: the function's frame, slot by slot.
 /// `ag image FILE types`: the platform's primitives and the project's
 /// definitions, with their layouts.
+/// The COM GUIDs the image's data holds, as JSON: empty lists for an
+/// image without any.
+pub(crate) fn com_json(image: &Binary) -> serde_json::Value {
+    let Some(com) = image.com() else {
+        return serde_json::json!({ "guids": [], "interfaces": [], "classes": [] });
+    };
+    serde_json::json!({
+        "guids": com.guids.iter().map(|hit| serde_json::json!({
+            "address": format!("{:#x}", hit.address),
+            "guid": hit.guid.text(),
+            "name": hit.name,
+            "interface": hit.interface,
+            "at": hit.at.map(|at| format!("{at:#x}")),
+        })).collect::<Vec<_>>(),
+        "interfaces": com.interfaces,
+        "classes": com.classes,
+    })
+}
+
+/// Print the COM types the image names by GUID, as text or as JSON.
+fn com(image: &Binary, json: bool, header: bool) -> Result<i32> {
+    if header {
+        match image.com() {
+            Some(com) => print!("{}", com.header()),
+            None => println!("/* no COM types */"),
+        }
+        return Ok(0);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&com_json(image))?);
+        return Ok(0);
+    }
+    let Some(com) = image.com() else {
+        println!("no COM types");
+        return Ok(0);
+    };
+    for hit in &com.guids {
+        // `scan` only matches GUIDs against the catalog, so every hit
+        // carries a name; `unknown` is the shape if that ever changes.
+        let name = hit.name.as_deref().unwrap_or("unknown");
+        println!(
+            "{:#x}  {}  {}  {}",
+            hit.address,
+            hit.guid.text(),
+            name,
+            if hit.interface { "interface" } else { "class" }
+        );
+    }
+    Ok(0)
+}
+
 fn types(image: &Binary, json: bool, header: bool) -> Result<i32> {
     if header {
         print!("{}", image.types_header());

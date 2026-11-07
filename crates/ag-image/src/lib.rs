@@ -97,6 +97,7 @@ pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
+pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;
@@ -1059,6 +1060,14 @@ impl Binary {
         self.types().header()
     }
 
+    /// The COM types the image names by GUID, as a C header: `GUID`
+    /// itself, each interface it names as a vtable struct, each class
+    /// it creates as a `CLSID_` GUID typedef. `None` for an image with
+    /// no GUID the catalog knows.
+    pub fn com_header(&self) -> Option<String> {
+        self.com().map(|com| com.header())
+    }
+
     /// The Swift metadata the image carries — its types with their fields
     /// and methods, its protocols — when it carries any. A vtable's methods
     /// are already in the function list, under their symbols' names or
@@ -1072,6 +1081,30 @@ impl Binary {
     /// already in the function list under the names their symbols spell.
     pub fn cxx(&self) -> Option<&ag_engine::cxx::CppMetadata> {
         self.cxx.as_ref()
+    }
+
+    /// The COM metadata the image carries: the GUIDs found in its data,
+    /// filed as interfaces and classes.
+    /// `None` for an image with no GUID the catalog knows.
+    pub fn com(&self) -> Option<ag_engine::com::ComMetadata> {
+        let sections: Vec<ag_engine::com::ComSection> = self
+            .sections
+            .iter()
+            .filter_map(|section| {
+                let bytes = self.bytes_at(section.vma, section.size as usize)?;
+                Some(ag_engine::com::ComSection {
+                    name: section.name.clone(),
+                    vma: section.vma,
+                    executable: section.executable,
+                    bytes,
+                })
+            })
+            .collect();
+        let hits = ag_engine::com::scan(&sections);
+        if hits.is_empty() {
+            return None;
+        }
+        Some(ag_engine::com::ComMetadata::from_scan(hits))
     }
 
     /// Whether the image is 32-bit ARM, read by the SLEIGH decoder, whose
