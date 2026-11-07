@@ -360,6 +360,18 @@ pub enum ImageCmd {
         #[arg(long)]
         header: bool,
     },
+    /// The JNI types the image types its functions with: the environment
+    /// and object types every `Java_<class>_<method>` and `JNI_OnLoad`
+    /// export takes; with `--json` each JNI function's parameters and
+    /// return, with `--header` the types as a C header
+    Jni {
+        /// Report as JSON.
+        #[arg(long, conflicts_with = "header")]
+        json: bool,
+        /// Write the types as a C header instead.
+        #[arg(long)]
+        header: bool,
+    },
     /// The structure the accesses through a pointer variable draft: one
     /// member each offset and width the function reads or writes through
     /// it — through its copies and, one level deep, the callees it is
@@ -1354,6 +1366,7 @@ pub fn run(
         }
         ImageCmd::Stack { target, json, .. } => stack(&image, &target, json, project.as_ref()),
         ImageCmd::Com { json, header } => com(&image, json, header),
+        ImageCmd::Jni { json, header } => jni(&image, json, header),
         ImageCmd::Types { json, header, .. } => types(&image, json, header),
         ImageCmd::StructFrom {
             function,
@@ -3029,6 +3042,41 @@ pub(crate) fn com_json(image: &Binary) -> serde_json::Value {
 }
 
 /// Print the COM types the image names by GUID, as text or as JSON.
+/// The JNI functions the image holds, as JSON: each with its address,
+/// name, parameters and return; empty for an image without any.
+pub(crate) fn jni_json(image: &Binary) -> serde_json::Value {
+    serde_json::json!({
+        "functions": image.jni_functions().iter().map(|f| serde_json::json!({
+            "address": format!("{:#x}", f.address),
+            "name": f.name,
+            "params": f.params,
+            "returns": f.returns,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Print the JNI functions the image holds, as text or as JSON.
+fn jni(image: &Binary, json: bool, header: bool) -> Result<i32> {
+    if header {
+        print!("{}", image.jni_header());
+        return Ok(0);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&jni_json(image))?);
+        return Ok(0);
+    }
+    let functions = image.jni_functions();
+    if functions.is_empty() {
+        println!("no JNI functions");
+        return Ok(0);
+    }
+    for f in &functions {
+        let sig = format!("{}({})", f.returns, f.params.join(", "));
+        println!("{:#x}  {}  {}", f.address, f.name, sig);
+    }
+    Ok(0)
+}
+
 fn com(image: &Binary, json: bool, header: bool) -> Result<i32> {
     if header {
         match image.com() {

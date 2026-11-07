@@ -2411,3 +2411,31 @@ fn the_analysts_global_pointer_stands_over_the_images_and_changes_what_the_opera
     assert!(sample().global_pointer_convention().is_none());
     assert!(!sample().set_global_pointer_words(words));
 }
+
+#[test]
+fn an_image_without_jni_functions_reports_none() {
+    let binary = sample();
+    assert!(binary.jni_functions().is_empty());
+    assert!(binary.jni_header().contains("JNIEnv"));
+}
+
+#[test]
+fn a_jni_image_types_its_jni_functions_from_their_names() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/jni.elf");
+    let binary = Binary::open(&path).expect("the JNI ELF loads");
+    let functions = binary.jni_functions();
+    let add = functions
+        .iter()
+        .find(|f| f.name == "Java_com_example_Native_add")
+        .expect("the add function");
+    assert_eq!(add.params, vec!["JNIEnv *", "jobject"]);
+    let overloaded = functions
+        .iter()
+        .find(|f| f.name == "Java_com_example_Native_overloaded__II")
+        .expect("the overloaded function");
+    assert_eq!(overloaded.params[2], "jint");
+    assert!(functions
+        .iter()
+        .any(|f| f.name == "JNI_OnLoad" && f.params[0] == "JavaVM *"));
+}

@@ -735,4 +735,16 @@ A GUID is 16 bytes: the first three fields little-endian, the last eight as writ
 
 The command is `ag image com [--json] [--header]`.
 
+### JNI types by name (#383)
+
+A Java native library exports entry points named by the JNI spec: `Java_<class>_<method>` — the class with package dots turned to underscores — and, for an overloaded method, a `__<signature>` suffix carrying the Java types the method takes; and `JNI_OnLoad` and its kin, the runtime functions the spec exports as plain functions. The spec fixes their shape: the first parameter is the environment, `JNIEnv *`, the second is the object or class the method is called on — `jobject` from the name alone, where static or instance is not distinguished there (`jclass` is what a signature spells out, `L<java/lang/Class>;`) — and the signature's own types follow.
+
+Typing the front of a JNI function turns register arithmetic into readable code: a native method's pseudocode reads `int Java_com_example_Native_add(JNIEnv *env, jobject obj, int a, int b)` instead of five bare registers. The types are the JNI header's — `JNIEnv`, `JavaVM`, `jobject` and its kin (`jclass`, `jstring`, `jobjectArray` and the per-primitive array types), `jmethodID`, `jfieldID`, `jthrowable`, `jobjectRefType`, `jvalue` — and the primitives `jboolean` through `jdouble` with `jsize`. A project's own definitions win over these, as with the type libraries.
+
+A signature letter names its type: `V`, `Z`, `B`, `C`, `S`, `I`, `J`, `F`, `D` are the primitives, `L<name>;` is the class (a `String` is `jstring`, an `Object` is `jobject`), and `[I`, `[[I` and `[[Ljava/lang/Object;` are the array types. A malformed signature keeps the spec's fallback — `jobject` in, `jobject` out.
+
+`ag image jni` prints the JNI functions the image holds, each with its address, name, parameters and return. With `--json` it gives `functions` — each `address`, `name`, `params` and `returns`. With `--header` it writes the JNI types as a C header. A function whose parameters the type propagation already knows is retyped from its name — `from Java_com_example_Native_add's JNI prototype` is where `variables` says the type came from — and the analyst's pinned types stand.
+
+The command is `ag image jni [--json] [--header]`.
+
 

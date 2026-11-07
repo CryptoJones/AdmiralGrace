@@ -21,6 +21,7 @@ pub mod headers;
 pub mod il;
 pub mod image;
 pub mod inline;
+pub mod jni;
 pub mod lift;
 pub mod liveness;
 pub mod merge;
