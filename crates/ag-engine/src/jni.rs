@@ -4,9 +4,10 @@
 //! — the class with package dots turned to underscores, and,
 //! for overloaded methods, a `__<signature>` suffix — and their signature
 //! is fixed by the JNI spec: the first parameter is a `JNIEnv *`, the
-//! second is the object or class the method is called on, `jobject` for an
-//! instance method and `jclass` for a static one, and the return is the
-//! return type the Java declaration names. A JNI function whose name starts
+//! second is the object or class the method is called on, `jobject` where
+//! the name alone cannot say whether the method is static (`jclass` is
+//! what a signature spells out, `L<java/lang/Class>;`), and the return is
+//! the return type the Java declaration names. A JNI function whose name starts
 //! `JNI_` is a function of the JNI runtime itself — the `JNIEnv` table's
 //! functions spelled as plain functions — whose first parameter is likewise
 //! the environment. Typing those parameters turns the register arithmetic
@@ -14,22 +15,22 @@
 //! Java native method returning an int reads `int Java_com_example_Native_add(JNIEnv *env, jobject obj, int a, int b)`, not five bare registers.
 //!
 //! A name is JNI when it is `Java_` followed by at least one underscore —
-//! `Java_com_example_Native_add` — or `JNI_` followed by a letter and a
-//! capital, `JNI_OnLoad`, `JNI_OnUnload`, `JNI_GetCreatedJavaVMs`. The
+//! `Java_com_example_Native_add` — or it is a JNI runtime function the
+//! spec exports as a plain function, `JNI_OnLoad`, `JNI_OnUnload`,
+//! `JNI_GetCreatedJavaVMs` and `JNI_GetDefaultJavaVMInitArgs`. The
 //! `Java_` check reads past the export's prefix and its class: the
 //! function has a class and a method only when a dot-underscore or a
 //! second underscore follows, so `Java` and `Javali` are not JNI and
 //! `Java_foo` — a class with no method — is not either. A JNI-subclass
-//! function may carry the overload suffix `__<signature>`: the signature
-//! is Java's internal form, `IILjava/lang/String;` for a `String`, and
-//! only the primitive returns name a C type — `V`, `Z`, `B`, `C`, `S`,
-//! `I`, `J`, `F`, `D` — and, once the index advances past the signature,
-//! a trailing `L<class>;` names an object return. An object return whose
-//! class is not `java/lang/Object` is typed as that class by its
-//! `L<name>;` — a `Ljava/lang/String;` return reads as `jstring` — and
-//! its parameters with it, `jobject` only where the signature names no
-//! class. A malformed or unknown signature keeps the spec's own types:
-//! `jobject` in, `jobject` out.
+//! function may carry the overload suffix `__<signature>`: the suffix
+//! spells the method's parameters in Java's internal form, `IILjava/lang/String;`
+//! for a `String`, with `/` and `;` mangled to `_` as an export spells
+//! them (`Java_com_example_Native_get__ILjava_lang_String_`), and the
+//! parser un-mangles it. `V`, `Z`, `B`, `C`, `S`, `I`, `J`, `F` and `D`
+//! are the primitives, `L<class>;` is the class (a `String` is
+//! `jstring`), and `[I` and its kin are the array types. A malformed
+//! or unknown signature keeps the spec's own types: `jobject` in,
+//! `jobject` out.
 //!
 //! The object types are the JNI header's: `JNIEnv`, `jobject`, `jclass`,
 //! `jstring`, `jarray`, `jobjectArray`, `jbooleanArray`, `jbyteArray`,
@@ -115,10 +116,11 @@ fn class_type(class: &str) -> &'static str {
 }
 
 /// The array type a JNI signature's array letter names, when the
-/// element is one `jni.h` arrays as: `[I` is `jintArray`, and an array
-/// of an array is `jobjectArray`. `dims` is the number of `[` read.
-fn array_type(dims: u32, inner: u8) -> &'static str {
-    match inner {
+/// element is one `jni.h` arrays as: `[I` is `jintArray`, an array of
+/// arrays is `jobjectArray`. `dims` is the number of `[` read, and an
+/// unknown element has no type.
+fn array_type(dims: u32, inner: u8) -> Option<&'static str> {
+    Some(match inner {
         b'L' => "jobjectArray",
         _ if dims != 1 => "jobjectArray",
         b'Z' => "jbooleanArray",
@@ -128,8 +130,9 @@ fn array_type(dims: u32, inner: u8) -> &'static str {
         b'I' => "jintArray",
         b'J' => "jlongArray",
         b'F' => "jfloatArray",
-        _ => "jdoubleArray",
-    }
+        b'D' => "jdoubleArray",
+        _ => return None,
+    })
 }
 
 /// Whether the symbol `name` is a JNI function: a `Java_` export naming a
@@ -139,19 +142,17 @@ pub fn is_jni(name: &str) -> bool {
     jni_signature(name).is_some() || jni_runtime(name).is_some()
 }
 
-/// Whether `name` is a JNI runtime function: `JNI_` and a name that
-/// begins with a capital — `JNI_OnLoad`, `JNI_OnUnload`,
-/// `JNI_GetCreatedJavaVMs`, `JNI_GetDefaultJavaVMInitArgs` — the
-/// functions the JNI spec exports as plain functions. `JNI_` alone and
-/// `JNI_foo` are not.
+/// Whether `name` is a JNI runtime function: one of the functions the
+/// JNI spec exports as plain functions — `JNI_OnLoad`, `JNI_OnUnload`,
+/// `JNI_GetCreatedJavaVMs`, `JNI_GetDefaultJavaVMInitArgs`. A name the
+/// table does not list has no types to apply, so it is not JNI here.
 fn jni_runtime(name: &str) -> Option<&str> {
-    let name = name.trim();
-    let rest = name.strip_prefix("JNI_")?;
-    let bytes = rest.as_bytes();
-    if bytes.is_empty() || !bytes[0].is_ascii_uppercase() {
-        return None;
+    match name.trim() {
+        "JNI_OnLoad" | "JNI_OnUnload" | "JNI_GetCreatedJavaVMs" | "JNI_GetDefaultJavaVMInitArgs" => {
+            Some(name)
+        }
+        _ => None,
     }
-    Some(rest)
 }
 
 
@@ -188,14 +189,22 @@ fn jni_signature(name: &str) -> Option<(&str, &str, Option<&str>)> {
     Some((class, method, overload))
 }
 
-/// One JNI type at the front of `letters`: a primitive letter, or a
-/// class `L<name>;`, or an array of either — `[I`, `[[I`, `[[Ljava/lang/Object;` —
+/// One JNI type at the front of `letters`: a primitive letter (never
+/// `V` outside return position), or a class `L<name>;`, or an array of
+/// either — `[I`, `[[I`, `[[Ljava/lang/Object;` —
 /// with every `[` the signature spells.
 fn jni_type(letters: &mut std::iter::Peekable<std::str::Chars>) -> Option<&'static str> {
     let letter = letters.next()? as u8;
     match letter {
         b'L' => {
-            let class: String = letters.take_while(|c| *c != ';').collect();
+            // The class runs to the `;` that closes it.
+            let mut class = String::new();
+            loop {
+                match letters.next()? {
+                    ';' => break,
+                    c => class.push(c),
+                }
+            }
             if class.is_empty() {
                 return None;
             }
@@ -214,15 +223,22 @@ fn jni_type(letters: &mut std::iter::Peekable<std::str::Chars>) -> Option<&'stat
                     _ => break letters.next()? as u8,
                 }
             };
-            let ty = array_type(dims, inner);
+            let ty = array_type(dims, inner)?;
             if inner == b'L' {
-                let class: String = letters.take_while(|c| *c != ';').collect();
+                let mut class = String::new();
+                loop {
+                    match letters.next()? {
+                        ';' => break,
+                        c => class.push(c),
+                    }
+                }
                 if class.is_empty() {
                     return None;
                 }
             }
             Some(ty)
         }
+        b'V' => None,
         _ => primitive(letter),
     }
 }
@@ -230,30 +246,47 @@ fn jni_type(letters: &mut std::iter::Peekable<std::str::Chars>) -> Option<&'stat
 /// Parse a JNI overload signature — `IJ`, or `(IJ)Ljava/lang/String;` —
 /// into the parameter types and the return type, as the C types the JNI
 /// header defines them. The overloaded name spells the parameters alone:
-/// `Java_com_example_Native_add__IJ`; the return, when the name names it
-/// — `__IILjava/lang/String;` — follows in the same place. A lone `V`
-/// is the void return of a method taking no arguments. A malformed
-/// signature returns `None`, and the caller keeps the fallback:
-/// `jobject` in, `jobject` out.
+/// `Java_com_example_Native_add__IJ`, `Java_com_example_Native_get__ILjava_lang_String_`
+/// (un-mangled to `ILjava/lang/String;` before parsing); the return is
+/// the bare form's `jobject` fallback, or `void` for a trailing `V`.
+/// A malformed signature — an unknown letter, an unterminated class,
+/// a `V` outside return position, trailing garbage — returns `None`,
+/// and the caller keeps the fallback: `jobject` in, `jobject` out.
 fn parse_signature(signature: &str) -> Option<(Vec<&'static str>, &'static str)> {
     // The full form `(params)return`: the return is the type past the
     // close, so read it after it — `V` there is the void here.
     if let Some(rest) = signature.strip_prefix('(') {
         let mut letters = rest.chars().peekable();
         let mut params = Vec::new();
-        while let Some(&next) = letters.peek() {
-            if next == ')' {
-                letters.next();
-                break;
+        // The loop has to break on `)`; without the break the return
+        // type would be walked as a parameter.
+        loop {
+            match letters.peek()? {
+                ')' => {
+                    letters.next();
+                    break;
+                }
+                _ => params.push(jni_type(&mut letters)?),
             }
-            params.push(jni_type(&mut letters)?);
         }
-        let returned = jni_type(&mut letters)?;
+        // `V` names the void return here and only here; nowhere else
+        // does a parameter take it.
+        let returned = if letters.peek() == Some(&'V') {
+            letters.next();
+            "void"
+        } else {
+            jni_type(&mut letters)?
+        };
+        // Trailing garbage after the return type is malformed.
+        if letters.next().is_some() {
+            return None;
+        }
+        // The `V` void return, checked via a peek above, never falls
+        // through here: this is the tail check only.
         return Some((params, returned));
     }
-    // The name's form spells the parameters alone; a trailing type is
-    // the return when one follows. A lone `V` is the void return with
-    // no parameters.
+    // The name's form spells the parameters alone; a trailing `V` names
+    // the void return. A lone `V` is that return with no parameters.
     if signature.is_empty() {
         return None;
     }
@@ -263,26 +296,52 @@ fn parse_signature(signature: &str) -> Option<(Vec<&'static str>, &'static str)>
     let mut letters = signature.chars().peekable();
     let mut params = Vec::new();
     while let Some(&next) = letters.peek() {
-        let ty = jni_type(&mut letters)?;
-        // The `V` void return past the last parameter; with another
-        // type following, the next loop reads it as a parameter.
-        if next == 'V' && letters.peek().is_none() {
-            return Some((params, "void"));
+        if next == 'V' {
+            letters.next();
+            if letters.next().is_none() {
+                return Some((params, "void"));
+            }
+            return None;
         }
-        params.push(ty);
-        if letters.peek().is_none() {
-            return Some((params, "jobject"));
-        }
-        // A `;` in the signature marks the end of a class: the type
-        // after it is the return only in the parenthesised form; the
-        // bare overload names the parameters alone, so a class that
-        // ends mid-list is a parameter and the next read is the next
-        // parameter.
-        if letters.peek() == Some(&';') {
-            return Some((params, "jobject"));
-        }
+        params.push(jni_type(&mut letters)?);
     }
     Some((params, "jobject"))
+}
+
+/// Un-mangle an overload signature as an export spells it: `_1` is a
+/// literal underscore, `_2` is `;`, `_3` is `[`, and a bare `_` is `/` —
+/// the per-escape mangling the spec spells out. A trailing bare `_` or
+/// an unterminated class reads as the class's closing `;`, the way
+/// `ILjava_lang_String_` for `ILjava/lang/String;` reads. The
+/// parenthesised form has no mangling.
+fn unmangle(signature: &str) -> String {
+    if signature.starts_with('(') {
+        return signature.to_string();
+    }
+    let mut out = String::new();
+    let mut chars = signature.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '_' {
+            match chars.peek() {
+                Some('1') | Some('2') | Some('3') => {
+                    let digit = chars.next().unwrap();
+                    out.push(match digit {
+                        '1' => '_',
+                        '2' => ';',
+                        _ => '[',
+                    });
+                    // A class on the far side of `[` opens after it.
+                    // The `[` itself just pushes; the next `_` is its
+                    // own separator.
+                }
+                Some(_) => out.push('/'),
+                None => out.push(';'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The types of a JNI function's parameters and return, from its name:
@@ -297,7 +356,8 @@ pub fn apply(name: &str) -> Option<JniTypes> {
         let mut params: Vec<String> = vec!["JNIEnv *".to_string(), "jobject".to_string()];
         let mut returns = "jobject".to_string();
         if let Some(signature) = overload {
-            if let Some((typed, returned)) = parse_signature(signature) {
+            let signature = unmangle(signature);
+            if let Some((typed, returned)) = parse_signature(&signature) {
                 params.extend(typed.iter().map(|s| s.to_string()));
                 returns = returned.to_string();
             }
@@ -357,16 +417,21 @@ pub struct JniTypes {
 pub fn definitions() -> Vec<crate::ctype::TypeText> {
     jni_types()
         .lines()
-        .map(|line| {
+        .filter_map(|line| {
             let trimmed = line.trim();
             let name = trimmed
                 .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .map(|at| trimmed[at + 1..].to_string())
                 .unwrap_or_default();
-            crate::ctype::TypeText {
+            // `_jvalue` is only the union's member spelling, not a name
+            // `jvalue` is spelled by; importing it pollutes the store.
+            if name.starts_with('_') {
+                return None;
+            }
+            Some(crate::ctype::TypeText {
                 name,
                 c: trimmed.to_string(),
-            }
+            })
         })
         .collect()
 }
@@ -456,12 +521,14 @@ mod tests {
     fn java_names_are_jni_and_javali_is_not() {
         assert!(is_jni("Java_com_example_Native_add"));
         assert!(is_jni("Java_com/example/Native_add"));
+        assert!(is_jni("JNI_OnLoad"));
         assert!(!is_jni("Java_foo"));
         assert!(!is_jni("Java"));
         assert!(!is_jni("Javali"));
         assert!(!is_jni("Java_"));
         assert!(!is_jni("JNI_"));
         assert!(!is_jni("JNI_foo"));
+        assert!(!is_jni("JNI_Unknown"));
         assert!(!is_jni("main"));
     }
 
@@ -509,6 +576,19 @@ mod tests {
         // The array forms and the double array.
         assert_eq!(parse_signature("[I"), Some((vec!["jintArray"], "jobject")));
         assert_eq!(parse_signature("[[I"), Some((vec!["jobjectArray"], "jobject")));
+        // Malformed signatures keep the fallback: `V` outside return
+        // position, an unknown array element, trailing garbage, and an
+        // unterminated class are all None.
+        assert_eq!(parse_signature("VI"), None);
+        assert_eq!(parse_signature("IVI"), None);
+        assert_eq!(parse_signature("[X"), None);
+        assert_eq!(parse_signature("(I)Vx"), None);
+        assert_eq!(parse_signature("Ljava/lang/String"), None);
+        // The mangled export spelling un-mangles round-trip.
+        assert_eq!(
+            parse_signature(&unmangle("ILjava_lang_String_")),
+            Some((vec!["jint", "jstring"], "jobject"))
+        );
     }
 
     #[test]
@@ -522,8 +602,12 @@ mod tests {
             vec!["JNIEnv *", "jobject", "jint", "jint"]
         );
         assert_eq!(types.returns, "jobject");
-        let types = apply("Java_com_example_Native_f__ILjava/lang/String;").unwrap();
-        assert_eq!(types.params[3], "jstring");
+        // The export's mangled spelling: `Java_com_example_Native_get__ILjava_lang_String_`.
+        let types = apply("Java_com_example_Native_get__ILjava_lang_String_").unwrap();
+        assert_eq!(
+            types.params,
+            vec!["JNIEnv *", "jobject", "jint", "jstring"]
+        );
         assert_eq!(types.returns, "jobject");
         let types = apply("Java_com_example_Native_g__I").unwrap();
         assert_eq!(types.params, vec!["JNIEnv *", "jobject", "jint"]);

@@ -1568,19 +1568,17 @@ pub fn solve(program: &[&Facts], store: &TypeStore) -> BTreeMap<u64, FunctionTyp
                     format!("from {}'s JNI prototype", prototype.name),
                 ));
             }
-            if facts.widths.contains_key(&Slot::Return) {
-                if !facts.fixed.contains(&Slot::Return) {
-                    if let Ok(size) = store.size_of(&prototype.ret) {
-                        solver.widths.insert((f, Slot::Return), size);
-                    }
+            if !facts.fixed.contains(&Slot::Return) {
+                if let Ok(size) = store.size_of(&prototype.ret) {
+                    solver.widths.insert((f, Slot::Return), size);
                 }
-                first.push((
-                    (f, Slot::Return),
-                    EXACT,
-                    evidence_of(store, prototype.ret.clone()),
-                    format!("from {}'s JNI prototype", prototype.name),
-                ));
             }
+            first.push((
+                (f, Slot::Return),
+                EXACT,
+                evidence_of(store, prototype.ret.clone()),
+                format!("from {}'s JNI prototype", prototype.name),
+            ));
         }
         for link in &facts.links {
             edges.push(Edge {
