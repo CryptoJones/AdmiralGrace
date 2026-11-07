@@ -12,10 +12,9 @@
 //! function — `init` of one build and `init` of the other. The source
 //! side's spellings are the name its image prints, the mangled spelling
 //! when that is what printed, and the analyst's own rename of the entry;
-//! the destination is searched by those same three spellings. A
-//! destination function found through a rename outranks an image-name
-//! hit wherever the two answers differ, since only the destination's
-//! analyst read destination addresses.
+//! the destination is searched by those same three spellings, its image's
+//! own names first and a rename last, since a rename recorded for one
+//! version names that version's address and no other.
 //!
 //! The port is `preview` (what would move, and what is held back) and
 //! `apply` (the move), the way the header import is. A definition the
@@ -30,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ag_corpus::project::canonical_address;
-use ag_image::ctype::{TypeText, build, parse_into, parse_type};
+use ag_image::ctype::{build, parse_into, parse_type, TypeText};
 use ag_image::{DataModel, Type, TypeStore};
 
 /// One variable's type on a function's record, as the source project
@@ -140,9 +139,12 @@ impl SymbolImage {
     fn by_name(&self, name: &str) -> Option<&SymbolFunction> {
         // `spellings` reads the image's own names first, so a name
         // collision between two functions takes the image's own match.
-        for function in &self.functions {
-            for spelled in Self::spellings(function) {
-                if spelled == name {
+        // Search each spelling's whole list in turn, so an image-name
+        // hit anywhere outranks a rename on another function.
+        for index in 0..3 {
+            for function in &self.functions {
+                let spelled = Self::spellings(function);
+                if spelled.get(index) == Some(&name) {
                     return Some(function);
                 }
             }
@@ -310,7 +312,11 @@ fn missing_names(store: &TypeStore, ty: &Type) -> Vec<String> {
 
 /// The keys of `store`'s named definitions, in the order defined.
 fn store_names(store: &TypeStore) -> Vec<String> {
-    store.names().iter().map(|name| (*name).to_string()).collect()
+    store
+        .names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 /// Whether `name` is a type name that needs no definition of its own:
@@ -364,7 +370,10 @@ fn is_platform(name: &str) -> bool {
 }
 
 /// The one `parse_into` reads of a definition against `store`.
-fn parse_definition(store: &mut TypeStore, text: &TypeText) -> Result<ag_image::ctype::Parsed, String> {
+fn parse_definition(
+    store: &mut TypeStore,
+    text: &TypeText,
+) -> Result<ag_image::ctype::Parsed, String> {
     parse_into(store, &text.c).map_err(|error| error.to_string())
 }
 
@@ -405,6 +414,7 @@ fn collect_port(
             .functions
             .iter()
             .find(|f| f.address == source_address)
+            .cloned()
         else {
             unmatched.push(UnmatchedFunction {
                 source: fun.address.clone(),
@@ -413,7 +423,7 @@ fn collect_port(
             });
             continue;
         };
-        let spellings = SymbolImage::spellings(source_function);
+        let spellings = SymbolImage::spellings(&source_function);
         let mut hit = None;
         for name in &spellings {
             if let Some(dest_function) = dest_image.by_name(name) {
@@ -513,14 +523,15 @@ fn collect_port(
     for definition in &source.definitions {
         // Only what the matched signatures need is drawn.
         let defined = source_definitions_of(definition, &source_store);
-        let needed_here = defined
-            .iter()
-            .any(|name| needed_set.contains(name))
+        let needed_here = defined.iter().any(|name| needed_set.contains(name))
             || needed_set.contains(&definition.name);
         if !needed_here {
             continue;
         }
-        if accepted.iter().any(|held_def| held_def.name == definition.name) {
+        if accepted
+            .iter()
+            .any(|held_def| held_def.name == definition.name)
+        {
             continue;
         }
         // The definition's own names, for a later duplicate: a name
@@ -541,7 +552,10 @@ fn collect_port(
             // A name of this definition drawn twice is the same refusal
             // as a name held differently: one shape only.
             for name in &defined {
-                blocked.insert(name.clone(), format!("{} is defined already", definition.name));
+                blocked.insert(
+                    name.clone(),
+                    format!("{} is defined already", definition.name),
+                );
             }
             continue;
         }
@@ -574,8 +588,8 @@ fn collect_port(
                 // Names drawn from the declaration first: a name only
                 // declared, not defined, does not count as drawn.
                 for declared in &parsed.declarations {
-                    let is_defined = probe.get(&declared.name).is_some()
-                        || defined.contains(&declared.name);
+                    let is_defined =
+                        probe.get(&declared.name).is_some() || defined.contains(&declared.name);
                     if is_defined && !accepted.iter().any(|a| a.name == declared.name) {
                         if let Some(def) = definitions_final
                             .iter()
@@ -629,8 +643,16 @@ fn collect_port(
                 });
                 continue;
             }
-            if let Some(declared) = held.declared.get(&fun.dest) {
-                if !declared.contains(&word.variable) {
+            match held.declared.get(&fun.dest) {
+                Some(declared) if !declared.contains(&word.variable) => {
+                    held_signatures.push(HeldSignature {
+                        function: fun.symbol.clone(),
+                        variable: word.variable.clone(),
+                        reason: format!("{} declares no {}", fun.symbol, word.variable),
+                    });
+                    continue;
+                }
+                None => {
                     held_signatures.push(HeldSignature {
                         function: fun.symbol.clone(),
                         variable: word.variable.clone(),
@@ -641,6 +663,7 @@ fn collect_port(
                     });
                     continue;
                 }
+                Some(_) => {}
             }
             let Some(ty) = parse_type(&final_store, &word.ty).ok() else {
                 held_signatures.push(HeldSignature {
@@ -686,10 +709,7 @@ fn collect_port(
                 held_signatures.push(HeldSignature {
                     function: fun.symbol.clone(),
                     variable: word.variable.clone(),
-                    reason: format!(
-                        "{} is already typed {}",
-                        word.variable, held_start.ty
-                    ),
+                    reason: format!("{} is already typed {}", word.variable, held_start.ty),
                 });
                 continue;
             }
@@ -746,14 +766,11 @@ fn collect_port(
             }
             // A variable the destination already holds at the same
             // offset stands; the port does not re-make it.
-            let already = held
-                .stack_vars
-                .get(&fun.dest)
-                .and_then(|held_here| {
-                    held_here
-                        .iter()
-                        .find(|w: &&StackWord| w.offset == word.offset)
-                });
+            let already = held.stack_vars.get(&fun.dest).and_then(|held_here| {
+                held_here
+                    .iter()
+                    .find(|w: &&StackWord| w.offset == word.offset)
+            });
             if already.is_some() {
                 continue;
             }
@@ -777,10 +794,7 @@ fn collect_port(
 /// The names `definition` defines, read by parsing it alone and asking
 /// the store it builds: every name it declares, that its C reads as a
 /// definition.
-fn source_definitions_of(
-    definition: &TypeText,
-    source_store: &TypeStore,
-) -> Vec<String> {
+fn source_definitions_of(definition: &TypeText, source_store: &TypeStore) -> Vec<String> {
     let mut fresh = TypeStore::new(*source_store.model());
     if parse_into(&mut fresh, &definition.c).is_err() {
         return vec![definition.name.clone()];
@@ -888,7 +902,9 @@ pub fn apply(
 /// A function's record, as a portable source project holds it: the
 /// variable types and stack variables that stand on it, read off the
 /// annotations of `project` as a list of canonical addresses.
-pub fn source_of_project(project: &ag_corpus::project::ProjectFile) -> (SourceProject, SymbolImage) {
+pub fn source_of_project(
+    project: &ag_corpus::project::ProjectFile,
+) -> (SourceProject, SymbolImage) {
     let mut source = SourceProject {
         definitions: crate::types::texts(project),
         functions: Vec::new(),
@@ -929,7 +945,9 @@ pub fn source_of_project(project: &ag_corpus::project::ProjectFile) -> (SourcePr
         let address = ag_corpus::parse_addr(&address).unwrap_or(0);
         functions.push(SymbolFunction {
             address,
-            name: renamed.clone().unwrap_or_else(|| format!("sub_{address:x}")),
+            name: renamed
+                .clone()
+                .unwrap_or_else(|| format!("sub_{address:x}")),
             mangled: None,
             renamed,
         });
@@ -951,8 +969,7 @@ pub fn held_of_project(project: &ag_corpus::project::ProjectFile) -> HeldProject
         if record.variable.is_some() || record.register.is_some() || record.block {
             continue;
         }
-        let address = canonical_address(&record.address)
-            .unwrap_or_else(|| record.address.clone());
+        let address = canonical_address(&record.address).unwrap_or_else(|| record.address.clone());
         if !record.var_types.is_empty() {
             signatures.insert(
                 address.clone(),

@@ -1970,7 +1970,11 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             println!("{}: {} imported", file.display(), added.join(", "));
             Ok(0)
         }
-        TypesCmd::Port { from, preview, json } => port_types(target, file, &from, preview, json),
+        TypesCmd::Port {
+            from,
+            preview,
+            json,
+        } => port_types(target, file, &from, preview, json),
     }
 }
 
@@ -1990,8 +1994,8 @@ fn port_inputs(
     crate::port::HeldProject,
     crate::port::SymbolImage,
 )> {
-    let source_file = ProjectFile::load(from)
-        .with_context(|| format!("reading {}", from.display()))?;
+    let source_file =
+        ProjectFile::load(from).with_context(|| format!("reading {}", from.display()))?;
     let (source, source_symbols) = crate::port::source_of_project(&source_file);
     let source_image = match source_file.target.path.as_deref() {
         Some(path) => {
@@ -2040,28 +2044,19 @@ fn port_inputs(
 /// nothing; otherwise the report is written to `FILE`: the definitions
 /// are added, and each applied word is set on its function's record.
 /// Returns 0 with a report, or 1 when something was held back.
-fn port_types(
-    target: &Path,
-    file: &Path,
-    from: &Path,
-    preview: bool,
-    json: bool,
-) -> Result<i32> {
+fn port_types(target: &Path, file: &Path, from: &Path, preview: bool, json: bool) -> Result<i32> {
     let (source, source_image, held, dest_image) = port_inputs(target, file, from)?;
     let shown = crate::port::preview(&source, &source_image, &dest_image, &held)
         .map_err(anyhow::Error::msg)?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&port_json(&shown))?
-        );
+    if json && preview {
+        println!("{}", serde_json::to_string_pretty(&port_json(&shown))?);
         return Ok(0);
     }
     for note in &shown.notes {
         eprintln!("note: {note}");
     }
-    for def in &shown.definitions {
-        println!("{}: ported", def.name);
+    for name in &shown.added {
+        println!("{name}: ported");
     }
     for fun in &shown.functions {
         for word in &fun.var_types {
@@ -2078,16 +2073,10 @@ fn port_types(
         println!("{}: held back ({})", held.name, held.reason);
     }
     for held in &shown.held_signatures {
-        println!(
-            "{}: held back ({})",
-            held.function, held.reason
-        );
+        println!("{}: held back ({})", held.function, held.reason);
     }
-    if shown.functions.is_empty() && shown.definitions.is_empty() {
-        println!(
-            "{}: no types to port",
-            from.display()
-        );
+    if shown.functions.is_empty() && shown.added.is_empty() {
+        println!("{}: no types to port", from.display());
     }
     if preview {
         return Ok(0);
@@ -2122,6 +2111,9 @@ fn port_types(
         carried,
         if carried == 1 { "" } else { "s" }
     );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&port_json(&shown))?);
+    }
     Ok(0)
 }
 
@@ -2132,6 +2124,7 @@ pub(crate) fn port_json(shown: &crate::port::PortPreview) -> serde_json::Value {
         "ported": shown
             .definitions
             .iter()
+            .filter(|d| shown.added.contains(&d.name))
             .map(|d| serde_json::json!({"name": d.name, "c": d.c}))
             .collect::<Vec<_>>(),
         "functions": shown
@@ -2164,6 +2157,11 @@ pub(crate) fn port_json(shown: &crate::port::PortPreview) -> serde_json::Value {
             .applied
             .iter()
             .map(|(address, word)| serde_json::json!({"address": address, "variable": word.variable, "type": word.ty}))
+            .collect::<Vec<_>>(),
+        "applied_stack": shown
+            .applied_stack
+            .iter()
+            .map(|(address, word)| serde_json::json!({"address": address, "offset": word.offset, "size": word.size}))
             .collect::<Vec<_>>(),
         "notes": shown.notes,
     })

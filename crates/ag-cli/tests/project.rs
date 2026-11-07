@@ -3211,6 +3211,118 @@ fn types_are_imported_from_a_c_header_with_the_preprocessor_flags() {
 }
 
 #[test]
+fn types_are_ported_by_matching_symbols() {
+    let from = TempFile::new("port-from");
+    let to = TempFile::new("port-to");
+    let source = |args: &[&str]| -> (bool, String, String) {
+        let text = from.text();
+        let mut all = vec!["types", "--file", &text];
+        all.extend(args);
+        project_with("structs.elf", &all)
+    };
+    let (ok, _, stderr) = source(&["add", "struct point { int x; int y; long tag; };"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "structs.elf",
+        &[
+            "var-type",
+            "--file",
+            &from.text(),
+            "init",
+            "a",
+            "struct point *",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let dest = |args: &[&str]| -> (bool, String, String) {
+        let text = to.text();
+        let mut all = vec!["types", "--file", &text];
+        all.extend(args);
+        project_with("structs.elf", &all)
+    };
+    let port = |args: &[&str]| -> (bool, String, String) {
+        let text = to.text();
+        let source = from.text();
+        let mut all = vec!["types", "--file", &text, "port", &source];
+        all.extend(args);
+        project_with("structs.elf", &all)
+    };
+    let (ok, stdout, stderr) = port(&["--preview"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point: ported"), "{stdout}");
+    assert!(stdout.contains("init 0x"), "{stdout}");
+    assert!(stdout.contains("a: struct point *"), "{stdout}");
+    let (ok, stdout, _) = dest(&["show"]);
+    assert!(ok);
+    assert!(!stdout.contains("struct point"), "{stdout}");
+    let (ok, stdout, stderr) = port(&["--preview", "--json"]);
+    assert!(ok, "{stderr}");
+    let shown: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        shown["added"],
+        serde_json::json!(["struct point"]),
+        "{stdout}"
+    );
+    assert_eq!(
+        shown["functions"][0]["var_types"],
+        serde_json::json!([{"variable": "a", "type": "struct point *"}]),
+        "{stdout}"
+    );
+    assert_eq!(
+        shown["applied"][0]["type"],
+        serde_json::json!("struct point *"),
+        "{stdout}"
+    );
+    let (ok, _, stderr) = port(&["--json"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, _) = dest(&["show"]);
+    assert!(ok);
+    assert!(stdout.contains("struct point"), "{stdout}");
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("image")
+        .arg(fixture("structs.elf"))
+        .args(["pseudocode", "init", "--project", &to.text()])
+        .output()
+        .expect("the ag binary runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("void init(struct point *a, int b)"), "{text}");
+    // A definition already held with the same C is not ported twice;
+    // one held differently is held back instead of overwritten.
+    let (ok, stdout, stderr) = port(&["--preview", "--json"]);
+    assert!(ok, "{stderr}");
+    let shown: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(shown["added"], serde_json::json!([]), "{stdout}");
+    let (ok, _, stderr) = port(&["--json"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project_with(
+        "structs.elf",
+        &[
+            "var-type",
+            "--file",
+            &to.text(),
+            "init",
+            "a",
+            "clear",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = dest(&["remove", "point"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = dest(&["show"]);
+    assert!(ok, "{stderr}");
+    assert!(!stdout.contains("struct point {"), "{stdout}");
+    let (ok, _, stderr) = dest(&["add", "struct point { long x; };"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = port(&["--preview"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("struct point: held back"), "{stdout}");
+    let (ok, stdout, _) = dest(&["show", "point"]);
+    assert!(ok);
+    assert!(stdout.contains("long x"), "{stdout}");
+    assert!(!stdout.contains("int y"), "{stdout}");
+}
+
+#[test]
 fn an_enumerations_variable_reads_its_constants_as_enumerators() {
     let file = TempFile::new("enum");
     let (ok, _, stderr) = project_with(

@@ -1625,6 +1625,7 @@ impl Server {
                     "ported": result
                         .definitions
                         .iter()
+                        .filter(|d| result.added.contains(&d.name))
                         .map(|d| json!({"name": d.name, "c": d.c}))
                         .collect::<Vec<_>>(),
                     "functions": result
@@ -1635,6 +1636,7 @@ impl Server {
                             "source": f.source,
                             "dest": f.dest,
                             "var_types": f.var_types.iter().map(|w| json!({"variable": w.variable, "type": w.ty})).collect::<Vec<_>>(),
+                            "stack_vars": f.stack_vars.iter().map(|w| json!({"offset": w.offset, "size": w.size})).collect::<Vec<_>>(),
                         }))
                         .collect::<Vec<_>>(),
                     "unmatched": result
@@ -1656,6 +1658,11 @@ impl Server {
                         .applied
                         .iter()
                         .map(|w| json!({"address": w.address, "variable": w.variable, "type": w.ty}))
+                        .collect::<Vec<_>>(),
+                    "applied_stack": result
+                        .applied_stack
+                        .iter()
+                        .map(|s| json!({"address": s.address, "offset": s.word.offset, "size": s.word.size}))
                         .collect::<Vec<_>>(),
                     "notes": result.notes,
                 })))
