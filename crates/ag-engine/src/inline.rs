@@ -650,7 +650,7 @@ impl Reads {
 }
 
 /// How many times `node` reads the variable `name`.
-fn occurrences(node: &AstNode, name: &str) -> usize {
+pub(crate) fn occurrences(node: &AstNode, name: &str) -> usize {
     let mut n = 0;
     visit(node, &mut |node| {
         if matches!(node, AstNode::Var { name: v } if v == name) {
