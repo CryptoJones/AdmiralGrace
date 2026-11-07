@@ -2770,3 +2770,13 @@ fn the_types_propagation_infers_are_declared_and_listed_with_where_they_came_fro
         "{drafted}"
     );
 }
+
+#[test]
+fn com_reports_no_types_for_an_ordinary_image() {
+    let out = image("propagate.elf", &["com"]);
+    assert!(out.contains("no COM types"), "{out}");
+    let json = image("propagate.elf", &["com", "--json"]);
+    assert!(json.contains("\"guids\": []"), "{json}");
+    let header = image("propagate.elf", &["com", "--header"]);
+    assert!(header.contains("no COM types"), "{header}");
+}

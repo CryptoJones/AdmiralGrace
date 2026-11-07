@@ -7,6 +7,7 @@ pub mod cfg;
 pub mod cfgwalk;
 pub mod cpu_context;
 pub mod ctype;
+pub mod com;
 pub mod cxx;
 pub mod dead;
 pub mod defuse;

@@ -724,3 +724,15 @@ nothing reads it.
 no name it is every definition the project holds. The same list is the
 MCP `type_cross_references` tool, and the Types tab writes it under the
 selected definition.
+
+### COM interface types by GUID (#382)
+
+A COM object is created by GUID: the class GUID (CLSID) names the coclass that implements it, and the interface GUID (IID) names the interface the caller wants back, both passed to `CoCreateInstance`. A binary that uses COM carries those GUIDs as 16-byte values in its data, and types turn them into readable code: `CoCreateInstance(&CLSID_ShellLink, ..., &IID_IShellLinkW, ...)` names its arguments instead of leaving them as addresses.
+
+A GUID is 16 bytes: the first three fields little-endian, the last eight as written, spelled `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`. The image's data sections — `.data`, `.rdata`, `__DATA`, `__TEXT,__const`, and the rest that are not code — are walked at 4-byte alignment for each known COM GUID's bytes, and each hit is reported under its address and section. The known GUIDs are the engine's catalog: the core interfaces every COM object answers to — `IUnknown`, `IDispatch`, the `IEnum*` family, `IPersist`, `IConnectionPoint` and friends — and the coclasses the Windows SDK prints.
+
+`ag image com` prints the GUIDs the image holds, each as text and the interface or class the catalog names it, filed as interfaces and classes. With `--json` it gives `guids` — each `address`, `guid`, `name`, `interface`, and `at`, the address of the statement that names it when one does — plus `interfaces` and `classes`, empty lists for an image with none. With `--header` it writes the found types as a C header: `GUID` itself, each interface as a vtable struct with `QueryInterface`, `AddRef`, `Release` first and the interface's own methods in slot order, and each class as its struct with the `CLSID_` comment.
+
+The command is `ag image com [--json] [--header]`.
+
+

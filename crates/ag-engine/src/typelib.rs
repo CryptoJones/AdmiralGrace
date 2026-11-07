@@ -42,6 +42,8 @@ pub const LIBC: &str = include_str!("typelib/libc.h");
 pub const KERNEL32: &str = include_str!("typelib/kernel32.h");
 /// The C of the built-in user32 library.
 pub const USER32: &str = include_str!("typelib/user32.h");
+/// The C of the built-in ole32 library: COM's run-time.
+pub const OLE32: &str = include_str!("typelib/ole32.h");
 
 /// One shared library's type library: its name, its definitions and its
 /// signatures by name, by ordinal and by syscall number.
@@ -167,6 +169,7 @@ impl TypeLibSet {
             TypeLibrary::parse("libc", LIBC, None, model),
             TypeLibrary::parse("kernel32", KERNEL32, Some(LIBC), model),
             TypeLibrary::parse("user32", USER32, Some(LIBC), model),
+            TypeLibrary::parse("ole32", OLE32, Some(LIBC), model),
         ];
         libraries.push(linux_syscalls(model));
         let set = Arc::new(TypeLibSet { libraries });
