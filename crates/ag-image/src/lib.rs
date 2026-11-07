@@ -101,7 +101,7 @@ pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;
 pub use ag_engine::Placement;
-pub use ag_engine::typed::{format_type_uses, TypeUse};
+pub use ag_engine::typed::{format_type_uses, underlying_key, TypeUse};
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
 pub mod graph_export;

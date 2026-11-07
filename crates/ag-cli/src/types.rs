@@ -270,21 +270,22 @@ pub(crate) fn type_uses_json(store: &TypeStore, key: &str, uses: &[ag_image::Typ
             "text": use_.spelled(),
         })
     };
+    let body = ag_image::underlying_key(store, key);
     let of = |member: &str| {
         uses.iter()
-            .filter(|use_| use_.key == key && use_.member == member)
+            .filter(|use_| (use_.key == key || use_.key == body) && use_.member == member)
             .map(one)
             .collect::<Vec<_>>()
     };
     let mut members = Vec::new();
-    if let Some(layout) = store.layout(key) {
+    if let Some(layout) = store.layout(body) {
         for field in &layout.fields {
             if let Some(name) = &field.name {
                 members.push(json!({"name": name, "uses": of(name)}));
             }
         }
     }
-    if let Some(ag_image::TypeDefinition::Enum(enumeration)) = store.get(key) {
+    if let Some(ag_image::TypeDefinition::Enum(enumeration)) = store.get(body) {
         for (name, value) in &enumeration.values {
             members.push(json!({"name": name, "value": value, "uses": of(name)}));
         }
