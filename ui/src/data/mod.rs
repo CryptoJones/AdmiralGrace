@@ -573,6 +573,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Every use of a type and of each member and enumerator. Empty from a
+    /// provider that does not lift.
+    fn type_cross_references(&self) -> Vec<ag_image::TypeUse> {
+        Vec::new()
+    }
+
     /// The loads and stores through the pointer `variable` of the function
     /// at `address`, by its lift name — through its copies and the callees
     /// it is passed to — and the allocation it is the result of. Refused

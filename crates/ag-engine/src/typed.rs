@@ -35,7 +35,7 @@
 //! `S_READY` is `__enumerator(1, "S_READY")`, the value kept beside the
 //! name. The emitter prints them as C.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AstNode, BinaryOp};
 use crate::lift::{LiftedFunction, Statement, StatementKind};
@@ -616,6 +616,574 @@ fn enum_side<'a>(node: &AstNode, typed: &'a Typed) -> Option<&'a Type> {
             ..
         } => enum_side(lhs, typed),
         _ => None,
+    }
+}
+
+/// One use of a type, or of one of its members or enumerators.
+///
+/// A use in code is a variable's type, the function's return, or a member
+/// or enumerator the pseudocode reads — `__member`, `__arrow` (and the
+/// bit-field forms) and `__enumerator`. A use in the types themselves is
+/// another definition naming this one: a member's type, a typedef's
+/// target, a base class.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypeUse {
+    /// The definition: `struct point`, `enum state`.
+    pub key: String,
+    /// The member or enumerator, empty when the use is of the type itself.
+    pub member: String,
+    /// `variable`, `return`, `member`, `arrow`, `enumerator` or `definition`.
+    pub kind: &'static str,
+    /// The function the use is in; `0` for a use in another definition.
+    pub function: u64,
+    /// The instruction the use came from, when the statement has one.
+    pub at: Option<u64>,
+    /// The function's name, empty for a use in another definition.
+    pub function_name: String,
+    /// The variable, or where another definition names this type.
+    pub detail: String,
+}
+
+/// The uses of types in `function`: its variables' and return's types, and
+/// the members and enumerators its body reads.
+///
+/// `returns` is the return type of each function by the name a call prints,
+/// so `make().y` is a use of that member. A name the store does not define
+/// is left out, and so is an anonymous definition.
+pub fn cross_references(
+    function: &LiftedFunction,
+    store: &TypeStore,
+    returns: &BTreeMap<String, Type>,
+) -> Vec<TypeUse> {
+    let mut uses = BTreeSet::new();
+    let mut vars = BTreeMap::new();
+    for variable in function.params.iter().chain(function.locals.iter()) {
+        let Some(text) = shown_type(variable, &function.params) else {
+            continue;
+        };
+        if let Ok(ty) = crate::ctype::parse_type(store, text) {
+            note_type(
+                store,
+                &ty,
+                "variable",
+                function,
+                None,
+                &variable.name,
+                &mut uses,
+            );
+            vars.insert(variable.name.clone(), ty);
+        }
+    }
+    if let Ok(ty) = crate::ctype::parse_type(store, &function.return_type) {
+        note_type(store, &ty, "return", function, None, "", &mut uses);
+    }
+    walk_statements(&function.body, function, store, &vars, returns, &mut uses);
+    uses.into_iter().collect()
+}
+
+/// Where the store's definitions name one another.
+pub fn definition_uses(store: &TypeStore) -> Vec<TypeUse> {
+    let mut uses = BTreeSet::new();
+    for owner in store.names() {
+        let Some(definition) = store.get(owner) else {
+            continue;
+        };
+        match definition {
+            crate::types::Definition::Struct(composite)
+            | crate::types::Definition::Union(composite) => {
+                if let Some(members) = &composite.members {
+                    for member in members {
+                        let detail = match &member.name {
+                            Some(name) => format!("{name} of {owner}"),
+                            None => format!("a member of {owner}"),
+                        };
+                        note_names(
+                            store,
+                            &member.ty,
+                            UseSite {
+                                kind: "definition",
+                                function: 0,
+                                at: None,
+                                function_name: "",
+                                detail: &detail,
+                            },
+                            &mut uses,
+                        );
+                    }
+                }
+                for method in &composite.methods {
+                    let detail = format!("{} of {owner}", method.name);
+                    note_names(
+                        store,
+                        &method.ty,
+                        UseSite {
+                            kind: "definition",
+                            function: 0,
+                            at: None,
+                            function_name: "",
+                            detail: &detail,
+                        },
+                        &mut uses,
+                    );
+                }
+                for base in &composite.base_classes {
+                    if store.get(base).is_some() && !store.is_anonymous(base) {
+                        uses.insert(TypeUse {
+                            key: base.clone(),
+                            member: String::new(),
+                            kind: "definition",
+                            function: 0,
+                            at: None,
+                            function_name: String::new(),
+                            detail: format!("base of {owner}"),
+                        });
+                    }
+                }
+            }
+            crate::types::Definition::Typedef(target) => {
+                let detail = format!("typedef {owner}");
+                note_names(
+                    store,
+                    target,
+                    UseSite {
+                        kind: "definition",
+                        function: 0,
+                        at: None,
+                        function_name: "",
+                        detail: &detail,
+                    },
+                    &mut uses,
+                );
+            }
+            crate::types::Definition::Enum(_) => {}
+        }
+    }
+    uses.into_iter().collect()
+}
+
+/// The uses of `key` as text under its definition: the type's own uses,
+/// then each member and enumerator with the places that read it.
+pub fn format_type_uses(store: &TypeStore, key: &str, uses: &[TypeUse]) -> String {
+    let body = underlying_key(store, key);
+    let mut out = String::from("\nuses:\n");
+    let own: Vec<&TypeUse> = uses
+        .iter()
+        .filter(|use_| (use_.key == key || use_.key == body) && use_.member.is_empty())
+        .collect();
+    if own.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for use_ in own {
+            out.push_str(&format!("  {}\n", use_.spelled()));
+        }
+    }
+    let mut listed = BTreeSet::new();
+    if let Some(layout) = store.layout(body) {
+        for field in &layout.fields {
+            let Some(name) = &field.name else {
+                continue;
+            };
+            listed.insert(name.clone());
+            out.push_str(&member_uses(body, name, uses));
+        }
+    }
+    if let Some(crate::types::Definition::Enum(enumeration)) = store.get(body) {
+        for (name, _) in &enumeration.values {
+            listed.insert(name.clone());
+            out.push_str(&member_uses(body, name, uses));
+        }
+    }
+    let mut extra: Vec<&str> = uses
+        .iter()
+        .filter(|use_| use_.key == body && !use_.member.is_empty() && !listed.contains(&use_.member))
+        .map(|use_| use_.member.as_str())
+        .collect();
+    extra.sort_unstable();
+    extra.dedup();
+    for name in extra {
+        out.push_str(&member_uses(body, name, uses));
+    }
+    out
+}
+
+/// The structure, union or enumeration a typedef names, or `key`.
+pub fn underlying_key<'a>(store: &'a TypeStore, key: &'a str) -> &'a str {
+    match store.get(key) {
+        Some(crate::types::Definition::Typedef(ty)) => match store.resolve(ty) {
+            Type::Named(name)
+                if store.layout(name).is_some()
+                    || matches!(store.get(name), Some(crate::types::Definition::Enum(_))) =>
+            {
+                name.as_str()
+            }
+            _ => key,
+        },
+        _ => key,
+    }
+}
+
+/// The type a variable is declared as: the structure it holds whole, not
+/// the integer the machine keeps those bytes in.
+fn shown_type<'a>(variable: &'a crate::lift::Variable, params: &'a [crate::lift::Variable]) -> Option<&'a str> {
+    match &variable.fragment {
+        Some(fragment)
+            if fragment.whole || fragment.within.as_deref() == Some(variable.name.as_str()) =>
+        {
+            Some(fragment.of.as_str())
+        }
+        Some(fragment) => match &fragment.within {
+            Some(within) if params.iter().any(|param| param.name == *within) => None,
+            _ => Some(variable.ty.as_str()),
+        },
+        None => Some(variable.ty.as_str()),
+    }
+}
+
+/// The definition that declares the member `name`, through a base class or
+/// an anonymous member. `bits` selects a bit-field.
+fn declaring_key(store: &TypeStore, ty: &Type, name: &str, bits: bool) -> Option<String> {
+    let Type::Named(key) = store.resolve(ty) else {
+        return None;
+    };
+    let layout = store.layout(key)?;
+    let direct = layout.fields.iter().any(|field| {
+        field.name.as_deref() == Some(name) && field.bits.is_some() == bits
+    });
+    if direct {
+        return Some(key.clone());
+    }
+    for field in &layout.fields {
+        if field.name.is_none() {
+            if let Some(found) = declaring_key(store, &field.ty, name, bits) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn member_uses(key: &str, name: &str, uses: &[TypeUse]) -> String {
+    let found: Vec<&TypeUse> = uses
+        .iter()
+        .filter(|use_| use_.key == key && use_.member == name)
+        .collect();
+    let mut out = format!("{name}:\n");
+    if found.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for use_ in found {
+            out.push_str(&format!("  {}\n", use_.spelled()));
+        }
+    }
+    out
+}
+
+impl TypeUse {
+    /// The use as one line: `a of init`, `0x4010b0 in init`, `next of struct node`.
+    pub fn spelled(&self) -> String {
+        match self.kind {
+            "variable" => format!("{} of {}", self.detail, self.function_name),
+            "return" => format!("return of {}", self.function_name),
+            "definition" => self.detail.clone(),
+            _ => match self.at {
+                Some(at) => format!("{at:#x} in {}", self.function_name),
+                None => format!("in {}", self.function_name),
+            },
+        }
+    }
+}
+
+struct UseSite<'a> {
+    kind: &'static str,
+    function: u64,
+    at: Option<u64>,
+    function_name: &'a str,
+    detail: &'a str,
+}
+
+fn note_type(
+    store: &TypeStore,
+    ty: &Type,
+    kind: &'static str,
+    function: &LiftedFunction,
+    at: Option<u64>,
+    detail: &str,
+    uses: &mut BTreeSet<TypeUse>,
+) {
+    note_names(
+        store,
+        ty,
+        UseSite {
+            kind,
+            function: function.address,
+            at,
+            function_name: &function.name,
+            detail,
+        },
+        uses,
+    );
+}
+
+fn note_names(store: &TypeStore, ty: &Type, site: UseSite<'_>, uses: &mut BTreeSet<TypeUse>) {
+    let mut names = BTreeSet::new();
+    ty.names(&mut names);
+    for key in names {
+        if store.is_anonymous(&key) || store.get(&key).is_none() {
+            continue;
+        }
+        uses.insert(TypeUse {
+            key,
+            member: String::new(),
+            kind: site.kind,
+            function: site.function,
+            at: site.at,
+            function_name: site.function_name.to_string(),
+            detail: site.detail.to_string(),
+        });
+    }
+}
+
+fn walk_statements(
+    statements: &[Statement],
+    function: &LiftedFunction,
+    store: &TypeStore,
+    vars: &BTreeMap<String, Type>,
+    returns: &BTreeMap<String, Type>,
+    uses: &mut BTreeSet<TypeUse>,
+) {
+    for statement in statements {
+        let at = statement.addresses.first().copied();
+        walk_nodes(&statement.node, &mut |node| {
+            record_node(node, at, function, store, vars, returns, uses);
+        });
+        match &statement.kind {
+            StatementKind::For { init, step, body } => {
+                walk_statements(std::slice::from_ref(init.as_ref()), function, store, vars, returns, uses);
+                walk_statements(std::slice::from_ref(step.as_ref()), function, store, vars, returns, uses);
+                walk_statements(body, function, store, vars, returns, uses);
+            }
+            StatementKind::Switch { arms } => {
+                for arm in arms {
+                    for label in &arm.labels {
+                        if let Some((owner, _)) = store.constant(label) {
+                            if !store.is_anonymous(owner) {
+                                uses.insert(TypeUse {
+                                    key: owner.to_string(),
+                                    member: label.clone(),
+                                    kind: "enumerator",
+                                    function: function.address,
+                                    at,
+                                    function_name: function.name.clone(),
+                                    detail: String::new(),
+                                });
+                            }
+                        }
+                    }
+                    walk_statements(&arm.body, function, store, vars, returns, uses);
+                }
+            }
+            _ => {
+                for child in statement.children() {
+                    walk_statements(child, function, store, vars, returns, uses);
+                }
+            }
+        }
+    }
+}
+
+fn record_node(
+    node: &AstNode,
+    at: Option<u64>,
+    function: &LiftedFunction,
+    store: &TypeStore,
+    vars: &BTreeMap<String, Type>,
+    returns: &BTreeMap<String, Type>,
+    uses: &mut BTreeSet<TypeUse>,
+) {
+    let (field, arrow) = if let Some((_, field, arrow)) = member_of(node) {
+        (field, arrow)
+    } else if let Some((_, field, _, _, arrow)) = bits_member_of(node) {
+        (field, arrow)
+    } else if let Some(name) = enumerator_of(node) {
+        if let Some((owner, _)) = store.constant(name) {
+            if !store.is_anonymous(owner) {
+                uses.insert(TypeUse {
+                    key: owner.to_string(),
+                    member: name.to_string(),
+                    kind: "enumerator",
+                    function: function.address,
+                    at,
+                    function_name: function.name.clone(),
+                    detail: String::new(),
+                });
+            }
+        }
+        return;
+    } else {
+        return;
+    };
+    let Some(base) = node_base(node) else {
+        return;
+    };
+    let Some(base_ty) = expr_type(base, store, vars, returns) else {
+        return;
+    };
+    let Some(outer) = composite_key(store, &base_ty, arrow) else {
+        return;
+    };
+    let bits = bits_member_of(node).is_some();
+    let Some(owner) = declaring_key(store, &Type::Named(outer), field, bits) else {
+        return;
+    };
+    uses.insert(TypeUse {
+        key: owner,
+        member: field.to_string(),
+        kind: if arrow { "arrow" } else { "member" },
+        function: function.address,
+        at,
+        function_name: function.name.clone(),
+        detail: String::new(),
+    });
+}
+
+fn node_base(node: &AstNode) -> Option<&AstNode> {
+    member_of(node)
+        .map(|(base, _, _)| base)
+        .or_else(|| bits_member_of(node).map(|(base, _, _, _, _)| base))
+}
+
+fn composite_key(store: &TypeStore, ty: &Type, arrow: bool) -> Option<String> {
+    let resolved = store.resolve(ty).clone();
+    let chosen = if !arrow && store.composite(&resolved).is_some() {
+        resolved
+    } else {
+        match &resolved {
+            Type::Pointer(inner) | Type::Array(inner, _) => store.resolve(inner).clone(),
+            other => other.clone(),
+        }
+    };
+    match &chosen {
+        Type::Named(key) if store.composite(&chosen).is_some() && !store.is_anonymous(key) => {
+            Some(key.clone())
+        }
+        _ => None,
+    }
+}
+
+fn expr_type(
+    node: &AstNode,
+    store: &TypeStore,
+    vars: &BTreeMap<String, Type>,
+    returns: &BTreeMap<String, Type>,
+) -> Option<Type> {
+    if let Some((base, field, arrow)) = member_of(node) {
+        let base_ty = expr_type(base, store, vars, returns)?;
+        let owner = composite_key(store, &base_ty, arrow)?;
+        return store
+            .path_offset(&Type::Named(owner), &[Step::Field(field.to_string())])
+            .map(|(_, ty)| ty);
+    }
+    if let Some((base, field, bit, bits, arrow)) = bits_member_of(node) {
+        let base_ty = expr_type(base, store, vars, returns)?;
+        let owner = composite_key(store, &base_ty, arrow)?;
+        return store
+            .path_offset(
+                &Type::Named(owner),
+                &[Step::Bits {
+                    name: field.to_string(),
+                    bit_offset: bit,
+                    bits,
+                }],
+            )
+            .map(|(_, ty)| ty);
+    }
+    match node {
+        AstNode::Var { name } => vars.get(name).cloned(),
+        AstNode::Cast { ty, .. } => crate::ctype::parse_type(store, ty).ok(),
+        AstNode::Deref { target } => match expr_type(target, store, vars, returns).as_ref() {
+            Some(ty) => match store.resolve(ty) {
+                Type::Pointer(inner) | Type::Array(inner, _) => Some((**inner).clone()),
+                _ => None,
+            },
+            None => None,
+        },
+        AstNode::Binary {
+            lhs,
+            op: BinaryOp::Add | BinaryOp::Sub,
+            ..
+        } => expr_type(lhs, store, vars, returns),
+        AstNode::Call { callee, .. } => {
+            let name = match callee.as_ref() {
+                AstNode::FunctionName { name, .. } | AstNode::Var { name } => Some(name.as_str()),
+                _ => None,
+            }?;
+            returns.get(name).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn walk_nodes(node: &AstNode, visit: &mut dyn FnMut(&AstNode)) {
+    visit(node);
+    match node {
+        AstNode::If {
+            cond,
+            then_part,
+            else_part,
+            ..
+        } => {
+            walk_nodes(cond, visit);
+            walk_nodes(then_part, visit);
+            if let Some(else_part) = else_part {
+                walk_nodes(else_part, visit);
+            }
+        }
+        AstNode::IfGoto { cond, .. } => walk_nodes(cond, visit),
+        AstNode::Loop { cond, body, .. } => {
+            if let Some(cond) = cond {
+                walk_nodes(cond, visit);
+            }
+            walk_nodes(body, visit);
+        }
+        AstNode::Assign { lhs, rhs } => {
+            walk_nodes(lhs, visit);
+            walk_nodes(rhs, visit);
+        }
+        AstNode::Binary { lhs, rhs, .. } => {
+            walk_nodes(lhs, visit);
+            walk_nodes(rhs, visit);
+        }
+        AstNode::Deref { target } | AstNode::AddressOf { target } | AstNode::Cast { target, .. } => {
+            walk_nodes(target, visit);
+        }
+        AstNode::Call { callee, args } => {
+            walk_nodes(callee, visit);
+            for arg in args {
+                walk_nodes(arg, visit);
+            }
+        }
+        AstNode::Return { value: Some(value) } => walk_nodes(value, visit),
+        AstNode::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            walk_nodes(cond, visit);
+            walk_nodes(then, visit);
+            walk_nodes(otherwise, visit);
+        }
+        AstNode::Intrinsic { args, .. } => {
+            for arg in args {
+                walk_nodes(arg, visit);
+            }
+        }
+        AstNode::StructInit { fields } => {
+            for field in fields {
+                walk_nodes(&field.value, visit);
+            }
+        }
+        AstNode::ConstantCondition { compared, .. } => walk_nodes(compared, visit),
+        _ => {}
     }
 }
 
@@ -1597,6 +2165,158 @@ mod tests {
         assert!(
             text.contains("return *(long *)&p.x /* p.x, p.y */;"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_type_and_its_members_list_where_the_pseudocode_reads_them() {
+        use crate::ast::AstNode;
+        use crate::lift::{LiftedFunction, Statement, Variable};
+        let mut store = TypeStore::new(DataModel::LP64);
+        crate::ctype::parse_into(&mut store, TYPES).unwrap();
+        let body = vec![
+            Statement::plain(
+                AstNode::Assign {
+                    lhs: Box::new(super::member(AstNode::var("a"), "y", true)),
+                    rhs: Box::new(AstNode::constant(2, 4)),
+                },
+                vec![0x4010],
+            ),
+            Statement::plain(
+                AstNode::Return {
+                    value: Some(Box::new(super::enumerator(1, 4, "S_READY"))),
+                },
+                vec![0x4014],
+            ),
+        ];
+        let function = LiftedFunction {
+            name: "init".to_string(),
+            address: 0x4000,
+            return_type: "enum state".to_string(),
+            params: vec![Variable::new("struct point *", "a")],
+            locals: Vec::new(),
+            body,
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let uses = super::cross_references(&function, &store, &std::collections::BTreeMap::new());
+        let spelled: Vec<String> = uses.iter().map(|use_| use_.spelled()).collect();
+        assert!(spelled.iter().any(|line| line == "a of init"), "{spelled:?}");
+        assert!(
+            spelled.iter().any(|line| line == "return of init"),
+            "{spelled:?}"
+        );
+        assert!(
+            uses.iter().any(|use_| {
+                use_.key == "struct point"
+                    && use_.member == "y"
+                    && use_.kind == "arrow"
+                    && use_.at == Some(0x4010)
+            }),
+            "{uses:?}"
+        );
+        assert!(
+            uses.iter().any(|use_| {
+                use_.key == "enum state" && use_.member == "S_READY" && use_.at == Some(0x4014)
+            }),
+            "{uses:?}"
+        );
+        let text = super::format_type_uses(&store, "struct point", &uses);
+        assert!(text.contains("a of init"), "{text}");
+        assert!(text.contains("y:\n  0x4010 in init"), "{text}");
+        assert!(text.contains("x:\n  (none)"), "{text}");
+        let defined = super::definition_uses(&store);
+        assert!(
+            defined
+                .iter()
+                .any(|use_| use_.key == "struct node" && use_.detail == "next of struct node"),
+            "{defined:?}"
+        );
+    }
+
+    #[test]
+    fn a_structure_held_by_value_and_a_base_field_are_uses_of_what_declares_them() {
+        use crate::ast::AstNode;
+        use crate::lift::{Fragment, LiftedFunction, Statement, Variable};
+        let mut store = TypeStore::new(DataModel::LP64);
+        crate::ctype::parse_into(
+            &mut store,
+            "struct point { int x; int y; }; struct base { int x; }; struct derived : base { int y; };",
+        )
+        .unwrap();
+        let mut held = Variable::new("long", "a");
+        held.fragment = Some(Fragment {
+            of: "struct point".to_string(),
+            offset: 0,
+            size: 8,
+            members: Vec::new(),
+            whole: true,
+            within: Some("a".to_string()),
+            signed: false,
+        });
+        let by_value = LiftedFunction {
+            name: "pass".to_string(),
+            address: 0x5000,
+            return_type: "void".to_string(),
+            params: vec![held],
+            locals: Vec::new(),
+            body: vec![Statement::plain(
+                AstNode::Assign {
+                    lhs: Box::new(super::member(AstNode::var("a"), "x", false)),
+                    rhs: Box::new(AstNode::constant(1, 4)),
+                },
+                vec![0x5000],
+            )],
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let uses = super::cross_references(&by_value, &store, &std::collections::BTreeMap::new());
+        assert!(
+            uses.iter().any(|use_| {
+                use_.key == "struct point" && use_.member.is_empty() && use_.detail == "a"
+            }),
+            "{uses:?}"
+        );
+        assert!(
+            uses.iter()
+                .any(|use_| use_.key == "struct point" && use_.member == "x" && use_.kind == "member"),
+            "{uses:?}"
+        );
+        let derived = LiftedFunction {
+            name: "touch".to_string(),
+            address: 0x6000,
+            return_type: "void".to_string(),
+            params: vec![Variable::new("struct derived *", "d")],
+            locals: Vec::new(),
+            body: vec![Statement::plain(
+                super::member(AstNode::var("d"), "x", true),
+                vec![0x6004],
+            )],
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let uses = super::cross_references(&derived, &store, &std::collections::BTreeMap::new());
+        assert!(
+            uses.iter()
+                .any(|use_| use_.key == "struct base" && use_.member == "x"),
+            "{uses:?}"
+        );
+        assert!(
+            uses.iter()
+                .all(|use_| !(use_.key == "struct derived" && use_.member == "x")),
+            "{uses:?}"
         );
     }
 }

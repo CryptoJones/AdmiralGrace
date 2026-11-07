@@ -481,6 +481,10 @@ impl Provider for BinaryProvider {
         Some(self.binary.types())
     }
 
+    fn type_cross_references(&self) -> Vec<ag_image::TypeUse> {
+        self.binary.type_cross_references()
+    }
+
     fn struct_accesses(
         &self,
         address: u64,

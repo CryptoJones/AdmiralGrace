@@ -3863,10 +3863,18 @@ impl App {
             .collect()
     }
 
-    /// The definition selected in the Types tab as C, with its layout.
+    /// The definition selected in the Types tab as C, with its layout and
+    /// the places the type and each member are used.
     pub(crate) fn selected_type_text(&self) -> Option<String> {
         let key = self.bottom.selected_type.as_ref()?;
-        self.provider.types()?.definition_text(key, true)
+        let store = self.provider.types()?;
+        let mut text = store.definition_text(key, true)?;
+        text.push_str(&ag_image::format_type_uses(
+            &store,
+            key,
+            &self.provider.type_cross_references(),
+        ));
+        Some(text)
     }
 
     /// Remember the change that took the annotations from `before` to what
@@ -13399,7 +13407,8 @@ mod tests {
         let _ = app.update(Message::TypeSelected("struct point".into()));
         let text = app.selected_type_text().expect("the layout");
         assert!(text.contains("/* 0x08 */ long tag;"), "{text}");
-        assert!(text.ends_with("/* size 0x10, align 8 */"), "{text}");
+        assert!(text.contains("/* size 0x10, align 8 */"), "{text}");
+        assert!(text.contains("x:\n  (none)"), "{text}");
         let _ = crate::views::bottom_panel::view(&app);
 
         // The search filters by name, member or text.
@@ -13500,6 +13509,10 @@ mod tests {
         );
         assert!(typed.contains("a->x = b;"), "{typed}");
         assert!(typed.contains("a->tag = 0x1122334455667788;"), "{typed}");
+        app.bottom.selected_type = Some("struct point".into());
+        let shown = app.selected_type_text().expect("the type");
+        assert!(shown.contains("a of init"), "{shown}");
+        assert!(shown.contains("x:\n  0x"), "{shown}");
         let key = app.annotation_key(0x401000);
         assert_eq!(
             app.annotations

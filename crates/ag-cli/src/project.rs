@@ -1549,6 +1549,16 @@ pub enum TypesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// List every use of a type and of each of its members and enumerators:
+    /// the variables and returns typed with it, the places the pseudocode
+    /// reads a member or an enumerator, and the definitions that name it
+    Xrefs {
+        /// The definition; every one the project defines when absent.
+        name: Option<String>,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1975,6 +1985,46 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
             preview,
             json,
         } => port_types(target, file, &from, preview, json),
+        TypesCmd::Xrefs { name, json } => {
+            let image = crate::image::open_image(
+                target,
+                None,
+                None,
+                Some(&project),
+                ag_image::Options::default(),
+            )?;
+            let store = image.types();
+            let uses = image.type_cross_references();
+            let keys: Vec<String> = match &name {
+                Some(name) => vec![store
+                    .key_of(name)
+                    .ok_or_else(|| anyhow::anyhow!("no type is named {}", name.trim()))?],
+                None => project
+                    .types
+                    .iter()
+                    .map(|definition| definition.name.clone())
+                    .collect(),
+            };
+            if json {
+                let shown: Vec<serde_json::Value> = keys
+                    .iter()
+                    .map(|key| crate::types::type_uses_json(&store, key, &uses))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&shown)?);
+                return Ok(0);
+            }
+            if keys.is_empty() {
+                println!("{}: no types are defined", file.display());
+            }
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    println!();
+                }
+                println!("{key}");
+                print!("{}", ag_image::format_type_uses(&store, key, &uses));
+            }
+            Ok(0)
+        }
     }
 }
 

@@ -345,7 +345,9 @@ showing: the structures, unions, enumerations and typedefs the project defines, 
 kind and its size under the image's data model, and beside the list the one clicked written
 out as C with its layout — each member's offset before it, `/* 0x08 */ long tag;`, the padding
 between, `/* 0x04: 4 bytes of padding */`, and the size and alignment after, `/* size 0x10,
-align 8 */`. The search box filters the list by any of a definition's name, its members' and
+align 8 */` — and under that the uses of the type and of each member and enumerator: the
+variables typed with it, the definitions that name it, and the instruction in each function
+whose pseudocode reads the member. The search box filters the list by any of a definition's name, its members' and
 enumerators' names and its C; the button beside it narrows the search to one of them, `in:
 name`, `in: member`, `in: text`, and back to `in: any`.
 

@@ -708,5 +708,19 @@ same move is the MCP `port_types` tool's.
 
 The command is `ag project TARGET types port FROM [--preview] [--json]`.
 
-- **Cross references for types and members (#384)** follow the members and enumerators the
-  pseudocode reads, which stand as the `__member`, `__arrow` and `__enumerator` intrinsics.
+### Cross references for types and members (#384)
+
+A type is in use where a variable or a return is given it, where another
+definition names it — a member's type, a typedef, a base class — and
+where the pseudocode reads one of its members or enumerators. Those
+reads stand as the `__member`, `__arrow` and `__enumerator` intrinsics
+(and the bit-field forms of the first two): `p->y` is a use of `y`,
+`v.f` of `f`, `S_READY` of that enumerator. Each member and enumerator
+is listed with the instruction and the function, or `(none)` when
+nothing reads it.
+
+`ag project TARGET types xrefs [NAME] [--json]` prints that list. With
+`NAME` (`struct point`, `point`, `node_t`) it is that definition; with
+no name it is every definition the project holds. The same list is the
+MCP `type_cross_references` tool, and the Types tab writes it under the
+selected definition.
