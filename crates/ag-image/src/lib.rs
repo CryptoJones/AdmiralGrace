@@ -97,10 +97,7 @@ pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
-pub use ag_engine::com::{
-    ComEntry as AgComEntry, ComMetadata as AgComMetadata, ComSection as AgComSection, Guid,
-    GuidHit as AgGuidHit,
-};
+pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;

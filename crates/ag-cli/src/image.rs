@@ -3046,6 +3046,8 @@ fn com(image: &Binary, json: bool, header: bool) -> Result<i32> {
         return Ok(0);
     };
     for hit in &com.guids {
+        // `scan` only matches GUIDs against the catalog, so every hit
+        // carries a name; `unknown` is the shape if that ever changes.
         let name = hit.name.as_deref().unwrap_or("unknown");
         println!(
             "{:#x}  {}  {}  {}",
@@ -3054,9 +3056,6 @@ fn com(image: &Binary, json: bool, header: bool) -> Result<i32> {
             name,
             if hit.interface { "interface" } else { "class" }
         );
-        if let Some(at) = hit.at {
-            println!("    at {:#x}", at);
-        }
     }
     Ok(0)
 }

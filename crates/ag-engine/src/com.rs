@@ -41,6 +41,15 @@
 //!
 //! The scan itself reports `at: None` for every hit: no statement
 //! attribution yet.
+//!
+//! The scan walks each section at 4-byte alignment, so a GUID the
+//! loader or the compiler kept at 1- or 2-byte alignment — a packed
+//! struct, a `#pragma pack(1)` constant — can fall between the
+//! offsets walked and be missed, and a GUID straddling the end of
+//! one section into the next is never read: each section is walked
+//! on its own bytes. A hit is a byte-pattern match, not a symbol
+//! attribution — a zero-filled block whose tail happens to read
+//! `C0 00 00 00 00 00 00 46` reports as `IUnknown`.
 
 /// One COM GUID: the 16-byte identifier COM names a class or an
 /// interface by, in the image's byte order — `Data1` little-endian,
@@ -73,6 +82,7 @@ impl Guid {
     }
 
     /// The C initialiser the SDK writes, as `{0XXXXXXXX,0XXXX,0XXXX,{0XX,0XX,0XX,0XX,0XX,0XX,0XX,0XX}}`.
+    #[cfg(test)]
     pub fn c_initializer(self) -> String {
         let b = self.0;
         format!(
@@ -162,7 +172,7 @@ fn iid(text: &str) -> Guid {
 
 /// The core COM interfaces, with the interfaces `objbase.h` and
 /// `unknwn.h` name, and the coclasses the Windows SDK prints.
-pub fn catalog() -> Vec<ComEntry> {
+pub(crate) fn catalog() -> Vec<ComEntry> {
     vec![
         ComEntry::iid("IUnknown", "0000000000000000C000000000000046", &[]),
         ComEntry::iid(
@@ -334,7 +344,7 @@ pub fn scan(sections: &[ComSection]) -> Vec<GuidHit> {
 
 /// The C of a GUID that names an interface: the named type, the
 /// vtable struct for its methods, and where its GUID's bytes line up.
-pub fn interface_c(entry: &ComEntry) -> String {
+pub(crate) fn interface_c(entry: &ComEntry) -> String {
     let mut out = format!("typedef struct {}Vtbl {}Vtbl;\n", entry.name, entry.name);
     out.push_str(&format!("struct {}Vtbl {{\n", entry.name));
     out.push_str(
@@ -355,20 +365,12 @@ pub fn interface_c(entry: &ComEntry) -> String {
 /// The C of a GUID that names a coclass: the SDK spells a class GUID
 /// as a `GUID` typedef, so the class is one too — a 16-byte value, not
 /// a struct holding a pointer.
-pub fn class_c(entry: &ComEntry) -> String {
+pub(crate) fn class_c(entry: &ComEntry) -> String {
     let mut out = format!("typedef GUID CLSID_{};\n", entry.name);
     out.push_str(&format!("// CLSID_{}: {}\n", entry.name, entry.guid.text()));
     out
 }
 
-/// The GUID's C initialiser, as one line of C: a named GUID built from the hit's address.
-pub fn guid_c(hit: &GuidHit) -> String {
-    format!(
-        "GUID guid_{:x} = {};\n",
-        hit.address,
-        hit.guid.c_initializer()
-    )
-}
 
 /// What an image's COM metadata gives: the GUIDs it holds, filed as
 /// interfaces and classes.
@@ -452,6 +454,37 @@ mod tests {
     }
 
     #[test]
+    fn an_asymmetric_guid_round_trips_through_text_and_c() {
+        // IID_IDispatch is 00020400-0000-0000-C000-000000000046: the
+        // nonzero Data1 reaches past the zero tail every other catalog
+        // GUID shares, so a transposition in any one of Data1, Data2 or
+        // Data3 fails this where the all-zero vector above cannot.
+        let dispatch = iid("0002040000000000C000000000000046");
+        assert_eq!(
+            dispatch.text(),
+            "{00020400-0000-0000-C000-000000000046}"
+        );
+        assert_eq!(
+            dispatch.c_initializer(),
+            "{0x00020400,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}}"
+        );
+        assert_eq!(Guid::from_bytes(&dispatch.0).unwrap(), dispatch);
+        // A synthetic GUID with every field nonzero pins each
+        // field's reversal independently of the catalog's tails.
+        let g = Guid::from_bytes(&[
+            0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A, 0xF0, 0xDE, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45,
+            0x67, 0x89,
+        ])
+        .unwrap();
+        assert_eq!(g.text(), "{12345678-9ABC-DEF0-ABCD-EF0123456789}");
+        assert_eq!(
+            g.c_initializer(),
+            "{0x12345678,0x9ABC,0xDEF0,{0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89}}"
+        );
+        assert_eq!(g, guid("123456789ABCDEF0ABCDEF0123456789"));
+    }
+
+    #[test]
     fn the_catalog_knows_iunknown() {
         let page = catalog();
         assert!(page.iter().any(|e| e.name == "IUnknown"));
@@ -488,6 +521,7 @@ mod tests {
     fn an_interface_gives_its_vtable_after_iunknown() {
         let page = catalog();
         let dispatch = page.iter().find(|e| e.name == "IDispatch").unwrap();
+
         let c = interface_c(dispatch);
         assert!(c.contains("QueryInterface"));
         assert!(c.contains("Invoke"));
@@ -516,3 +550,4 @@ mod tests {
         assert!(metadata.types().contains("typedef struct GUID"));
     }
 }
+

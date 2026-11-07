@@ -21,7 +21,7 @@ typedef long HRESULT;
 
 HRESULT CoInitialize(LPVOID reserved);
 HRESULT CoInitializeEx(LPVOID reserved, DWORD dwCoInit);
-HRESULT CoInitializeSecurity(LPVOID pSecDesc, long cAuthSvc, LPVOID asAuthSvc, LPVOID pReserved1, DWORD dwAuthnLevel, DWORD dwImpLevel, LPVOID pAuthList, DWORD dwAuthnCapabilities, LPVOID pReserved3);
+HRESULT CoInitializeSecurity(LPVOID pSecDesc, long cAuthSvc, LPVOID* asAuthSvc, LPVOID pReserved1, DWORD dwAuthnLevel, DWORD dwImpLevel, LPVOID pAuthList, DWORD dwAuthnCapabilities, LPVOID pReserved3);
 void CoUninitialize(void);
 HRESULT CoCreateInstance(const GUID *rclsid, void *pUnkOuter, DWORD dwClsContext, const void *pvReserved, void **ppv);
 HRESULT CoRegisterClassObject(const GUID *clsid, void *pUnk, DWORD dwClsContext, DWORD dwRegister, DWORD *pdwRegister);

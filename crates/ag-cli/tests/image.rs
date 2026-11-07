@@ -2797,6 +2797,14 @@ fn com_finds_and_files_the_guids_a_pe_holds() {
     }).expect("the IUnknown hit");
     assert_eq!(hit["interface"], serde_json::json!(true));
     assert_eq!(hit["at"], serde_json::Value::Null);
+    let shell = json["guids"].as_array().expect("guids").iter().find(|hit| {
+        hit["name"].as_str() == Some("ShellLink")
+    }).expect("the ShellLink hit");
+    assert_eq!(shell["interface"], serde_json::json!(false));
+    assert_eq!(
+        shell["guid"],
+        serde_json::json!("{00021401-0000-0000-C000-000000000046}")
+    );
 
     let header = image("com.exe", &["com", "--header"]);
     assert!(header.contains("typedef struct GUID"), "{header}");
