@@ -2780,3 +2780,26 @@ fn com_reports_no_types_for_an_ordinary_image() {
     let header = image("propagate.elf", &["com", "--header"]);
     assert!(header.contains("no COM types"), "{header}");
 }
+
+#[test]
+fn com_finds_and_files_the_guids_a_pe_holds() {
+    let out = image("com.exe", &["com"]);
+    assert!(out.contains("IUnknown"), "{out}");
+    assert!(out.contains("ShellLink"), "{out}");
+    assert!(out.contains("interface"), "{out}");
+    assert!(out.contains("class"), "{out}");
+
+    let json = image_json("com.exe", &["com"]);
+    assert_eq!(json["interfaces"], serde_json::json!(["IUnknown"]));
+    assert_eq!(json["classes"], serde_json::json!(["ShellLink"]));
+    let hit = json["guids"].as_array().expect("guids").iter().find(|hit| {
+        hit["name"].as_str() == Some("IUnknown")
+    }).expect("the IUnknown hit");
+    assert_eq!(hit["interface"], serde_json::json!(true));
+    assert_eq!(hit["at"], serde_json::Value::Null);
+
+    let header = image("com.exe", &["com", "--header"]);
+    assert!(header.contains("typedef struct GUID"), "{header}");
+    assert!(header.contains("typedef struct IUnknownVtbl"), "{header}");
+    assert!(header.contains("typedef GUID CLSID_ShellLink;"), "{header}");
+}

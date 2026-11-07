@@ -31,24 +31,16 @@
 //! is the one a `QueryInterface` asks for and `CoCreateInstance`
 //! returns, so the interface's type is wanted. Where it is a CLSID,
 //! the coclass is the one `CoCreateInstance` makes. [`ComMetadata`]
-//! files the hits — the interfaces the image names, the classes it
-//! creates, and those it uses whose GUID the catalog does not know —
-//! and [`ComMetadata::types`] gives the C of each: `GUID` itself,
-//! the class and interface named, and a vtable struct for the
-//! interface's methods — `IUnknown`'s three, then its own in slot
-//! order, the first member the vtable pointer. [`ComMetadata::header`]
-//! writes the found types as a C header.
+//! files the hits — the interfaces the image names and the classes it
+//! creates — and [`ComMetadata::types`] gives the C of each: `GUID`
+//! itself, each interface as a vtable struct for its methods —
+//! `IUnknown`'s three, then its own in slot order, the first member
+//! the vtable pointer — and each class as the SDK spells it, a `GUID`
+//! typedef plus the `CLSID_` comment. [`ComMetadata::header`] writes
+//! the found types as a C header.
 //!
-//! [`ComMetadata::types`] gives the C of each: `GUID` itself,
-//! the class and interface named, and a vtable struct for the
-//! interface's methods — `IUnknown`'s three, then its own in slot
-//! order, the first member the vtable pointer. [`ComMetadata::header`]
-//! writes the found types as a C header.
-//!
-//! The statement-attribution side ([`ComUse`], [`collect`]) is an
-//! extension point: a caller that lifts a `CoCreateInstance` or
-//! `QueryInterface` fact can file the GUID that call names alongside
-//! the scan's hits. The scan itself reports `at: None` for every hit.
+//! The scan itself reports `at: None` for every hit: no statement
+//! attribution yet.
 
 /// One COM GUID: the 16-byte identifier COM names a class or an
 /// interface by, in the image's byte order — `Data1` little-endian,
@@ -80,11 +72,11 @@ impl Guid {
         )
     }
 
-    /// The C initialiser the SDK writes, as `{0xxxxxxxx,0xxxx,0xxxx,{0xx,0xx,0xx,0xx,0xx,0xx,0xx,0xx}}`.
+    /// The C initialiser the SDK writes, as `{0XXXXXXXX,0XXXX,0XXXX,{0XX,0XX,0XX,0XX,0XX,0XX,0XX,0XX}}`.
     pub fn c_initializer(self) -> String {
         let b = self.0;
         format!(
-            "{{0x{:02x}{:02x}{:02x}{:02x},0x{:02x}{:02x},0x{:02x}{:02x},{{0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x}}}}}",
+            "{{0x{:02X}{:02X}{:02X}{:02X},0x{:02X}{:02X},0x{:02X}{:02X},{{0x{:02X},0x{:02X},0x{:02X},0x{:02X},0x{:02X},0x{:02X},0x{:02X},0x{:02X}}}}}",
             b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12],
             b[13], b[14], b[15]
         )
@@ -102,6 +94,7 @@ fn guid(text: &str) -> Guid {
         .bytes()
         .filter(|c| *c != b'-' && *c != b'{' && *c != b'}')
         .collect();
+    debug_assert_eq!(clean.len(), 32, "a GUID's text holds 32 hex digits");
     let pair = |i: usize| -> u8 {
         let hi = (clean[i * 2] as char).to_digit(16).unwrap_or(0) as u8;
         let lo = (clean[i * 2 + 1] as char).to_digit(16).unwrap_or(0) as u8;
@@ -280,18 +273,6 @@ pub struct GuidHit {
     pub at: Option<u64>,
 }
 
-/// A COM usage: the interface a `QueryInterface` asks for, or the
-/// coclass a `CoCreateInstance` makes, named by its GUID.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComUse {
-    /// The GUID the call names.
-    pub guid: Guid,
-    /// The interface or class the catalog names it, when known.
-    pub name: Option<String>,
-    /// The address of the statement that makes the call.
-    pub at: u64,
-}
-
 /// One section to walk: its name and the bytes the image holds there,
 /// with the address the first byte maps to.
 #[derive(Debug, Clone)]
@@ -306,16 +287,16 @@ pub struct ComSection {
     pub bytes: Vec<u8>,
 }
 
-/// Whether a section's name is one that holds data rather than code.
-/// `.text`, `__TEXT,__text` and the like are code; everything else with
-/// bytes is data. An executable section is still data when it is not
-/// code — a Mach-O has none — so the caller passes what the image knows.
+/// Whether a section holds data rather than code: the image's own
+/// executable flag decides — a GUID's bytes can fall inside an
+/// instruction, so code is out. The name check is a backstop for a
+/// loader that spells a text section without setting the flag.
 fn is_data(section: &ComSection) -> bool {
     if section.executable {
         return false;
     }
     let name = section.name.as_str();
-    !matches!(name, ".text" | "__TEXT,__text" | "__TEXT")
+    !matches!(name, ".text" | "__TEXT,__text" | "__TEXT" | "__text")
 }
 
 /// Walk `sections` at 4-byte alignment for the GUIDs of the catalog.
@@ -371,14 +352,11 @@ pub fn interface_c(entry: &ComEntry) -> String {
     out
 }
 
-/// The C of a GUID that names a coclass: its class GUID as `CLSID_`
-/// text, and the pointer type a create call takes.
+/// The C of a GUID that names a coclass: the SDK spells a class GUID
+/// as a `GUID` typedef, so the class is one too — a 16-byte value, not
+/// a struct holding a pointer.
 pub fn class_c(entry: &ComEntry) -> String {
-    let mut out = format!("typedef struct {} {};\n", entry.name, entry.name);
-    out.push_str(&format!(
-        "struct {} {{\n    const GUID *rclsid;\n}};\n",
-        entry.name
-    ));
+    let mut out = format!("typedef GUID CLSID_{};\n", entry.name);
     out.push_str(&format!("// CLSID_{}: {}\n", entry.name, entry.guid.text()));
     out
 }
@@ -402,17 +380,12 @@ pub struct ComMetadata {
     pub interfaces: Vec<String>,
     /// The classes the image creates, by name.
     pub classes: Vec<String>,
-    /// The GUIDs the image's statements use, in address order.
-    pub uses: Vec<ComUse>,
 }
 
 impl ComMetadata {
     /// File the scan's hits: each named interface once, each named
-    /// class once, and the GUIDs the catalog does not know as
-    /// unfiled. `uses` are the statements' own — kept separate so a
-    /// stray value's address is not mistaken for a call.
+    /// class once.
     pub fn from_scan(hits: Vec<GuidHit>) -> ComMetadata {
-        let page = catalog();
         let mut metadata = ComMetadata::default();
         for hit in hits {
             if let Some(name) = &hit.name {
@@ -428,8 +401,6 @@ impl ComMetadata {
         }
         metadata.interfaces.sort();
         metadata.classes.sort();
-        // Keep the catalog's entries reachable without a hit.
-        let _ = page;
         metadata
     }
 
@@ -451,9 +422,6 @@ impl ComMetadata {
                 out.push_str(&class_c(entry));
             }
         }
-        if self.interfaces.is_empty() && self.classes.is_empty() {
-            // Still carry GUID itself, the type every hit is built from.
-        }
         out
     }
 
@@ -464,15 +432,6 @@ impl ComMetadata {
         out.push_str(&self.types());
         out
     }
-}
-
-/// File the hits and the statements' uses together: a hit the catalog
-/// knows is its interface or class, and one a statement points at
-/// carries the statement's address.
-pub fn collect(hits: Vec<GuidHit>, uses: Vec<ComUse>) -> ComMetadata {
-    let mut metadata = ComMetadata::from_scan(hits);
-    metadata.uses = uses;
-    metadata
 }
 
 #[cfg(test)]
@@ -532,6 +491,16 @@ mod tests {
         let c = interface_c(dispatch);
         assert!(c.contains("QueryInterface"));
         assert!(c.contains("Invoke"));
+    }
+
+    #[test]
+    fn a_class_gives_a_guid_typedef() {
+        let page = catalog();
+        let shell = page.iter().find(|e| e.name == "ShellLink").unwrap();
+        let c = class_c(shell);
+        assert!(c.contains("typedef GUID CLSID_ShellLink;"));
+        assert!(c.contains("{00021401-0000-0000-C000-000000000046}"));
+        assert!(!c.contains("rclsid"));
     }
 
     #[test]

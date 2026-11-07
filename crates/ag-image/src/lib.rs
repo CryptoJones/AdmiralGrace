@@ -98,8 +98,8 @@ pub use ag_engine::types::{
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
 pub use ag_engine::com::{
-    ComEntry as AgComEntry, ComMetadata as AgComMetadata, ComSection as AgComSection,
-    ComUse as AgComUse, Guid, GuidHit as AgGuidHit,
+    ComEntry as AgComEntry, ComMetadata as AgComMetadata, ComSection as AgComSection, Guid,
+    GuidHit as AgGuidHit,
 };
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
@@ -1063,6 +1063,14 @@ impl Binary {
         self.types().header()
     }
 
+    /// The COM types the image names by GUID, as a C header: `GUID`
+    /// itself, each interface it names as a vtable struct, each class
+    /// it creates as a `CLSID_` GUID typedef. `None` for an image with
+    /// no GUID the catalog knows.
+    pub fn com_header(&self) -> Option<String> {
+        self.com().map(|com| com.header())
+    }
+
     /// The Swift metadata the image carries — its types with their fields
     /// and methods, its protocols — when it carries any. A vtable's methods
     /// are already in the function list, under their symbols' names or
@@ -1079,7 +1087,7 @@ impl Binary {
     }
 
     /// The COM metadata the image carries: the GUIDs found in its data,
-    /// filed as interfaces and classes, with the statements that use one.
+    /// filed as interfaces and classes.
     /// `None` for an image with no GUID the catalog knows.
     pub fn com(&self) -> Option<ag_engine::com::ComMetadata> {
         let sections: Vec<ag_engine::com::ComSection> = self
