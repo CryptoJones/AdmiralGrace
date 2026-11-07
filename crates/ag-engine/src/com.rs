@@ -39,16 +39,16 @@
 //! order, the first member the vtable pointer. [`ComMetadata::header`]
 //! writes the found types as a C header.
 //!
-//! [`ComMetadata::statements`] goes the other way: the GUIDs the
-//! image's own code names. A call the image makes — `CoCreateInstance`,
-//! `QueryInterface` through an import stub — is read for its
-//! arguments: the CLSID pointer, the IID pointer, and the pointer
-//! that receives the object, each dereferenced to the value the image
-//! holds there. A GUID in the image's data that no statement points
-//! at is a stray value, not a COM argument; one in a statement is
-//! "at" that call. Only the first argument slot of each call is read
-//! — a GUID a fact does not name is left unnamed.
-
+//! [`ComMetadata::types`] gives the C of each: `GUID` itself,
+//! the class and interface named, and a vtable struct for the
+//! interface's methods — `IUnknown`'s three, then its own in slot
+//! order, the first member the vtable pointer. [`ComMetadata::header`]
+//! writes the found types as a C header.
+//!
+//! The statement-attribution side ([`ComUse`], [`collect`]) is an
+//! extension point: a caller that lifts a `CoCreateInstance` or
+//! `QueryInterface` fact can file the GUID that call names alongside
+//! the scan's hits. The scan itself reports `at: None` for every hit.
 
 /// One COM GUID: the 16-byte identifier COM names a class or an
 /// interface by, in the image's byte order — `Data1` little-endian,
@@ -98,25 +98,29 @@ fn guid(text: &str) -> Guid {
     // Data2 (4), Data3 (4), then Data4 as eight bytes. In memory
     // Data1..Data3 are little-endian, byte-reversed within the field;
     // Data4 is byte-for-byte.
-    let clean: Vec<u8> = text.bytes().filter(|c| *c != b'-' && *c != b'{' && *c != b'}').collect();
+    let clean: Vec<u8> = text
+        .bytes()
+        .filter(|c| *c != b'-' && *c != b'{' && *c != b'}')
+        .collect();
     let pair = |i: usize| -> u8 {
         let hi = (clean[i * 2] as char).to_digit(16).unwrap_or(0) as u8;
         let lo = (clean[i * 2 + 1] as char).to_digit(16).unwrap_or(0) as u8;
         hi * 16 + lo
     };
     let mut bytes = [0u8; 16];
-    for field in 0..3 {
-        let (len, at) = match field {
-            0 => (4usize, 0usize),
-            1 => (2, 4),
-            _ => (2, 6),
-        };
+    // Data1 is the first four bytes as a little-endian u32, Data2 and
+    // Data3 are each a little-endian u16, Data4 is byte-for-byte, so
+    // each field's hex reverses within the field and not across it.
+    let fields = [(0usize, 4usize), (4, 2), (6, 2)];
+    let mut hex_at = 0usize;
+    for (at, len) in fields {
         for i in 0..len {
-            bytes[at + i] = pair(4 - len + i);
+            bytes[at + i] = pair(hex_at + len - 1 - i);
         }
+        hex_at += len;
     }
     for i in 0..8 {
-        bytes[8 + i] = pair(8 + i);
+        bytes[8 + i] = pair(hex_at + i);
     }
     Guid(bytes)
 }
@@ -169,86 +173,92 @@ fn iid(text: &str) -> Guid {
 pub fn catalog() -> Vec<ComEntry> {
     vec![
         ComEntry::iid("IUnknown", "0000000000000000C000000000000046", &[]),
-        ComEntry::iid("IClassFactory", "0000000100000000C000000000000046", &[
-            "CreateInstance",
-            "RetainString",
-            "LockInstance",
-        ]),
-        ComEntry::iid("IDispatch", "0002040000000000C000000000000046", &[
-            "GetTypeInfoCount",
-            "GetTypeInfo",
-            "GetIDsOfNames",
-            "Invoke",
-        ]),
-        ComEntry::iid("IEnumUnknown", "0000010000000000C000000000000046", &[
-            "Next",
-            "Skip",
-            "Reset",
-            "Clone",
-        ]),
-        ComEntry::iid("IEnumVARIANT", "0000020400000000C000000000000046", &[
-            "Next",
-            "Skip",
-            "Reset",
-            "Clone",
-        ]),
-        ComEntry::iid("IEnumString", "0000010100000000C000000000000046", &[
-            "Next",
-            "Skip",
-            "Reset",
-            "Clone",
-        ]),
-        ComEntry::iid("IPersist", "0000010C00000000C000000000000046", &["GetClassID"]),
-        ComEntry::iid("IPersistFile", "0000010E00000000C000000000000046", &[
-            "IsDirty",
-            "Load",
-            "Save",
-            "SaveCompleted",
-            "GetCurFile",
-        ]),
-        ComEntry::iid("IPersistStream", "0000010900000000C000000000000046", &[
-            "IsDirty",
-            "Load",
-            "Save",
-            "SaveCompleted",
-        ]),
-        ComEntry::iid("IConnectionPointContainer", "0000010F00000000C000000000000046", &[
-            "EnumConnectionPoints",
-            "FindConnectionPoint",
-        ]),
-        ComEntry::iid("IConnectionPoint", "0000010B00000000C000000000000046", &[
-            "GetConnectionInterface",
-            "GetConnectionContainer",
-            "Advise",
-            "Unadvise",
-            "EnumConnections",
-        ]),
-        ComEntry::iid("IEnumConnectionPoints", "0000010D00000000C000000000000046", &[
-            "Next",
-            "Skip",
-            "Reset",
-            "Clone",
-        ]),
-        ComEntry::iid("IErrorLog", "0000010A00000000C000000000000046", &[
-            "AddErrorLogEntry",
-        ]),
-        ComEntry::iid("ISequentialStream", "0000010C00000000C000000000000046", &[
-            "Read",
-            "Write",
-        ]),
-        ComEntry::iid("IStream", "0000000C00000000C000000000000046", &[
-            "Read",
-            "Write",
-            "Seek",
-            "SetSize",
-            "CopyTo",
-            "Commit",
-            "Revert",
-            "LockRegion",
-            "UnlockRegion",
-            "Stat",
-            "Clone",
-        ]),
+        ComEntry::iid(
+            "IClassFactory",
+            "0000000100000000C000000000000046",
+            &["CreateInstance", "RetainString", "LockInstance"],
+        ),
+        ComEntry::iid(
+            "IDispatch",
+            "0002040000000000C000000000000046",
+            &["GetTypeInfoCount", "GetTypeInfo", "GetIDsOfNames", "Invoke"],
+        ),
+        ComEntry::iid(
+            "IEnumUnknown",
+            "0000010000000000C000000000000046",
+            &["Next", "Skip", "Reset", "Clone"],
+        ),
+        ComEntry::iid(
+            "IEnumVARIANT",
+            "0000020400000000C000000000000046",
+            &["Next", "Skip", "Reset", "Clone"],
+        ),
+        ComEntry::iid(
+            "IEnumString",
+            "0000010100000000C000000000000046",
+            &["Next", "Skip", "Reset", "Clone"],
+        ),
+        ComEntry::iid(
+            "IPersist",
+            "0000010C00000000C000000000000046",
+            &["GetClassID"],
+        ),
+        ComEntry::iid(
+            "IPersistFile",
+            "0000010E00000000C000000000000046",
+            &["IsDirty", "Load", "Save", "SaveCompleted", "GetCurFile"],
+        ),
+        ComEntry::iid(
+            "IPersistStream",
+            "0000010900000000C000000000000046",
+            &["IsDirty", "Load", "Save", "SaveCompleted"],
+        ),
+        ComEntry::iid(
+            "IConnectionPointContainer",
+            "0000010F00000000C000000000000046",
+            &["EnumConnectionPoints", "FindConnectionPoint"],
+        ),
+        ComEntry::iid(
+            "IConnectionPoint",
+            "0000010B00000000C000000000000046",
+            &[
+                "GetConnectionInterface",
+                "GetConnectionContainer",
+                "Advise",
+                "Unadvise",
+                "EnumConnections",
+            ],
+        ),
+        ComEntry::iid(
+            "IEnumConnectionPoints",
+            "0000010D00000000C000000000000046",
+            &["Next", "Skip", "Reset", "Clone"],
+        ),
+        ComEntry::iid(
+            "IErrorLog",
+            "0000010A00000000C000000000000046",
+            &["AddErrorLogEntry"],
+        ),
+        ComEntry::clsid("ShellLink", "0002140100000000C000000000000046"),
+        ComEntry::clsid("InternetExplorer", "0002D00000000000C000000000000046"),
+        ComEntry::clsid("ShellFolder", "000214E600000000C000000000000046"),
+        ComEntry::iid(
+            "IStream",
+            "0000000C00000000C000000000000046",
+            &[
+                "Read",
+                "Write",
+                "Seek",
+                "SetSize",
+                "CopyTo",
+                "Commit",
+                "Revert",
+                "LockRegion",
+                "UnlockRegion",
+                "Stat",
+                "Clone",
+            ],
+        ),
     ]
 }
 
@@ -345,27 +355,18 @@ pub fn scan(sections: &[ComSection]) -> Vec<GuidHit> {
 /// The C of a GUID that names an interface: the named type, the
 /// vtable struct for its methods, and where its GUID's bytes line up.
 pub fn interface_c(entry: &ComEntry) -> String {
-    let mut out = format!(
-        "typedef struct {}Vtbl {}Vtbl;\n",
-        entry.name, entry.name
+    let mut out = format!("typedef struct {}Vtbl {}Vtbl;\n", entry.name, entry.name);
+    out.push_str(&format!("struct {}Vtbl {{\n", entry.name));
+    out.push_str(
+        "    long (__stdcall *QueryInterface)(void *self, const GUID *riid, void **ppvObj);\n",
     );
-    out.push_str(&format!(
-        "struct {}Vtbl {{\n",
-        entry.name
-    ));
-    out.push_str("    HRESULT (__stdcall *QueryInterface)(void *self, const GUID *riid, void **ppvObj);\n");
     out.push_str("    unsigned long (__stdcall *AddRef)(void *self);\n");
     out.push_str("    unsigned long (__stdcall *Release)(void *self);\n");
     for method in &entry.methods {
-        out.push_str(&format!(
-            "    void (__stdcall *{method})(void *self);\n"
-        ));
+        out.push_str(&format!("    void (__stdcall *{method})(void *self);\n"));
     }
     out.push_str("};\n");
-    out.push_str(&format!(
-        "struct {} {{\n",
-        entry.name
-    ));
+    out.push_str(&format!("struct {} {{\n", entry.name));
     out.push_str(&format!("    const {}Vtbl *lpVtbl;\n", entry.name));
     out.push_str("};\n");
     out
@@ -379,17 +380,17 @@ pub fn class_c(entry: &ComEntry) -> String {
         "struct {} {{\n    const GUID *rclsid;\n}};\n",
         entry.name
     ));
-    out.push_str(&format!(
-        "// CLSID_{}: {}\n",
-        entry.name,
-        entry.guid.text()
-    ));
+    out.push_str(&format!("// CLSID_{}: {}\n", entry.name, entry.guid.text()));
     out
 }
 
-/// The GUID's C initialiser, as one line of C.
+/// The GUID's C initialiser, as one line of C: a named GUID built from the hit's address.
 pub fn guid_c(hit: &GuidHit) -> String {
-    format!("GUID {} = {};\n", hit.address, hit.guid.c_initializer())
+    format!(
+        "GUID guid_{:x} = {};\n",
+        hit.address,
+        hit.guid.c_initializer()
+    )
 }
 
 /// What an image's COM metadata gives: the GUIDs it holds, filed as
@@ -440,6 +441,7 @@ impl ComMetadata {
     pub fn types(&self) -> String {
         let page = catalog();
         let mut out = String::new();
+        out.push_str("typedef long HRESULT;\n");
         out.push_str("typedef struct GUID { unsigned int Data1; unsigned short Data2; unsigned short Data3; unsigned char Data4[8]; } GUID;\n");
         for name in &self.interfaces {
             if let Some(entry) = page.iter().find(|e| e.name == *name) {

@@ -3031,10 +3031,9 @@ pub(crate) fn com_json(image: &Binary) -> serde_json::Value {
 /// Print the COM types the image names by GUID, as text or as JSON.
 fn com(image: &Binary, json: bool, header: bool) -> Result<i32> {
     if header {
-        if let Some(com) = image.com() {
-            print!("{}", com.header());
-        } else {
-            println!("no COM types");
+        match image.com() {
+            Some(com) => print!("{}", com.header()),
+            None => println!("/* no COM types */"),
         }
         return Ok(0);
     }
