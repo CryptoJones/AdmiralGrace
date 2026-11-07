@@ -3044,8 +3044,9 @@ fn the_types_are_defined_shown_searched_and_read_into_the_pseudocode() {
     assert!(stdout.contains(" in init"), "{stdout}");
     let (ok, stdout, stderr) = types(&["xrefs", "node_t"]);
     assert!(ok, "{stderr}");
+    assert!(stdout.contains("next of struct node"), "{stdout}");
     assert!(stdout.contains("next:"), "{stdout}");
-    assert!(stdout.contains("at of struct node"), "{stdout}");
+    assert!(stdout.contains("at:"), "{stdout}");
     // The C++ declares the type ahead of the function.
     let program = image("structs.elf", &["transpile", "init", "--no-follow"]);
     assert!(program.contains("struct point {\n    int x;"), "{program}");
