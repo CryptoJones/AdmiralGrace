@@ -365,6 +365,14 @@ Filed 2026-10-26.
 
 - [ ] AI assistant with name and type recovery tied back to the analysis — [#489](https://github.com/CryptoJones/AdmiralGrace/issues/489)
 
+## Bugs
+
+Filed 2026-10-31 – 2026-11-01 while working the advanced-analysis roadmap; mirrored into this file 2026-11-07.
+
+- [ ] Lift writes a call twice when its result is read twice in one instruction — [#547](https://github.com/CryptoJones/AdmiralGrace/issues/547)
+- [ ] `ag image pseudocode --project` does not apply the analyst's variable renames — [#552](https://github.com/CryptoJones/AdmiralGrace/issues/552)
+- [ ] Lift prints a call with its arguments missing (fragments.elf: second calls make()) — [#562](https://github.com/CryptoJones/AdmiralGrace/issues/562)
+
 ---
 
 Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/2347/
