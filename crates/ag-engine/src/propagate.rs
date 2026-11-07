@@ -113,6 +113,8 @@ pub struct Library {
 impl Library {
     /// The prototype of the function `name`, under an import's or a stub's
     /// decoration: `strlen@plt`, `__imp_ReadFile`, `_strlen`, `j_strlen`.
+    /// A name that is a JNI function (`Java_com_example_Native_add`,
+    /// `JNI_OnLoad`) takes its types from its name.
     pub fn prototype(&self, name: &str) -> Option<&Prototype> {
         let full = name.trim();
         let bare = full.split('@').next().unwrap_or(full);
@@ -439,7 +441,10 @@ fn unnamed(text: &str) -> String {
 }
 
 /// `store` with the library's types it does not define itself: what the
-/// variables' inferred types name, `FILE *`, `struct timeval`.
+/// variables' inferred types name, `FILE *`, `struct timeval`. A JNI
+/// function's types — the environment and object types — ride with it:
+/// a store that has not read them still types a JNI parameter under
+/// them, and the library's other types still merge beneath an analyst's.
 pub fn with_library(store: &TypeStore) -> TypeStore {
     let library = library(*store.model());
     let mut out = store.clone();
@@ -449,6 +454,7 @@ pub fn with_library(store: &TypeStore) -> TypeStore {
         }
         let _ = crate::ctype::parse_into(&mut out, &definition.c);
     }
+    out = crate::jni::with_jni(&out);
     out
 }
 
@@ -1541,6 +1547,40 @@ pub fn solve(program: &[&Facts], store: &TypeStore) -> BTreeMap<u64, FunctionTyp
                 evidence_of(store, prototype.ret.clone()),
                 format!("from {}'s prototype", prototype.name),
             ));
+        } else if let Some(prototype) = crate::jni::prototype_of(store, &facts.name) {
+            for (param, ty) in facts.params.iter().zip(&prototype.params) {
+                // The name fixes the slot's width where the lift's own
+                // reading was only a guess at the parameter: a `long`
+                // the lift gave an `int` parameter does not widen to a
+                // jobject's pointer, and the seed would be refused for
+                // the width rather than read as the JNI type. Do not
+                // widen a slot the analyst pinned.
+                let slot = Slot::Var(param.clone());
+                if !facts.fixed.contains(&slot) {
+                    if let Ok(size) = store.size_of(ty) {
+                        solver.widths.insert((f, slot), size);
+                    }
+                }
+                first.push((
+                    (f, Slot::Var(param.clone())),
+                    EXACT,
+                    evidence_of(store, ty.clone()),
+                    format!("from {}'s JNI prototype", prototype.name),
+                ));
+            }
+            if facts.widths.contains_key(&Slot::Return) {
+                if !facts.fixed.contains(&Slot::Return) {
+                    if let Ok(size) = store.size_of(&prototype.ret) {
+                        solver.widths.insert((f, Slot::Return), size);
+                    }
+                }
+                first.push((
+                    (f, Slot::Return),
+                    EXACT,
+                    evidence_of(store, prototype.ret.clone()),
+                    format!("from {}'s JNI prototype", prototype.name),
+                ));
+            }
         }
         for link in &facts.links {
             edges.push(Edge {
@@ -1767,6 +1807,32 @@ pub(crate) fn apply(
             .ok()
             .and_then(|ty| store.size_of(&ty).ok())
     };
+    // A JNI function's types come from its name, which is as sure as a
+    // prototype: where the lift's guess at a parameter's width is the
+    // registration's — an `int` for a pointer the signature names — the
+    // inferred pointer is the right one even though the widths differ,
+    // and `facts` gave the width first so the seed could be read.
+    let jni = function
+        .params
+        .iter()
+        .position(|v| !fixed.contains(&v.name))
+        .and_then(|_| crate::jni::prototype_of(store, &function.name));
+    let jni_widths: BTreeMap<String, u64> = jni
+        .as_ref()
+        .map(|proto| {
+            function
+                .params
+                .iter()
+                .zip(&proto.params)
+                .filter_map(|(v, ty)| {
+                    store
+                        .size_of(ty)
+                        .ok()
+                        .map(|size| (v.name.clone(), size))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for variable in function.params.iter_mut().chain(function.locals.iter_mut()) {
         if fixed.contains(&variable.name)
             || variable.fragment.is_some()
@@ -1779,7 +1845,15 @@ pub(crate) fn apply(
         let Some((ty, source)) = types.variables.get(&variable.name) else {
             continue;
         };
-        if *ty == variable.ty || size(ty).is_none() || size(ty) != size(&variable.ty) {
+        if *ty == variable.ty || size(ty).is_none() {
+            continue;
+        }
+        // The JNI type overrides the lift's width guess; the inferred
+        // type fits the JNI width exactly and is taken.
+        let jni_fit = jni_widths
+            .get(&variable.name)
+            .is_some_and(|&width| size(ty) == Some(width));
+        if !jni_fit && size(ty) != size(&variable.ty) {
             continue;
         }
         variable.ty = ty.clone();

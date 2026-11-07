@@ -98,6 +98,7 @@ pub use ag_engine::types::{
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
 pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
+pub use ag_engine::jni::JniFunction;
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;
@@ -1066,6 +1067,39 @@ impl Binary {
     /// no GUID the catalog knows.
     pub fn com_header(&self) -> Option<String> {
         self.com().map(|com| com.header())
+    }
+
+    /// The JNI types the image types its functions with: the
+    /// environment and object types of `jni.h`, as C. Always present:
+    /// the library defines them, and `types` carries them as it carries
+    /// the type libraries', beneath the project's.
+    pub fn jni_header(&self) -> String {
+        ag_engine::jni::jni_types()
+    }
+
+    /// The JNI functions of the image: each function whose name is a
+    /// JNI export — `Java_<class>_<method>`, with the overload signature
+    /// when it carries one, and `JNI_OnLoad` and its kin — with the
+    /// types the name gives: the environment, the object or class the
+    /// method runs on, and the signature's own when it carries one, in
+    /// parameter order, and the return. Empty for an image with no JNI
+    /// function.
+    pub fn jni_functions(&self) -> Vec<ag_engine::jni::JniFunction> {
+        let mut out = Vec::new();
+        for function in &self.functions {
+            if !ag_engine::jni::is_jni(&function.name) {
+                continue;
+            }
+            if let Some(typed) = ag_engine::jni::apply(&function.name) {
+                out.push(ag_engine::jni::JniFunction {
+                    address: function.address,
+                    name: function.name.clone(),
+                    params: typed.params,
+                    returns: typed.returns,
+                });
+            }
+        }
+        out
     }
 
     /// The Swift metadata the image carries — its types with their fields

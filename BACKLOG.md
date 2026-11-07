@@ -206,7 +206,7 @@ Filed 2026-10-26.
 - [x] Export types as a C header — [#380](https://github.com/CryptoJones/AdmiralGrace/issues/380)
 - [x] Port types and signatures from another project by matching symbols — [#381](https://github.com/CryptoJones/AdmiralGrace/issues/381)
 - [x] Import COM interface types by GUID — [#382](https://github.com/CryptoJones/AdmiralGrace/issues/382)
-- [ ] Apply JNI types to Java_* and JNI_* functions automatically — [#383](https://github.com/CryptoJones/AdmiralGrace/issues/383)
+- [x] Apply JNI types to Java_* and JNI_* functions automatically — [#383](https://github.com/CryptoJones/AdmiralGrace/issues/383)
 - [x] Cross references for types and struct members — [#384](https://github.com/CryptoJones/AdmiralGrace/issues/384)
 - [ ] Show a constant as an enum member — [#385](https://github.com/CryptoJones/AdmiralGrace/issues/385)
 - [ ] Quick data-typing keys: width, sign, complement, char array, pointer, array — [#386](https://github.com/CryptoJones/AdmiralGrace/issues/386)

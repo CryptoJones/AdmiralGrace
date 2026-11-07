@@ -2811,3 +2811,68 @@ fn com_finds_and_files_the_guids_a_pe_holds() {
     assert!(header.contains("typedef struct IUnknownVtbl"), "{header}");
     assert!(header.contains("typedef GUID CLSID_ShellLink;"), "{header}");
 }
+
+#[test]
+fn jni_reports_no_functions_for_an_ordinary_image() {
+    let out = image("propagate.elf", &["jni"]);
+    assert!(out.contains("no JNI functions"), "{out}");
+    let json = image("propagate.elf", &["jni", "--json"]);
+    assert!(json.contains("\"functions\": []"), "{json}");
+    let header = image("propagate.elf", &["jni", "--header"]);
+    assert!(header.contains("JNIEnv"), "{header}");
+}
+
+#[test]
+fn jni_types_the_jni_functions_an_elf_holds() {
+    let out = image("jni.elf", &["jni"]);
+    assert!(out.contains("Java_com_example_Native_add"), "{out}");
+    assert!(out.contains("JNIEnv *"), "{out}");
+    assert!(out.contains("JNI_OnLoad"), "{out}");
+
+    let json = image_json("jni.elf", &["jni"]);
+    let functions = json["functions"].as_array().expect("functions");
+    let add = functions
+        .iter()
+        .find(|f| f["name"].as_str() == Some("Java_com_example_Native_add"))
+        .expect("the add function");
+    assert_eq!(add["params"][0], serde_json::json!("JNIEnv *"));
+    assert_eq!(add["params"][1], serde_json::json!("jobject"));
+    let overloaded = functions
+        .iter()
+        .find(|f| f["name"].as_str() == Some("Java_com_example_Native_overloaded__II"))
+        .expect("the overloaded function");
+    assert_eq!(overloaded["params"][2], serde_json::json!("jint"));
+    let on_load = functions
+        .iter()
+        .find(|f| f["name"].as_str() == Some("JNI_OnLoad"))
+        .expect("JNI_OnLoad");
+    assert_eq!(on_load["params"][0], serde_json::json!("JavaVM *"));
+
+    let header = image("jni.elf", &["jni", "--header"]);
+    assert!(header.contains("typedef struct _JNIEnv JNIEnv;"), "{header}");
+    assert!(header.contains("typedef struct _jobject *jobject;"), "{header}");
+
+    let pseudo = image("jni.elf", &["pseudocode", "Java_com_example_Native_add"]);
+    assert!(pseudo.contains("JNIEnv *"), "{pseudo}");
+    assert!(pseudo.contains("jobject"), "{pseudo}");
+    let overloaded_pseudo = image(
+        "jni.elf",
+        &["pseudocode", "Java_com_example_Native_overloaded__II"],
+    );
+    assert!(overloaded_pseudo.contains("jint"), "{overloaded_pseudo}");
+}
+
+#[test]
+fn jni_types_the_jni_functions_a_pe_holds() {
+    let out = image("jni.exe", &["jni"]);
+    assert!(out.contains("Java_com_example_Native_add"), "{out}");
+    assert!(out.contains("JNIEnv *"), "{out}");
+    let json = image_json("jni.exe", &["jni"]);
+    let functions = json["functions"].as_array().expect("functions");
+    assert!(functions
+        .iter()
+        .any(|f| f["name"].as_str() == Some("Java_com_example_Native_add")));
+    assert!(functions
+        .iter()
+        .any(|f| f["name"].as_str() == Some("JNI_OnLoad")));
+}

@@ -1,0 +1,5 @@
+EXPORTS
+    Java_com_example_Native_add
+    Java_com_example_Native_overloaded__II
+    JNI_OnLoad
+    main
