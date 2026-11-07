@@ -672,5 +672,41 @@ The command is `ag image FILE types --header` (or
 writes as `types.h` in the export directory. The header holds the
 types the image is read with — the platform's defaults and the
 project's — as `ag image … types` prints them.
+
+### Porting types and signatures by matching symbols (#381)
+
+A project holds its analyst's types at addresses, so the types of one
+build of a binary do not travel to the next by copying records. A
+function of one image is the same function of another when both name
+it, and the types of that function — the definitions it names and the
+types of its variables — move with the name: `ag project TARGET types
+port FROM` reads the source project and carries its definitions and
+its per-function signatures onto the destination project's. The source
+side's spellings are the names its image prints, the mangled name when
+the image demangled one, and the analyst's own rename of the entry;
+the destination is searched by those same spellings, its image's own
+names first and its analyst's renames last, since a rename recorded
+for one version names that version's address and no other. Every
+definition the matched signatures name, with what those name in turn,
+is drawn from the source, so a signature comes whole or is held back
+whole.
+
+The port is a preview and a move: `--preview` says what would move —
+each definition, each matched function with the symbol it matched on
+and its variable types, the source functions no symbol carries, and
+what is held back with why — and writes nothing; without it the
+definitions are added and each applied word is set on its function's
+record. A definition the destination already holds with the same C is
+held once, not twice; one it holds differently is held back by name, so
+no port changes the shape of a type already held. A signature is held
+back when its type does not read, when it names a definition neither
+store defines, when the destination's function declares no variable of
+that lift name, or when the variable is already typed differently; a
+stack variable the destination already holds at the same offset stands.
+Like the rest of the types commands, the report is `--json`, and the
+same move is the MCP `port_types` tool's.
+
+The command is `ag project TARGET types port FROM [--preview] [--json]`.
+
 - **Cross references for types and members (#384)** follow the members and enumerators the
   pseudocode reads, which stand as the `__member`, `__arrow` and `__enumerator` intrinsics.
