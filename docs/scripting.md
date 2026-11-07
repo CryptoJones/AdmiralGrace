@@ -38,6 +38,7 @@ error saying so.
 The script calls the tools `ag mcp` serves; `docs/cli.md` lists them under *An MCP server*.
 In short: `image_info`, `list_functions`, `search`, `disassemble`, `decompile`,
 `control_flow`, `il`, `emulate`, `transpile`, `callers`, `callees`, `cross_references`,
+`type_cross_references`,
 `strings` and `read_bytes` read the image; `annotations`, `set_name`, `set_label`, `set_comment`, `set_bookmark`,
 `bookmarks`, `set_tags`, `set_color`, `add_reference`, `remove_reference`, `tags` and
 `tagged` read and write the project file. A function is named by its address or its name;

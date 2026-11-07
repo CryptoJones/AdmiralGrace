@@ -259,6 +259,43 @@ pub(crate) fn draft_json(draft: &ag_image::StructDraft) -> Value {
     })
 }
 
+/// One type and the uses of it and of each member, as JSON.
+pub(crate) fn type_uses_json(store: &TypeStore, key: &str, uses: &[ag_image::TypeUse]) -> Value {
+    let one = |use_: &ag_image::TypeUse| {
+        json!({
+            "kind": use_.kind,
+            "function": (!use_.function_name.is_empty()).then_some(use_.function_name.clone()),
+            "address": use_.at.map(|at| format!("{at:#x}")),
+            "detail": (!use_.detail.is_empty()).then_some(use_.detail.clone()),
+            "text": use_.spelled(),
+        })
+    };
+    let of = |member: &str| {
+        uses.iter()
+            .filter(|use_| use_.key == key && use_.member == member)
+            .map(one)
+            .collect::<Vec<_>>()
+    };
+    let mut members = Vec::new();
+    if let Some(layout) = store.layout(key) {
+        for field in &layout.fields {
+            if let Some(name) = &field.name {
+                members.push(json!({"name": name, "uses": of(name)}));
+            }
+        }
+    }
+    if let Some(ag_image::TypeDefinition::Enum(enumeration)) = store.get(key) {
+        for (name, value) in &enumeration.values {
+            members.push(json!({"name": name, "value": value, "uses": of(name)}));
+        }
+    }
+    json!({
+        "name": key,
+        "uses": of(""),
+        "members": members,
+    })
+}
+
 /// A structure made or updated from a pointer: the project's definitions
 /// after, the structure, the type the pointer is given, and what changed.
 pub(crate) struct Applied {

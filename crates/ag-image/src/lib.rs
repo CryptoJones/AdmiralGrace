@@ -101,6 +101,7 @@ pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;
 pub use ag_engine::Placement;
+pub use ag_engine::typed::{format_type_uses, TypeUse};
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
 pub mod graph_export;
@@ -527,6 +528,9 @@ pub struct Binary {
 
     disassembly: Mutex<HashMap<u64, Arc<Disassembly>>>,
     pseudocode: Mutex<HashMap<u64, Result<Arc<Pseudocode>, NotLifted>>>,
+    /// The uses of the image's types, computed once from the lifts and
+    /// dropped whenever those lifts are read again.
+    type_uses: Mutex<Option<Vec<TypeUse>>>,
     /// The analyst's words on the sites, by address: the judgment calls the
     /// lift is to make or not make there.
     site_overrides: Mutex<BTreeMap<u64, SiteOverride>>,
@@ -925,6 +929,7 @@ impl Binary {
 
             disassembly: Mutex::new(HashMap::new()),
             pseudocode: Mutex::new(HashMap::new()),
+            type_uses: Mutex::new(None),
             levels: Mutex::new(HashMap::new()),
             noreturn: Mutex::new(BTreeMap::new()),
             noreturn_facts: Mutex::new(BTreeMap::new()),
@@ -959,6 +964,9 @@ impl Binary {
         self.options = options;
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
         }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
@@ -1317,6 +1325,9 @@ impl Binary {
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
         }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
@@ -1889,6 +1900,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
@@ -1946,6 +1960,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
@@ -1966,6 +1983,9 @@ impl Binary {
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
         }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
@@ -2026,6 +2046,9 @@ impl Binary {
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
         }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
@@ -2144,6 +2167,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
@@ -2180,6 +2206,9 @@ impl Binary {
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();
         }
@@ -2207,6 +2236,45 @@ impl Binary {
         let stages = self.stages(function).ok()?;
         let store = self.types();
         ag_engine::typed::union_access_at(&stages.function, address, &store)
+    }
+
+    /// Every use of a type and of each struct member and enumerator: a
+    /// variable's or return's type, a member or enumerator the pseudocode
+    /// reads, and a definition that names another. Cached until the lifts
+    /// are read again.
+    pub fn type_cross_references(&self) -> Vec<TypeUse> {
+        if let Ok(held) = self.type_uses.lock() {
+            if let Some(uses) = held.as_ref() {
+                return uses.clone();
+            }
+        }
+        let store = self.types();
+        let mut lifted = Vec::new();
+        for function in self.functions() {
+            if let Ok(stages) = self.stages(function.address) {
+                lifted.push(stages);
+            }
+        }
+        let mut returns = std::collections::BTreeMap::new();
+        for stages in &lifted {
+            if let Ok(ty) = ag_engine::ctype::parse_type(&store, &stages.function.return_type) {
+                returns.insert(stages.function.name.clone(), ty);
+            }
+        }
+        let mut uses = ag_engine::typed::definition_uses(&store);
+        for stages in &lifted {
+            uses.extend(ag_engine::typed::cross_references(
+                &stages.function,
+                &store,
+                &returns,
+            ));
+        }
+        uses.sort();
+        uses.dedup();
+        if let Ok(mut held) = self.type_uses.lock() {
+            *held = Some(uses.clone());
+        }
+        uses
     }
 
     /// The pairs of the variables of the function at `address` that could
@@ -2380,6 +2448,9 @@ impl Binary {
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
         }
         if let Ok(mut cache) = self.type_facts.lock() {
             cache.clear();

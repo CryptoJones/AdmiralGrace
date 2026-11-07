@@ -594,6 +594,16 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "type_cross_references",
+            description: "Every use of a type and of each of its members and enumerators: the variables and returns typed with it, the places the pseudocode reads a member (`p->f`, `v.f`) or an enumerator, and the definitions that name it. With `name`, that type; otherwise every type the project defines.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The type's name. Every project type when absent." }
+                }
+            }),
+        },
+        Tool {
             name: "search_types",
             description: "The project's types whose name, members or C hold `text`, in any case: `in` is `name`, `member`, `text` or `any` (the default).",
             schema: json!({
@@ -1666,6 +1676,28 @@ impl Server {
                         .collect::<Vec<_>>(),
                     "notes": result.notes,
                 })))
+            }
+            "type_cross_references" => {
+                self.reload()?;
+                let store = self.image.types();
+                let uses = self.image.type_cross_references();
+                let keys: Vec<String> = match optional_text("name")? {
+                    Some(name) => vec![store
+                        .key_of(&name)
+                        .ok_or_else(|| format!("no type is named {}", name.trim()))?],
+                    None => self
+                        .project()?
+                        .file
+                        .types
+                        .iter()
+                        .map(|definition| definition.name.clone())
+                        .collect(),
+                };
+                let shown: Vec<Value> = keys
+                    .iter()
+                    .map(|key| crate::types::type_uses_json(&store, key, &uses))
+                    .collect();
+                Ok(Answer::json(json!({ "types": shown })))
             }
             "search_types" => {
                 let store = self.image.types();
@@ -2939,6 +2971,7 @@ mod tests {
                 "remove_type",
                 "export_types_header",
                 "port_types",
+                "type_cross_references",
                 "search_types",
                 "set_variable_type",
                 "infer_struct",
