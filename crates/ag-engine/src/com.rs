@@ -84,7 +84,7 @@ impl Guid {
     pub fn c_initializer(self) -> String {
         let b = self.0;
         format!(
-            "{{0x{:02x}{:02x}{:02x}{:02x},0x{:02x}{:02x},0x{:02x}{:02x},{{0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x}}}}},",
+            "{{0x{:02x}{:02x}{:02x}{:02x},0x{:02x}{:02x},0x{:02x}{:02x},{{0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x},0x{:02x}}}}}",
             b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12],
             b[13], b[14], b[15]
         )
@@ -152,7 +152,6 @@ impl ComEntry {
         }
     }
 
-    #[allow(dead_code)]
     fn clsid(name: &str, text_guid: &str) -> ComEntry {
         ComEntry {
             name: name.to_string(),
@@ -330,7 +329,7 @@ pub fn scan(sections: &[ComSection]) -> Vec<GuidHit> {
         if !is_data(section) || section.bytes.len() < 16 {
             continue;
         }
-        let mut offset = 0;
+        let mut offset = (4 - (section.vma % 4) as usize) % 4;
         while offset + 16 <= section.bytes.len() {
             let bytes = &section.bytes[offset..offset + 16];
             if let Some(found) = Guid::from_bytes(bytes) {
@@ -394,8 +393,7 @@ pub fn guid_c(hit: &GuidHit) -> String {
 }
 
 /// What an image's COM metadata gives: the GUIDs it holds, filed as
-/// interfaces and classes, and the statements that make a call with
-/// one.
+/// interfaces and classes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComMetadata {
     /// The GUIDs found in the image's data, in address order.

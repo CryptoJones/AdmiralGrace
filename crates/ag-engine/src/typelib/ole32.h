@@ -3,6 +3,13 @@
 // The types they name are in libc and in the platform's windows.h —
 // GUID, REFIID, CLSCTX, HRESULT and the interface pointer types.
 
+struct GUID {
+    unsigned int Data1;
+    unsigned short Data2;
+    unsigned short Data3;
+    unsigned char Data4[8];
+};
+
 typedef void *IUnknown;
 typedef void *IDispatch;
 typedef void *CLSID;
