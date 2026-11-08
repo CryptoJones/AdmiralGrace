@@ -7421,19 +7421,6 @@ fn names_word(text: &str, word: &str) -> bool {
         })
 }
 
-/// `text` with every whole-word use of each name replaced in one pass.
-///
-/// A whole word is bounded by characters that cannot spell an identifier,
-/// so renaming `add` does not reach into `address` or `dadd`. The scan
-/// never reads what it already wrote, so a name that itself contains the
-/// word — `add` to `addX` — is not reached into twice.
-///
-/// One pass matters when two renames are in flight at once: renaming
-/// `local_10` to `count` and `local_14` to `local_10` must render the
-/// first as `count` and the second as `local_10`, not both as `count`.
-/// The earliest match is taken first, and among matches starting at the
-/// same point the longest word wins, so a declared name that starts with
-/// another — `v1` and `v10` — still keys on the whole word it found.
 /// `text` in pieces at the whole-word occurrences of `words`, by the rule
 /// [`replace_words`] reads words by: each piece with the index of the word
 /// it is, or `None` for the text between. The pieces put together are the
@@ -7487,54 +7474,9 @@ pub(crate) fn split_words(text: &str, words: &[&str]) -> Vec<(String, Option<usi
     pieces
 }
 
-pub(crate) fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
-    let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
-    if pairs.is_empty() {
-        return text.to_string();
-    }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    // The character of the original text just before `rest`, so a word
-    // boundary is read from what the provider wrote, never from what the
-    // replacement put down.
-    let mut prev: Option<char> = None;
-    'scan: while !rest.is_empty() {
-        // The earliest whole-word match, longest word among equals.
-        let best = pairs
-            .iter()
-            .filter_map(|(word, name)| rest.find(word).map(|found| (found, *word, *name)))
-            .min_by(|(left_found, left_word, _), (right_found, right_word, _)| {
-                left_found.cmp(right_found).then(right_word.len().cmp(&left_word.len()))
-            });
-        if let Some((found, word, name)) = best {
-            let before = rest[..found]
-                .chars()
-                .next_back()
-                .or(prev)
-                .is_none_or(|c| !is_word(c));
-            let after_index = found + word.len();
-            let after = rest[after_index..]
-                .chars()
-                .next()
-                .is_none_or(|c| !is_word(c));
-            out.push_str(&rest[..found]);
-            if before && after {
-                out.push_str(name);
-            } else {
-                out.push_str(word);
-            }
-            prev = word.chars().next_back();
-            rest = &rest[after_index..];
-            continue 'scan;
-        }
-        let width = rest.chars().next().expect("nonempty").len_utf8();
-        out.push_str(&rest[..width]);
-        prev = rest.chars().next();
-        rest = &rest[width..];
-    }
-    out
-}
+// The workbench and the command line replace the lift's names with the
+// analyst's by the same rule, kept in `ag_corpus::project`.
+pub(crate) use ag_corpus::project::replace_words;
 
 /// How far a string mark reads when no zero ends it.
 const STRING_REACH: usize = 256;

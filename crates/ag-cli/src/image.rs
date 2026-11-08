@@ -151,7 +151,8 @@ pub enum ImageCmd {
         /// repeated; `ag catalog` lists the options and their symptoms.
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
-        /// A project file whose jump-table notes the walk is told.
+        /// A project file whose jump-table notes the walk is told and
+        /// whose renames name the variables.
         #[arg(long)]
         project: Option<PathBuf>,
         /// Print it sliced: the statements the value of VAR depends on —
@@ -1298,7 +1299,7 @@ pub fn run(
                         .map_err(|error| anyhow::anyhow!("{error}"))
                 })
                 .transpose()?;
-            pseudocode(&image, &target, json, slice, values)
+            pseudocode(&image, &target, json, slice, values, project.as_ref())
         }
         ImageCmd::Il {
             target,
@@ -2193,12 +2194,16 @@ pub(crate) fn cfg_json(graph: &ag_image::ControlFlowGraph) -> CfgJson {
 /// A function the lifter refuses is reported with the reason: as a comment
 /// on stdout and exit code 1 as text, and as `lifted: false` with the
 /// `reason` as JSON, so an agent reading the JSON need not parse an error.
+/// The project's variable renames, when there is a project, show as the
+/// workbench shows them: each lift name the analyst renamed reads its
+/// rename.
 fn pseudocode(
     image: &Binary,
     target: &str,
     json: bool,
     slice: Option<(ag_image::SliceCriterion, ag_image::SliceDirection, bool)>,
     values: bool,
+    project: Option<&ag_corpus::project::ProjectFile>,
 ) -> Result<i32> {
     anyhow::ensure!(
         image.supports_disassembly(),
@@ -2220,6 +2225,7 @@ fn pseudocode(
             .map_err(|error| anyhow::anyhow!("{error}"))?,
         None => pseudocode_json(image, address),
     };
+    let report = renamed_pseudocode(image, address, report, project);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2250,6 +2256,50 @@ fn pseudocode(
             Ok(0)
         }
     }
+}
+
+/// The pseudocode report with the project's variable renames applied to
+/// its lines and text, as the workbench's pseudocode pane shows them:
+/// every whole-word use of a renamed lift name reads the analyst's name,
+/// in one pass, so two renames in flight never reach into each other.
+/// The names are the ones the function declares — the lift's own, before
+/// renames — the way the records key and the workbench filters.
+fn renamed_pseudocode(
+    image: &Binary,
+    address: u64,
+    mut report: PseudocodeJson,
+    project: Option<&ag_corpus::project::ProjectFile>,
+) -> PseudocodeJson {
+    let Some(project) = project else {
+        return report;
+    };
+    let Ok(declared) = image.variables(address) else {
+        return report;
+    };
+    let key = format!("{address:#x}");
+    let names: Vec<(String, String)> = declared
+        .iter()
+        .filter_map(|variable| {
+            Some((
+                variable.lift_name.clone(),
+                project.variable_name(&key, &variable.lift_name)?,
+            ))
+        })
+        .collect();
+    if names.is_empty() {
+        return report;
+    }
+    let pairs: Vec<(&str, &str)> = names
+        .iter()
+        .map(|(lift, renamed)| (lift.as_str(), renamed.as_str()))
+        .collect();
+    for line in &mut report.lines {
+        line.text = ag_corpus::project::replace_words(&line.text, &pairs);
+    }
+    report.text = report
+        .text
+        .map(|text| ag_corpus::project::replace_words(&text, &pairs));
+    report
 }
 
 /// How a line comment opens in the language the image's pseudocode is
