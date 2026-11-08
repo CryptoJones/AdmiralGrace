@@ -77,9 +77,11 @@
 //!   named by position: `a`, `b`, `c`… The width of the first read fixes the
 //!   type.
 //! * **Calls** pass the argument registers written before the call, in
-//!   convention order up to the first one not written; the result is `rax`,
-//!   and the caller-saved registers are forgotten, and so is every value read
-//!   from memory the callee could write. A call is a statement of its own;
+//!   convention order up to the last one written; one the block never wrote
+//!   below that holds the function's own parameter, passed on to the callee.
+//!   The result is `rax`, and the caller-saved registers are forgotten, and
+//!   so is every value read from memory the callee could write. A call is a
+//!   statement of its own;
 //!   its result is a temporary (`v1`) that is inlined into the next
 //!   statement when that is its only use.
 //! * **Pointers** the code takes through `lea` off the instruction pointer
@@ -5202,11 +5204,27 @@ impl<'a> Lifter<'a> {
     ) -> Result<(), NotLifted> {
         let mut args = Vec::new();
         let mut addresses = vec![at];
-        for &register in self.abi.argument_registers() {
-            // An argument register not written in the block is not known to
-            // be an argument: the list stops there.
-            let Some(value) = self.state.regs.get(&register).cloned() else {
+        // The convention is positional: the arguments run to the last
+        // argument register the block left a value in. One it never touched
+        // below that holds the function's own parameter, passed on to the
+        // callee; one above it is not an argument at all, and the list stops
+        // there.
+        let last_written = self
+            .abi
+            .argument_registers()
+            .iter()
+            .rposition(|&register| self.state.regs.contains_key(&register));
+        for (position, &register) in self.abi.argument_registers().iter().enumerate() {
+            if last_written.is_none_or(|last| position > last) {
                 break;
+            }
+            // A register the block never wrote still holds its parameter at
+            // the call, exactly as at entry.
+            let value = match self.state.regs.get(&register) {
+                Some(value) => value.clone(),
+                None => self
+                    .parameter_of(register, 64)
+                    .expect("an argument register of the convention"),
             };
             if matches!(value.sym, Sym::Unknown(_)) {
                 break;
@@ -5226,7 +5244,9 @@ impl<'a> Lifter<'a> {
         // `self` is, in a method that sends itself a message.
         if is_dispatcher(&name) {
             let registers = self.abi.argument_registers().to_vec();
-            let mut wanted = 2;
+            // The block may have written the receiver and loaded the
+            // selector itself: the arity is then known before the top-up.
+            let mut wanted = message_arity(&name, &args).unwrap_or(2);
             while args.len() < wanted.min(registers.len()) {
                 let register = registers[args.len()];
                 // A selector stub loads the selector its name carries into
@@ -7203,6 +7223,23 @@ mod tests {
     }
 
     #[test]
+    fn a_call_passes_an_argument_register_the_block_never_wrote() {
+        // endbr64; mov esi, 5; call f; shr rax, 0x20; ret: the shape of
+        // `second` in fragments.elf. rdi is never written — the caller's
+        // own parameter passes straight through to the callee in it — and
+        // the argument list must not stop there and lose the pass-through
+        // and the 5 written after it.
+        let code = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0xbe, 5, 0, 0, 0, 0xe8, 0xf2, 0x0f, 0x00, 0x00, 0x48, 0xc1,
+            0xe8, 0x20, 0xc3,
+        ];
+        assert_eq!(
+            c(&code),
+            "long f(long a)\n{\n  return (unsigned long)(f(a, 5)) >> 0x20;\n}"
+        );
+    }
+
+    #[test]
     fn a_register_the_call_clobbered_is_not_read_after_it() {
         // mov ecx, edi; call f; mov eax, ecx; ret
         let code = [0x89, 0xf9, 0xe8, 0xf9, 0x0f, 0x00, 0x00, 0x89, 0xc8, 0xc3];
@@ -7564,7 +7601,9 @@ mod tests {
         );
         assert!(named.contains("  add(3);"), "{named}");
         // mov r8, [0x4000]; mov rax, rdi; jmp r8: the dispatcher loaded into
-        // a register and jumped through is a tail call through rax.
+        // a register and jumped through is a tail call through rax. The
+        // registers it never wrote below the dispatcher's hold the function's
+        // own parameters, passed on to the dispatch.
         let tail = c_with(
             &[
                 0x4c, 0x8b, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0x48, 0x89, 0xf8, 0x41, 0xff, 0xe0,
@@ -7572,9 +7611,13 @@ mod tests {
             &Guarded,
             &[],
         );
-        assert_eq!(tail, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        assert_eq!(
+            tail,
+            "void f(long a, long b, long c, long d)\n{\n  a(a, b, c, d);\n  return;\n}"
+        );
         // mov rcx, rdi; call [0x4008]; call rcx; ret: the check validates
-        // rcx and is dropped; the call through rcx stands.
+        // rcx and is dropped; the call through rcx stands, with the
+        // parameters it never wrote below rcx passed on.
         let checked = c_with(
             &[
                 0x48, 0x89, 0xf9, 0xff, 0x15, 0xff, 0x2f, 0x00, 0x00, 0xff, 0xd1, 0xc3,
@@ -7582,7 +7625,10 @@ mod tests {
             &Guarded,
             &[],
         );
-        assert_eq!(checked, "void f(long a)\n{\n  a(a);\n  return;\n}");
+        assert_eq!(
+            checked,
+            "void f(long a, long b, long c)\n{\n  a(a, b, c, a);\n  return;\n}"
+        );
         // A `rax` that holds the dispatcher itself goes nowhere: refused,
         // not followed round. mov rax, [0x4000]; call rax; ret — and the
         // same through the slot.
@@ -8794,7 +8840,11 @@ mod tests {
             "{text}"
         );
         // Without an argument for the parameter the condition names, nothing
-        // is said: mov esi, 5; call checked; ret
+        // is said: call checked; ret
+        let text = c_with(&[0xe8, 0xf6, 0x1f, 0x00, 0x00, 0xc3], &Dying, &[]);
+        assert!(!text.contains("does not return when"), "{text}");
+        // A parameter passed straight through in rdi is an argument too:
+        // mov esi, 5; call checked; ret says the condition of `a`.
         let text = c_with(
             &[
                 0xbe, 0x05, 0x00, 0x00, 0x00, 0xe8, 0xf6, 0x1f, 0x00, 0x00, 0xc3,
@@ -8802,7 +8852,10 @@ mod tests {
             &Dying,
             &[],
         );
-        assert!(!text.contains("does not return when"), "{text}");
+        assert!(
+            text.contains("  checked(a, 5);  // checked does not return when a == 0"),
+            "{text}"
+        );
         // A function whose every path ends in such a call does not return.
         // mov edi, 1; call die
         let text = c_with(
