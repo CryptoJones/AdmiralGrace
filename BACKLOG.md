@@ -371,7 +371,7 @@ Filed 2026-10-31 – 2026-11-01 while working the advanced-analysis roadmap; mir
 
 - [x] Lift writes a call twice when its result is read twice in one instruction — [#547](https://github.com/CryptoJones/AdmiralGrace/issues/547)
 - [x] `ag image pseudocode --project` does not apply the analyst's variable renames — [#552](https://github.com/CryptoJones/AdmiralGrace/issues/552)
-- [ ] Lift prints a call with its arguments missing (fragments.elf: second calls make()) — [#562](https://github.com/CryptoJones/AdmiralGrace/issues/562)
+- [x] Lift prints a call with its arguments missing (fragments.elf: second calls make()) — [#562](https://github.com/CryptoJones/AdmiralGrace/issues/562)
 
 ---
 

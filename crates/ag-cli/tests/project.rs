@@ -3481,12 +3481,10 @@ fn the_structures_held_in_registers_read_as_their_members() {
         text.contains("long width(struct span a)\n{\n  return a.hi - a.lo;\n}"),
         "{text}"
     );
-    // The caller reads y from the high half of what make returns in rax.
+    // The caller reads y from the high half of what make returns in rax,
+    // and passes its own parameter through rdi and 5 in rsi.
     let text = image(&["pseudocode", "second"]);
-    assert!(
-        text.contains("return make(") && text.contains(").y;"),
-        "{text}"
-    );
+    assert!(text.contains("return make(a, 5).y;"), "{text}");
     // GCC loads both members, joins them in rax and shifts y back out.
     let text = image(&["pseudocode", "copy_y"]);
     assert!(text.contains("  a->y = b->y;\n"), "{text}");
