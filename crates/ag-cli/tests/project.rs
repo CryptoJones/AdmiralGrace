@@ -2757,6 +2757,68 @@ fn the_variables_follow_the_analysts_merges_splits_inlines_and_renames() {
 }
 
 #[test]
+fn the_pseudocode_shows_the_analysts_variable_renames() {
+    let file = TempFile::new("pseudocode-rename");
+    // What `ag image inline.elf pseudocode ping --project FILE` prints.
+    let pseudocode = |flags: &[&str]| -> String {
+        let text = file.text();
+        let mut args = vec!["pseudocode", "ping", "--project", text.as_str()];
+        args.extend(flags.iter().copied());
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(&args)
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    let before = pseudocode(&[]);
+    assert!(before.contains("  int eax;\n"), "{before}");
+    assert!(before.contains("  eax = a;\n"), "{before}");
+
+    // The rename the project records shows in the pseudocode as the
+    // workbench shows it: every whole-word use of the lift's name reads
+    // the analyst's, and the lift's name stands nowhere.
+    let (ok, stdout, stderr) = project_with(
+        "inline.elf",
+        &["var", "--file", &file.text(), "0x401000", "eax", "count"],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("variable 0x401000::eax now name count"),
+        "{stdout}"
+    );
+    let renamed = pseudocode(&[]);
+    assert!(renamed.contains("  int count;\n"), "{renamed}");
+    assert!(renamed.contains("  count = a;\n"), "{renamed}");
+    assert!(renamed.contains("  if (count > 0) {\n"), "{renamed}");
+    assert!(renamed.contains("    count = v1 + 1;\n"), "{renamed}");
+    assert!(!renamed.contains("eax"), "{renamed}");
+
+    // The JSON carries the rename in its lines and text too.
+    let report: serde_json::Value =
+        serde_json::from_str(&pseudocode(&["--json"])).expect("the report is JSON");
+    let text = report["text"].as_str().expect("the text");
+    assert!(text.contains("int count;"), "{text}");
+    assert!(!text.contains("eax"), "{text}");
+    assert!(
+        report["lines"]
+            .as_array()
+            .expect("the lines")
+            .iter()
+            .any(|line| line["text"] == serde_json::json!("  count = a;")),
+        "{report}"
+    );
+}
+
+#[test]
 fn a_stack_variable_the_analyst_makes_is_read_by_the_lift_and_taken_back() {
     let file = TempFile::new("stack-var");
     // What `ag image sample.elf COMMAND sum_to --project FILE` prints.
