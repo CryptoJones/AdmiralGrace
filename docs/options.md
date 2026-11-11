@@ -12,6 +12,8 @@ code in an executable section that no function in the list reaches: a stripped r
 `sub_…` functions that are really a table, a string or padding the compiler left in `.text` | `--option code-sections mixed`
 `not lifted yet: rcx is read before it is written` on an ELF built for the Microsoft convention | `--option abi win64`
 `not lifted yet: rdi is read before it is written` on a PE built with a System V compiler | `--option abi sysv`
+`not lifted yet: rbx is read before it is written` on a Go binary, whose arguments arrive in rax and rbx | `--option abi go`
+a Delphi routine's first arguments read as none, though they arrive in eax, edx and ecx | `--option abi pascal`
 a function you know takes more arguments than its signature shows, because the tail of them is only passed on | `--option parameters convention`
 `long a` in a signature where nothing reads `a` | `--option parameters last-read`
 `eax`, `eax_2` and `edi` declared as locals, reading like a listing and not like C | `--option merged-register-names numbered`
@@ -72,7 +74,7 @@ Option | Tier | Takes | Default | What it decides
 
 Option | Tier | Takes | Default | What it decides
 --- | --- | --- | --- | ---
-`abi` | analysis | `auto` \| `sysv` \| `win64` | `auto` | The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`) or Microsoft x64 (`rcx, rdx, r8, r9`) whatever the image says.
+`abi` | analysis | `auto` \| `sysv` \| `win64` \| `go` \| `pascal` | `auto` | The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`) or the Borland Pascal register convention (`rax, rdx, rcx`) whatever the image says.
 `parameters` | analysis | `last-read` \| `convention` | `last-read` | Which argument registers are parameters: the ones through the last one read, a gap declared `long`, or every register of the convention.
 `merged-register-names` | rendering | `register` \| `numbered` | `register` | How a register that differs where two paths join is named once it is a variable: after the register (`eax`, `eax_2`), or by number (`var_1`, `var_2`).
 `stack-slot-names` | rendering | `hex` \| `decimal` | `hex` | How a stack slot is named, by its offset from the entry stack pointer: `local_14` in hex, or `local_20` in decimal.

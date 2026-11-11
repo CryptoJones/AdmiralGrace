@@ -275,8 +275,9 @@ pub(crate) fn apply_var_types(
 pub const RETURN: &str = "return";
 
 /// The structure `text` a function returns, as its callers read it: in
-/// `rax`, at most eight bytes of it — under System V a structure of the
-/// INTEGER class, under Microsoft x64 one of 1, 2, 4 or 8 bytes.
+/// `rax`, at most eight bytes of it — under System V and Go a structure of
+/// the INTEGER class, under Microsoft x64 one of 1, 2, 4 or 8 bytes, under
+/// Pascal one that fits a register.
 pub(crate) fn return_type(
     store: &TypeStore,
     text: &str,
@@ -290,12 +291,22 @@ pub(crate) fn return_type(
         ));
     }
     let size = match abi {
-        crate::lift::Abi::SystemV => store.integer_class(&ty)?,
+        crate::lift::Abi::SystemV => store.integer_class(&ty, "System V")?,
+        crate::lift::Abi::Go => store.integer_class(&ty, "Go")?,
         crate::lift::Abi::Win64 => {
             let size = store.size_of(&ty)?;
             if !matches!(size, 1 | 2 | 4 | 8) {
                 return Err(format!(
                     "Microsoft x64 returns {spelled}, of {size} bytes, through memory the caller passes"
+                ));
+            }
+            size
+        }
+        crate::lift::Abi::Pascal => {
+            let size = store.size_of(&ty)?;
+            if size > 8 {
+                return Err(format!(
+                    "Pascal returns {spelled}, of {size} bytes, through memory the caller passes"
                 ));
             }
             size
@@ -323,7 +334,12 @@ fn by_value(
     let spelled = ty.spelled(store);
     match abi {
         crate::lift::Abi::SystemV => {
-            if let Err(why) = store.integer_class(ty) {
+            if let Err(why) = store.integer_class(ty, "System V") {
+                return Some(why);
+            }
+        }
+        crate::lift::Abi::Go => {
+            if let Err(why) = store.integer_class(ty, "Go") {
                 return Some(why);
             }
         }
@@ -340,6 +356,20 @@ fn by_value(
                     param.name, param.ty
                 ));
                 return None;
+            }
+        }
+        crate::lift::Abi::Pascal => {
+            // The Borland register convention passes a structure that fits
+            // one register in it; a larger one goes on the stack, which the
+            // lift does not read as a parameter.
+            let size = match store.size_of(ty) {
+                Ok(size) => size,
+                Err(why) => return Some(why),
+            };
+            if size > 8 {
+                return Some(format!(
+                    "Pascal passes {spelled}, of {size} bytes, on the stack"
+                ));
             }
         }
     }
@@ -1683,6 +1713,25 @@ mod tests {
         versions: &[(&str, u64)],
         union_fields: &[(u64, &str)],
     ) -> (String, Vec<(String, String)>) {
+        lifted_abi(
+            bytes,
+            stack_vars,
+            var_types,
+            versions,
+            union_fields,
+            Abi::SystemV,
+        )
+    }
+
+    /// [`lifted_union`], under the calling convention `abi`.
+    fn lifted_abi(
+        bytes: &[u8],
+        stack_vars: &[(i64, u32, &str, &str)],
+        var_types: &[(&str, &str)],
+        versions: &[(&str, u64)],
+        union_fields: &[(u64, &str)],
+        abi: Abi,
+    ) -> (String, Vec<(String, String)>) {
         let mut store = TypeStore::new(DataModel::LP64);
         crate::ctype::parse_into(&mut store, TYPES).unwrap();
         let world = World {
@@ -1718,7 +1767,7 @@ mod tests {
             BASE,
             "f",
             Bitness::Bits64,
-            Abi::SystemV,
+            abi,
             &world,
             &Options::default(),
         )
@@ -2169,6 +2218,58 @@ mod tests {
         assert!(
             variables.contains(&("a_2".to_string(), "struct point [0..8) (x, y)".to_string())),
             "{variables:?}"
+        );
+    }
+
+    #[test]
+    fn a_go_structure_passed_by_value_reads_its_members_from_rax_and_rbx() {
+        // Eight bytes in rax: mov rdx, rax; sar rdx, 32; mov eax, edx; ret
+        let code = [0x48, 0x89, 0xc2, 0x48, 0xc1, 0xfa, 0x20, 0x89, 0xd0, 0xc3];
+        let (text, variables) = lifted_abi(&code, &[], &[("a", "struct pair")], &[], &[], Abi::Go);
+        assert_eq!(text, "int f(struct pair a)\n{\n  return a.b;\n}");
+        assert_eq!(variables, [("a".to_string(), "struct pair".to_string())]);
+        // Sixteen bytes in rax and rbx: mov rdx, rax; shr rdx, 32; add edx,
+        // eax; add rdx, rbx; mov rax, rdx; ret
+        let code = [
+            0x48, 0x89, 0xc2, 0x48, 0xc1, 0xea, 0x20, 0x01, 0xc2, 0x48, 0x01, 0xda, 0x48, 0x89,
+            0xd0, 0xc3,
+        ];
+        let (text, variables) = lifted_abi(&code, &[], &[("a", "struct point")], &[], &[], Abi::Go);
+        assert!(text.starts_with("long f(struct point a)\n"), "{text}");
+        assert!(
+            text.contains("(a.y + a.x)") && text.contains("+ a.tag;"),
+            "{text}"
+        );
+        assert_eq!(
+            variables,
+            [
+                ("a".to_string(), "struct point [0..8) (x, y)".to_string()),
+                ("b".to_string(), "struct point [8..16) (tag)".to_string()),
+            ]
+        );
+        // A union of a floating member is not read, and says why.
+        let (text, _) = lifted_abi(&code, &[], &[("a", "union word")], &[], &[], Abi::Go);
+        assert!(
+            text.contains(
+                "union word has a member of floating type, which Go passes in vector registers"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_pascal_structure_passed_by_value_reads_its_members_from_rax() {
+        // Eight bytes in rax: mov rdx, rax; sar rdx, 32; mov eax, edx; ret
+        let code = [0x48, 0x89, 0xc2, 0x48, 0xc1, 0xfa, 0x20, 0x89, 0xd0, 0xc3];
+        let (text, variables) =
+            lifted_abi(&code, &[], &[("a", "struct pair")], &[], &[], Abi::Pascal);
+        assert_eq!(text, "int f(struct pair a)\n{\n  return a.b;\n}");
+        assert_eq!(variables, [("a".to_string(), "struct pair".to_string())]);
+        // Larger than eight bytes goes on the stack, and the lift says so.
+        let (text, _) = lifted_abi(&code, &[], &[("a", "struct point")], &[], &[], Abi::Pascal);
+        assert!(
+            text.contains("Pascal passes struct point, of 16 bytes, on the stack"),
+            "{text}"
         );
     }
 

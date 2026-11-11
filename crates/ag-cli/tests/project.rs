@@ -2317,6 +2317,24 @@ fn a_functions_properties_are_recorded_and_read_by_the_lift() {
         assert!(stderr.contains(why), "{stderr}");
     }
 
+    // The Go and Pascal conventions, and the spellings that name them, are
+    // accepted and canonicalize.
+    for (word, canonical) in [
+        ("go", "go"),
+        ("golang", "go"),
+        ("pascal", "pascal"),
+        ("delphi", "pascal"),
+    ] {
+        let (ok, stdout, stderr) = props(&["--convention", word]);
+        assert!(ok, "{word}: {stderr}");
+        assert!(
+            stdout.contains(&format!("convention {canonical}")),
+            "{stdout}"
+        );
+        let (ok, _, stderr) = props(&["--convention", "clear"]);
+        assert!(ok, "{stderr}");
+    }
+
     // Taking every part back clears the record, and the lift reads its own
     // signature again.
     let (ok, stdout, stderr) = props(&[

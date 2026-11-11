@@ -125,7 +125,9 @@ impl DataModel {
     pub fn of_abi(abi: crate::lift::Abi) -> DataModel {
         match abi {
             crate::lift::Abi::Win64 => DataModel::LLP64,
-            crate::lift::Abi::SystemV => DataModel::LP64,
+            crate::lift::Abi::SystemV | crate::lift::Abi::Go | crate::lift::Abi::Pascal => {
+                DataModel::LP64
+            }
         }
     }
 }
@@ -1435,14 +1437,15 @@ impl TypeStore {
         }
     }
 
-    /// The size of the structure or union `ty` when the System V x86-64
-    /// convention passes and returns it in general registers — the
+    /// The size of the structure or union `ty` when the x86-64 convention
+    /// `convention` passes and returns it in general registers — the
     /// INTEGER class: at most 16 bytes, every member an integer, an
     /// enumeration or a pointer at its natural alignment — or why it does
     /// not: a member of floating type is passed in vector registers, and a
     /// larger structure, or one with a member out of its alignment, in
-    /// memory.
-    pub fn integer_class(&self, ty: &Type) -> Result<u64, String> {
+    /// memory. `convention` names the convention in the reasons, `System V`
+    /// or `Go`.
+    pub fn integer_class(&self, ty: &Type, convention: &str) -> Result<u64, String> {
         let spelled = ty.spelled(self);
         if self.composite(ty).is_none() {
             return Err(format!("{spelled} is no structure or union"));
@@ -1450,24 +1453,30 @@ impl TypeStore {
         let size = self.size_of(ty)?;
         if size > 16 {
             return Err(format!(
-                "{spelled} is {size} bytes, which System V passes in memory"
+                "{spelled} is {size} bytes, which {convention} passes in memory"
             ));
         }
-        self.integer_members(ty, &spelled, 0)?;
+        self.integer_members(ty, &spelled, convention, 0)?;
         Ok(size)
     }
 
-    fn integer_members(&self, ty: &Type, spelled: &str, depth: usize) -> Result<(), String> {
+    fn integer_members(
+        &self,
+        ty: &Type,
+        spelled: &str,
+        convention: &str,
+        depth: usize,
+    ) -> Result<(), String> {
         if depth > 32 {
             return Err(format!("{spelled} nests too deeply"));
         }
         match self.resolve(ty) {
             Type::Prim(p) if p.is_integer() => Ok(()),
             Type::Prim(_) => Err(format!(
-                "{spelled} has a member of floating type, which System V passes in vector registers"
+                "{spelled} has a member of floating type, which {convention} passes in vector registers"
             )),
             Type::Pointer(_) | Type::BasedPointer { .. } => Ok(()),
-            Type::Array(element, _) => self.integer_members(element, spelled, depth + 1),
+            Type::Array(element, _) => self.integer_members(element, spelled, convention, depth + 1),
             resolved @ Type::Named(_) => {
                 if self.enumeration(resolved).is_some() {
                     return Ok(());
@@ -1480,11 +1489,11 @@ impl TypeStore {
                         let align = self.align_of(&field.ty)?;
                         if align > 0 && field.offset % align != 0 {
                             return Err(format!(
-                                "{spelled} has a member out of its alignment, which System V passes in memory"
+                                "{spelled} has a member out of its alignment, which {convention} passes in memory"
                             ));
                         }
                     }
-                    self.integer_members(&field.ty, spelled, depth + 1)?;
+                    self.integer_members(&field.ty, spelled, convention, depth + 1)?;
                 }
                 Ok(())
             }
@@ -2647,22 +2656,27 @@ mod tests {
         assert_eq!(path(&[Step::Field("x".into())]), Some(24));
         assert_eq!(path(&[Step::Field("nothing".into())]), None);
         // System V passes the INTEGER class in registers, and the rest not.
-        assert_eq!(s.integer_class(&named("struct pair")), Ok(8));
-        assert_eq!(s.integer_class(&named("struct span")), Ok(16));
+        assert_eq!(s.integer_class(&named("struct pair"), "System V"), Ok(8));
+        assert_eq!(s.integer_class(&named("struct span"), "System V"), Ok(16));
         assert_eq!(
-            s.integer_class(&named("struct mixed")),
+            s.integer_class(&named("struct mixed"), "System V"),
             Err("struct mixed has a member of floating type, which System V passes in vector registers".to_string())
         );
         assert_eq!(
-            s.integer_class(&named("struct big")),
+            s.integer_class(&named("struct big"), "System V"),
             Err("struct big is 24 bytes, which System V passes in memory".to_string())
         );
         assert_eq!(
-            s.integer_class(&named("struct odd")),
+            s.integer_class(&named("struct odd"), "System V"),
             Err(
                 "struct odd has a member out of its alignment, which System V passes in memory"
                     .to_string()
             )
+        );
+        // The reasons name the convention they are read under.
+        assert_eq!(
+            s.integer_class(&named("struct big"), "Go"),
+            Err("struct big is 24 bytes, which Go passes in memory".to_string())
         );
     }
 

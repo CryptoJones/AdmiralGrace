@@ -21,7 +21,7 @@ pub struct FunctionProperties {
     /// type, parameter types and names the lift reads over its own.
     pub prototype: Option<String>,
     /// The calling convention, by name: `cdecl`, `stdcall`, `win64`, `sysv`,
-    /// and their kind; see [`parse_convention`].
+    /// `go`, `pascal`, and their kind; see [`parse_convention`].
     pub convention: Option<String>,
     /// The bytes the callee takes off the stack on return — the `N` of a
     /// `ret N` — over what the instruction itself says.
@@ -89,8 +89,9 @@ impl FunctionProperties {
 }
 
 /// The canonical spelling of a calling convention `word`, when it is one:
-/// `__cdecl` and `cdecl` are `cdecl`, `system v` and `amd64` are `sysv`.
-/// `None` for a word that names no convention.
+/// `__cdecl` and `cdecl` are `cdecl`, `system v` and `amd64` are `sysv`,
+/// `golang` is `go`, `delphi` is `pascal`. `None` for a word that names no
+/// convention.
 pub fn parse_convention(word: &str) -> Option<&'static str> {
     let word = word.trim().to_ascii_lowercase();
     let word = word.as_str();
@@ -103,16 +104,21 @@ pub fn parse_convention(word: &str) -> Option<&'static str> {
         "__clrcall" | "clrcall" => Some("clrcall"),
         "sysv" | "systemv" | "system v" | "amd64" | "unix" | "linux" => Some("sysv"),
         "win64" | "windows" | "ms" | "microsoft" | "msx64" => Some("win64"),
+        "go" | "golang" | "go-register" => Some("go"),
+        "pascal" | "__pascal" | "delphi" | "borland" => Some("pascal"),
         _ => None,
     }
 }
 
 /// The integer ABI a convention `word` implies: `cdecl` and `sysv` pass
-/// arguments as System V does, the Microsoft conventions as Win64 does.
-/// `None` for a word that names no convention.
+/// arguments as System V does, the Microsoft conventions as Win64 does,
+/// `go` as Go's register ABI does and `pascal` as the Borland register
+/// convention does. `None` for a word that names no convention.
 pub fn convention_abi(word: &str) -> Option<Abi> {
     match parse_convention(word)? {
         "cdecl" | "sysv" => Some(Abi::SystemV),
+        "go" => Some(Abi::Go),
+        "pascal" => Some(Abi::Pascal),
         _ => Some(Abi::Win64),
     }
 }
@@ -178,6 +184,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(props.convention_abi(), Some(Abi::SystemV));
+        let props = FunctionProperties {
+            convention: Some("golang".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            props.argument_registers(Abi::SystemV),
+            Abi::Go.argument_registers()
+        );
+        let props = FunctionProperties {
+            convention: Some("delphi".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            props.argument_registers(Abi::Win64),
+            Abi::Pascal.argument_registers()
+        );
     }
 
     #[test]
@@ -212,8 +234,33 @@ mod tests {
         assert_eq!(parse_convention("__cdecl"), Some("cdecl"));
         assert_eq!(parse_convention("System V"), Some("sysv"));
         assert_eq!(parse_convention("WINDOWS"), Some("win64"));
-        assert_eq!(parse_convention("pascal"), None);
+        assert_eq!(parse_convention("golang"), Some("go"));
+        assert_eq!(parse_convention("Go-Register"), Some("go"));
+        assert_eq!(parse_convention("delphi"), Some("pascal"));
+        assert_eq!(parse_convention("__Pascal"), Some("pascal"));
+        assert_eq!(parse_convention("nope"), None);
         assert_eq!(convention_abi("fastcall"), Some(Abi::Win64));
+        assert_eq!(convention_abi("go"), Some(Abi::Go));
+        assert_eq!(convention_abi("pascal"), Some(Abi::Pascal));
         assert_eq!(convention_abi("nope"), None);
+    }
+
+    #[test]
+    fn the_go_and_pascal_registers_are_their_own() {
+        // Go's register ABI leads with rax and rbx, and runs to r11.
+        assert_eq!(Abi::Go.argument_registers(), &[0, 3, 1, 7, 6, 8, 9, 10, 11]);
+        // Pascal leads with rax, rdx, rcx, left to right.
+        assert_eq!(Abi::Pascal.argument_registers(), &[0, 2, 1]);
+        // Go keeps only the stack and frame pointers and the goroutine
+        // pointer r14; Pascal keeps what its 32-bit original keeps.
+        assert!(Abi::Go.is_callee_saved(4));
+        assert!(Abi::Go.is_callee_saved(5));
+        assert!(Abi::Go.is_callee_saved(14));
+        assert!(!Abi::Go.is_callee_saved(3));
+        assert!(!Abi::Go.is_callee_saved(12));
+        assert!(Abi::Pascal.is_callee_saved(3));
+        assert!(Abi::Pascal.is_callee_saved(6));
+        assert!(Abi::Pascal.is_callee_saved(7));
+        assert!(!Abi::Pascal.is_callee_saved(0));
     }
 }

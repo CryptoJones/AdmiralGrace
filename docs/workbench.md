@@ -302,8 +302,8 @@ conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto int f(int n, char
 ```
 
 Each part is optional and the parts read in any order, `proto` taking the rest of the line:
-`conv NAME` is the calling convention (`cdecl`, `stdcall`, `win64`, `sysv`…), which sets the
-argument registers and the caller-saved ones; `stack N` is the bytes the callee takes off the
+`conv NAME` is the calling convention (`cdecl`, `stdcall`, `win64`, `sysv`, `go`, `pascal`…),
+which sets the argument registers and the caller-saved ones; `stack N` is the bytes the callee takes off the
 stack on return; `clobbers R,…` names the registers clobbered beyond the convention's
 caller-saved ones, which a call to the function kills in its caller; `args R,…` names the
 registers the arguments arrive in, in order, over the convention's own; `ret R` names the

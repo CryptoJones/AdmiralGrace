@@ -53,7 +53,7 @@ functions are lifted with:
 
 | Model | Images | `long` | pointer | `long double` | `wchar_t` | 8-byte scalars align to |
 |---|---|---|---|---|---|---|
-| `LP64` | 64-bit ELF and Mach-O: x86-64, AArch64 | 8 | 8 | 16, align 16 | 4 | 8 |
+| `LP64` | 64-bit ELF and Mach-O: x86-64, AArch64; x86-64 under `--option abi go` or `pascal` | 8 | 8 | 16, align 16 | 4 | 8 |
 | `LLP64` | 64-bit Windows, and x86-64 under `--option abi win64` | 4 | 8 | 8 | 2 | 8 |
 | `ILP32` | 32-bit ARM, MIPS and Windows (`wchar_t` 2) | 4 | 4 | 8 | 4 | 8 |
 | `ILP32 (i386)` | 32-bit x86 under System V | 4 | 4 | 12, align 4 | 4 | 4 |
@@ -245,18 +245,25 @@ by value:
   parameter standing in it, and both registers' reads are its members, `a.lo`, `a.hi`, while
   the body leaves the registers as they came. A structure with a floating member (the SSE
   class), one of more than 16 bytes or with a member out of its alignment (MEMORY), and one
-  that needs two registers when its parameter is in the last, are refused with a note; those
-  classes are #388's, with the other calling conventions.
+  that needs two registers when its parameter is in the last, are refused with a note; the SSE
+  and MEMORY classes are still to come.
+- **Go**: the same INTEGER class as System V, in the register ABI's argument registers
+  (`rax, rbx, rcx, …`) — the first eight bytes in the parameter's register, the rest in the
+  next — with the same refusals named for Go: a floating member is passed in vector registers,
+  more than 16 bytes in memory.
+- **The Borland Pascal register convention**: a structure of at most 8 bytes comes whole in
+  `rax`; a larger one goes on the stack, which the lift does not read as a parameter, and is
+  refused with a note: `Pascal passes struct point, of 16 bytes, on the stack`.
 - **Microsoft x64**: a structure of 1, 2, 4 or 8 bytes comes whole in its register; another is
   passed by its address, and the parameter is typed a pointer to it, with a note: `a is struct
   big *: Microsoft x64 passes struct big, of 24 bytes, by its address`.
 
 A function's `return` typed a structure (`var-type … make return 'struct point'`) is read at its
 calls: the call's result in `rax` is the structure's first eight bytes, `make(a, 5).y`. A
-structure the System V convention returns in `rax` and `rdx` is refused — the calls read `rax`
-alone — as are the SSE and MEMORY classes, and under Microsoft x64 a size other than 1, 2, 4 or
-8 bytes, which is returned through memory the caller passes. The function's own pseudocode keeps
-the integer it returns in.
+structure System V or Go returns in `rax` and `rdx` is refused — the calls read `rax` alone — as
+are the SSE and MEMORY classes; under Microsoft x64 a size other than 1, 2, 4 or 8 bytes, and
+under Pascal one of more than 8 bytes, is returned through memory the caller passes. The
+function's own pseudocode keeps the integer it returns in.
 
 A fragment rides with its variable through the analyst's splits, new versions and merges, which
 copy the variable's declaration, and through inlining: a structure passed by value is bound to a
@@ -541,8 +548,9 @@ defaults and below the project's, so the project still wins.
 
 The model leaves room for the items that build on it:
 
-- **Struct-by-value calling conventions (#388)** add the SSE and MEMORY classes, `rdx` of a
-  returned structure, and the other conventions to the INTEGER class the fragments read.
+- **The SSE and MEMORY classes and a two-register return** add a floating member, more than 16
+  bytes and a member out of its alignment to the INTEGER class the fragments read, and `rdx` of
+  a returned structure to the `rax` the calls read.
 - **The union field per instruction (#371)** replaces the first-member-that-fits choice, made
   in one place (`TypeStore::field_at`).
 

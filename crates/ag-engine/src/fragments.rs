@@ -99,6 +99,12 @@ pub fn annotation_of(node: &AstNode) -> Option<(&AstNode, &str)> {
 /// The System V argument registers, in order.
 const SYSV_ARGUMENTS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
+/// The Go register ABI's argument registers, in order.
+const GO_ARGUMENTS: [&str; 9] = ["rax", "rbx", "rcx", "rdi", "rsi", "r8", "r9", "r10", "r11"];
+
+/// The Borland Pascal register convention's argument registers, in order.
+const PASCAL_ARGUMENTS: [&str; 3] = ["rax", "rdx", "rcx"];
+
 /// The structure passed by value in the parameter `index` of `function`,
 /// `ty` of `size` bytes, as System V passes it: the parameter holds its
 /// first eight bytes, and the parameter in the next argument register its
@@ -173,6 +179,8 @@ pub(crate) fn argument_registers(abi: crate::lift::Abi) -> &'static [&'static st
     match abi {
         crate::lift::Abi::SystemV => &SYSV_ARGUMENTS,
         crate::lift::Abi::Win64 => &["rcx", "rdx", "r8", "r9"],
+        crate::lift::Abi::Go => &GO_ARGUMENTS,
+        crate::lift::Abi::Pascal => &PASCAL_ARGUMENTS,
     }
 }
 

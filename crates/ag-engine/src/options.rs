@@ -168,9 +168,9 @@ pub const OPTIONS: &[OptionSpec] = &[
         name: "abi",
         phase: Phase::Lift,
         tier: Tier::Analysis,
-        kind: Kind::Choice(&["auto", "sysv", "win64"]),
+        kind: Kind::Choice(&["auto", "sysv", "win64", "go", "pascal"]),
         default: "auto",
-        description: "The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`) or Microsoft x64 (`rcx, rdx, r8, r9`) whatever the image says.",
+        description: "The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`) or the Borland Pascal register convention (`rax, rdx, rcx`) whatever the image says.",
         symptoms: &[
             symptom(
                 "`not lifted yet: rcx is read before it is written` on an ELF built for the Microsoft convention",
@@ -179,6 +179,14 @@ pub const OPTIONS: &[OptionSpec] = &[
             symptom(
                 "`not lifted yet: rdi is read before it is written` on a PE built with a System V compiler",
                 "sysv",
+            ),
+            symptom(
+                "`not lifted yet: rbx is read before it is written` on a Go binary, whose arguments arrive in rax and rbx",
+                "go",
+            ),
+            symptom(
+                "a Delphi routine's first arguments read as none, though they arrive in eax, edx and ecx",
+                "pascal",
             ),
         ],
     },
@@ -646,6 +654,10 @@ pub enum AbiChoice {
     SysV,
     /// Microsoft x64, whatever the image says.
     Win64,
+    /// Go's register ABI, whatever the image says.
+    Go,
+    /// The Borland Pascal register convention, whatever the image says.
+    Pascal,
 }
 
 /// Which argument registers are parameters.
@@ -1151,6 +1163,8 @@ impl Options {
                         ("auto", AbiChoice::Auto),
                         ("sysv", AbiChoice::SysV),
                         ("win64", AbiChoice::Win64),
+                        ("go", AbiChoice::Go),
+                        ("pascal", AbiChoice::Pascal),
                     ],
                 )?
             }
@@ -1399,6 +1413,8 @@ impl Options {
                     AbiChoice::Auto => "auto",
                     AbiChoice::SysV => "sysv",
                     AbiChoice::Win64 => "win64",
+                    AbiChoice::Go => "go",
+                    AbiChoice::Pascal => "pascal",
                 },
                 "parameters" => match self.parameters {
                     Parameters::LastRead => "last-read",
@@ -1529,6 +1545,8 @@ impl Options {
             AbiChoice::Auto => Abi::of_language(language),
             AbiChoice::SysV => Abi::SystemV,
             AbiChoice::Win64 => Abi::Win64,
+            AbiChoice::Go => Abi::Go,
+            AbiChoice::Pascal => Abi::Pascal,
         }
     }
 }
@@ -1834,6 +1852,20 @@ mod tests {
         assert_eq!(options.abi_for(language), Abi::SystemV);
         let options = Options::from_pairs([("abi", "win64")]).unwrap();
         assert_eq!(options.abi_for("x86:LE:64:default:gcc"), Abi::Win64);
+        let options = Options::from_pairs([("abi", "go")]).unwrap();
+        assert_eq!(options.abi_for("x86:LE:64:default:gcc"), Abi::Go);
+        let options = Options::from_pairs([("abi", "pascal")]).unwrap();
+        assert_eq!(options.abi_for(language), Abi::Pascal);
+        // The language's own compiler field names Go and the Borland
+        // compilers when nothing is set.
+        assert_eq!(
+            Options::default().abi_for("x86:LE:64:default:golang"),
+            Abi::Go
+        );
+        assert_eq!(
+            Options::default().abi_for("x86:LE:64:default:borlanddelphi"),
+            Abi::Pascal
+        );
     }
 
     #[test]
