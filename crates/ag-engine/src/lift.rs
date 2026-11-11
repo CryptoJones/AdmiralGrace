@@ -237,6 +237,13 @@ pub trait Symbols {
         BTreeMap::new()
     }
 
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of, by the address of each instruction that said — see
+    /// [`crate::typed`]. Nothing is chosen unless the image says.
+    fn constant_enums(&self) -> BTreeMap<u64, String> {
+        BTreeMap::new()
+    }
+
     /// The types the analyst defined ([`crate::types`]), which the
     /// variables' types name; `None` for the platform's primitives alone.
     fn types(&self) -> Option<std::sync::Arc<crate::types::TypeStore>> {
@@ -1102,6 +1109,9 @@ fn lift_pass(
     // Which member of a union each instruction's access means, by the
     // address of each instruction that said.
     let union_fields = symbols.union_fields();
+    // The enumeration a constant in each instruction's operands is shown
+    // as a member of, by the address of each instruction that said.
+    let constant_enums = symbols.constant_enums();
     let store = symbols.types().unwrap_or_else(|| {
         std::sync::Arc::new(crate::types::TypeStore::new(
             crate::types::DataModel::of_abi(abi),
@@ -1363,7 +1373,7 @@ fn lift_pass(
                 .map(|ty| (callee, ty))
         })
         .collect();
-    crate::typed::read_types(&mut function, &store, &returns, &union_fields);
+    crate::typed::read_types(&mut function, &store, &returns, &union_fields, &constant_enums);
     let high = if keep {
         function.body.clone()
     } else {

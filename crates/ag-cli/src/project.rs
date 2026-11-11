@@ -145,6 +145,19 @@ pub enum ProjectCmd {
         /// `hex` is how the analysis prints them and clears the record.
         format: String,
     },
+    /// Show a constant in an instruction's operands as a member of an
+    /// enumeration — `enum state`, `mode_t` — when the enumeration has a
+    /// member of that value. `none` takes the choice back and shows the
+    /// constant as a number.
+    ConstantEnum {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The instruction's address, with its space when it names one.
+        address: String,
+        /// The enumeration's key, or `none`.
+        key: String,
+    },
     /// Say which member of a union the access at an instruction means,
     /// when the pseudocode would print the first member the bytes fit.
     Union {
@@ -723,6 +736,24 @@ pub fn run(
             })?;
             edit(&target, &file, TargetKind::Address, &address, |a| {
                 a.set_operand_format(Some(format))
+            })
+        }
+        ProjectCmd::ConstantEnum {
+            file,
+            address,
+            key,
+        } => {
+            // The enumeration's key is what the type store declares;
+            // whether it still has a member of the constant's value is the
+            // lift's business when it reads, so a stale key is recorded
+            // and degrades, not refused here.
+            let name = if key.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(key.as_str())
+            };
+            edit(&target, &file, TargetKind::Address, &address, |a| {
+                a.set_constant_enum(name)
             })
         }
         ProjectCmd::Union {

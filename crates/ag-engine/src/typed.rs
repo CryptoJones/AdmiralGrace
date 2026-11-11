@@ -356,6 +356,9 @@ struct Typed<'a> {
     /// The member of a union each instruction's access means, by the
     /// address of each instruction that said ([`crate::types::TypeStore::field_at_chosen`]).
     union_fields: &'a BTreeMap<u64, String>,
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of, by the address of each instruction that said.
+    constant_enums: &'a BTreeMap<u64, String>,
 }
 
 /// Read the types of the variables of `function` into its body: the
@@ -366,15 +369,17 @@ struct Typed<'a> {
 /// pointer's or an enumeration's type is read through it in turn.
 /// `union_fields` is the analyst's word on which member of a union each
 /// instruction's access means, by the address of each instruction that
-/// said.
+/// said. `constant_enums` is the enumeration a constant in each
+/// instruction's operands is shown as a member of, by address.
 pub(crate) fn read_types(
     function: &mut LiftedFunction,
     store: &TypeStore,
     returns: &BTreeMap<u64, Type>,
     union_fields: &BTreeMap<u64, String>,
+    constant_enums: &BTreeMap<u64, String>,
 ) {
     for _ in 0..3 {
-        read_pointers(function, store, union_fields);
+        read_pointers(function, store, union_fields, constant_enums);
         if !crate::fragments::read(function, store, returns, union_fields) {
             break;
         }
@@ -387,12 +392,14 @@ fn read_pointers(
     function: &mut LiftedFunction,
     store: &TypeStore,
     union_fields: &BTreeMap<u64, String>,
+    constant_enums: &BTreeMap<u64, String>,
 ) {
     let mut typed = Typed {
         store,
         pointers: BTreeMap::new(),
         enums: BTreeMap::new(),
         union_fields,
+        constant_enums,
     };
     for variable in function.params.iter().chain(&function.locals) {
         let Ok(ty) = crate::ctype::parse_type(store, &variable.ty) else {
@@ -413,7 +420,7 @@ fn read_pointers(
             _ => {}
         }
     }
-    if typed.pointers.is_empty() && typed.enums.is_empty() {
+    if typed.pointers.is_empty() && typed.enums.is_empty() && typed.constant_enums.is_empty() {
         return;
     }
     read_statements(&mut function.body, &typed);
@@ -423,6 +430,7 @@ fn read_statements(statements: &mut Vec<Statement>, typed: &Typed) {
     let mut out = Vec::with_capacity(statements.len());
     for mut statement in std::mem::take(statements) {
         let chosen = typed.chosen_at(&statement.addresses);
+        let constant_enum = typed.constant_enum_at(&statement.addresses);
         if let Some(stores) = initializer_stores(&statement, typed, chosen) {
             out.extend(stores);
             continue;
@@ -431,17 +439,20 @@ fn read_statements(statements: &mut Vec<Statement>, typed: &Typed) {
             std::mem::replace(&mut statement.node, AstNode::Break),
             typed,
             chosen,
+            constant_enum,
         );
         if let StatementKind::For { init, step, .. } = &mut statement.kind {
             init.node = read_node(
                 std::mem::replace(&mut init.node, AstNode::Break),
                 typed,
                 chosen,
+                constant_enum,
             );
             step.node = read_node(
                 std::mem::replace(&mut step.node, AstNode::Break),
                 typed,
                 chosen,
+                constant_enum,
             );
         }
         if let StatementKind::Switch { arms } = &mut statement.kind {
@@ -476,6 +487,16 @@ impl Typed<'_> {
             .find_map(|address| self.union_fields.get(address))
             .map(String::as_str)
     }
+
+    /// The enumeration the analyst said a constant at one of the
+    /// statement's instructions is shown as a member of: the word at the
+    /// first of them that carries one.
+    fn constant_enum_at(&self, addresses: &[u64]) -> Option<&str> {
+        addresses
+            .iter()
+            .find_map(|address| self.constant_enums.get(address))
+            .map(String::as_str)
+    }
 }
 
 /// The stores a struct initializer through a typed pointer stands for,
@@ -508,7 +529,7 @@ fn initializer_stores(
         stores.push(Statement::plain(
             AstNode::Assign {
                 lhs: Box::new(target),
-                rhs: Box::new(read_node(field.value.clone(), typed, chosen)),
+                rhs: Box::new(read_node(field.value.clone(), typed, chosen, None)),
             },
             statement.addresses.clone(),
         ));
@@ -518,8 +539,10 @@ fn initializer_stores(
 
 /// `node` with the types read into it, innermost first. `chosen` is the
 /// member the analyst said the union access at the statement means.
-fn read_node(node: AstNode, typed: &Typed, chosen: Option<&str>) -> AstNode {
-    let read = crate::inline::map(node, &mut |n| read_one(n, typed, chosen));
+/// `constant_enum` is the enumeration a constant at the statement is shown
+/// as a member of.
+fn read_node(node: AstNode, typed: &Typed, chosen: Option<&str>, constant_enum: Option<&str>) -> AstNode {
+    let read = crate::inline::map(node, &mut |n| read_one(n, typed, chosen, constant_enum));
     // What is left of byte arithmetic on a typed pointer is said in bytes.
     crate::inline::map(read, &mut |n| match n {
         AstNode::Binary {
@@ -550,8 +573,19 @@ fn scales(name: &str, typed: &Typed) -> bool {
         .is_some_and(|pointee| typed.store.size_of(pointee).ok() != Some(1))
 }
 
-fn read_one(node: AstNode, typed: &Typed, chosen: Option<&str>) -> AstNode {
+fn read_one(node: AstNode, typed: &Typed, chosen: Option<&str>, constant_enum: Option<&str>) -> AstNode {
     match node {
+        // A constant the analyst said is shown as a member of an
+        // enumeration, when the enumeration has a member of that value.
+        AstNode::Constant { .. } => {
+            if let Some(key) = constant_enum {
+                let ty = Type::Named(key.to_string());
+                if let Some(named) = spelled_constant(&node, &ty, typed) {
+                    return named;
+                }
+            }
+            node
+        }
         AstNode::Deref { target } => {
             if let AstNode::Cast {
                 ty,
@@ -1999,6 +2033,7 @@ mod tests {
             &store,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(function.locals[0].ty, "struct node *");
         let text = emit_function(&function, &Options::default())
@@ -2318,5 +2353,87 @@ mod tests {
                 .all(|use_| !(use_.key == "struct derived" && use_.member == "x")),
             "{uses:?}"
         );
+    }
+
+    #[test]
+    fn a_constant_shown_as_an_enum_member_by_the_analysts_word() {
+        use crate::ast::AstNode;
+        use crate::lift::{LiftedFunction, Statement};
+        let mut store = TypeStore::new(DataModel::LP64);
+        crate::ctype::parse_into(&mut store, "enum state { S_IDLE = 0, S_READY = 1, S_DONE = 2 };")
+            .unwrap();
+        let body = vec![Statement::plain(
+            AstNode::Return {
+                value: Some(Box::new(AstNode::constant(1, 4))),
+            },
+            vec![0x4010],
+        )];
+        let mut function = LiftedFunction {
+            name: "get_state".to_string(),
+            address: 0x4000,
+            return_type: "int".to_string(),
+            params: vec![],
+            locals: vec![],
+            body,
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        // Without the annotation, the constant is a number.
+        let constant_enums = std::collections::BTreeMap::new();
+        super::read_types(
+            &mut function,
+            &store,
+            &Default::default(),
+            &Default::default(),
+            &constant_enums,
+        );
+        let text = emit_function(&function, &Options::default())
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("return 1;"), "{text}");
+        // With the annotation, the constant is the enumerator.
+        let body = vec![Statement::plain(
+            AstNode::Return {
+                value: Some(Box::new(AstNode::constant(1, 4))),
+            },
+            vec![0x4010],
+        )];
+        let mut function = LiftedFunction {
+            name: "get_state".to_string(),
+            address: 0x4000,
+            return_type: "int".to_string(),
+            params: vec![],
+            locals: vec![],
+            body,
+            frame: Vec::new(),
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            noreturn_when: Vec::new(),
+            thunk: None,
+            return_reason: None,
+        };
+        let mut constant_enums = std::collections::BTreeMap::new();
+        constant_enums.insert(0x4010, "enum state".to_string());
+        super::read_types(
+            &mut function,
+            &store,
+            &Default::default(),
+            &Default::default(),
+            &constant_enums,
+        );
+        let text = emit_function(&function, &Options::default())
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("return S_READY;"), "{text}");
     }
 }
