@@ -407,6 +407,23 @@ fn merge(function: &mut LiftedFunction, keep: &str, gone: &str) -> Result<(), St
     Ok(())
 }
 
+/// Rename the variable `from` to `to` throughout the function's body, in
+/// every read and every definition, as a merge renames the variable it
+/// takes away. The declarations are the caller's to follow; this reaches
+/// only the body.
+pub(crate) fn rename_variable(function: &mut LiftedFunction, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    let mut rename = |node: AstNode| match node {
+        AstNode::Var { name } if name == from => AstNode::var(to),
+        other => other,
+    };
+    walk_mut(&mut function.body, &mut 0, &mut |_, _, node| {
+        *node = crate::inline::map(std::mem::replace(node, AstNode::Break), &mut rename);
+    });
+}
+
 /// Take out the plain statements `a = a;`, at every depth.
 fn drop_self_copies(statements: &mut Vec<Statement>) {
     statements.retain(|statement| {

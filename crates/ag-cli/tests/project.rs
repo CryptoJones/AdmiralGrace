@@ -2185,6 +2185,176 @@ fn a_function_marked_inline_reads_as_its_body_in_its_callers() {
 }
 
 #[test]
+fn a_functions_properties_are_recorded_and_read_by_the_lift() {
+    let file = TempFile::new("funcprops");
+    // What `ag image inline.elf pseudocode FUNCTION --project FILE` prints.
+    let pseudocode = |function: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(["pseudocode", function, "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let props = |args: &[&str]| -> (bool, String, String) {
+        let path = file.text();
+        let mut all = vec!["function-props", "--file", &path, "ping"];
+        all.extend_from_slice(args);
+        project_with("inline.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(pseudocode("ping").contains("int ping(int a)\n"));
+
+    // With nothing set, the function says so.
+    let (ok, stdout, stderr) = props(&[]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("ping: no function properties set"),
+        "{stdout}"
+    );
+
+    // The prototype is the analyst's signature over the lift's own, and the
+    // pseudocode reads it: the return type, the parameter types and names.
+    let (ok, stdout, stderr) = props(&["--prototype", "long ping(long n, char *s)"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("function 0x401000 now prototype \"long ping(long n, char *s)\""),
+        "{stdout}"
+    );
+    let text = pseudocode("ping");
+    assert!(text.contains("long ping(long n, char *s)\n"), "{text}");
+    assert!(text.contains("// returns long:"), "{text}");
+
+    // The rest of the properties ride on the same record.
+    let (ok, stdout, stderr) = props(&[
+        "--convention",
+        "win64",
+        "--stack-adjust",
+        "8",
+        "--clobbers",
+        "rbx,r12",
+        "--args",
+        "rcx,rdx",
+        "--return",
+        "rdx",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("convention win64"), "{stdout}");
+    assert!(stdout.contains("stack adjustment 8"), "{stdout}");
+    assert!(stdout.contains("clobbers rbx,r12"), "{stdout}");
+    assert!(stdout.contains("args rcx,rdx"), "{stdout}");
+    assert!(stdout.contains("return rdx"), "{stdout}");
+
+    // With no flag, the properties print in the prompt's own grammar.
+    let (ok, stdout, stderr) = props(&[]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains(
+            "ping: conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto long ping(long n, char *s)"
+        ),
+        "{stdout}"
+    );
+
+    // The file keeps them, and `show` reads them back.
+    let report = show_json(&file);
+    let record = report["annotations"]
+        .as_array()
+        .expect("annotations")
+        .iter()
+        .find(|a| a["address"] == "0x401000")
+        .expect("the function's record");
+    assert_eq!(
+        record["prototype"],
+        serde_json::json!("long ping(long n, char *s)"),
+        "{report}"
+    );
+    assert_eq!(
+        record["calling_convention"],
+        serde_json::json!("win64"),
+        "{report}"
+    );
+    assert_eq!(record["stack_adjustment"], serde_json::json!(8), "{report}");
+    assert_eq!(
+        record["clobbers"],
+        serde_json::json!(["rbx", "r12"]),
+        "{report}"
+    );
+    assert_eq!(
+        record["arg_locations"],
+        serde_json::json!(["rcx", "rdx"]),
+        "{report}"
+    );
+    assert_eq!(
+        record["return_location"],
+        serde_json::json!("rdx"),
+        "{report}"
+    );
+
+    // `clear` takes one part back and leaves the rest.
+    let (ok, stdout, stderr) = props(&["--convention", "clear"]);
+    assert!(ok, "{stderr}");
+    assert!(!stdout.contains("convention"), "{stdout}");
+    assert!(stdout.contains("clobbers rbx,r12"), "{stdout}");
+
+    // A word that is not one is refused, and leaves the record untouched.
+    for (args, why) in [
+        (vec!["--convention", "bogus"], "names no calling convention"),
+        (vec!["--clobbers", "r99"], "names no general register"),
+        (vec!["--args", "nope"], "names no general register"),
+        (vec!["--return", "nope"], "names no general register"),
+        (vec!["--stack-adjust", "xyz"], "is no byte count"),
+        (vec!["--prototype", "int ("], "the prototype is not read"),
+    ] {
+        let (ok, _, stderr) = props(&args);
+        assert!(!ok, "{args:?} was accepted");
+        assert!(stderr.contains(why), "{stderr}");
+    }
+
+    // Taking every part back clears the record, and the lift reads its own
+    // signature again.
+    let (ok, stdout, stderr) = props(&[
+        "--prototype",
+        "clear",
+        "--stack-adjust",
+        "none",
+        "--clobbers",
+        "clear",
+        "--args",
+        "none",
+        "--return",
+        "clear",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("function 0x401000 cleared"), "{stdout}");
+    assert!(pseudocode("ping").contains("int ping(int a)\n"));
+
+    // A function that is not one is refused.
+    let (ok, _, stderr) = project_with(
+        "inline.elf",
+        &[
+            "function-props",
+            "--file",
+            &file.text(),
+            "nowhere",
+            "--convention",
+            "cdecl",
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("no function is named \"nowhere\""),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn opaque_predicates_are_found_and_patched_out_of_the_pseudocode() {
     let file = TempFile::new("opaque");
     let ag = |args: &[&str]| -> String {

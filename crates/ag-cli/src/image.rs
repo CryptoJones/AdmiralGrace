@@ -1037,6 +1037,7 @@ pub(crate) fn open_image(
         image.set_removable_stores(project.removable_stores());
         image.set_inlines(project.inlines());
         image.set_variable_edits(variable_edits(project));
+        image.set_function_properties(function_properties(project));
         image.set_union_fields(project.union_fields());
         image.set_constant_enums(project.constant_enums());
         if let Err(why) = image.set_type_definitions(&crate::types::texts(project)) {
@@ -2957,6 +2958,31 @@ pub(crate) fn variable_edits(
         .variable_edits()
         .into_iter()
         .map(|(address, words)| (address, words.into()))
+        .collect()
+}
+
+/// The project's function properties, keyed by entry, as the engine reads
+/// them. The two crates keep the same words in their own structs — the
+/// corpus cannot depend on the engine — so each field crosses by name.
+pub(crate) fn function_properties(
+    project: &ag_corpus::project::ProjectFile,
+) -> std::collections::BTreeMap<u64, ag_image::FunctionProperties> {
+    project
+        .function_properties()
+        .into_iter()
+        .map(|(address, props)| {
+            (
+                address,
+                ag_image::FunctionProperties {
+                    prototype: props.prototype,
+                    convention: props.convention,
+                    stack_adjustment: props.stack_adjustment,
+                    clobbers: props.clobbers,
+                    arguments: props.arguments,
+                    returns: props.returns,
+                },
+            )
+        })
         .collect()
 }
 

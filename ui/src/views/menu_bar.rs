@@ -220,6 +220,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::EditGlobalPointer,
             )),
             Item::new(item_button(
+                "Function properties…",
+                "Ctrl+Shift+P",
+                Message::EditFunctionProperties,
+            )),
+            Item::new(item_button(
                 "Merge variables…",
                 "",
                 Message::EditMergeVariables,

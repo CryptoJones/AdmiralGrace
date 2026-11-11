@@ -82,6 +82,7 @@ pub use ag_engine::opaque::Opaque;
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
+pub use ag_engine::properties::FunctionProperties;
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::slice::{Criterion as SliceCriterion, Direction as SliceDirection};
 pub use ag_engine::smart_struct::{
@@ -546,6 +547,10 @@ pub struct Binary {
     /// The analyst's merges, splits, new versions and pinned values of
     /// each function's variables, by the function's entry.
     variable_edits: Mutex<BTreeMap<u64, VariableEdits>>,
+    /// The analyst's words on each function's signature and analysis
+    /// properties — prototype, convention, stack adjustment, clobbers and
+    /// value locations — by the function's entry.
+    function_properties: Mutex<BTreeMap<u64, FunctionProperties>>,
     /// The analyst's word on which member of a union each instruction's
     /// access means, by the address of each instruction that said.
     union_fields: Mutex<BTreeMap<u64, String>>,
@@ -943,6 +948,7 @@ impl Binary {
             removable_stores: Mutex::new(BTreeMap::new()),
             inlines: Mutex::new(BTreeMap::new()),
             variable_edits: Mutex::new(BTreeMap::new()),
+            function_properties: Mutex::new(BTreeMap::new()),
             union_fields: Mutex::new(BTreeMap::new()),
             constant_enums: Mutex::new(BTreeMap::new()),
             types: Mutex::new(None),
@@ -2258,6 +2264,49 @@ impl Binary {
             .ok()
             .and_then(|held| held.get(&address).cloned())
             .unwrap_or_default()
+    }
+
+    /// The analyst's words on the signature and analysis properties of the
+    /// function at `address`.
+    pub fn function_properties(&self, address: u64) -> FunctionProperties {
+        self.function_properties
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Tell the lift each function's signature and analysis properties —
+    /// prototype, convention, stack adjustment, clobbers and value locations
+    /// — by entry, and say whether that changed anything. The pseudocode and
+    /// the levels are read again after; the walks are kept, since a
+    /// signature changes no function's graph.
+    pub fn set_function_properties(&self, props: BTreeMap<u64, FunctionProperties>) -> bool {
+        let props: BTreeMap<u64, FunctionProperties> = props
+            .into_iter()
+            .filter(|(_, props)| !props.is_empty())
+            .collect();
+        if let Ok(mut held) = self.function_properties.lock() {
+            if *held == props {
+                return false;
+            }
+            *held = props;
+        } else {
+            return false;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        true
     }
 
     /// Tell the lift which member of a union each instruction's access
@@ -4315,6 +4364,11 @@ impl Symbols for ImageSymbols<'_> {
     /// variables.
     fn variable_edits(&self, address: u64) -> VariableEdits {
         self.0.variable_edits(address)
+    }
+
+    /// The analyst's words on the function's signature and properties.
+    fn function_properties(&self, address: u64) -> FunctionProperties {
+        self.0.function_properties(address)
     }
 
     /// The member of a union each instruction's access means, by address.

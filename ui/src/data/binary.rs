@@ -473,6 +473,10 @@ impl Provider for BinaryProvider {
         )
     }
 
+    fn set_function_properties(&self, props: BTreeMap<u64, ag_image::FunctionProperties>) -> bool {
+        self.binary.set_function_properties(props)
+    }
+
     fn set_type_definitions(&self, definitions: &[ag_image::TypeText]) -> Result<bool, String> {
         self.binary.set_type_definitions(definitions)
     }

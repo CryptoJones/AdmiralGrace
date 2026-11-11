@@ -952,6 +952,143 @@ pub struct Annotation {
     /// and misreads nothing, so the format version does not change for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub var_types: Vec<VariableType>,
+    /// On a function's record: the analyst's C prototype for it —
+    /// `int f(int n, char *s)` — whose return type, parameter types and
+    /// names the lift reads over its own. A reader that does not know the
+    /// field declares the lift's own signature and misreads nothing, so the
+    /// format version does not change for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype: Option<String>,
+    /// On a function's record: the calling convention the analyst says it
+    /// uses, by name — `cdecl`, `stdcall`, `win64`, `sysv`. A reader that
+    /// does not know the field reads the program's own convention and
+    /// misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calling_convention: Option<String>,
+    /// On a function's record: the bytes the analyst says the callee takes
+    /// off the stack on return — the `N` of a `ret N` — over what the
+    /// instruction itself says. A reader that does not know the field reads
+    /// the stack as the bytes say and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_adjustment: Option<i64>,
+    /// On a function's record: the registers the analyst says it clobbers
+    /// beyond its convention's caller-saved ones, by name — `rbx`, `r12`.
+    /// A reader that does not know the field clobbers the convention's own
+    /// and misreads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clobbers: Vec<String>,
+    /// On a function's record: the registers the analyst says its arguments
+    /// arrive in, in order, by name — `rcx`, `rdx`, `r8` — over the
+    /// convention's own. A reader that does not know the field reads the
+    /// convention's registers and misreads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_locations: Vec<String>,
+    /// On a function's record: the register the analyst says its result
+    /// leaves in, by name — `rdx` — over `rax`. A reader that does not know
+    /// the field reads the result in `rax` and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_location: Option<String>,
+}
+
+/// The analyst's words on one function's signature and analysis properties,
+/// as the project keeps them on its record: its prototype, its calling
+/// convention, the stack it adjusts on return, the registers it clobbers,
+/// and where its arguments and its result live.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FunctionProperties {
+    /// The C prototype, `int f(int n, char *s)`.
+    pub prototype: Option<String>,
+    /// The calling convention, by name.
+    pub convention: Option<String>,
+    /// The bytes the callee takes off the stack on return.
+    pub stack_adjustment: Option<i64>,
+    /// The registers clobbered beyond the convention's caller-saved ones.
+    pub clobbers: Vec<String>,
+    /// The registers the arguments arrive in, in order.
+    pub arguments: Vec<String>,
+    /// The register the result leaves in.
+    pub returns: Option<String>,
+}
+
+impl FunctionProperties {
+    /// Whether nothing is said.
+    pub fn is_empty(&self) -> bool {
+        self.prototype.is_none()
+            && self.convention.is_none()
+            && self.stack_adjustment.is_none()
+            && self.clobbers.is_empty()
+            && self.arguments.is_empty()
+            && self.returns.is_none()
+    }
+
+    /// The properties as the function-properties prompt spells them: each
+    /// part that is said, in a fixed order, `conv win64 stack 8 clobbers
+    /// rbx,r12 args rcx,rdx ret rdx proto int f(int n)`. Nothing said is the
+    /// empty string.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(convention) = &self.convention {
+            parts.push(format!("conv {convention}"));
+        }
+        if let Some(adjustment) = self.stack_adjustment {
+            parts.push(format!("stack {adjustment}"));
+        }
+        if !self.clobbers.is_empty() {
+            parts.push(format!("clobbers {}", self.clobbers.join(",")));
+        }
+        if !self.arguments.is_empty() {
+            parts.push(format!("args {}", self.arguments.join(",")));
+        }
+        if let Some(returns) = &self.returns {
+            parts.push(format!("ret {returns}"));
+        }
+        if let Some(prototype) = &self.prototype {
+            parts.push(format!("proto {prototype}"));
+        }
+        parts.join(" ")
+    }
+}
+
+/// The calling convention `word` names, spelled canonically, when it is one:
+/// `__cdecl` and `cdecl` are `cdecl`, `system v` and `amd64` are `sysv`.
+/// `None` for a word that names no convention.
+pub fn parse_convention(word: &str) -> Option<&'static str> {
+    let word = word.trim().to_ascii_lowercase();
+    match word.as_str() {
+        "__cdecl" | "cdecl" => Some("cdecl"),
+        "__stdcall" | "stdcall" => Some("stdcall"),
+        "__fastcall" | "fastcall" => Some("fastcall"),
+        "__thiscall" | "thiscall" => Some("thiscall"),
+        "__vectorcall" | "vectorcall" => Some("vectorcall"),
+        "__clrcall" | "clrcall" => Some("clrcall"),
+        "sysv" | "systemv" | "system v" | "amd64" | "unix" | "linux" => Some("sysv"),
+        "win64" | "windows" | "ms" | "microsoft" | "msx64" => Some("win64"),
+        _ => None,
+    }
+}
+
+/// Whether `word` names a general register at any width — `rdi`, `edi`,
+/// `r9d` — as the value locations and clobbers are given.
+pub fn is_register(word: &str) -> bool {
+    let word = word.trim().to_ascii_lowercase();
+    const NAMES: [[&str; 4]; 8] = [
+        ["rax", "eax", "ax", "al"],
+        ["rcx", "ecx", "cx", "cl"],
+        ["rdx", "edx", "dx", "dl"],
+        ["rbx", "ebx", "bx", "bl"],
+        ["rsp", "esp", "sp", "spl"],
+        ["rbp", "ebp", "bp", "bpl"],
+        ["rsi", "esi", "si", "sil"],
+        ["rdi", "edi", "di", "dil"],
+    ];
+    if NAMES.iter().any(|names| names.contains(&word.as_str())) {
+        return true;
+    }
+    (8..16).any(|index| {
+        ["", "d", "w", "b"]
+            .iter()
+            .any(|suffix| format!("r{index}{suffix}") == word)
+    })
 }
 
 /// A C type the analyst gave one of a function's variables, on its record:
@@ -1178,6 +1315,12 @@ impl Annotation {
             values: Vec::new(),
             stack_vars: Vec::new(),
             var_types: Vec::new(),
+            prototype: None,
+            calling_convention: None,
+            stack_adjustment: None,
+            clobbers: Vec::new(),
+            arg_locations: Vec::new(),
+            return_location: None,
         }
     }
 
@@ -1217,6 +1360,12 @@ impl Annotation {
             values: Vec::new(),
             stack_vars: Vec::new(),
             var_types: Vec::new(),
+            prototype: None,
+            calling_convention: None,
+            stack_adjustment: None,
+            clobbers: Vec::new(),
+            arg_locations: Vec::new(),
+            return_location: None,
         }
     }
 
@@ -1255,6 +1404,12 @@ impl Annotation {
             values: Vec::new(),
             stack_vars: Vec::new(),
             var_types: Vec::new(),
+            prototype: None,
+            calling_convention: None,
+            stack_adjustment: None,
+            clobbers: Vec::new(),
+            arg_locations: Vec::new(),
+            return_location: None,
         }
     }
 
@@ -1509,6 +1664,12 @@ impl Annotation {
             && self.values.is_empty()
             && self.stack_vars.is_empty()
             && self.var_types.is_empty()
+            && self.prototype.is_none()
+            && self.calling_convention.is_none()
+            && self.stack_adjustment.is_none()
+            && self.clobbers.is_empty()
+            && self.arg_locations.is_empty()
+            && self.return_location.is_none()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -2223,6 +2384,32 @@ impl ProjectFile {
                 let on = a.inline?;
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, on))
+            })
+            .collect()
+    }
+
+    /// The analyst's words on each function's signature and analysis
+    /// properties, by the value of its entry: its prototype, calling
+    /// convention, stack adjustment, clobbers and value locations. A
+    /// function nothing is said of is left out; a word on a spaced address
+    /// keys on its value, as an override does.
+    pub fn function_properties(&self) -> BTreeMap<u64, FunctionProperties> {
+        self.places()
+            .filter(|a| !a.block)
+            .filter_map(|a| {
+                let props = FunctionProperties {
+                    prototype: a.prototype.clone(),
+                    convention: a.calling_convention.clone(),
+                    stack_adjustment: a.stack_adjustment,
+                    clobbers: a.clobbers.clone(),
+                    arguments: a.arg_locations.clone(),
+                    returns: a.return_location.clone(),
+                };
+                if props.is_empty() {
+                    return None;
+                }
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, props))
             })
             .collect()
     }
@@ -3618,6 +3805,101 @@ mod tests {
         assert!(!record.is_empty());
         record.inline = None;
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn function_properties_are_kept_on_the_record_and_read_back() {
+        let mut project = ProjectFile::new(Target::default());
+        let record = project.annotation_mut(TargetKind::Function, "0x401000");
+        record.prototype = Some("int f(int n, char *s)".to_string());
+        record.calling_convention = Some("win64".to_string());
+        record.stack_adjustment = Some(8);
+        record.clobbers = vec!["rbx".to_string(), "r12".to_string()];
+        record.arg_locations = vec!["rcx".to_string(), "rdx".to_string()];
+        record.return_location = Some("rdx".to_string());
+        // A word on a block, or on a variable, is not the function's.
+        project
+            .annotation_mut(TargetKind::Region, "0x401040")
+            .prototype = Some("void g(void)".to_string());
+        project.variable_mut("0x401040", "x").prototype = Some("void h(void)".to_string());
+
+        let props = project.function_properties();
+        assert_eq!(
+            props,
+            BTreeMap::from([(
+                0x401000,
+                FunctionProperties {
+                    prototype: Some("int f(int n, char *s)".to_string()),
+                    convention: Some("win64".to_string()),
+                    stack_adjustment: Some(8),
+                    clobbers: vec!["rbx".to_string(), "r12".to_string()],
+                    arguments: vec!["rcx".to_string(), "rdx".to_string()],
+                    returns: Some("rdx".to_string()),
+                }
+            )])
+        );
+
+        let json = project.to_json().unwrap();
+        assert!(
+            json.contains("\"prototype\": \"int f(int n, char *s)\""),
+            "{json}"
+        );
+        assert!(json.contains("\"stack_adjustment\": 8"), "{json}");
+        let read = ProjectFile::from_json(&json).unwrap();
+        assert_eq!(read.function_properties(), props);
+        assert_eq!(read.format, FORMAT_VERSION);
+
+        // A record without the fields reads as nothing said.
+        let bare = ProjectFile::from_json(
+            r#"{"format": 6, "annotations": [{"kind": "function", "address": "0x401000", "name": "f"}]}"#,
+        )
+        .unwrap();
+        assert!(bare.function_properties().is_empty());
+
+        // The properties alone keep a record; cleared, the record goes.
+        let mut record = Annotation::new(TargetKind::Function, "0x401000");
+        record.calling_convention = Some("cdecl".to_string());
+        assert!(!record.is_empty());
+        record.calling_convention = None;
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn function_properties_spell_the_prompt_grammar() {
+        let props = FunctionProperties {
+            prototype: Some("int f(int n)".to_string()),
+            convention: Some("win64".to_string()),
+            stack_adjustment: Some(8),
+            clobbers: vec!["rbx".to_string(), "r12".to_string()],
+            arguments: vec!["rcx".to_string(), "rdx".to_string()],
+            returns: Some("rdx".to_string()),
+        };
+        assert_eq!(
+            props.label(),
+            "conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto int f(int n)"
+        );
+        assert_eq!(FunctionProperties::default().label(), "");
+        let only = FunctionProperties {
+            convention: Some("cdecl".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(only.label(), "conv cdecl");
+    }
+
+    #[test]
+    fn conventions_and_registers_are_validated() {
+        assert_eq!(parse_convention("__stdcall"), Some("stdcall"));
+        assert_eq!(parse_convention("System V"), Some("sysv"));
+        assert_eq!(parse_convention("windows"), Some("win64"));
+        assert_eq!(parse_convention("pascal"), None);
+        assert!(is_register("rdi"));
+        assert!(is_register("edi"));
+        assert!(is_register("r9d"));
+        assert!(is_register("R15"));
+        assert!(is_register("spl"));
+        assert!(!is_register("xmm0"));
+        assert!(!is_register("r16"));
+        assert!(!is_register(""));
     }
 
     #[test]

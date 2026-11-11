@@ -230,6 +230,14 @@ pub trait Symbols {
         crate::merge::VariableEdits::default()
     }
 
+    /// The analyst's words on the signature and analysis properties of the
+    /// function at `address` — its prototype, calling convention, stack
+    /// adjustment, clobbers and value locations ([`crate::properties`]).
+    /// Nothing is said unless the image says.
+    fn function_properties(&self, _address: u64) -> crate::properties::FunctionProperties {
+        crate::properties::FunctionProperties::default()
+    }
+
     /// The analyst's word on which member of a union each instruction's
     /// access means, by the address of each instruction that said — see
     /// [`crate::typed`]. Nothing is chosen unless the image says.
@@ -1103,6 +1111,12 @@ fn lift_pass(
         })
         .collect();
     let mut lifter = Lifter::new(abi, symbols, *options);
+    // The analyst's words on the function's signature and properties: the
+    // registers its parameters arrive in and its result leaves in, over the
+    // convention's own.
+    let properties = symbols.function_properties(entry);
+    lifter.arguments = properties.argument_registers(abi);
+    lifter.return_register = properties.return_register().unwrap_or(RAX);
     // The analyst's words on the function's variables; the variables made
     // in its frame are read by the walk itself.
     let edits = symbols.variable_edits(entry);
@@ -1128,6 +1142,14 @@ fn lift_pass(
     } else {
         store
     };
+    // The analyst's prototype, read against the project's types: its return
+    // type and its parameters' types and names, applied once the lift has
+    // decided its own. A prototype that does not read is a note, not a
+    // refusal — the function lifts as the bytes say.
+    let prototype = properties
+        .prototype
+        .as_deref()
+        .map(|text| crate::ctype::parse_prototype(&store, text));
     let words: Vec<crate::stack_vars::StackVar> = edits
         .stack_vars
         .iter()
@@ -1294,7 +1316,14 @@ fn lift_pass(
                 return Ok(Pass::Again(found));
             }
         }
-        let fixed: BTreeSet<String> = edits.var_types.iter().map(|(v, _)| v.clone()).collect();
+        let mut fixed: BTreeSet<String> = edits.var_types.iter().map(|(v, _)| v.clone()).collect();
+        // The prototype's parameters are the analyst's types too: propagation
+        // does not overwrite them.
+        if let Some(Ok(proto)) = &prototype {
+            for i in 0..proto.params.len() {
+                fixed.insert(parameter_name(i));
+            }
+        }
         // A structure drafted for this frame is no type another function
         // knows: its address passed says only that it is a pointer.
         let known: Vec<crate::stack_vars::StackVar> = slots
@@ -1347,6 +1376,11 @@ fn lift_pass(
             }
         }
     }
+    if let Some(Ok(proto)) = &prototype {
+        for i in 0..proto.params.len() {
+            inferred.analyst.insert(parameter_name(i));
+        }
+    }
     // The calls to the functions the analyst marked are read as their
     // bodies, once the function's own return and notes are decided.
     crate::inline::inline_calls(&mut function, symbols, &call_sites);
@@ -1374,6 +1408,24 @@ fn lift_pass(
         })
         .collect();
     crate::typed::read_types(&mut function, &store, &returns, &union_fields, &constant_enums);
+    // The analyst's prototype over the lift's own signature, once every
+    // word keyed on the lift's names has been applied; the renames it makes
+    // reach the analyst's marks too.
+    match &prototype {
+        Some(Ok(proto)) => {
+            for (from, to) in apply_prototype(&mut function, proto, &store, &edits.var_types) {
+                if inferred.analyst.remove(&from) {
+                    inferred.analyst.insert(to);
+                }
+            }
+        }
+        Some(Err(error)) => {
+            function
+                .notes
+                .push(format!("the prototype is not read: {error}"));
+        }
+        None => {}
+    }
     let high = if keep {
         function.body.clone()
     } else {
@@ -1405,6 +1457,66 @@ fn lift_pass(
         slots,
         inferred,
     })))
+}
+
+/// Apply the analyst's prototype to the lifted function: its return type
+/// and its parameters' types and names, over the lift's own. An explicit
+/// variable type the analyst gave a parameter wins over the prototype's,
+/// and an explicit `RETURN` type wins over the prototype's return. The
+/// parameter renames made are returned, `(lift name, prototype name)`, so
+/// the caller can follow them in the analyst's marks; a name that collides
+/// with another variable is left as the lift named it.
+fn apply_prototype(
+    function: &mut LiftedFunction,
+    proto: &crate::ctype::Prototype,
+    store: &crate::types::TypeStore,
+    var_types: &[(String, String)],
+) -> Vec<(String, String)> {
+    if !var_types.iter().any(|(v, _)| v == crate::typed::RETURN) {
+        function.return_type = proto.ret.spelled(store);
+    }
+    // The parameters' types, and any the lift did not read added in order.
+    for (i, (ty, _)) in proto.params.iter().enumerate() {
+        let lift_name = parameter_name(i);
+        let explicit = var_types.iter().any(|(v, _)| *v == lift_name);
+        match function.params.get_mut(i) {
+            Some(param) => {
+                if !explicit {
+                    param.ty = ty.spelled(store);
+                }
+            }
+            None => function
+                .params
+                .push(Variable::new(ty.spelled(store), lift_name)),
+        }
+    }
+    // The names, renamed through the body where they collide with nothing
+    // the function already declares.
+    let mut taken: BTreeSet<String> = function
+        .params
+        .iter()
+        .chain(&function.locals)
+        .map(|v| v.name.clone())
+        .collect();
+    let mut renames = Vec::new();
+    for (i, (_, name)) in proto.params.iter().enumerate() {
+        let Some(name) = name else { continue };
+        let lift_name = parameter_name(i);
+        if name == &lift_name || taken.contains(name) {
+            continue;
+        }
+        if !function.params.iter().any(|p| p.name == lift_name) {
+            continue;
+        }
+        crate::merge::rename_variable(function, &lift_name, name);
+        if let Some(param) = function.params.iter_mut().find(|p| p.name == lift_name) {
+            param.name = name.clone();
+        }
+        taken.remove(&lift_name);
+        taken.insert(name.clone());
+        renames.push((lift_name, name.clone()));
+    }
+    renames
 }
 
 /// A chain's end as a low-level statement, when it says more than the
@@ -2504,6 +2616,8 @@ struct Temp {
     bits: Option<u32>,
     /// The callee whose result it is.
     callee: String,
+    /// The register the callee leaves the result in, as a GPR index.
+    register: u32,
 }
 
 /// A statement before the temporaries are resolved.
@@ -2624,6 +2738,12 @@ struct Lifter<'a> {
     index_stack: bool,
     /// What the walk saw of the frame, for its layout.
     slot_facts: crate::frame::SlotFacts,
+    /// The argument registers this function's parameters arrive in, as GPR
+    /// indices in order: the analyst's words over the convention's own.
+    arguments: Vec<u32>,
+    /// The register this function's result leaves in, as a GPR index: the
+    /// analyst's word over `rax`.
+    return_register: u32,
 }
 
 impl<'a> Lifter<'a> {
@@ -2652,6 +2772,8 @@ impl<'a> Lifter<'a> {
             covered: Vec::new(),
             index_stack: false,
             slot_facts: crate::frame::SlotFacts::default(),
+            arguments: abi.argument_registers().to_vec(),
+            return_register: RAX,
         }
     }
 
@@ -3121,7 +3243,7 @@ impl<'a> Lifter<'a> {
                 // reads it, which an unknown merge never does: a register a
                 // call clobbered on one path is unknown after the join, not
                 // the parameter the other path never touched.
-                let known = all_present || self.abi.argument_registers().contains(&index);
+                let known = all_present || self.arguments.contains(&index);
                 if known && expressions && agree {
                     if !all_present {
                         self.parameter_of(index, bits);
@@ -3244,8 +3366,7 @@ impl<'a> Lifter<'a> {
     /// `bits`; `None` for a register that is not an argument register.
     fn parameter_of(&mut self, index: u32, bits: u32) -> Option<Value> {
         let position = self
-            .abi
-            .argument_registers()
+            .arguments
             .iter()
             .position(|&register| register == index)?;
         let width = *self.params.entry(position).or_insert(bits);
@@ -3346,8 +3467,7 @@ impl<'a> Lifter<'a> {
     /// register, otherwise whatever the caller left in it.
     fn entry_value(&mut self, index: u32, bits: u32) -> Value {
         let position = self
-            .abi
-            .argument_registers()
+            .arguments
             .iter()
             .position(|&register| register == index);
         let value = match position {
@@ -5214,27 +5334,43 @@ impl<'a> Lifter<'a> {
     ) -> Result<(), NotLifted> {
         let mut args = Vec::new();
         let mut addresses = vec![at];
-        // The convention is positional: the arguments run to the last
-        // argument register the block left a value in. One it never touched
-        // below that holds the function's own parameter, passed on to the
-        // callee; one above it is not an argument at all, and the list stops
-        // there.
-        let last_written = self
-            .abi
-            .argument_registers()
+        // The analyst's words on the callee: the registers its arguments
+        // arrive in, its prototype's exact arity, the registers it clobbers,
+        // the stack it adjusts and the register its result leaves in.
+        let props = match target {
+            Some(target) => self.symbols.function_properties(target),
+            None => crate::properties::FunctionProperties::default(),
+        };
+        let registers = props.argument_registers(self.abi);
+        // A prototype reads an exact number of arguments; without one the
+        // convention is positional: the arguments run to the last argument
+        // register the block left a value in. One it never touched below
+        // that holds the function's own parameter, passed on to the callee;
+        // one above it is not an argument at all, and the list stops there.
+        let arity = props.prototype.as_deref().and_then(|text| {
+            let store = crate::types::TypeStore::default();
+            crate::ctype::parse_prototype(&store, text)
+                .ok()
+                .map(|proto| proto.params.len())
+        });
+        let last_written = registers
             .iter()
             .rposition(|&register| self.state.regs.contains_key(&register));
-        for (position, &register) in self.abi.argument_registers().iter().enumerate() {
-            if last_written.is_none_or(|last| position > last) {
-                break;
+        for (position, &register) in registers.iter().enumerate() {
+            match arity {
+                Some(count) if position >= count => break,
+                None if last_written.is_none_or(|last| position > last) => break,
+                _ => {}
             }
             // A register the block never wrote still holds its parameter at
-            // the call, exactly as at entry.
+            // the call, exactly as at entry — when it is one of this
+            // function's own argument registers; another it cannot name.
             let value = match self.state.regs.get(&register) {
                 Some(value) => value.clone(),
-                None => self
-                    .parameter_of(register, 64)
-                    .expect("an argument register of the convention"),
+                None => match self.parameter_of(register, 64) {
+                    Some(value) => value,
+                    None => break,
+                },
             };
             if matches!(value.sym, Sym::Unknown(_)) {
                 break;
@@ -5330,17 +5466,37 @@ impl<'a> Lifter<'a> {
                 );
             }
         }
+        // The registers the analyst says the callee clobbers beyond the
+        // convention's caller-saved ones.
+        for index in props.clobber_registers() {
+            self.state.regs.insert(
+                index,
+                Value::unknown(
+                    format!("{} after the call at {at:#x}", gpr_name(index, 64)),
+                    64,
+                ),
+            );
+        }
+        // The stack the callee takes off on return — a `ret N` — over what
+        // the instruction itself says.
+        if let Some(adjustment) = props.stack_adjustment {
+            if let Ok(sp) = self.stack_pointer() {
+                self.set_stack_pointer(sp + adjustment, at);
+            }
+        }
         self.state.flags.clear();
+        let return_register = props.return_register().unwrap_or(RAX);
         let temp = self.temps.len() + self.saved.len();
         self.temps.push(Temp {
             name: format!("v{}", temp + 1),
             bits: None,
             callee: callee_name,
+            register: return_register,
         });
         let temp = self.temps.len() - 1;
         self.state
             .regs
-            .insert(RAX, Value::new(Sym::Temp(temp), 64, vec![at]));
+            .insert(return_register, Value::new(Sym::Temp(temp), 64, vec![at]));
         self.memory_written("the call", at);
         self.statements.push(Stmt::Call {
             temp,
@@ -5355,7 +5511,7 @@ impl<'a> Lifter<'a> {
             return Err(NotLifted::new("the stack is not balanced at ret"));
         }
         let at = ins.address;
-        let held = self.state.regs.get(&RAX).cloned();
+        let held = self.state.regs.get(&self.return_register).cloned();
         // A call result exactly as the call left it — nothing of the
         // function's own went into it — is a leftover, and whether it is
         // returned is decided once every ret is seen.
@@ -5441,14 +5597,20 @@ impl<'a> Lifter<'a> {
 
         if rets.iter().all(|(width, _)| width.is_none()) {
             self.return_bits = None;
-            self.return_reason = "no ret has a value in rax".to_string();
+            self.return_reason = format!(
+                "no ret has a value in {}",
+                gpr_name(self.return_register, 64)
+            );
             return Ok(());
         }
 
         match self.options.return_liveness {
             ReturnLiveness::Presence => {
                 self.return_bits = agree(rets.iter().map(|(width, _)| *width))?;
-                self.return_reason = "rax holds a value at the ret".to_string();
+                self.return_reason = format!(
+                    "{} holds a value at the ret",
+                    gpr_name(self.return_register, 64)
+                );
             }
             ReturnLiveness::Callers => {
                 match callers_verdict(self.symbols, entry, &mut BTreeSet::from([entry])) {
@@ -5610,7 +5772,7 @@ impl<'a> Lifter<'a> {
                             // A call's result, held in the accumulator.
                             declared.push(
                                 Variable::new(type_name(bits), name.clone())
-                                    .placed(Placement::register(RAX, bits)),
+                                    .placed(Placement::register(self.temps[temp].register, bits)),
                             );
                             body.push(Statement::plain(
                                 AstNode::Assign {
@@ -5643,9 +5805,9 @@ impl<'a> Lifter<'a> {
     ) -> Result<LiftedFunction, NotLifted> {
         let count = match self.options.parameters {
             Parameters::LastRead => self.params.keys().next_back().map_or(0, |last| last + 1),
-            Parameters::Convention => self.abi.argument_registers().len(),
+            Parameters::Convention => self.arguments.len(),
         };
-        let registers = self.abi.argument_registers();
+        let registers = &self.arguments;
         let params = (0..count)
             .map(|position| {
                 let bits = self.params.get(&position).copied();
@@ -9204,5 +9366,175 @@ mod tests {
         let text = without_reason(&emit_function(&stages.function, &Options::default()));
         assert!(text.contains("// not analyzed: 0x1008"), "{text}");
         assert!(text.contains("return;"), "{text}");
+    }
+
+    // ---- function properties ----------------------------------------------
+
+    /// Symbols under which functions carry the analyst's signature and
+    /// analysis properties, and nothing else is said.
+    struct Props(BTreeMap<u64, crate::properties::FunctionProperties>);
+
+    impl Symbols for Props {
+        fn function_name(&self, address: u64) -> Option<String> {
+            names(address)
+        }
+
+        fn function_properties(&self, address: u64) -> crate::properties::FunctionProperties {
+            self.0.get(&address).cloned().unwrap_or_default()
+        }
+    }
+
+    /// The properties `entries` give, by each function's entry.
+    fn props(entries: &[(u64, crate::properties::FunctionProperties)]) -> Props {
+        Props(entries.iter().cloned().collect())
+    }
+
+    /// A prototype property, on its own.
+    fn prototype(text: &str) -> crate::properties::FunctionProperties {
+        crate::properties::FunctionProperties {
+            prototype: Some(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_prototype_spells_the_return_type_and_the_parameters() {
+        // mov eax, edi; ret — the lift reads one int parameter `a`.
+        let code = [0x89, 0xf8, 0xc3];
+        let symbols = props(&[(BASE, prototype("char f(char n)"))]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "char f(char n)\n{\n  return n;\n}"
+        );
+    }
+
+    #[test]
+    fn a_prototype_adds_a_parameter_the_lift_did_not_read() {
+        // mov eax, edi; ret — one register read, two parameters declared.
+        let code = [0x89, 0xf8, 0xc3];
+        let symbols = props(&[(BASE, prototype("int f(int n, int m)"))]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "int f(int n, int m)\n{\n  return n;\n}"
+        );
+    }
+
+    #[test]
+    fn a_prototype_that_does_not_read_is_a_note() {
+        let code = [0x89, 0xf8, 0xc3];
+        let symbols = props(&[(BASE, prototype("int f(int"))]);
+        let function = lift_block(
+            &decode(&code),
+            BASE,
+            "f",
+            Abi::SystemV,
+            &symbols,
+            &Options::default(),
+        )
+        .expect("the code lifts");
+        assert!(
+            function
+                .notes
+                .iter()
+                .any(|note| note.starts_with("the prototype is not read:")),
+            "{:?}",
+            function.notes
+        );
+    }
+
+    #[test]
+    fn a_prototype_fixes_the_arity_of_a_call() {
+        // mov edi, 1; mov esi, 2; call g; ret — two registers written.
+        let code = [
+            0xbf, 1, 0, 0, 0, // mov edi, 1
+            0xbe, 2, 0, 0, 0, // mov esi, 2
+            0xe8, 0xf1, 0x1f, 0, 0,    // call g (0x3000)
+            0xc3, // ret
+        ];
+        // Without a word, both registers are arguments.
+        assert!(c_with(&code, &names, &[]).contains("g(1, 2)"));
+        // The prototype says one parameter, so the call passes one.
+        let symbols = props(&[(0x3000, prototype("int g(int x)"))]);
+        let text = c_with(&code, &symbols, &[]);
+        assert!(text.contains("g(1)"), "{text}");
+        assert!(!text.contains("g(1, 2)"), "{text}");
+    }
+
+    #[test]
+    fn a_convention_chooses_the_argument_registers() {
+        // mov eax, ecx; ret — ecx is no System V argument, but is Win64's
+        // first.
+        let code = [0x89, 0xc8, 0xc3];
+        let symbols = props(&[(
+            BASE,
+            crate::properties::FunctionProperties {
+                convention: Some("win64".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "int f(int a)\n{\n  return a;\n}"
+        );
+    }
+
+    #[test]
+    fn an_extra_clobber_kills_a_register_the_convention_keeps() {
+        // mov ebx, edi; call g; mov eax, ebx; ret — rbx is callee-saved, so
+        // it carries the parameter across the call unless g clobbers it.
+        let code = [
+            0x89, 0xfb, // mov ebx, edi
+            0xe8, 0xf9, 0x1f, 0, 0, // call g (0x3000)
+            0x89, 0xd8, // mov eax, ebx
+            0xc3, // ret
+        ];
+        assert_eq!(
+            c_with(&code, &names, &[]),
+            "int f(int a)\n{\n  g(a);\n  return a;\n}"
+        );
+        let symbols = props(&[(
+            0x3000,
+            crate::properties::FunctionProperties {
+                clobbers: vec!["rbx".to_string()],
+                ..Default::default()
+            },
+        )]);
+        let text = c_with(&code, &symbols, &[]);
+        assert!(text.contains("rbx"), "{text}");
+        assert!(text.starts_with("not lifted yet:"), "{text}");
+    }
+
+    #[test]
+    fn a_stack_adjustment_moves_the_callers_stack() {
+        // call g; ret — balanced unless g takes bytes off the stack.
+        let code = [0xe8, 0xfb, 0x1f, 0, 0, 0xc3];
+        assert!(c_with(&code, &names, &[]).contains("g()"));
+        let symbols = props(&[(
+            0x3000,
+            crate::properties::FunctionProperties {
+                stack_adjustment: Some(8),
+                ..Default::default()
+            },
+        )]);
+        let text = c_with(&code, &symbols, &[]);
+        assert!(text.contains("the stack is not balanced at ret"), "{text}");
+    }
+
+    #[test]
+    fn a_return_register_other_than_rax_is_read() {
+        // mov edx, edi; ret — the result leaves in edx, not rax.
+        let code = [0x89, 0xfa, 0xc3];
+        assert_eq!(c_with(&code, &names, &[]), "void f(int a)\n{\n  return;\n}");
+        let symbols = props(&[(
+            BASE,
+            crate::properties::FunctionProperties {
+                returns: Some("rdx".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "int f(int a)\n{\n  return a;\n}"
+        );
     }
 }

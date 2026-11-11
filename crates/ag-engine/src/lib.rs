@@ -34,6 +34,7 @@ pub mod platform;
 pub mod plugin;
 pub mod procedure;
 pub mod propagate;
+pub mod properties;
 pub mod pvs;
 pub mod register;
 pub mod slice;
@@ -73,6 +74,7 @@ pub use plugin::{
     Loader, Manifest, RecoveredBlock, Rewrite, Rewriter,
 };
 pub use procedure::FunctionSignature;
+pub use properties::FunctionProperties;
 pub use register::{DataFlowDefinition, RegisterId, RegisterSet};
 pub use stack_offsets::{stack_offsets, StackOffset};
 pub use stack_vars::StackVar;

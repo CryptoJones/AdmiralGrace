@@ -228,6 +228,43 @@ pub enum ProjectCmd {
         /// analysis, which inlines nothing by itself.
         state: String,
     },
+    /// Edit a function's signature and analysis properties: its prototype,
+    /// calling convention, the stack it adjusts on return, the registers it
+    /// clobbers, and where its arguments and its result live. A wrong
+    /// signature misleads every caller's pseudocode, so each part is the
+    /// analyst's word over what the bytes say. With no flag, the properties
+    /// the function already has are printed; `clear` (or `none`) as a flag's
+    /// value takes that part back.
+    FunctionProps {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The function: its name, or its address with its space when it
+        /// names one.
+        function: String,
+        /// The C prototype, `int f(int n, char *s)`, or `clear`.
+        #[arg(long)]
+        prototype: Option<String>,
+        /// The calling convention — `cdecl`, `stdcall`, `win64`, `sysv` — or
+        /// `clear`.
+        #[arg(long)]
+        convention: Option<String>,
+        /// The bytes the callee takes off the stack on return, `8`, or
+        /// `clear`.
+        #[arg(long = "stack-adjust", allow_hyphen_values = true)]
+        stack_adjust: Option<String>,
+        /// The registers clobbered beyond the convention's caller-saved
+        /// ones, comma-separated — `rbx,r12` — or `clear`.
+        #[arg(long, value_delimiter = ',')]
+        clobbers: Option<Vec<String>>,
+        /// The registers the arguments arrive in, in order, comma-separated
+        /// — `rcx,rdx,r8` — or `clear`.
+        #[arg(long, value_delimiter = ',')]
+        args: Option<Vec<String>>,
+        /// The register the result leaves in, `rdx`, or `clear`.
+        #[arg(long = "return")]
+        return_location: Option<String>,
+    },
     /// Say what the global pointer register — MIPS's `gp` — holds: in every
     /// function, or in one with `--function`, over what the image says (a
     /// function's prologue, the `_gp` symbol, the GOT). The operands read
@@ -841,6 +878,26 @@ pub fn run(
                 a.inline = on;
             })
         }
+        ProjectCmd::FunctionProps {
+            file,
+            function,
+            prototype,
+            convention,
+            stack_adjust,
+            clobbers,
+            args,
+            return_location,
+        } => function_props(
+            &target,
+            &file,
+            &function,
+            prototype.as_deref(),
+            convention.as_deref(),
+            stack_adjust.as_deref(),
+            clobbers.as_deref(),
+            args.as_deref(),
+            return_location.as_deref(),
+        ),
         ProjectCmd::GlobalPointer {
             file,
             value,
@@ -2551,6 +2608,142 @@ fn edit_patch(
 /// `0x…` or with its space is taken as it is; anything else is a name the
 /// image says the address of first, so a function called `beef` is not the
 /// address 0xbeef.
+/// `ag project function-props --file F FUNCTION …`: edit or show one
+/// function's signature and analysis properties. Each flag is the analyst's
+/// word over what the bytes say; `clear` (or `none`) as a flag's value takes
+/// that part back. With no flag, the properties the function already has are
+/// printed in the prompt's own grammar.
+#[allow(clippy::too_many_arguments)]
+fn function_props(
+    target: &Path,
+    file: &Path,
+    function: &str,
+    prototype: Option<&str>,
+    convention: Option<&str>,
+    stack_adjust: Option<&str>,
+    clobbers: Option<&[String]>,
+    args: Option<&[String]>,
+    return_location: Option<&str>,
+) -> Result<i32> {
+    let address = function_key(target, file, function)?;
+    let clears = |word: &str| {
+        let word = word.trim();
+        word.eq_ignore_ascii_case("clear") || word.eq_ignore_ascii_case("none")
+    };
+    // With nothing to set, print what the function already has.
+    if prototype.is_none()
+        && convention.is_none()
+        && stack_adjust.is_none()
+        && clobbers.is_none()
+        && args.is_none()
+        && return_location.is_none()
+    {
+        let project = open_project(target, file)?;
+        let key =
+            ag_corpus::project::canonical_address(&address).unwrap_or_else(|| address.clone());
+        let props = project
+            .annotation_for(&key)
+            .map(|a| ag_corpus::project::FunctionProperties {
+                prototype: a.prototype.clone(),
+                convention: a.calling_convention.clone(),
+                stack_adjustment: a.stack_adjustment,
+                clobbers: a.clobbers.clone(),
+                arguments: a.arg_locations.clone(),
+                returns: a.return_location.clone(),
+            })
+            .unwrap_or_default();
+        if props.is_empty() {
+            println!("{function}: no function properties set");
+        } else {
+            println!("{function}: {}", props.label());
+        }
+        return Ok(0);
+    }
+    // Read every part before writing any, so a bad word leaves the record
+    // untouched. Each is `None` to leave the part as it is, `Some(None)` to
+    // take it back, `Some(Some(…))` to set it.
+    let prototype = match prototype {
+        None => None,
+        Some(text) if clears(text) => Some(None),
+        Some(text) => {
+            let store = ag_image::TypeStore::default();
+            ag_image::ctype::parse_prototype(&store, text)
+                .map_err(|error| anyhow::anyhow!("the prototype is not read: {error}"))?;
+            Some(Some(text.trim().to_string()))
+        }
+    };
+    let convention = match convention {
+        None => None,
+        Some(word) if clears(word) => Some(None),
+        Some(word) => Some(Some(
+            ag_corpus::project::parse_convention(word)
+                .ok_or_else(|| anyhow::anyhow!("{word:?} names no calling convention"))?
+                .to_string(),
+        )),
+    };
+    let stack_adjust = match stack_adjust {
+        None => None,
+        Some(word) if clears(word) => Some(None),
+        Some(word) => Some(Some(
+            word.trim()
+                .parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("{word:?} is no byte count"))?,
+        )),
+    };
+    let registers = |words: Option<&[String]>| -> Result<Option<Vec<String>>> {
+        match words {
+            None => Ok(None),
+            Some(words) if words.len() == 1 && clears(&words[0]) => Ok(Some(Vec::new())),
+            Some(words) => {
+                let mut out = Vec::new();
+                for word in words {
+                    let word = word.trim().to_ascii_lowercase();
+                    anyhow::ensure!(
+                        ag_corpus::project::is_register(&word),
+                        "{word:?} names no general register"
+                    );
+                    out.push(word);
+                }
+                Ok(Some(out))
+            }
+        }
+    };
+    let clobbers = registers(clobbers)?;
+    let args = registers(args)?;
+    let return_location = match return_location {
+        None => None,
+        Some(word) if clears(word) => Some(None),
+        Some(word) => {
+            let word = word.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                ag_corpus::project::is_register(&word),
+                "{word:?} names no general register"
+            );
+            Some(Some(word))
+        }
+    };
+    edit(target, file, TargetKind::Function, &address, |a| {
+        if let Some(change) = prototype {
+            a.prototype = change;
+        }
+        if let Some(change) = convention {
+            a.calling_convention = change;
+        }
+        if let Some(change) = stack_adjust {
+            a.stack_adjustment = change;
+        }
+        if let Some(change) = clobbers {
+            a.clobbers = change;
+        }
+        if let Some(change) = args {
+            a.arg_locations = change;
+        }
+        if let Some(change) = return_location {
+            a.return_location = change;
+        }
+    })
+}
+
 fn function_key(target: &Path, file: &Path, function: &str) -> Result<String> {
     let name = function.trim();
     let spelled = name.to_ascii_lowercase().starts_with("0x") || name.contains(':');
@@ -2795,6 +2988,24 @@ fn summarize(annotation: &Annotation) -> String {
         Some(true) => parts.push("inline on".to_string()),
         Some(false) => parts.push("inline off".to_string()),
         None => {}
+    }
+    if let Some(prototype) = &annotation.prototype {
+        parts.push(format!("prototype {prototype:?}"));
+    }
+    if let Some(convention) = &annotation.calling_convention {
+        parts.push(format!("convention {convention}"));
+    }
+    if let Some(adjustment) = annotation.stack_adjustment {
+        parts.push(format!("stack adjustment {adjustment}"));
+    }
+    if !annotation.clobbers.is_empty() {
+        parts.push(format!("clobbers {}", annotation.clobbers.join(",")));
+    }
+    if !annotation.arg_locations.is_empty() {
+        parts.push(format!("args {}", annotation.arg_locations.join(",")));
+    }
+    if let Some(returns) = &annotation.return_location {
+        parts.push(format!("return {returns}"));
     }
     if let Some(value) = &annotation.global_pointer {
         parts.push(format!("global pointer {value}"));
