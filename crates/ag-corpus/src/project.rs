@@ -1050,8 +1050,9 @@ impl FunctionProperties {
 }
 
 /// The calling convention `word` names, spelled canonically, when it is one:
-/// `__cdecl` and `cdecl` are `cdecl`, `system v` and `amd64` are `sysv`.
-/// `None` for a word that names no convention.
+/// `__cdecl` and `cdecl` are `cdecl`, `system v` and `amd64` are `sysv`,
+/// `golang` is `go`, `delphi` is `pascal`. `None` for a word that names no
+/// convention.
 pub fn parse_convention(word: &str) -> Option<&'static str> {
     let word = word.trim().to_ascii_lowercase();
     match word.as_str() {
@@ -1063,6 +1064,8 @@ pub fn parse_convention(word: &str) -> Option<&'static str> {
         "__clrcall" | "clrcall" => Some("clrcall"),
         "sysv" | "systemv" | "system v" | "amd64" | "unix" | "linux" => Some("sysv"),
         "win64" | "windows" | "ms" | "microsoft" | "msx64" => Some("win64"),
+        "go" | "golang" | "go-register" => Some("go"),
+        "pascal" | "__pascal" | "delphi" | "borland" => Some("pascal"),
         _ => None,
     }
 }
@@ -3891,7 +3894,9 @@ mod tests {
         assert_eq!(parse_convention("__stdcall"), Some("stdcall"));
         assert_eq!(parse_convention("System V"), Some("sysv"));
         assert_eq!(parse_convention("windows"), Some("win64"));
-        assert_eq!(parse_convention("pascal"), None);
+        assert_eq!(parse_convention("golang"), Some("go"));
+        assert_eq!(parse_convention("delphi"), Some("pascal"));
+        assert_eq!(parse_convention("nope"), None);
         assert!(is_register("rdi"));
         assert!(is_register("edi"));
         assert!(is_register("r9d"));

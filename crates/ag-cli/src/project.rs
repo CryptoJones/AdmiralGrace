@@ -245,8 +245,8 @@ pub enum ProjectCmd {
         /// The C prototype, `int f(int n, char *s)`, or `clear`.
         #[arg(long)]
         prototype: Option<String>,
-        /// The calling convention — `cdecl`, `stdcall`, `win64`, `sysv` — or
-        /// `clear`.
+        /// The calling convention — `cdecl`, `stdcall`, `win64`, `sysv`,
+        /// `go`, `pascal` — or `clear`.
         #[arg(long)]
         convention: Option<String>,
         /// The bytes the callee takes off the stack on return, `8`, or

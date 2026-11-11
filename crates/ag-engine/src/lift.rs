@@ -383,16 +383,25 @@ pub enum Abi {
     SystemV,
     /// Microsoft x64: arguments in `rcx, rdx, r8, r9`.
     Win64,
+    /// Go's register ABI (Go 1.17 and later): arguments in `rax, rbx, rcx,
+    /// rdi, rsi, r8, r9, r10, r11`.
+    Go,
+    /// The Borland Pascal register convention, read at 64 bits: arguments
+    /// in `rax, rdx, rcx`, left to right.
+    Pascal,
 }
 
 impl Abi {
     /// The convention a language id implies.
     ///
     /// The compiler field of the id names it: `x86:LE:64:default:windows` is
-    /// Microsoft x64, and everything else is System V.
+    /// Microsoft x64, `go` and `golang` are Go's register ABI, the Borland
+    /// compilers are Pascal, and everything else is System V.
     pub fn of_language(language: &str) -> Abi {
         match language.split(':').nth(4) {
             Some("windows") => Abi::Win64,
+            Some("go" | "golang") => Abi::Go,
+            Some("borlanddelphi" | "borlandcpp" | "pascal") => Abi::Pascal,
             _ => Abi::SystemV,
         }
     }
@@ -402,6 +411,8 @@ impl Abi {
         match self {
             Abi::SystemV => &[RDI, RSI, RDX, RCX, R8, R9],
             Abi::Win64 => &[RCX, RDX, R8, R9],
+            Abi::Go => &[RAX, RBX, RCX, RDI, RSI, R8, R9, 10, 11],
+            Abi::Pascal => &[RAX, RDX, RCX],
         }
     }
 
@@ -410,6 +421,12 @@ impl Abi {
         match self {
             Abi::SystemV => matches!(index, RBX | RSP | RBP | 12..=15),
             Abi::Win64 => matches!(index, RBX | RSP | RBP | RSI | RDI | 12..=15),
+            // Go keeps only the stack and frame pointers and `r14`, the
+            // goroutine pointer; every other register a call may clobber.
+            Abi::Go => matches!(index, RSP | RBP | 14),
+            // Pascal keeps what its 32-bit original keeps — `ebx`, `esi`,
+            // `edi`, `ebp` — and the 64-bit-only registers beside them.
+            Abi::Pascal => matches!(index, RBX | RSP | RBP | RSI | RDI | 12..=15),
         }
     }
 }
@@ -419,6 +436,8 @@ impl fmt::Display for Abi {
         f.write_str(match self {
             Abi::SystemV => "System V",
             Abi::Win64 => "Microsoft x64",
+            Abi::Go => "Go",
+            Abi::Pascal => "Pascal",
         })
     }
 }
@@ -5453,10 +5472,12 @@ impl<'a> Lifter<'a> {
             callee: Box::new(callee),
             args,
         };
-        // The call clobbers the caller-saved registers, the flags, and
-        // anything in memory it can reach.
+        // The call clobbers the caller-saved registers of the callee's
+        // convention — the program's own when the callee says none — the
+        // flags, and anything in memory it can reach.
+        let clobber_abi = props.convention_abi().unwrap_or(self.abi);
         for index in 0..16 {
-            if !self.abi.is_callee_saved(index) {
+            if !clobber_abi.is_callee_saved(index) {
                 self.state.regs.insert(
                     index,
                     Value::unknown(
@@ -7871,10 +7892,63 @@ mod tests {
     }
 
     #[test]
+    fn the_go_convention_takes_its_arguments_from_rax_and_rbx() {
+        // add eax, ebx; ret — rax and rbx are Go's first two argument
+        // registers, and neither is System V's.
+        let function = lift_block(
+            &decode(&[0x01, 0xd8, 0xc3]),
+            BASE,
+            "add",
+            Abi::Go,
+            &names,
+            &Options::default(),
+        )
+        .expect("lifts");
+        assert_eq!(
+            without_reason(&emit_function(&function, &Options::default())),
+            "int add(int a, int b)\n{\n  return a + b;\n}"
+        );
+        // Under System V the same bytes read a register that is no argument
+        // before it is written, and are refused.
+        let text = c(&[0x01, 0xd8, 0xc3]);
+        assert!(text.starts_with("not lifted yet:"), "{text}");
+        assert!(text.contains("read before it is written"), "{text}");
+    }
+
+    #[test]
+    fn the_pascal_convention_takes_its_arguments_from_rax_and_rdx() {
+        // add eax, edx; ret — rax and rdx are the Borland register
+        // convention's first two argument registers, left to right.
+        let function = lift_block(
+            &decode(&[0x01, 0xd0, 0xc3]),
+            BASE,
+            "add",
+            Abi::Pascal,
+            &names,
+            &Options::default(),
+        )
+        .expect("lifts");
+        assert_eq!(
+            without_reason(&emit_function(&function, &Options::default())),
+            "int add(int a, int b)\n{\n  return a + b;\n}"
+        );
+    }
+
+    #[test]
     fn the_convention_comes_from_the_language() {
         assert_eq!(Abi::of_language("x86:LE:64:default:windows"), Abi::Win64);
         assert_eq!(Abi::of_language("x86:LE:64:default:gcc"), Abi::SystemV);
         assert_eq!(Abi::of_language("x86:LE:32:default:gcc"), Abi::SystemV);
+        assert_eq!(Abi::of_language("x86:LE:64:default:golang"), Abi::Go);
+        assert_eq!(Abi::of_language("x86:LE:64:default:go"), Abi::Go);
+        assert_eq!(
+            Abi::of_language("x86:LE:64:default:borlanddelphi"),
+            Abi::Pascal
+        );
+        assert_eq!(
+            Abi::of_language("x86:LE:64:default:borlandcpp"),
+            Abi::Pascal
+        );
     }
 
     /// Lift `bytes` as the function `f` through its control-flow graph, the
@@ -9479,6 +9553,38 @@ mod tests {
     }
 
     #[test]
+    fn the_go_and_pascal_conventions_choose_the_argument_registers() {
+        // add eax, ebx; ret — rbx is no System V argument, but is Go's
+        // second, and rax its first.
+        let code = [0x01, 0xd8, 0xc3];
+        let symbols = props(&[(
+            BASE,
+            crate::properties::FunctionProperties {
+                convention: Some("go".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "int f(int a, int b)\n{\n  return a + b;\n}"
+        );
+        // add eax, edx; ret — rdx is the Pascal convention's second
+        // argument register, rax its first.
+        let code = [0x01, 0xd0, 0xc3];
+        let symbols = props(&[(
+            BASE,
+            crate::properties::FunctionProperties {
+                convention: Some("pascal".to_string()),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            c_with(&code, &symbols, &[]),
+            "int f(int a, int b)\n{\n  return a + b;\n}"
+        );
+    }
+
+    #[test]
     fn an_extra_clobber_kills_a_register_the_convention_keeps() {
         // mov ebx, edi; call g; mov eax, ebx; ret — rbx is callee-saved, so
         // it carries the parameter across the call unless g clobbers it.
@@ -9496,6 +9602,33 @@ mod tests {
             0x3000,
             crate::properties::FunctionProperties {
                 clobbers: vec!["rbx".to_string()],
+                ..Default::default()
+            },
+        )]);
+        let text = c_with(&code, &symbols, &[]);
+        assert!(text.contains("rbx"), "{text}");
+        assert!(text.starts_with("not lifted yet:"), "{text}");
+    }
+
+    #[test]
+    fn a_go_callee_clobbers_a_register_the_programs_convention_keeps() {
+        // mov ebx, edi; call g; mov eax, ebx; ret — rbx is System V
+        // callee-saved, but a Go callee need not keep it.
+        let code = [
+            0x89, 0xfb, // mov ebx, edi
+            0xe8, 0xf9, 0x1f, 0, 0, // call g (0x3000)
+            0x89, 0xd8, // mov eax, ebx
+            0xc3, // ret
+        ];
+        // Without a word, rbx carries the parameter across the call.
+        assert_eq!(
+            c_with(&code, &names, &[]),
+            "int f(int a)\n{\n  g(a);\n  return a;\n}"
+        );
+        let symbols = props(&[(
+            0x3000,
+            crate::properties::FunctionProperties {
+                convention: Some("go".to_string()),
                 ..Default::default()
             },
         )]);

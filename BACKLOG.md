@@ -214,7 +214,7 @@ Filed 2026-10-26.
 ### Function signatures
 
 - [x] Edit function properties: prototype, calling convention, stack adjustment, clobbers, value locations — [#387](https://github.com/CryptoJones/AdmiralGrace/issues/387)
-- [ ] Support more calling conventions, including Go, Pascal and struct-by-value — [#388](https://github.com/CryptoJones/AdmiralGrace/issues/388)
+- [x] Support more calling conventions, including Go, Pascal and struct-by-value — [#388](https://github.com/CryptoJones/AdmiralGrace/issues/388)
 - [ ] Per-function analysis settings — [#389](https://github.com/CryptoJones/AdmiralGrace/issues/389)
 
 ### Strings and constants
