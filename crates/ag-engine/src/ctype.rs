@@ -116,6 +116,77 @@ pub fn normalized(store: &TypeStore, text: &str) -> String {
     }
 }
 
+/// A function prototype read as C: its name when it has one, its return
+/// type, its parameters' types and names in order, whether it is variadic,
+/// and the calling convention it spells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prototype {
+    /// The function's name, `f` of `int f(int n)`; `None` for `int (int)`.
+    pub name: Option<String>,
+    /// The return type.
+    pub ret: Type,
+    /// The parameters, each its type and its name when it has one, in
+    /// order. An array or function parameter is a pointer, as C adjusts it.
+    pub params: Vec<(Type, Option<String>)>,
+    /// Whether the list ends in `...`.
+    pub variadic: bool,
+    /// The calling convention the prototype spells, `__stdcall`, when any.
+    pub convention: Option<String>,
+}
+
+/// Read `text` as one function prototype — `int f(int n, char *s)`,
+/// `void __stdcall foo(int)` — against `store`. A name the store does not
+/// define is a type of no known size, as [`parse_type`] reads it. What is
+/// not a single function declaration is an error at a line and column.
+pub fn parse_prototype(store: &TypeStore, text: &str) -> Result<Prototype, CError> {
+    let tokens = lex(text)?;
+    let mut parser = Parser::new(text, tokens, Cow::Borrowed(store), true);
+    parser.record_names = true;
+    let at = parser.token().clone();
+    let Some(specs) = parser.specifiers()? else {
+        return Err(parser.error_here(format!("expected a return type, not {}", parser.shown())));
+    };
+    if specs.typedef {
+        return Err(CError {
+            line: at.line,
+            column: at.column,
+            message: "typedef names no prototype here".to_string(),
+        });
+    }
+    let (name, ops) = parser.declarator(false)?;
+    let ty = parser.apply(specs.base, ops, &at)?;
+    if !parser.at_end() {
+        return Err(parser.error_here(format!("{} is not one prototype", text.trim())));
+    }
+    let Type::Function {
+        ret,
+        params,
+        variadic,
+        attrs,
+    } = ty
+    else {
+        return Err(CError {
+            line: at.line,
+            column: at.column,
+            message: format!("{} declares no function", text.trim()),
+        });
+    };
+    let params = params
+        .into_iter()
+        .enumerate()
+        .map(|(i, ty)| (ty, parser.param_names.get(i).cloned().flatten()))
+        .collect();
+    Ok(Prototype {
+        name,
+        ret: *ret,
+        params,
+        variadic,
+        convention: attrs
+            .calling_convention
+            .or(specs.func_attrs.calling_convention),
+    })
+}
+
 /// The declaration of `name` of the type `ty` as C writes it — `int i`,
 /// `char buf[16]`, `int (*cb)(int)` — the type read as [`parse_type`]
 /// reads it, against the platform's primitives alone; a type that does not
@@ -725,6 +796,15 @@ struct Parser<'a> {
     local_constants: BTreeMap<String, i64>,
     pending_align: Option<u64>,
     pending_conv: Option<String>,
+    /// Whether a prototype is being read, whose parameter names are kept.
+    record_names: bool,
+    /// How deep the parameter list being read is nested: the outermost is 1,
+    /// a function-pointer parameter's own list 2. Only the outermost's names
+    /// are the prototype's.
+    param_depth: usize,
+    /// The outermost parameter list's names, in order, `None` for an
+    /// abstract parameter.
+    param_names: Vec<Option<String>>,
 }
 
 const QUALIFIERS: &[&str] = &[
@@ -783,6 +863,9 @@ impl<'a> Parser<'a> {
             local_constants: BTreeMap::new(),
             pending_align: None,
             pending_conv: None,
+            record_names: false,
+            param_depth: 0,
+            param_names: Vec::new(),
         }
     }
 
@@ -2073,6 +2156,15 @@ impl<'a> Parser<'a> {
     /// A parameter list after its `(`, through its `)`: the parameters'
     /// types, and whether it ends in `...`.
     fn parameters(&mut self) -> Result<(Vec<Type>, bool), CError> {
+        self.param_depth += 1;
+        let result = self.parameters_inner();
+        self.param_depth -= 1;
+        result
+    }
+
+    /// The parameter list itself, read at the depth [`Self::parameters`]
+    /// set; the outermost list's names are kept when a prototype is read.
+    fn parameters_inner(&mut self) -> Result<(Vec<Type>, bool), CError> {
         let mut params = Vec::new();
         let mut variadic = false;
         if self.eat(")") {
@@ -2093,7 +2185,7 @@ impl<'a> Parser<'a> {
             let Some(specs) = self.specifiers()? else {
                 return Err(self.error_here(format!("expected a parameter, not {}", self.shown())));
             };
-            let (_, mut ops) = self.declarator(true)?;
+            let (name, mut ops) = self.declarator(true)?;
             for op in &mut ops {
                 if let Op::Function(_, _, attrs) = op {
                     let mut merged = specs.func_attrs.clone();
@@ -2116,6 +2208,9 @@ impl<'a> Parser<'a> {
                 f @ Type::Function { .. } => Type::pointer(f),
                 other => other,
             };
+            if self.record_names && self.param_depth == 1 {
+                self.param_names.push(name);
+            }
             params.push(ty);
             if !self.eat(",") {
                 self.expect(")", "after the parameters")?;
@@ -2928,4 +3023,90 @@ mod tests {
         assert_eq!(spelled(&again, "f_t"), "int __stdcall(int)");
     }
 
+    // ---- prototypes -------------------------------------------------------
+
+    /// The prototype `text` reads as, against the platform's primitives.
+    fn proto(text: &str) -> Prototype {
+        let store = TypeStore::new(DataModel::LP64);
+        parse_prototype(&store, text).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The parameters of `proto`, each its type spelled and its name.
+    fn params(proto: &Prototype) -> Vec<(String, Option<String>)> {
+        let store = TypeStore::new(DataModel::LP64);
+        proto
+            .params
+            .iter()
+            .map(|(ty, name)| (ty.spelled(&store), name.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_prototype_keeps_its_parameters_names_and_types() {
+        let p = proto("int f(int n, char *s)");
+        assert_eq!(p.name.as_deref(), Some("f"));
+        let store = TypeStore::new(DataModel::LP64);
+        assert_eq!(p.ret.spelled(&store), "int");
+        assert_eq!(
+            params(&p),
+            vec![
+                ("int".to_string(), Some("n".to_string())),
+                ("char *".to_string(), Some("s".to_string())),
+            ]
+        );
+        assert!(!p.variadic);
+    }
+
+    #[test]
+    fn a_prototype_reads_abstract_and_void_parameters() {
+        let p = proto("void g(int, char *)");
+        assert_eq!(p.name.as_deref(), Some("g"));
+        assert_eq!(
+            params(&p),
+            vec![("int".to_string(), None), ("char *".to_string(), None),]
+        );
+        let p = proto("void h(void)");
+        assert!(p.params.is_empty());
+        let p = proto("void k()");
+        assert!(p.params.is_empty());
+    }
+
+    #[test]
+    fn a_prototype_reads_variadic_and_conventions() {
+        let p = proto("int printf(const char *fmt, ...)");
+        assert!(p.variadic);
+        assert_eq!(p.params.len(), 1);
+        let p = proto("void __stdcall foo(int n)");
+        assert_eq!(p.convention.as_deref(), Some("__stdcall"));
+        let p = proto("__cdecl int bar(int n)");
+        assert_eq!(p.convention.as_deref(), Some("__cdecl"));
+    }
+
+    #[test]
+    fn a_prototype_adjusts_array_and_function_parameters_to_pointers() {
+        let p = proto("void f(int a[16], int cb(int))");
+        assert_eq!(
+            params(&p),
+            vec![
+                ("int *".to_string(), Some("a".to_string())),
+                ("int (*)(int)".to_string(), Some("cb".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prototype_reads_a_pointer_return() {
+        let p = proto("char *strdup(const char *s)");
+        let store = TypeStore::new(DataModel::LP64);
+        assert_eq!(p.ret.spelled(&store), "char *");
+        assert_eq!(p.name.as_deref(), Some("strdup"));
+    }
+
+    #[test]
+    fn a_prototype_that_is_no_function_is_refused() {
+        let store = TypeStore::new(DataModel::LP64);
+        assert!(parse_prototype(&store, "int n").is_err());
+        assert!(parse_prototype(&store, "int f(int n); int g(int)").is_err());
+        assert!(parse_prototype(&store, "int f(int").is_err());
+    }
 }

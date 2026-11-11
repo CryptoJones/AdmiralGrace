@@ -557,6 +557,14 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Tell the analysis the analyst's words on each function's signature
+    /// and properties — its prototype, calling convention, stack adjustment,
+    /// clobbers, and where its arguments and result live — by the function's
+    /// entry, and say whether that changed anything.
+    fn set_function_properties(&self, _props: BTreeMap<u64, ag_image::FunctionProperties>) -> bool {
+        false
+    }
+
     /// Tell the analysis the analyst's type definitions, each a name and
     /// its C, in the project's order, and say whether that changed
     /// anything; a definition that does not read is refused with what was

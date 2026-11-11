@@ -291,6 +291,32 @@ not. `NAME off` or `NAME@ADDRESS off` takes the word back. The words are kept on
 function's record in the project file, by the names the lift declares, and undo takes them
 back.
 
+## A function's signature and properties
+
+**Edit ▸ Function properties…** (Ctrl+Shift+P) edits the signature and analysis properties of
+the function on screen on one line, since a wrong signature misleads every caller's
+pseudocode. The prompt opens on the properties the function already has, in this grammar:
+
+```
+conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto int f(int n, char *s)
+```
+
+Each part is optional and the parts read in any order, `proto` taking the rest of the line:
+`conv NAME` is the calling convention (`cdecl`, `stdcall`, `win64`, `sysv`…), which sets the
+argument registers and the caller-saved ones; `stack N` is the bytes the callee takes off the
+stack on return; `clobbers R,…` names the registers clobbered beyond the convention's
+caller-saved ones, which a call to the function kills in its caller; `args R,…` names the
+registers the arguments arrive in, in order, over the convention's own; `ret R` names the
+register the result leaves in, over `rax`; and `proto SIGNATURE` is the C prototype, whose
+return type, parameter types and parameter names the lift reads over its own. The registers
+are general ones at any width — `rdi`, `edi`, `r9d`. The line is the whole record: a part left
+out is taken back, and an empty line takes every part back. A convention, register, byte count
+or prototype that is not one is refused, and the record is left untouched. The pseudocode is
+read again at once — the function's own signature, and its callers' reads of its arguments,
+result and clobbers — and undo covers the word like every other. The words are kept on the
+function's record in the project file; `ag project function-props` records the same for
+`ag image … --project` to read (`docs/cli.md`).
+
 ## The variables of a function
 
 **View ▸ Variables** opens the bottom workspace on its Variables tab, or closes it when the

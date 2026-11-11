@@ -190,6 +190,10 @@ pub enum Message {
     /// Say what the global pointer register holds in the function on
     /// screen, or in every function.
     EditGlobalPointer,
+    /// Edit the function on screen's signature and analysis properties:
+    /// its prototype, calling convention, stack adjustment, clobbers, and
+    /// where its arguments and result live.
+    EditFunctionProperties,
     /// Define types from C: the prompt opens for the declarations.
     EditNewType,
     /// Edit the type selected in the Types tab: the prompt opens on its C.
@@ -389,6 +393,11 @@ pub enum PromptKind {
     /// `VALUE` or `clear`, and `image VALUE` or `image clear` for every
     /// function.
     GlobalPointer,
+    /// The function on screen's signature and analysis properties, each
+    /// part optional and in any order: `conv NAME`, `stack N`, `clobbers
+    /// R,…`, `args R,…`, `ret R`, `proto SIGNATURE` (the rest of the line).
+    /// An empty line takes every part back.
+    FunctionProperties,
     /// Two variables of the function on screen to merge: `KEEP GONE`.
     MergeVariables,
     /// A variable of the function on screen merged away: `GONE`.
@@ -3202,6 +3211,7 @@ impl App {
                         | PromptKind::Override
                         | PromptKind::Inline
                         | PromptKind::GlobalPointer
+                        | PromptKind::FunctionProperties
                         | PromptKind::MergeVariables
                         | PromptKind::UnmergeVariable
                         | PromptKind::SplitVariable
@@ -3246,6 +3256,7 @@ impl App {
                 self.tell_variable_edits();
                 self.tell_union_fields();
                 self.tell_global_pointer();
+                self.tell_function_properties();
             }
         }
         task
@@ -3649,6 +3660,43 @@ impl App {
             return;
         }
         self.refresh_listing();
+    }
+
+    /// Tell the analysis the analyst's words on each function's signature
+    /// and properties, and read the function on screen again when that
+    /// changed anything: a wrong signature misleads every caller's
+    /// pseudocode, so the lift reads the analyst's over its own.
+    fn tell_function_properties(&mut self) {
+        // The corpus and the engine keep the same words in their own
+        // structs, so each field crosses by name.
+        let props = self
+            .annotations
+            .function_properties()
+            .into_iter()
+            .map(|(address, props)| {
+                (
+                    address,
+                    ag_image::FunctionProperties {
+                        prototype: props.prototype,
+                        convention: props.convention,
+                        stack_adjustment: props.stack_adjustment,
+                        clobbers: props.clobbers,
+                        arguments: props.arguments,
+                        returns: props.returns,
+                    },
+                )
+            })
+            .collect();
+        if !self.provider.set_function_properties(props) {
+            return;
+        }
+        if let Some(function) = self.work.listing_of {
+            self.work.pseudocode = self.pseudocode_of(function);
+            self.refresh_variables();
+            self.work.line_addresses = self.provider.line_addresses(function);
+            self.work.dead_lines = self.provider.dead_lines(function);
+            self.refresh_slice();
+        }
     }
 
     /// Tell the analysis which member of a union each instruction's access
@@ -4301,6 +4349,32 @@ impl App {
                 });
             }
 
+            Message::EditFunctionProperties => {
+                let Some(function) = self.work.listing_of else {
+                    self.notice = Some("Open the function whose properties to edit".into());
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .map(|a| ag_corpus::project::FunctionProperties {
+                        prototype: a.prototype.clone(),
+                        convention: a.calling_convention.clone(),
+                        stack_adjustment: a.stack_adjustment,
+                        clobbers: a.clobbers.clone(),
+                        arguments: a.arg_locations.clone(),
+                        returns: a.return_location.clone(),
+                    })
+                    .unwrap_or_default()
+                    .label();
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::FunctionProperties,
+                    title: "Function properties (conv NAME stack N clobbers R,… args R,… ret R proto SIGNATURE)",
+                    value: current,
+                });
+            }
+
             Message::EditMergeVariables => {
                 let Some(function) = self.work.listing_of else {
                     self.notice = Some("Open the function whose variables to merge".into());
@@ -4584,6 +4658,7 @@ impl App {
                 self.tell_variable_edits();
                 self.tell_union_fields();
                 self.tell_global_pointer();
+                self.tell_function_properties();
             }
 
             Message::EditRedo => {
@@ -4610,6 +4685,7 @@ impl App {
                 self.tell_variable_edits();
                 self.tell_union_fields();
                 self.tell_global_pointer();
+                self.tell_function_properties();
             }
 
             Message::NavigatorFilterChanged(filter) => {
@@ -5924,6 +6000,38 @@ impl App {
                             self.annotations.prune();
                         }
                         self.tell_global_pointer();
+                    }
+                    PromptKind::FunctionProperties => {
+                        let Some(function) = self.work.listing_of else {
+                            return Task::none();
+                        };
+                        let props = match parse_function_properties(&prompt.value) {
+                            Ok(props) => props,
+                            Err(why) => {
+                                self.notice = Some(why);
+                                return Task::none();
+                            }
+                        };
+                        let key = self.annotation_key(function);
+                        let notice = if props.is_empty() {
+                            format!("The properties of {key} are the analysis's own")
+                        } else {
+                            format!("{key}: {}", props.label())
+                        };
+                        {
+                            let record = self
+                                .annotations
+                                .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                            record.prototype = props.prototype;
+                            record.calling_convention = props.convention;
+                            record.stack_adjustment = props.stack_adjustment;
+                            record.clobbers = props.clobbers;
+                            record.arg_locations = props.arguments;
+                            record.return_location = props.returns;
+                        }
+                        self.annotations.prune();
+                        self.notice = Some(notice);
+                        self.tell_function_properties();
                     }
                     PromptKind::MergeVariables => {
                         let Some(function) = self.work.listing_of else {
@@ -7497,6 +7605,90 @@ fn parse_stack_variable(text: &str) -> Result<(i64, u32, Option<String>, Option<
     Ok((offset, size, name, ty))
 }
 
+/// Read the function-properties prompt: `conv NAME stack N clobbers R,…
+/// args R,… ret R proto SIGNATURE`, each part optional and in any order,
+/// `proto` taking the rest of the line. The line is the whole record: a part
+/// left out is taken back, and an empty line is nothing said. A part that
+/// does not read is an error, and nothing is written.
+fn parse_function_properties(text: &str) -> Result<ag_corpus::project::FunctionProperties, String> {
+    let mut props = ag_corpus::project::FunctionProperties::default();
+    let registers = |list: &str| -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for word in list.split(',') {
+            let word = word.trim().to_ascii_lowercase();
+            if word.is_empty() {
+                continue;
+            }
+            if !ag_corpus::project::is_register(&word) {
+                return Err(format!("{word:?} names no general register"));
+            }
+            out.push(word);
+        }
+        Ok(out)
+    };
+    let mut words = text.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        match word.to_ascii_lowercase().as_str() {
+            "conv" => {
+                let name = words
+                    .next()
+                    .ok_or_else(|| "conv needs a convention name".to_string())?;
+                props.convention = Some(
+                    ag_corpus::project::parse_convention(name)
+                        .ok_or_else(|| format!("{name:?} names no calling convention"))?
+                        .to_string(),
+                );
+            }
+            "stack" => {
+                let count = words
+                    .next()
+                    .ok_or_else(|| "stack needs a byte count".to_string())?;
+                props.stack_adjustment = Some(
+                    count
+                        .parse::<i64>()
+                        .map_err(|_| format!("{count:?} is no byte count"))?,
+                );
+            }
+            "clobbers" => {
+                let list = words
+                    .next()
+                    .ok_or_else(|| "clobbers needs a register list".to_string())?;
+                props.clobbers = registers(list)?;
+            }
+            "args" => {
+                let list = words
+                    .next()
+                    .ok_or_else(|| "args needs a register list".to_string())?;
+                props.arguments = registers(list)?;
+            }
+            "ret" => {
+                let register = words
+                    .next()
+                    .ok_or_else(|| "ret needs a register".to_string())?;
+                let register = register.trim().to_ascii_lowercase();
+                if !ag_corpus::project::is_register(&register) {
+                    return Err(format!("{register:?} names no general register"));
+                }
+                props.returns = Some(register);
+            }
+            "proto" => {
+                let rest: Vec<&str> = words.collect();
+                let signature = rest.join(" ");
+                if signature.is_empty() {
+                    return Err("proto needs a signature".to_string());
+                }
+                let store = ag_image::TypeStore::default();
+                ag_image::ctype::parse_prototype(&store, &signature)
+                    .map_err(|error| format!("the prototype is not read: {error}"))?;
+                props.prototype = Some(signature);
+                break;
+            }
+            other => return Err(format!("{other:?} is no function property part")),
+        }
+    }
+    Ok(props)
+}
+
 /// C the analyst typed on one line as the parser reads it: each `#pragma
 /// pack(…)` on a line of its own, since a directive runs to the end of its
 /// line.
@@ -8067,6 +8259,8 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("m"), true, true) => Message::EditUnionField,
         // Where the jump table the selected jmp reads is.
         (Key::Character("j"), true, true) => Message::EditSwitch,
+        // The function on screen's signature and analysis properties.
+        (Key::Character("p"), true, true) => Message::EditFunctionProperties,
         // An instruction written over the bytes at the selection.
         (Key::Character("e"), true, true) => Message::EditAssemble,
         // The bytes at the selection, edited as hex.
@@ -8944,6 +9138,10 @@ mod tests {
             Message::EditBlockText
         ));
         assert!(matches!(shortcut(character("g", ctrl)), Message::EditGroup));
+        assert!(matches!(
+            shortcut(character("p", ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditFunctionProperties
+        ));
         assert!(matches!(
             shortcut(named(keyboard::key::Named::ArrowUp, none)),
             Message::GraphMove(crate::views::graph::Direction::Up)
@@ -13360,6 +13558,147 @@ mod tests {
         assert!(app.annotations.annotation_for("0x1149").is_none());
         let _ = app.update(Message::FunctionSelected(0x1198));
         assert!(main(&app).contains("sum_to(add(a, 3))"), "{}", main(&app));
+    }
+
+    #[test]
+    fn a_functions_properties_are_set_read_back_and_undo_takes_them_back() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let main = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        // add, at 0x1149, is marked on its own screen.
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        assert!(
+            main(&app).contains("int add(int a, int b)\n"),
+            "{}",
+            main(&app)
+        );
+
+        let _ = app.update(Message::EditFunctionProperties);
+        assert_eq!(
+            app.prompt.as_ref().expect("a prompt").kind,
+            PromptKind::FunctionProperties
+        );
+        // Nothing is said yet, so the field opens empty.
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, "");
+
+        // The line is the whole record: the prototype is the analyst's
+        // signature over the lift's own, and the rest ride beside it. The
+        // arguments stay the ones `add` really reads, so it still lifts.
+        let line =
+            "conv sysv stack 8 clobbers rbx,r12 args rdi,rsi ret rax proto long add(long x, long y)";
+        let _ = app.update(Message::PromptChanged(line.into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        let record = app.annotations.annotation_for("0x1149").expect("a record");
+        assert_eq!(
+            record.prototype.as_deref(),
+            Some("long add(long x, long y)")
+        );
+        assert_eq!(record.calling_convention.as_deref(), Some("sysv"));
+        assert_eq!(record.stack_adjustment, Some(8));
+        assert_eq!(record.clobbers, vec!["rbx".to_string(), "r12".to_string()]);
+        assert_eq!(
+            record.arg_locations,
+            vec!["rdi".to_string(), "rsi".to_string()]
+        );
+        assert_eq!(record.return_location.as_deref(), Some("rax"));
+        // The lift reads the signature on the function's own screen.
+        assert!(
+            main(&app).contains("long add(long x, long y)\n"),
+            "{}",
+            main(&app)
+        );
+
+        // The prompt reads the properties back in their own grammar.
+        let _ = app.update(Message::EditFunctionProperties);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, line);
+
+        // A part that does not read is refused, and the record is untouched.
+        let _ = app.update(Message::PromptChanged("conv bogus".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("names no calling convention")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(
+            app.annotations
+                .annotation_for("0x1149")
+                .and_then(|a| a.calling_convention.clone()),
+            Some("sysv".to_string())
+        );
+
+        // An empty line takes every part back, and the lift reads its own
+        // signature again.
+        app.prompt = None;
+        let _ = app.update(Message::EditFunctionProperties);
+        let _ = app.update(Message::PromptChanged("".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x1149").is_none());
+        assert!(
+            main(&app).contains("int add(int a, int b)\n"),
+            "{}",
+            main(&app)
+        );
+
+        // Undo puts the properties back, and the lift reads them again.
+        let _ = app.update(Message::EditUndo);
+        let record = app.annotations.annotation_for("0x1149").expect("a record");
+        assert_eq!(
+            record.prototype.as_deref(),
+            Some("long add(long x, long y)")
+        );
+        assert!(
+            main(&app).contains("long add(long x, long y)\n"),
+            "{}",
+            main(&app)
+        );
+    }
+
+    #[test]
+    fn the_function_properties_prompt_reads_each_part_in_any_order() {
+        // Empty is nothing said.
+        assert!(parse_function_properties("").unwrap().is_empty());
+        assert!(parse_function_properties("   ").unwrap().is_empty());
+        // The parts read in any order; `proto` takes the rest of the line.
+        let props = parse_function_properties(
+            "ret rdx conv win64 args rcx,rdx stack 8 clobbers rbx,r12 proto int f(int n, char *s)",
+        )
+        .expect("the line reads");
+        assert_eq!(props.convention.as_deref(), Some("win64"));
+        assert_eq!(props.stack_adjustment, Some(8));
+        assert_eq!(props.clobbers, vec!["rbx", "r12"]);
+        assert_eq!(props.arguments, vec!["rcx", "rdx"]);
+        assert_eq!(props.returns.as_deref(), Some("rdx"));
+        assert_eq!(props.prototype.as_deref(), Some("int f(int n, char *s)"));
+        // A part left out is nothing said for it.
+        let props = parse_function_properties("conv cdecl").unwrap();
+        assert_eq!(props.convention.as_deref(), Some("cdecl"));
+        assert!(props.prototype.is_none());
+        assert!(props.clobbers.is_empty());
+        // A word that is not one, or a part missing its value, is refused.
+        for bad in [
+            "conv bogus",
+            "clobbers r99",
+            "args nope",
+            "ret nope",
+            "stack xyz",
+            "proto int (",
+            "bogus",
+            "conv",
+            "stack",
+            "clobbers",
+            "args",
+            "ret",
+            "proto",
+        ] {
+            assert!(parse_function_properties(bad).is_err(), "{bad:?} read");
+        }
     }
 
     #[test]
