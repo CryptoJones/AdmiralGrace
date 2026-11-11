@@ -7,7 +7,7 @@ use iced::widget::{button, container, Container, Row, Space, Text};
 use iced::{Alignment, Background, Border, Element, Length};
 use iced_aw::menu::{Item, Menu, MenuBar};
 
-use crate::app::{App, Mark, Message};
+use crate::app::{App, DataTyping, Mark, Message};
 use crate::theme::color;
 
 /// Build the menu bar.
@@ -152,6 +152,38 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Ctrl+Shift+U",
                 Message::EditMark(Mark::Undefined),
             )),
+            Item::new(separator()),
+            Item::new(item_button(
+                "Type data: wider item",
+                "D",
+                Message::EditMark(Mark::Data),
+            )),
+            Item::new(item_button(
+                "Type data: sign",
+                "S",
+                Message::EditDataTyping(DataTyping::Sign),
+            )),
+            Item::new(item_button(
+                "Type data: complement",
+                "C",
+                Message::EditDataTyping(DataTyping::Complement),
+            )),
+            Item::new(item_button(
+                "Type data: char array",
+                "A",
+                Message::EditDataTyping(DataTyping::CharArray),
+            )),
+            Item::new(item_button(
+                "Type data: pointer",
+                "O",
+                Message::EditDataTyping(DataTyping::Pointer),
+            )),
+            Item::new(item_button(
+                "Type data: array of…",
+                "N",
+                Message::EditDataTyping(DataTyping::Array),
+            )),
+            Item::new(separator()),
             Item::new(item_button(
                 "Operand format (next: hex, signed, decimal, octal, address)",
                 "Ctrl+Shift+N",

@@ -151,6 +151,22 @@ pub fn parse_color(text: &str) -> Option<String> {
     }
 }
 
+/// What one item of data is: a number, a character, or an address.
+///
+/// The kind is the analyst's word on what the bytes mean. It changes how
+/// each item is shown, not how many bytes it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataKind {
+    /// A number, shown in hexadecimal — or as a signed decimal when signed.
+    #[default]
+    Number,
+    /// A character, shown as text.
+    Char,
+    /// An address, shown by the name of the place it points at when one is
+    /// named, else as a hexadecimal address.
+    Pointer,
+}
+
 /// How the analyst says the bytes at a place are to be read.
 ///
 /// The automatic split of code and data is sometimes wrong; this is the
@@ -158,6 +174,11 @@ pub fn parse_color(text: &str) -> Option<String> {
 /// `function`, `string`, `undefined`, or `data:W` for `W` bytes each with
 /// `[N]` after it for an array of `N` — so a reader that does not know a
 /// spelling keeps it and shows nothing for it rather than misreading it.
+///
+/// A data item carries the analyst's typing too: `s` after the width reads
+/// it signed, `c` as its bitwise complement (`data:4sc[8]`); `char[N]` is
+/// an array of `N` characters and `ptr:W[N]` an array of `N` addresses
+/// (`ptr` alone is one 8-byte address).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteType {
     /// An instruction.
@@ -174,6 +195,12 @@ pub enum ByteType {
         width: u8,
         /// How many items there are; one is not an array.
         count: u32,
+        /// What each item is: a number, a character or an address.
+        kind: DataKind,
+        /// Whether a number is read as signed (two's complement).
+        signed: bool,
+        /// Whether a number is shown as its bitwise complement.
+        complement: bool,
     },
 }
 
@@ -181,9 +208,22 @@ impl ByteType {
     /// The widths data cycles through, in order.
     pub const WIDTHS: [u8; 4] = [1, 2, 4, 8];
 
+    /// One unsigned number, `width` bytes, `count` items: the plain data
+    /// mark the quick typing keys start from.
+    pub fn data(width: u8, count: u32) -> ByteType {
+        ByteType::Data {
+            width,
+            count,
+            kind: DataKind::Number,
+            signed: false,
+            complement: false,
+        }
+    }
+
     /// Read a byte type as it is stored or typed: `code`, `function`,
-    /// `string`, `undefined`, `data`, `data:4`, `data:4[16]`, `data[16]`.
-    /// Case and the spaces around do not matter.
+    /// `string`, `undefined`, `data`, `data:4`, `data:4s`, `data:4c[16]`,
+    /// `data[16]`, `char[16]`, `ptr`, `ptr:4[8]`. Case and the spaces around
+    /// do not matter.
     pub fn parse(text: &str) -> Option<ByteType> {
         let text = text.trim().to_ascii_lowercase();
         match text.as_str() {
@@ -193,14 +233,72 @@ impl ByteType {
             "undefined" => return Some(ByteType::Undefined),
             _ => {}
         }
-        let rest = text.strip_prefix("data")?;
-        let (width, count) = match rest.split_once('[') {
-            Some((width, count)) => (width, Some(count.strip_suffix(']')?)),
+        if let Some(rest) = text.strip_prefix("data") {
+            let (width, signed, complement, count) = Self::parse_items(rest, 1, true)?;
+            return Some(ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed,
+                complement,
+            });
+        }
+        if let Some(rest) = text.strip_prefix("char") {
+            let count = Self::parse_char_count(rest)?;
+            return Some(ByteType::Data {
+                width: 1,
+                count,
+                kind: DataKind::Char,
+                signed: false,
+                complement: false,
+            });
+        }
+        if let Some(rest) = text.strip_prefix("ptr") {
+            let (width, _, _, count) = Self::parse_items(rest, 8, false)?;
+            return Some(ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Pointer,
+                signed: false,
+                complement: false,
+            });
+        }
+        None
+    }
+
+    /// The `[:W][flags][[N]]` tail of a `data` or `ptr` spelling: the width
+    /// (defaulting to `default_width` when none is written), the `s`/`c`
+    /// flags when they are allowed, and the item count.
+    fn parse_items(
+        rest: &str,
+        default_width: u8,
+        allow_flags: bool,
+    ) -> Option<(u8, bool, bool, u32)> {
+        let (head, count) = match rest.split_once('[') {
+            Some((head, count)) => (head, Some(count.strip_suffix(']')?)),
             None => (rest, None),
         };
-        let width: u8 = match width.strip_prefix(':') {
-            Some(width) => width.parse().ok()?,
-            None if width.is_empty() => 1,
+        let (width, signed, complement) = match head.strip_prefix(':') {
+            Some(tail) => {
+                let split = tail
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(tail.len());
+                let (digits, flags) = tail.split_at(split);
+                let width: u8 = digits.parse().ok()?;
+                if !allow_flags && !flags.is_empty() {
+                    return None;
+                }
+                let (mut signed, mut complement) = (false, false);
+                for flag in flags.chars() {
+                    match flag {
+                        's' => signed = true,
+                        'c' => complement = true,
+                        _ => return None,
+                    }
+                }
+                (width, signed, complement)
+            }
+            None if head.is_empty() => (default_width, false, false),
             None => return None,
         };
         if !Self::WIDTHS.contains(&width) {
@@ -210,7 +308,21 @@ impl ByteType {
             Some(count) => count.parse().ok().filter(|count| *count >= 1)?,
             None => 1,
         };
-        Some(ByteType::Data { width, count })
+        Some((width, signed, complement, count))
+    }
+
+    /// The `[N]` (or nothing) tail of a `char` spelling. A character is
+    /// always one byte, so no width is read.
+    fn parse_char_count(rest: &str) -> Option<u32> {
+        match rest.split_once('[') {
+            Some(("", count)) => count
+                .strip_suffix(']')?
+                .parse()
+                .ok()
+                .filter(|count: &u32| *count >= 1),
+            None if rest.is_empty() => Some(1),
+            _ => None,
+        }
     }
 
     /// The byte type as it is stored: the canonical spelling [`parse`]
@@ -223,24 +335,190 @@ impl ByteType {
             ByteType::Function => "function".into(),
             ByteType::String => "string".into(),
             ByteType::Undefined => "undefined".into(),
-            ByteType::Data { width, count: 1 } => format!("data:{width}"),
-            ByteType::Data { width, count } => format!("data:{width}[{count}]"),
+            ByteType::Data {
+                width,
+                count,
+                kind,
+                signed,
+                complement,
+            } => {
+                let items = if count == 1 {
+                    String::new()
+                } else {
+                    format!("[{count}]")
+                };
+                match kind {
+                    DataKind::Char => format!("char{items}"),
+                    DataKind::Pointer => {
+                        let width = if width == 8 {
+                            String::new()
+                        } else {
+                            format!(":{width}")
+                        };
+                        format!("ptr{width}{items}")
+                    }
+                    DataKind::Number => {
+                        let flags = format!(
+                            "{}{}",
+                            if signed { "s" } else { "" },
+                            if complement { "c" } else { "" }
+                        );
+                        format!("data:{width}{flags}{items}")
+                    }
+                }
+            }
         }
     }
 
     /// The data type one step wider: a byte to a word to a double word to a
-    /// quad word and round to a byte, the count kept. Anything that is not
-    /// data becomes one byte.
+    /// quad word and round to a byte, the count kept. A char array becomes
+    /// byte numbers; anything that is not data becomes one byte.
     pub fn next_width(self) -> ByteType {
         match self {
-            ByteType::Data { width, count } => {
+            ByteType::Data {
+                count,
+                kind: DataKind::Char,
+                ..
+            } => ByteType::data(1, count),
+            ByteType::Data {
+                width,
+                count,
+                kind,
+                signed,
+                complement,
+            } => {
                 let at = Self::WIDTHS.iter().position(|w| *w == width).unwrap_or(0);
                 ByteType::Data {
                     width: Self::WIDTHS[(at + 1) % Self::WIDTHS.len()],
                     count,
+                    kind,
+                    signed,
+                    complement,
                 }
             }
-            _ => ByteType::Data { width: 1, count: 1 },
+            _ => ByteType::data(1, 1),
+        }
+    }
+
+    /// The data with its sign flipped: a number reads signed or unsigned;
+    /// anything else becomes a signed number of the same width and count.
+    pub fn toggle_sign(self) -> ByteType {
+        match self {
+            ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed,
+                complement,
+            } => ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed: !signed,
+                complement,
+            },
+            ByteType::Data { width, count, .. } => ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed: true,
+                complement: false,
+            },
+            _ => ByteType::Data {
+                width: 1,
+                count: 1,
+                kind: DataKind::Number,
+                signed: true,
+                complement: false,
+            },
+        }
+    }
+
+    /// The data with its complement flipped: a number is shown as its
+    /// bitwise complement or not; anything else becomes a complemented
+    /// number of the same width and count.
+    pub fn toggle_complement(self) -> ByteType {
+        match self {
+            ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed,
+                complement,
+            } => ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed,
+                complement: !complement,
+            },
+            ByteType::Data { width, count, .. } => ByteType::Data {
+                width,
+                count,
+                kind: DataKind::Number,
+                signed: false,
+                complement: true,
+            },
+            _ => ByteType::Data {
+                width: 1,
+                count: 1,
+                kind: DataKind::Number,
+                signed: false,
+                complement: true,
+            },
+        }
+    }
+
+    /// The data read as characters, one byte each, the count kept; anything
+    /// that is not data becomes one character.
+    pub fn as_char(self) -> ByteType {
+        let count = match self {
+            ByteType::Data { count, .. } => count,
+            _ => 1,
+        };
+        ByteType::Data {
+            width: 1,
+            count,
+            kind: DataKind::Char,
+            signed: false,
+            complement: false,
+        }
+    }
+
+    /// The data read as addresses `width` bytes each, the count kept;
+    /// anything that is not data becomes one address.
+    pub fn as_pointer(self, width: u8) -> ByteType {
+        let count = match self {
+            ByteType::Data { count, .. } => count,
+            _ => 1,
+        };
+        ByteType::Data {
+            width,
+            count,
+            kind: DataKind::Pointer,
+            signed: false,
+            complement: false,
+        }
+    }
+
+    /// The data with `count` items, the item kept; anything that is not data
+    /// becomes `count` bytes.
+    pub fn with_count(self, count: u32) -> ByteType {
+        match self {
+            ByteType::Data {
+                width,
+                kind,
+                signed,
+                complement,
+                ..
+            } => ByteType::Data {
+                width,
+                count,
+                kind,
+                signed,
+                complement,
+            },
+            _ => ByteType::data(1, count),
         }
     }
 
@@ -248,7 +526,7 @@ impl ByteType {
     /// others reach as far as the bytes say.
     pub fn span(self) -> Option<usize> {
         match self {
-            ByteType::Data { width, count } => Some(width as usize * count as usize),
+            ByteType::Data { width, count, .. } => Some(width as usize * count as usize),
             _ => None,
         }
     }
@@ -2557,7 +2835,7 @@ mod tests {
         assert_eq!(ByteType::parse(" Function "), Some(ByteType::Function));
         assert_eq!(ByteType::parse("string"), Some(ByteType::String));
         assert_eq!(ByteType::parse("undefined"), Some(ByteType::Undefined));
-        let bytes = |width, count| ByteType::Data { width, count };
+        let bytes = |width, count| ByteType::data(width, count);
         assert_eq!(ByteType::parse("data"), Some(bytes(1, 1)));
         assert_eq!(ByteType::parse("data:4"), Some(bytes(4, 1)));
         assert_eq!(ByteType::parse("data:8[16]"), Some(bytes(8, 16)));
@@ -2600,6 +2878,134 @@ mod tests {
         );
         record.set_byte_type(None);
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_data_item_reads_its_sign_complement_char_and_pointer_spellings() {
+        use DataKind::{Char, Number, Pointer};
+        let item = |width, count, kind, signed, complement| ByteType::Data {
+            width,
+            count,
+            kind,
+            signed,
+            complement,
+        };
+        // Sign and complement flags, alone and together, with an array.
+        assert_eq!(
+            ByteType::parse("data:4s"),
+            Some(item(4, 1, Number, true, false))
+        );
+        assert_eq!(
+            ByteType::parse("data:4c"),
+            Some(item(4, 1, Number, false, true))
+        );
+        assert_eq!(
+            ByteType::parse("data:4sc[8]"),
+            Some(item(4, 8, Number, true, true))
+        );
+        assert_eq!(
+            ByteType::parse("data:2cs"),
+            Some(item(2, 1, Number, true, true))
+        );
+        // A char array is one byte an item; no width is read.
+        assert_eq!(
+            ByteType::parse("char"),
+            Some(item(1, 1, Char, false, false))
+        );
+        assert_eq!(
+            ByteType::parse("char[16]"),
+            Some(item(1, 16, Char, false, false))
+        );
+        assert_eq!(ByteType::parse("char:4"), None, "a char is one byte");
+        assert_eq!(ByteType::parse("char[0]"), None);
+        // A pointer defaults to eight bytes; a width may be written.
+        assert_eq!(
+            ByteType::parse("ptr"),
+            Some(item(8, 1, Pointer, false, false))
+        );
+        assert_eq!(
+            ByteType::parse("ptr:4"),
+            Some(item(4, 1, Pointer, false, false))
+        );
+        assert_eq!(
+            ByteType::parse("ptr:4[8]"),
+            Some(item(4, 8, Pointer, false, false))
+        );
+        assert_eq!(
+            ByteType::parse("ptr[3]"),
+            Some(item(8, 3, Pointer, false, false))
+        );
+        assert_eq!(ByteType::parse("ptr:4s"), None, "no flags on a pointer");
+        assert_eq!(ByteType::parse("data:4x"), None, "no such flag");
+        assert_eq!(ByteType::parse("data:3s"), None, "no such width");
+
+        // Every spelling round-trips through its canonical label.
+        for text in [
+            "data:4s",
+            "data:4c",
+            "data:4sc[8]",
+            "char",
+            "char[16]",
+            "ptr",
+            "ptr:4",
+            "ptr:4[8]",
+        ] {
+            assert_eq!(ByteType::parse(text).unwrap().label(), text, "round trip");
+        }
+        // A pointer of eight bytes spells no width; a char array of one is
+        // just `char`.
+        assert_eq!(item(8, 1, Pointer, false, false).label(), "ptr");
+        assert_eq!(item(1, 1, Char, false, false).label(), "char");
+    }
+
+    #[test]
+    fn the_quick_typing_keys_flip_sign_complement_kind_and_count() {
+        use DataKind::{Char, Number, Pointer};
+        let plain = ByteType::data(4, 3);
+        // Sign and complement flip on a number and back off.
+        let signed = plain.toggle_sign();
+        assert_eq!(signed.label(), "data:4s[3]");
+        assert_eq!(signed.toggle_sign(), plain);
+        let complemented = plain.toggle_complement();
+        assert_eq!(complemented.label(), "data:4c[3]");
+        assert_eq!(complemented.toggle_complement(), plain);
+        // Both together, in either order.
+        assert_eq!(signed.toggle_complement().label(), "data:4sc[3]");
+        assert_eq!(complemented.toggle_sign().label(), "data:4sc[3]");
+        // Sign on a non-number makes it a signed number, width and count kept.
+        assert_eq!(
+            ByteType::parse("char[5]").unwrap().toggle_sign().label(),
+            "data:1s[5]"
+        );
+        // Sign or complement on nothing starts a byte.
+        assert_eq!(ByteType::Code.toggle_sign().label(), "data:1s");
+        assert_eq!(ByteType::Undefined.toggle_complement().label(), "data:1c");
+
+        // Char and pointer keep the count; sign and complement come off.
+        assert_eq!(plain.as_char().label(), "char[3]");
+        assert_eq!(signed.as_char().label(), "char[3]");
+        assert_eq!(plain.as_pointer(4).label(), "ptr:4[3]");
+        assert_eq!(plain.as_pointer(8).label(), "ptr[3]");
+        assert_eq!(ByteType::String.as_char().label(), "char");
+        assert_eq!(ByteType::String.as_pointer(8).label(), "ptr");
+
+        // The count is set on whatever item is there.
+        assert_eq!(plain.with_count(8).label(), "data:4[8]");
+        assert_eq!(signed.with_count(8).label(), "data:4s[8]");
+        assert_eq!(plain.as_char().with_count(8).label(), "char[8]");
+        assert_eq!(ByteType::Code.with_count(8).label(), "data:1[8]");
+
+        // Width cycles a number and keeps its typing; a char array becomes
+        // byte numbers.
+        assert_eq!(signed.next_width().label(), "data:8s[3]");
+        assert_eq!(
+            ByteType::parse("char[3]").unwrap().next_width().label(),
+            "data:1[3]"
+        );
+        // The span is the item's width times its count, whatever the kind.
+        assert_eq!(ByteType::parse("char[16]").unwrap().span(), Some(16));
+        assert_eq!(ByteType::parse("ptr:4[8]").unwrap().span(), Some(32));
+        let _ = (Char, Number, Pointer);
     }
 
     #[test]

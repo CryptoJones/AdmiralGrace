@@ -209,7 +209,7 @@ Filed 2026-10-26.
 - [x] Apply JNI types to Java_* and JNI_* functions automatically — [#383](https://github.com/CryptoJones/AdmiralGrace/issues/383)
 - [x] Cross references for types and struct members — [#384](https://github.com/CryptoJones/AdmiralGrace/issues/384)
 - [x] Show a constant as an enum member — [#385](https://github.com/CryptoJones/AdmiralGrace/issues/385)
-- [ ] Quick data-typing keys: width, sign, complement, char array, pointer, array — [#386](https://github.com/CryptoJones/AdmiralGrace/issues/386)
+- [x] Quick data-typing keys: width, sign, complement, char array, pointer, array — [#386](https://github.com/CryptoJones/AdmiralGrace/issues/386)
 
 ### Function signatures
 

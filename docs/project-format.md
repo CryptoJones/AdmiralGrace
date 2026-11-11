@@ -88,7 +88,7 @@ An annotation is one address's worth of the analyst's decisions.
 | `tags` | Tags carried by the target. |
 | `color` | A color for the target, as `#rrggbb`. |
 | `mode` | The instruction set the code from the target onward decodes in, on an architecture that has more than one: `arm` or `thumb`. The mark reaches to the next mark or symbol that says otherwise. |
-| `byte_type` | How the bytes at the target are read, as the analyst said: `code`, `function`, `string`, `undefined`, or `data:W` for items of `W` bytes (1, 2, 4 or 8) with `[N]` after it for an array of `N` — `data:4[8]`. A reader that does not know a spelling keeps it and shows nothing for it. |
+| `byte_type` | How the bytes at the target are read, as the analyst said: `code`, `function`, `string`, `undefined`, or `data:W` for items of `W` bytes (1, 2, 4 or 8) with `[N]` after it for an array of `N` — `data:4[8]`. A number takes `s` after the width to read it signed and `c` to show its bitwise complement — `data:4sc[8]` is both. `char[N]` is an array of `N` characters, one byte each, and `ptr[:W][N]` an array of `N` addresses of `W` bytes — `ptr` alone is one 8-byte address, `ptr:4[8]` eight 4-byte ones. A reader that does not know a spelling keeps it and shows nothing for it. |
 
 Every field but `kind` and `address` is optional and is left out when it carries nothing. An
 annotation that has come to carry nothing at all is dropped on save, so the file says only

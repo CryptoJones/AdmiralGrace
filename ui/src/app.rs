@@ -176,6 +176,9 @@ pub enum Message {
     JumpTo(u64),
     /// Say how the bytes at the selection are read.
     EditMark(Mark),
+    /// Type the data at the selection with one key: its sign, its
+    /// complement, a char array, a pointer, or an array of a given count.
+    EditDataTyping(DataTyping),
     /// Say where the jump table the selected `jmp` reads is.
     EditSwitch,
     /// Allow or prevent one of the lift's judgment calls at the selected
@@ -474,6 +477,8 @@ pub enum PromptKind {
     AttachPid,
     /// The bytes at the selection, as hex pairs.
     Bytes,
+    /// How many items the data at the selection is an array of.
+    DataArray,
 }
 
 /// How the analyst marks the bytes at the selection.
@@ -489,6 +494,22 @@ pub enum Mark {
     String,
     /// Bytes with no meaning given.
     Undefined,
+}
+
+/// How the analyst types the data at the selection with one key. The width
+/// is cycled by [`Mark::Data`]; these are the rest of the quick keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataTyping {
+    /// Read the number signed, or unsigned again.
+    Sign,
+    /// Show the number as its bitwise complement, or as it is again.
+    Complement,
+    /// Read the items as characters, one byte each.
+    CharArray,
+    /// Read the items as addresses the width of the image's pointers.
+    Pointer,
+    /// Read the items as an array of a count the analyst types.
+    Array,
 }
 
 /// An inline prompt for a filesystem path.
@@ -2676,13 +2697,22 @@ impl App {
             graph.blocks.iter().map(|block| block.from).collect();
         // The operand formats are read the same way, once per function.
         let formats = self.formats_by_address();
-        self.work.listing = self.formatted(marked(listing, &marks, &stops), &formats);
+        // A pointer item is shown by the name of the place it points at
+        // when the analysis or the analyst named one.
+        let name_of = |value: u64| self.named_place(value);
+        let new_listing = self.formatted(marked_named(listing, &marks, &stops, &name_of), &formats);
         for block in &mut graph.blocks {
             block.instructions = self.formatted(
-                marked(std::mem::take(&mut block.instructions), &marks, &stops),
+                marked_named(
+                    std::mem::take(&mut block.instructions),
+                    &marks,
+                    &stops,
+                    &name_of,
+                ),
                 &formats,
             );
         }
+        self.work.listing = new_listing;
         self.work.graph = graph;
         self.work.il_graph = None;
         self.work.listing_shown = PaneLevel::Disassembly;
@@ -3150,6 +3180,7 @@ impl App {
         let edits = match &message {
             Message::EditBookmark
             | Message::EditMark(_)
+            | Message::EditDataTyping(_)
             | Message::EditOperandFormat
             | Message::EditUnionField
             | Message::EditNop
@@ -3186,6 +3217,7 @@ impl App {
                         | PromptKind::Assemble
                         | PromptKind::Nop
                         | PromptKind::Bytes
+                        | PromptKind::DataArray
                         | PromptKind::Mode
                 )
             }),
@@ -4385,7 +4417,7 @@ impl App {
                     // step wider; anywhere else it starts at a byte.
                     Mark::Data => Some(match current {
                         Some(data @ ByteType::Data { .. }) => data.next_width(),
-                        _ => ByteType::Data { width: 1, count: 1 },
+                        _ => ByteType::data(1, 1),
                     }),
                 };
                 // A function mark says what the place is.
@@ -4401,6 +4433,66 @@ impl App {
                     Some(next) => format!("Marked {key} as {}", next.label()),
                     None => format!("Mark taken off {key}: code"),
                 });
+                self.refresh_functions();
+                self.refresh_listing();
+            }
+
+            Message::EditDataTyping(typing) => {
+                use ag_corpus::project::ByteType;
+                // While a prompt is open the keys are about the typing in
+                // it, not the data beneath it.
+                if self.prompt.is_some() {
+                    return Task::none();
+                }
+                let Some(address) = self.selection.address() else {
+                    self.notice = Some("Select the bytes to type".into());
+                    return Task::none();
+                };
+                if !self.instruction_starts_at(address) {
+                    self.notice = Some(format!(
+                        "Marks start at an instruction; {address:#x} is not one"
+                    ));
+                    return Task::none();
+                }
+                let key = self.annotation_key(address);
+                let current = self
+                    .annotations
+                    .annotation_for(&key)
+                    .and_then(|a| a.byte_type());
+                // The array key asks for the count; the rest apply at once.
+                if typing == DataTyping::Array {
+                    let count = match current {
+                        Some(ByteType::Data { count, .. }) => count,
+                        _ => 1,
+                    };
+                    self.prompt = Some(Prompt {
+                        kind: PromptKind::DataArray,
+                        title: "Array of how many items (a count, 1 or more)",
+                        value: count.to_string(),
+                    });
+                    return Task::none();
+                }
+                let base = current.unwrap_or(ByteType::Undefined);
+                let next = match typing {
+                    DataTyping::Sign => base.toggle_sign(),
+                    DataTyping::Complement => base.toggle_complement(),
+                    DataTyping::CharArray => base.as_char(),
+                    DataTyping::Pointer => {
+                        let width = self
+                            .provider
+                            .bitness()
+                            .map(|bits| bits.byte_size() as u8)
+                            .unwrap_or(8);
+                        base.as_pointer(width)
+                    }
+                    DataTyping::Array => unreachable!("the array key opens a prompt above"),
+                };
+                let kind = self.kind_at(address);
+                self.annotations
+                    .annotation_mut(kind, &key)
+                    .set_byte_type(Some(next));
+                self.annotations.prune();
+                self.notice = Some(format!("Marked {key} as {}", next.label()));
                 self.refresh_functions();
                 self.refresh_listing();
             }
@@ -5551,6 +5643,35 @@ impl App {
                                     self.notice = Some(format!(
                                         "Not a reach: {text:?} (an address after {address:#x} to stop before, or +N bytes)"
                                     ));
+                                    return Task::none();
+                                }
+                            }
+                        }
+                    }
+                    PromptKind::DataArray => {
+                        let text = prompt.value.trim();
+                        if let Some(address) = self.selection.address() {
+                            match text.parse::<u32>().ok().filter(|count| *count >= 1) {
+                                Some(count) => {
+                                    let key = self.annotation_key(address);
+                                    let current = self
+                                        .annotations
+                                        .annotation_for(&key)
+                                        .and_then(|a| a.byte_type())
+                                        .unwrap_or(ag_corpus::project::ByteType::Undefined);
+                                    let next = current.with_count(count);
+                                    let kind = self.kind_at(address);
+                                    self.annotations
+                                        .annotation_mut(kind, &key)
+                                        .set_byte_type(Some(next));
+                                    self.annotations.prune();
+                                    self.notice = Some(format!("Marked {key} as {}", next.label()));
+                                    self.refresh_functions();
+                                    self.refresh_listing();
+                                }
+                                None => {
+                                    self.notice =
+                                        Some(format!("Not a count: {text:?} (1 or more items)"));
                                     return Task::none();
                                 }
                             }
@@ -7494,10 +7615,22 @@ const STRING_REACH: usize = 256;
 /// [`STRING_REACH`]; an undefined mark covers the one instruction. The
 /// first line that stands in keeps the comment of the line it replaced,
 /// so a block's header stays.
+#[cfg(test)]
 fn marked(
     lines: Vec<ListingLine>,
     marks: &std::collections::HashMap<u64, ag_corpus::project::ByteType>,
     stops: &std::collections::HashSet<u64>,
+) -> Vec<ListingLine> {
+    marked_named(lines, marks, stops, &|_| None)
+}
+
+/// [`marked`] with `name_of`, which names the place a pointer item points
+/// at when the analysis or the analyst gave it a name.
+fn marked_named(
+    lines: Vec<ListingLine>,
+    marks: &std::collections::HashMap<u64, ag_corpus::project::ByteType>,
+    stops: &std::collections::HashSet<u64>,
+    name_of: &dyn Fn(u64) -> Option<String>,
 ) -> Vec<ListingLine> {
     use ag_corpus::project::ByteType;
     if marks.is_empty() {
@@ -7535,7 +7668,7 @@ fn marked(
             at += 1;
             continue;
         }
-        let mut shown = data_lines(line.address, &bytes, mark);
+        let mut shown = data_lines(line.address, &bytes, mark, name_of);
         if let Some(first) = shown.first_mut() {
             first.comment = line.comment.clone();
         }
@@ -7674,13 +7807,21 @@ fn hex_bytes(text: &str) -> Vec<u8> {
 /// The listing lines that show `bytes`, starting at `address`, as the mark
 /// says they are read.
 ///
-/// Data is one line per item — `db`, `dw`, `dd` or `dq` with the value,
-/// little-endian — for as many items as the mark covers, and whatever is
-/// left of the last instruction the mark touched as bytes. A string is one
-/// line, its printable runs quoted and the rest as values, up to and with
-/// its zero. Undefined bytes are shown eight to a line.
-fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) -> Vec<ListingLine> {
-    use ag_corpus::project::ByteType;
+/// Data is one line per item — `db`, `dw`, `dd` or `dq`, little-endian — for
+/// as many items as the mark covers, and whatever is left of the last
+/// instruction the mark touched as bytes. A number is hexadecimal, or a
+/// signed decimal when signed, and its bitwise complement when complemented;
+/// a pointer is the name `name_of` gives the address it holds, else the
+/// address; a char array is one line of text of exactly its count. A string
+/// is one line, its printable runs quoted and the rest as values, up to and
+/// with its zero. Undefined bytes are shown eight to a line.
+fn data_lines(
+    address: u64,
+    bytes: &[u8],
+    mark: ag_corpus::project::ByteType,
+    name_of: &dyn Fn(u64) -> Option<String>,
+) -> Vec<ListingLine> {
+    use ag_corpus::project::{ByteType, DataKind};
     let line = |at: u64, mnemonic: &str, chunk: &[u8], operands: String| ListingLine {
         address: at,
         bytes: chunk
@@ -7708,11 +7849,42 @@ fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) ->
                 .join(", "),
         )
     };
+    // The bytes as text: printable runs quoted, the rest as values, a zero
+    // as `0`. A string and a char array are both shown this way.
+    let quoted = |text: &[u8]| -> String {
+        let mut parts = Vec::new();
+        let mut run = String::new();
+        for byte in text {
+            if (0x20..0x7f).contains(byte) && *byte != b'"' {
+                run.push(*byte as char);
+            } else {
+                if !run.is_empty() {
+                    parts.push(format!("\"{run}\""));
+                    run.clear();
+                }
+                parts.push(if *byte == 0 {
+                    "0".to_string()
+                } else {
+                    format!("{byte:#04x}")
+                });
+            }
+        }
+        if !run.is_empty() {
+            parts.push(format!("\"{run}\""));
+        }
+        parts.join(", ")
+    };
     let mut out = Vec::new();
     let mut at = address;
     let mut rest = bytes;
     match mark {
-        ByteType::Data { width, count } => {
+        ByteType::Data {
+            width,
+            count,
+            kind,
+            signed,
+            complement,
+        } => {
             let width = width as usize;
             let mnemonic = match width {
                 1 => "db",
@@ -7720,23 +7892,61 @@ fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) ->
                 4 => "dd",
                 _ => "dq",
             };
-            for _ in 0..count {
-                if rest.len() < width {
-                    break;
+            match kind {
+                // A char array is text of exactly its count, not run to a
+                // zero the way a string is.
+                DataKind::Char => {
+                    let n = (count as usize).min(rest.len());
+                    let (text, after) = rest.split_at(n);
+                    out.push(line(at, "db", text, quoted(text)));
+                    at += n as u64;
+                    rest = after;
                 }
-                let (item, after) = rest.split_at(width);
-                let value = item
-                    .iter()
-                    .rev()
-                    .fold(0u64, |value, byte| (value << 8) | *byte as u64);
-                out.push(line(
-                    at,
-                    mnemonic,
-                    item,
-                    format!("{value:#0w$x}", w = 2 + width * 2),
-                ));
-                at += width as u64;
-                rest = after;
+                _ => {
+                    for _ in 0..count {
+                        if rest.len() < width {
+                            break;
+                        }
+                        let (item, after) = rest.split_at(width);
+                        let mut value = item
+                            .iter()
+                            .rev()
+                            .fold(0u64, |value, byte| (value << 8) | *byte as u64);
+                        if complement {
+                            let mask = if width == 8 {
+                                u64::MAX
+                            } else {
+                                (1u64 << (width * 8)) - 1
+                            };
+                            value = !value & mask;
+                        }
+                        let shown = match kind {
+                            // An address is shown by the name of the place
+                            // it points at when one is named.
+                            DataKind::Pointer => match name_of(value) {
+                                Some(name) => name,
+                                None => format!("{value:#0w$x}", w = 2 + width * 2),
+                            },
+                            // A number is signed decimal when signed, else
+                            // hexadecimal.
+                            _ if signed => {
+                                let bits = width * 8;
+                                let signed = if bits == 64 {
+                                    value as i64
+                                } else if value & (1u64 << (bits - 1)) != 0 {
+                                    (value as i64) - (1i64 << bits)
+                                } else {
+                                    value as i64
+                                };
+                                format!("{signed}")
+                            }
+                            _ => format!("{value:#0w$x}", w = 2 + width * 2),
+                        };
+                        out.push(line(at, mnemonic, item, shown));
+                        at += width as u64;
+                        rest = after;
+                    }
+                }
             }
         }
         ByteType::String => {
@@ -7746,27 +7956,7 @@ fn data_lines(address: u64, bytes: &[u8], mark: ag_corpus::project::ByteType) ->
                 .map(|i| i + 1)
                 .unwrap_or(rest.len());
             let (text, after) = rest.split_at(end);
-            let mut parts = Vec::new();
-            let mut run = String::new();
-            for byte in text {
-                if (0x20..0x7f).contains(byte) && *byte != b'"' {
-                    run.push(*byte as char);
-                } else {
-                    if !run.is_empty() {
-                        parts.push(format!("\"{run}\""));
-                        run.clear();
-                    }
-                    parts.push(if *byte == 0 {
-                        "0".to_string()
-                    } else {
-                        format!("{byte:#04x}")
-                    });
-                }
-            }
-            if !run.is_empty() {
-                parts.push(format!("\"{run}\""));
-            }
-            out.push(line(at, "db", text, parts.join(", ")));
+            out.push(line(at, "db", text, quoted(text)));
             at += text.len() as u64;
             rest = after;
         }
@@ -7860,6 +8050,17 @@ fn shortcut(event: keyboard::Event) -> Message {
         (Key::Character("d"), true, true) => Message::EditMark(Mark::Data),
         (Key::Character("a"), true, true) => Message::EditMark(Mark::String),
         (Key::Character("u"), true, true) => Message::EditMark(Mark::Undefined),
+        // Quick data typing, one bare key on the selection: the width
+        // (`d`, wider each time), the sign (`s`), the complement (`c`), a
+        // char array (`a`), a pointer (`o`), or an array of a count (`n`).
+        // They reach the workbench only when no field is being typed into,
+        // so a letter in a filter stays a letter.
+        (Key::Character("d"), false, _) => Message::EditMark(Mark::Data),
+        (Key::Character("s"), false, _) => Message::EditDataTyping(DataTyping::Sign),
+        (Key::Character("c"), false, _) => Message::EditDataTyping(DataTyping::Complement),
+        (Key::Character("a"), false, _) => Message::EditDataTyping(DataTyping::CharArray),
+        (Key::Character("o"), false, _) => Message::EditDataTyping(DataTyping::Pointer),
+        (Key::Character("n"), false, _) => Message::EditDataTyping(DataTyping::Array),
         // The constants of the selected instruction, the next way round.
         (Key::Character("n"), true, true) => Message::EditOperandFormat,
         // Which member of a union the selected instruction reads.
@@ -8903,6 +9104,42 @@ mod tests {
         assert!(matches!(
             shortcut(z(ctrl | keyboard::Modifiers::SHIFT)),
             Message::EditRedo
+        ));
+
+        // The quick data-typing keys are bare letters on the selection.
+        assert!(matches!(
+            shortcut(character("d", none)),
+            Message::EditMark(Mark::Data)
+        ));
+        assert!(matches!(
+            shortcut(character("s", none)),
+            Message::EditDataTyping(DataTyping::Sign)
+        ));
+        assert!(matches!(
+            shortcut(character("c", none)),
+            Message::EditDataTyping(DataTyping::Complement)
+        ));
+        assert!(matches!(
+            shortcut(character("a", none)),
+            Message::EditDataTyping(DataTyping::CharArray)
+        ));
+        assert!(matches!(
+            shortcut(character("o", none)),
+            Message::EditDataTyping(DataTyping::Pointer)
+        ));
+        assert!(matches!(
+            shortcut(character("n", none)),
+            Message::EditDataTyping(DataTyping::Array)
+        ));
+        // A capital types too, and the command chord still wins over the
+        // bare letter.
+        assert!(matches!(
+            shortcut(character("s", keyboard::Modifiers::SHIFT)),
+            Message::EditDataTyping(DataTyping::Sign)
+        ));
+        assert!(matches!(
+            shortcut(character("n", ctrl | keyboard::Modifiers::SHIFT)),
+            Message::EditOperandFormat
         ));
     }
 
@@ -10897,6 +11134,179 @@ mod tests {
     }
 
     #[test]
+    fn the_quick_keys_type_the_data_at_the_selection_and_undo_takes_it_back() {
+        let start = 0x100084A20;
+        let byte_at = |app: &App| {
+            app.work
+                .listing
+                .iter()
+                .position(|line| line.address == start + 4)
+                .expect("the second instruction")
+        };
+        let mark_of = |app: &App| {
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 4))
+                .and_then(|a| a.byte_type())
+                .map(|m| m.label())
+        };
+
+        // Sign: the byte 0xfd reads -3; sign again reads it unsigned.
+        let mut app = app();
+        let _ = app.update(Message::FunctionSelected(start));
+        let _ = app.update(Message::AddressSelected(start + 4));
+        let at = byte_at(&app);
+        let _ = app.update(Message::EditDataTyping(DataTyping::Sign));
+        assert_eq!(mark_of(&app).as_deref(), Some("data:1s"));
+        assert_eq!(
+            (
+                app.work.listing[at].mnemonic.as_str(),
+                app.work.listing[at].operands.as_str()
+            ),
+            ("db", "-3")
+        );
+        let _ = app.update(Message::EditDataTyping(DataTyping::Sign));
+        assert_eq!(mark_of(&app).as_deref(), Some("data:1"));
+        assert_eq!(app.work.listing[at].operands, "0xfd");
+
+        // Complement: 0xfd reads 0x02; with sign too it reads 2.
+        let _ = app.update(Message::EditDataTyping(DataTyping::Complement));
+        assert_eq!(mark_of(&app).as_deref(), Some("data:1c"));
+        assert_eq!(app.work.listing[at].operands, "0x02");
+        let _ = app.update(Message::EditDataTyping(DataTyping::Sign));
+        assert_eq!(mark_of(&app).as_deref(), Some("data:1sc"));
+        assert_eq!(app.work.listing[at].operands, "2");
+        assert_eq!(app.undo.len(), 4);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(mark_of(&app).as_deref(), Some("data:1c"));
+        assert_eq!(app.work.listing[at].operands, "0x02");
+    }
+
+    #[test]
+    fn the_char_and_pointer_keys_type_the_data_and_a_key_off_an_instruction_is_refused() {
+        let start = 0x100084A20;
+        let mut app = app();
+        let _ = app.update(Message::FunctionSelected(start));
+        let _ = app.update(Message::AddressSelected(start + 4));
+        let at = app
+            .work
+            .listing
+            .iter()
+            .position(|line| line.address == start + 4)
+            .expect("the second instruction");
+        let mark_of = |app: &App| {
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 4))
+                .and_then(|a| a.byte_type())
+                .map(|m| m.label())
+        };
+
+        // A char array reads the bytes as text; a pointer as an address the
+        // width of the image's pointers (eight when it says nothing).
+        let _ = app.update(Message::EditDataTyping(DataTyping::CharArray));
+        assert_eq!(mark_of(&app).as_deref(), Some("char"));
+        assert_eq!(app.work.listing[at].mnemonic, "db");
+        let _ = app.update(Message::EditDataTyping(DataTyping::Pointer));
+        assert_eq!(mark_of(&app).as_deref(), Some("ptr"));
+        assert_eq!(app.work.listing[at].mnemonic, "dq");
+
+        // A key off an instruction is refused, like a mark.
+        let _ = app.update(Message::AddressSelected(start + 5));
+        let _ = app.update(Message::EditDataTyping(DataTyping::Sign));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Marks start at an instruction")));
+    }
+
+    #[test]
+    fn the_array_key_asks_for_a_count_and_types_the_data_as_an_array() {
+        let start = 0x100084A20;
+        let mut app = app();
+        let _ = app.update(Message::FunctionSelected(start));
+        let before = app.work.listing.clone();
+        let _ = app.update(Message::AddressSelected(start + 4));
+
+        // The array key opens a prompt on the count, one when nothing is
+        // marked yet.
+        let _ = app.update(Message::EditDataTyping(DataTyping::Array));
+        assert!(matches!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::DataArray)
+        ));
+        assert_eq!(app.prompt.as_ref().unwrap().value, "1");
+        let _ = app.update(Message::PromptChanged("4".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none());
+        assert_eq!(
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 4))
+                .and_then(|a| a.byte_type())
+                .map(|m| m.label()),
+            Some("data:1[4]".into())
+        );
+        // Four byte items stand in for the one four-byte instruction.
+        assert_eq!(app.work.listing.len(), before.len() + 3);
+
+        // The count is kept when the item is typed further: a signed array.
+        let _ = app.update(Message::EditDataTyping(DataTyping::Sign));
+        assert_eq!(
+            app.annotations
+                .annotation_for(&app.annotation_key(start + 4))
+                .and_then(|a| a.byte_type())
+                .map(|m| m.label()),
+            Some("data:1s[4]".into())
+        );
+
+        // The prompt opens on the count already there, and a bad count is
+        // refused.
+        let _ = app.update(Message::EditDataTyping(DataTyping::Array));
+        assert_eq!(app.prompt.as_ref().unwrap().value, "4");
+        let _ = app.update(Message::PromptChanged("0".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Not a count")));
+    }
+
+    #[test]
+    fn data_lines_shows_a_number_signed_complemented_a_char_array_and_a_pointer() {
+        use ag_corpus::project::ByteType;
+        let none = |_: u64| None;
+        // A signed number reads as a decimal; a complemented one as its
+        // bitwise complement; both together as the signed complement.
+        let bytes = [0xfd, 0xff, 0xff, 0xff];
+        let signed = ByteType::parse("data:4s").unwrap();
+        let shown = data_lines(0x1000, &bytes, signed, &none);
+        assert_eq!(shown[0].mnemonic, "dd");
+        assert_eq!(shown[0].operands, "-3");
+        let complement = ByteType::parse("data:1c").unwrap();
+        let shown = data_lines(0x1000, &[0xfd], complement, &none);
+        assert_eq!(shown[0].operands, "0x02");
+        let both = ByteType::parse("data:1sc").unwrap();
+        let shown = data_lines(0x1000, &[0xfd], both, &none);
+        assert_eq!(shown[0].operands, "2");
+
+        // A char array is text of exactly its count, printable runs quoted.
+        let chars = ByteType::parse("char[5]").unwrap();
+        let shown = data_lines(0x1000, b"hi\x00th", chars, &none);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].mnemonic, "db");
+        assert_eq!(shown[0].operands, "\"hi\", 0, \"th\"");
+        assert_eq!(shown[0].bytes, "68 69 00 74 68");
+
+        // A pointer is the name of the place it points at when one is
+        // named, else the address.
+        let ptr = ByteType::parse("ptr:4").unwrap();
+        let named = |value: u64| (value == 0x2000).then(|| "target".to_string());
+        let shown = data_lines(0x1000, &[0x00, 0x20, 0x00, 0x00], ptr, &named);
+        assert_eq!(shown[0].mnemonic, "dd");
+        assert_eq!(shown[0].operands, "target");
+        let shown = data_lines(0x1000, &[0x00, 0x20, 0x00, 0x00], ptr, &none);
+        assert_eq!(shown[0].operands, "0x00002000");
+    }
+
+    #[test]
     fn a_mark_stops_at_a_gap_a_block_and_a_line_without_bytes() {
         use ag_corpus::project::ByteType;
         let line = |address: u64, bytes: &str| ListingLine {
@@ -10913,7 +11323,7 @@ mod tests {
         let marks =
             |address: u64, mark: ByteType| std::collections::HashMap::from([(address, mark)]);
         let no_stops = std::collections::HashSet::new();
-        let quad = ByteType::Data { width: 8, count: 1 };
+        let quad = ByteType::data(8, 1);
 
         // A gap: the mark takes what is there and no more, and the line
         // past the gap stays.
