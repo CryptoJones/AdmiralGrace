@@ -581,6 +581,15 @@ directly:
   function list as `sub_` and its address — the analyst's name for it when there is one —
   and opening it reads the function from there; where the analysis found none, the inspector
   says the mark is the analyst's.
+- The quick data-typing keys type the data at the selection with a single bare key, no
+  modifier: **D** makes the item wider (as Ctrl+Shift+D does), **S** toggles signed — a number
+  read as two's complement and shown as a decimal — **C** toggles the bitwise complement,
+  **A** reads the bytes as a char array, **O** as a pointer (an address, shown by the name of
+  the place it points at when one is named), and **N** asks for a count and makes an array of
+  that many items. Sign and complement are a number's alone: a char or pointer clears them.
+  The count is kept as the width or kind changes, and a pointer is as wide as the image's
+  addresses. Like the marks, these need the selection on an instruction the analysis decoded,
+  and undo takes each back.
 
 A data, string or undefined mark stands in place of the instructions it covers, in the
 listing and the graph alike, and the bytes it shows are the ones the analysis decoded there:
@@ -589,8 +598,8 @@ follows the last with no gap and none starts a block, and what is left of the la
 instruction a data mark cut into follows as bytes. A string with no zero runs 256 bytes at
 most. The line that stands in keeps the header of the one it replaced. A function the analyst
 marked is the function the addresses after it belong to, until the next. An array — `data:4[8]` — is
-recorded with `ag project mark`; the workbench cycles the width of one item. The inspector
-shows the mark as the file holds it.
+made with the **N** key or recorded with `ag project mark`; the workbench cycles the width of one
+item. The inspector shows the mark as the file holds it.
 
 The right base for a constant depends on what it means — a flag mask, a count, an address —
 so the analyst chooses it per instruction:

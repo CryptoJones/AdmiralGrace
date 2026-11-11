@@ -567,6 +567,49 @@ fn a_mark_says_how_the_bytes_are_read_and_a_typo_is_refused() {
 }
 
 #[test]
+fn a_mark_types_data_signed_complemented_char_and_pointer() {
+    let file = TempFile::new("mark-typed");
+    for (address, kind, stored) in [
+        ("0x1161", "data:4s", "data:4s"),
+        ("0x1169", "data:2c[4]", "data:2c[4]"),
+        ("0x1171", "data:8sc", "data:8sc"),
+        ("0x1179", "char[16]", "char[16]"),
+        ("0x1189", "ptr", "ptr"),
+        ("0x1191", "ptr:4[8]", "ptr:4[8]"),
+    ] {
+        let (ok, stdout, stderr) = project(&["mark", "--file", &file.text(), address, kind]);
+        assert!(ok, "{stderr}");
+        assert!(stdout.contains(&format!("now type {stored}")), "{stdout}");
+    }
+    let report = show_json(&file);
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    let stored: Vec<&str> = annotations
+        .iter()
+        .map(|a| a["byte_type"].as_str().expect("a byte type"))
+        .collect();
+    assert_eq!(
+        stored,
+        vec![
+            "data:4s",
+            "data:2c[4]",
+            "data:8sc",
+            "char[16]",
+            "ptr",
+            "ptr:4[8]"
+        ],
+        "{report}"
+    );
+
+    // A pointer takes no sign flag, and a char no width.
+    let (ok, _, stderr) = project(&["mark", "--file", &file.text(), "0x1199", "ptr:4s"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not a byte type"), "{stderr}");
+    let (ok, _, stderr) = project(&["mark", "--file", &file.text(), "0x1199", "char:4"]);
+    assert!(!ok);
+    assert!(stderr.contains("is not a byte type"), "{stderr}");
+}
+
+#[test]
 fn an_operand_format_is_recorded_and_hex_clears_it() {
     let file = TempFile::new("operand");
     let (ok, stdout, stderr) = project(&["operand", "--file", &file.text(), "0x1161", "Decimal"]);

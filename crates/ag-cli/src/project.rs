@@ -131,7 +131,9 @@ pub enum ProjectCmd {
         address: String,
         /// How the bytes are read: `code`, `function`, `string`,
         /// `undefined`, `data`, `data:W` for `W` of 1, 2, 4 or 8 bytes each,
-        /// `data:W[N]` for an array of `N`, or `none` to take the mark off.
+        /// `data:W[N]` for an array of `N`, `data:Ws`/`data:Wc` for a signed
+        /// or complemented number, `char[N]` for an array of characters,
+        /// `ptr[:W][N]` for addresses, or `none` to take the mark off.
         kind: String,
     },
     /// Say how the constants in an instruction's operands are shown.
@@ -711,7 +713,7 @@ pub fn run(
             } else {
                 Some(ByteType::parse(&kind).with_context(|| {
                     format!(
-                        "{kind:?} is not a byte type; use code, function, string, undefined, data, data:W or data:W[N]"
+                        "{kind:?} is not a byte type; use code, function, string, undefined, data:W[s][c][N], char[N] or ptr[:W][N]"
                     )
                 })?)
             };
