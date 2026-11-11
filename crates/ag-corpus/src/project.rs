@@ -564,6 +564,13 @@ pub struct Annotation {
     /// as the analysis printed them and misreads nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand_format: Option<String>,
+    /// The enumeration a constant in the instruction's operands is shown
+    /// as a member of, by the enumeration's key — `enum state`, `mode_t`.
+    /// A reader that does not know the field shows the constant as a
+    /// number and misreads nothing, so the format version does not change
+    /// for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constant_enum: Option<String>,
     /// Which member of a union the access at the instruction means, by
     /// name, when the analyst said and this program reads the name: the
     /// pseudocode prints `u.f` where it would print the first member the
@@ -869,6 +876,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            constant_enum: None,
             union_field: None,
             jump_table: None,
             patch: None,
@@ -907,6 +915,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            constant_enum: None,
             union_field: None,
             jump_table: None,
             patch: None,
@@ -944,6 +953,7 @@ impl Annotation {
             name: None,
             references: Vec::new(),
             operand_format: None,
+            constant_enum: None,
             union_field: None,
             jump_table: None,
             patch: None,
@@ -1091,6 +1101,21 @@ impl Annotation {
         self.operand_format = format
             .filter(|format| *format != OperandFormat::Hex)
             .map(|format| format.label().to_string());
+    }
+
+    /// The enumeration a constant in the instruction's operands is shown
+    /// as a member of, when the record says.
+    pub fn constant_enum(&self) -> Option<&str> {
+        self.constant_enum.as_deref()
+    }
+
+    /// Record the enumeration a constant is shown as a member of, or
+    /// clear it with `None`; an empty name is no choice.
+    pub fn set_constant_enum(&mut self, key: Option<&str>) {
+        self.constant_enum = key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string);
     }
 
     /// Which member of a union the access at the instruction means, when
@@ -1956,6 +1981,21 @@ impl ProjectFile {
                 let name = a.union_field.clone()?;
                 let (value, _) = crate::parse_addr_space(&a.address).ok()?;
                 Some((value, name))
+            })
+            .collect()
+    }
+
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of, by the value of the address of each instruction
+    /// that said. A word on a spaced address keys on its value, as a union
+    /// field does.
+    pub fn constant_enums(&self) -> BTreeMap<u64, String> {
+        self.places()
+            .filter(|a| !a.block)
+            .filter_map(|a| {
+                let key = a.constant_enum.clone()?;
+                let (value, _) = crate::parse_addr_space(&a.address).ok()?;
+                Some((value, key))
             })
             .collect()
     }

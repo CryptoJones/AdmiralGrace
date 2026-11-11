@@ -549,6 +549,9 @@ pub struct Binary {
     /// The analyst's word on which member of a union each instruction's
     /// access means, by the address of each instruction that said.
     union_fields: Mutex<BTreeMap<u64, String>>,
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of, by the address of each instruction that said.
+    constant_enums: Mutex<BTreeMap<u64, String>>,
     /// The analyst's types, built from the project's C under the image's
     /// data model; `None` for the platform's primitives alone.
     types: Mutex<Option<Arc<TypeStore>>>,
@@ -941,6 +944,7 @@ impl Binary {
             inlines: Mutex::new(BTreeMap::new()),
             variable_edits: Mutex::new(BTreeMap::new()),
             union_fields: Mutex::new(BTreeMap::new()),
+            constant_enums: Mutex::new(BTreeMap::new()),
             types: Mutex::new(None),
             inline_visiting: Mutex::new(HashSet::new()),
             site_overrides: Mutex::new(BTreeMap::new()),
@@ -2289,6 +2293,44 @@ impl Binary {
     /// means, when the record says.
     pub fn union_field(&self, address: u64) -> Option<String> {
         self.union_fields
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&address).cloned())
+    }
+
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of — by the address of each instruction that said — and
+    /// say whether that changed anything. The pseudocode and the levels are
+    /// read again after; the walks are kept, since the choice changes no
+    /// function's graph.
+    pub fn set_constant_enums(&self, enums: BTreeMap<u64, String>) -> bool {
+        if let Ok(mut held) = self.constant_enums.lock() {
+            if *held == enums {
+                return false;
+            }
+            *held = enums;
+        } else {
+            return false;
+        }
+        if let Ok(mut cache) = self.pseudocode.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.type_uses.lock() {
+            *cache = None;
+        }
+        if let Ok(mut cache) = self.type_facts.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.levels.lock() {
+            cache.clear();
+        }
+        true
+    }
+
+    /// The enumeration a constant in the instruction's operands at
+    /// `address` is shown as a member of, when the record says.
+    pub fn constant_enum(&self, address: u64) -> Option<String> {
+        self.constant_enums
             .lock()
             .ok()
             .and_then(|held| held.get(&address).cloned())
@@ -4279,6 +4321,17 @@ impl Symbols for ImageSymbols<'_> {
     fn union_fields(&self) -> std::collections::BTreeMap<u64, String> {
         self.0
             .union_fields
+            .lock()
+            .ok()
+            .map(|held| (*held).clone())
+            .unwrap_or_default()
+    }
+
+    /// The enumeration a constant in each instruction's operands is shown
+    /// as a member of, by address.
+    fn constant_enums(&self) -> std::collections::BTreeMap<u64, String> {
+        self.0
+            .constant_enums
             .lock()
             .ok()
             .map(|held| (*held).clone())
