@@ -672,6 +672,31 @@ ag archive pull --project ls.agproj shared.agarchive --keep archive
 | `ag archive status --project PROJECT ARCHIVE [--json]` | Where every name stands, in name order: `in-sync`, `project-only`, `archive-only` or `conflict`; `--json` carries the `c` each side holds. |
 | `ag archive resolve --project PROJECT ARCHIVE NAME --keep project\|archive` | Settles one conflict by changing one side alone. Refuses a name that is not a conflict. |
 
+## Library identification by whole-function hash: `ag funcid`
+
+A library function is the same code in every program that links it, so it
+can be named by a fingerprint of its body without lifting a line.
+`ag funcid` makes the signature files (`.agsig`) that hold those
+fingerprints, reads them back onto an image, and writes what a match knows
+— the name, the prototype, the comment — into a project, keeping the
+analyst's own words. The engine ships signatures for libc, libstdc++ and
+libgcc. See `ag docs funcid` for the fingerprint, its constraints and the
+file format.
+
+```sh
+ag funcid list
+ag funcid create /lib/x86_64-linux-gnu/libc.so.6 -o libc.agsig --library libc
+ag funcid match ./program --sig libc.agsig
+ag funcid apply ./program --project program.agproj --sig libc.agsig
+```
+
+| Command | What it does |
+|---|---|
+| `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT] [--no-types] [--json]` | Fingerprints every named function of an image; a function the type libraries know carries its prototype unless `--no-types`. |
+| `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more. |
+| `ag funcid apply BINARY --project PROJECT [--sig FILE]… [--no-builtin] [--json]` | Writes each match's name, prototype and comment into a project, made from the image when not there yet. A rename or type already on a function stands. |
+| `ag funcid list [--json]` | The signature databases the engine ships, with their counts and provenance. |
+
 ## Platform types: `ag platform`
 
 `ag platform` reports and extends the default types of each platform

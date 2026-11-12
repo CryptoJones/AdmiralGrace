@@ -66,6 +66,7 @@ pub use ag_engine::defuse::{
 };
 pub use ag_engine::emulate::{self as emulate, Limits as EmulationLimits, Run as Emulation};
 pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
+pub use ag_engine::funcid::{self as funcid, Signature, SignatureDb, SignatureSet};
 pub use ag_engine::global_pointer::{
     GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
 };
@@ -82,6 +83,7 @@ pub use ag_engine::opaque::Opaque;
 pub use ag_engine::options;
 use ag_engine::options::{BranchesEndProcedures, CodeSections};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
+pub use ag_engine::propagate::{self as propagate};
 pub use ag_engine::properties::FunctionProperties;
 pub use ag_engine::pvs::{PossibleValues, StatementValues};
 pub use ag_engine::slice::{Criterion as SliceCriterion, Direction as SliceDirection};

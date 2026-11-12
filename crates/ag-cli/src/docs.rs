@@ -86,6 +86,12 @@ pub const DOCS: &[Doc] = &[
         body: include_str!("../../../docs/archive.md"),
     },
     Doc {
+        topic: "funcid",
+        summary: "Library identification by whole-function hash: signature files, matching, and applying names, types and comments.",
+        readme_sections: &[],
+        body: include_str!("../../../docs/funcid.md"),
+    },
+    Doc {
         topic: "workbench",
         summary: "The panes of ag-ui, and the kuna JSON surfaces it reads.",
         readme_sections: &["Desktop workbench"],

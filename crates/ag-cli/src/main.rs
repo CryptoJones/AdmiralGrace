@@ -11,6 +11,7 @@ mod catalog;
 mod debug;
 mod docs;
 mod export;
+mod funcid;
 mod image;
 mod mcp;
 mod platform;
@@ -210,6 +211,12 @@ enum Cmd {
     Platform {
         #[command(subcommand)]
         cmd: platform::PlatformCmd,
+    },
+    /// Library identification by whole-function hash: make signature files,
+    /// match an image's functions against them, and apply what a match knows.
+    Funcid {
+        #[command(subcommand)]
+        cmd: funcid::FuncidCmd,
     },
 }
 
@@ -477,6 +484,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         }
         Cmd::Archive { cmd } => archive::run(cmd),
         Cmd::Platform { cmd } => platform::run(cmd),
+        Cmd::Funcid { cmd } => funcid::run(cmd),
     }
 }
 
