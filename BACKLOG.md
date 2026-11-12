@@ -234,7 +234,7 @@ Filed 2026-10-26.
 ### Diffing
 
 - [ ] Binary similarity and diffing between versions — [#398](https://github.com/CryptoJones/AdmiralGrace/issues/398)
-- [ ] Export BinExport for BinDiff — [#399](https://github.com/CryptoJones/AdmiralGrace/issues/399)
+- [x] Export BinExport for BinDiff — [#399](https://github.com/CryptoJones/AdmiralGrace/issues/399)
 
 ### Debug info and interop
 

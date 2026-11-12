@@ -119,6 +119,8 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 `export` writes the whole analysis to a directory in one pass: `info.json`, `symbols.json`, `strings.json`, `data.json` and `calls.json` as the subcommands print them under `--json`, a `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json`, and a `README.md` naming the binary, its SHA-256 and the `ag` version. `--functions REGEX` limits the per-function files; a directory that is not empty is refused without `--force`.
 
+`binexport FILE` writes the analysis as a BinExport file — the call graph, the flow graphs, the instructions and their operands — so two versions read by `ag` can be compared in BinDiff. `--project FILE` writes the project's renames and comments with it.
+
 ## Library identification
 
 A library function is the same code in every program that links it, so `ag funcid` names it by a hash of its whole body without lifting a line. The bytes that carry an address — a branch's relative target, a RIP-relative or absolute displacement — are masked before hashing, so the same function matches at any load address, while a stack or structure offset is kept. `create` makes a signature file (`.agsig`) from a named library, `match` reports the functions of an image a signature knows, and `apply` writes what a match knows — the name, the prototype, the comment — into a project, keeping the analyst's own words. The engine ships signatures for libc, libstdc++ and libgcc; a whole-function hash is exact, so they match the build they were taken from and `create` makes signatures for the exact libraries a target links.

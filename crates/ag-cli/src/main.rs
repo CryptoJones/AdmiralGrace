@@ -7,6 +7,7 @@ use ag_corpus::objc::Overlay;
 use ag_corpus::{BodyRange, Corpus};
 
 mod archive;
+mod binexport;
 mod catalog;
 mod debug;
 mod diff;

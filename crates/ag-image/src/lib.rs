@@ -109,6 +109,7 @@ pub use ag_engine::Placement;
 pub use ag_engine::typed::{format_type_uses, underlying_key, TypeUse};
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
+pub mod binexport;
 pub mod diff;
 pub mod graph_export;
 pub mod plugin;

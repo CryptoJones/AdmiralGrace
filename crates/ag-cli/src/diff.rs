@@ -143,7 +143,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
 
 /// The analyst's renames a project holds, by function entry: a rename
 /// recorded for a function is its name for the comparison.
-fn renames_of(project: Option<&ProjectFile>) -> BTreeMap<u64, String> {
+pub(crate) fn renames_of(project: Option<&ProjectFile>) -> BTreeMap<u64, String> {
     let mut out = BTreeMap::new();
     let Some(project) = project else {
         return out;

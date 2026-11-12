@@ -257,6 +257,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
 | `export DIR --force` | Write into a directory that is not empty. |
 | `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |
+| `binexport FILE [--project FILE]` | The analysis as a BinExport file, the format BinDiff compares: the call graph, every function's flow graph, the basic blocks, the instructions with their bytes, mnemonics and operands, the strings and data they refer to, and the sections. With `--project FILE` the project's renames are the functions' names and its comments are written on their instructions. One line on stdout: the functions, the flow graphs, the basic blocks, the instructions and the bytes written. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
@@ -518,6 +519,49 @@ nothing in it is removed, so `index.json` is the list of what the last run wrote
 takes; the whole-image files are never limited. A function the decoder cannot reach — a
 symbol in no code section — gets no files, and a warning on stderr names it. An image the
 decoder does not read is refused, like `disasm`. An error names the file it could not write.
+
+`binexport` writes the analysis as one `BinExport2` protobuf message — the file Google's
+BinExport plugins write for IDA Pro, Ghidra and Binary Ninja, and the one BinDiff reads — so
+two versions of a binary read by `ag` can be compared in BinDiff, or one read by `ag` with
+one exported from another tool:
+
+```sh
+cargo run --bin ag -- image ./old.elf binexport old.BinExport
+cargo run --bin ag -- image ./new.elf binexport new.BinExport --project new.agproj
+bindiff old.BinExport new.BinExport
+```
+
+(`ag diff` compares two versions without leaving `ag`; `binexport` is for the reader who
+wants BinDiff's matching, or its interface.) The file holds:
+
+- the *meta*: the executable's file name, its SHA-256, the architecture as BinExport names
+  it (`x86-64`, `x86-32`, `ARM-32`, `ARM-64`, `MIPS-32`) and the time it was written;
+- the *call graph*: one vertex a function, in address order, and one edge a call site. A
+  function with a real name carries it — the mangled name, and the demangled one beside it
+  when they differ — and one the analysis named itself (`sub_…`) carries none, which is how
+  BinDiff tells the two apart. A stub that only jumps through an import slot is a `THUNK`,
+  and each import a function calls is an `IMPORTED` vertex at its slot;
+- one *flow graph* a function that was disassembled: its basic blocks, the block it starts
+  at, and the edges between them, each a `CONDITION_TRUE`, a `CONDITION_FALSE`, an
+  `UNCONDITIONAL` or a `SWITCH`, with the edges that close a loop — the ones to a block that
+  dominates their source — marked as back edges;
+- the *instructions*, in address order, with their raw bytes, their mnemonic, the address a
+  call goes to, and their *operands* as expression trees: `qword ptr [rbp+rax*8-14h]` is a
+  size (`b8`) over a dereference over a sum of a register, a register times a scale and an
+  integer. Operand text that reads as none of these is written whole, as one symbol. A
+  prefix is part of the mnemonic (`bnd jmp`, `rep movsb`);
+- the *string references* and *data references*: the strings and data the instructions
+  point at, as `strings` and `data` report them;
+- the *comments* of the project, each on its instruction, one written above its line as
+  `ANTERIOR`;
+- the *sections*, each with its address and size, readable, and executable when it holds
+  code.
+
+Three things the format can hold are left out because the image does not say them: a
+section's write flag, the library and module tables, and the `LIBRARY` function type. A
+comment on an address where no function's instruction starts has nowhere to stand and is
+left out too. The file's directory is made when it is not there, and a file already there
+is written over. An image the decoder does not read is refused, like `disasm`.
 
 ## Assembling one instruction: `ag asm`
 
