@@ -12,7 +12,9 @@
 //! lives in `ag_image::plugin`, beside the image it reads. A **recognizer**
 //! finds the expressions that build strings — a stack string written a
 //! character at a time, a buffer XORed with a key — and decodes them, for
-//! the pseudocode to show beside the lines that build them.
+//! the pseudocode to show beside the lines that build them. A **renderer**
+//! names the constants a function's expressions use — an error code, a
+//! flag, a magic number — for the pseudocode to show in their place.
 //!
 //! A plugin is written one of two ways. In Rust, a crate that builds on
 //! the engine implements [`Loader`] or [`Architecture`] and registers it
@@ -986,6 +988,166 @@ pub fn strings_of(answer: &serde_json::Value) -> Result<Vec<DecodedString>, Stri
     Ok(decoded)
 }
 
+/// A constant a function's expressions use, as a renderer is handed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Constant {
+    /// The constant's value.
+    pub value: u64,
+    /// Its width in bytes.
+    pub width_bytes: u32,
+}
+
+/// A constant as a renderer names it: the text the pseudocode shows where
+/// the constant would be printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedConstant {
+    /// The value named.
+    pub value: u64,
+    /// The width the name is for, in bytes; `None` for every width the
+    /// value is used at. A name for one width is shown before a name for
+    /// every width.
+    pub width_bytes: Option<u32>,
+    /// The text shown in the constant's place: a name, a flag spelled out,
+    /// what the value means. One line, without control characters.
+    pub text: String,
+}
+
+/// What a renderer is handed: the constants a function's expressions use,
+/// as the rewriters left them — each once, by value and width, in value
+/// order. A switch's case values are among them, eight bytes wide.
+#[derive(Debug, Clone, Copy)]
+pub struct Rendering<'a> {
+    /// The function's address.
+    pub function: u64,
+    /// The function's name.
+    pub name: &'a str,
+    /// The constants the function's expressions use.
+    pub constants: &'a [Constant],
+}
+
+impl Rendering<'_> {
+    /// The constants as JSON for a renderer that is a command: each its
+    /// `value` (a number, with a `value_hex` twin) and its `width` in bytes.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "function": self.function,
+            "function_hex": format!("{:#x}", self.function),
+            "name": self.name,
+            "constants": self.constants.iter().map(|constant| serde_json::json!({
+                "value": constant.value,
+                "value_hex": format!("{:#x}", constant.value),
+                "width": constant.width_bytes,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A renderer names the constants a function's expressions use — an error
+/// code as `STATUS_ACCESS_VIOLATION`, a flag as `O_RDONLY`, a magic number
+/// as what it marks. Every function lifted passes through every registered
+/// renderer in order, after the rewriters, beside the recognizers; the
+/// first name given for a value and width is the one the pseudocode shows
+/// in the constant's place, in every form the engine prints. A renderer
+/// that fails is reported on standard error with its name, and the
+/// function is lifted with its constants spelled as the style says: a
+/// display is not the analysis, and one renderer's failure does not refuse
+/// the lift.
+pub trait ConstantRenderer: Send + Sync {
+    /// The renderer's name.
+    fn name(&self) -> &str;
+    /// Whether the renderer wants the function at `address` named `name`;
+    /// every function, unless said. A renderer that is a command is not
+    /// started for a function it does not want, or one with no constants.
+    fn wants(&self, _address: u64, _name: &str) -> bool {
+        true
+    }
+    /// The names for the function's constants, or fail with a reason.
+    fn render(&self, rendering: &Rendering) -> Result<Vec<RenderedConstant>, String>;
+}
+
+/// A renderer that is a command: given the function's constants as JSON on
+/// its standard input, it prints the names it gives them as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRenderer {
+    pub name: String,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+    /// The functions the command is run for, by name or address; every
+    /// function when empty.
+    pub functions: Vec<String>,
+}
+
+impl ConstantRenderer for ExternalRenderer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn wants(&self, address: u64, name: &str) -> bool {
+        wants_function(&self.functions, address, name)
+    }
+
+    fn render(&self, rendering: &Rendering) -> Result<Vec<RenderedConstant>, String> {
+        let input = serde_json::to_vec(&rendering.to_json()).map_err(|error| error.to_string())?;
+        let output = run_command(&self.command, &input, self.timeout)?;
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Vec::new());
+        }
+        let answer: serde_json::Value = serde_json::from_slice(&output)
+            .map_err(|error| format!("the answer is not JSON: {error}"))?;
+        renderings_of(&answer)
+    }
+}
+
+/// The names a renderer's answer holds: `{"constants": [{"value": …,
+/// "text": …, "width": …}, …]}`, each `value` the constant named, as a
+/// number or hex text, and `width` optional — the width in bytes the name
+/// is for, every width when left out. An answer without `constants` names
+/// none; a row without a value or without a text is refused, named by its
+/// place, as is a text that is empty or not one line.
+pub fn renderings_of(answer: &serde_json::Value) -> Result<Vec<RenderedConstant>, String> {
+    if !answer.is_object() {
+        return Err("the answer is a JSON object, `{\"constants\": […]}` or `{}`".to_string());
+    }
+    let Some(constants) = answer.get("constants") else {
+        return Ok(Vec::new());
+    };
+    let constants = constants
+        .as_array()
+        .ok_or_else(|| "\"constants\" is a JSON array".to_string())?;
+    let mut rendered = Vec::with_capacity(constants.len());
+    for (index, row) in constants.iter().enumerate() {
+        let value = row
+            .get("value")
+            .and_then(number)
+            .ok_or_else(|| format!("constant {index} names its value, as a number or hex text"))?;
+        let text = row
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| format!("constant {index} has a non-empty \"text\""))?;
+        if text.chars().any(char::is_control) {
+            return Err(format!(
+                "constant {index}'s \"text\" is one line, without control characters"
+            ));
+        }
+        let width_bytes = match row.get("width") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(width) => Some(
+                number(width)
+                    .filter(|width| (1..=8).contains(width))
+                    .map(|width| width as u32)
+                    .ok_or_else(|| format!("constant {index}'s width is 1 to 8 bytes"))?,
+            ),
+        };
+        rendered.push(RenderedConstant {
+            value,
+            width_bytes,
+            text: text.to_string(),
+        });
+    }
+    Ok(rendered)
+}
+
 /// A formatter changes the pseudocode's lines after they are printed —
 /// their text, their order, their number — for a house style the options
 /// do not cover: every function's pseudocode passes through every
@@ -1152,6 +1314,7 @@ struct Registry {
     rewriters: Vec<Arc<dyn Rewriter>>,
     formatters: Vec<Arc<dyn Formatter>>,
     recognizers: Vec<Arc<dyn Recognizer>>,
+    renderers: Vec<Arc<dyn ConstantRenderer>>,
 }
 
 fn registry() -> &'static RwLock<Registry> {
@@ -1317,6 +1480,101 @@ pub(crate) fn recognize_strings(
         }
     }
     decoded
+}
+
+/// Add a renderer: every function lifted after passes through it, after
+/// the rewriters and the ones registered before. One of the same name is
+/// replaced.
+pub fn register_renderer(renderer: Arc<dyn ConstantRenderer>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = renderer.name().to_string();
+    registry.renderers.retain(|known| known.name() != name);
+    registry.renderers.push(renderer);
+}
+
+/// Take a renderer off, by name; for a test that registered one.
+pub fn unregister_renderer(name: &str) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    registry.renderers.retain(|known| known.name() != name);
+}
+
+/// The renderers registered, in the order they run.
+pub fn renderers() -> Vec<Arc<dyn ConstantRenderer>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .renderers
+        .clone()
+}
+
+/// The constants a graph's expressions use, each once, by value and width,
+/// in value order: the statements' and the terminators', a switch's case
+/// values as eight bytes wide.
+fn constants_of(nodes: &[Node]) -> Vec<Constant> {
+    let mut seen = std::collections::BTreeSet::new();
+    for node in nodes {
+        for statement in &node.statements {
+            statement.node.constants(&mut seen);
+        }
+        match &node.terminator {
+            Terminator::Return | Terminator::Goto { .. } => {}
+            Terminator::Branch { cond, .. } => cond.constants(&mut seen),
+            Terminator::Switch { index, cases, .. } => {
+                index.constants(&mut seen);
+                for (values, _) in cases {
+                    for value in values {
+                        seen.insert((*value as u64, 8));
+                    }
+                }
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|(value, width_bytes)| Constant { value, width_bytes })
+        .collect()
+}
+
+/// Run every registered renderer that wants the function over the
+/// constants its graph uses, in order, after the rewriters: the names they
+/// give, the first for a value and width the one kept. A renderer's
+/// failure is reported on standard error with its name, and the function
+/// is lifted with its constants spelled as the style says — a display is
+/// not the analysis, and one renderer's failure does not refuse the lift.
+pub(crate) fn render_constants(function: u64, name: &str, nodes: &[Node]) -> Vec<RenderedConstant> {
+    let renderers = renderers();
+    if renderers.is_empty() {
+        return Vec::new();
+    }
+    let constants = constants_of(nodes);
+    if constants.is_empty() {
+        return Vec::new();
+    }
+    let rendering = Rendering {
+        function,
+        name,
+        constants: &constants,
+    };
+    let mut rendered: Vec<RenderedConstant> = Vec::new();
+    for renderer in renderers {
+        if !renderer.wants(function, name) {
+            continue;
+        }
+        match renderer.render(&rendering) {
+            Ok(rows) => {
+                for row in rows {
+                    let named = (row.value, row.width_bytes);
+                    if !rendered
+                        .iter()
+                        .any(|known| (known.value, known.width_bytes) == named)
+                    {
+                        rendered.push(row);
+                    }
+                }
+            }
+            Err(error) => eprintln!("warning: the renderer {}: {error}", renderer.name()),
+        }
+    }
+    rendered
 }
 
 /// The loaders registered, in the order they were.
@@ -1793,7 +2051,7 @@ pub struct ExternalTool {
 }
 
 /// One manifest: a JSON file declaring loaders, architectures, tools,
-/// rewriters, formatters and recognizers.
+/// rewriters, formatters, recognizers and renderers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// Where the manifest was read from.
@@ -1806,6 +2064,7 @@ pub struct Manifest {
     pub rewriters: Vec<ExternalRewriter>,
     pub formatters: Vec<ExternalFormatter>,
     pub recognizers: Vec<ExternalRecognizer>,
+    pub renderers: Vec<ExternalRenderer>,
 }
 
 /// The directories manifests are read from: the ones `AG_PLUGINS` names,
@@ -2071,6 +2330,15 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             functions: strings(entry.get("functions")),
         });
     }
+    let mut renderers = Vec::new();
+    for (index, entry) in entries("renderers")?.iter().enumerate() {
+        renderers.push(ExternalRenderer {
+            name: entry_name(entry, index),
+            command: command_of(entry, "renderer")?,
+            timeout: timeout_of(entry)?,
+            functions: strings(entry.get("functions")),
+        });
+    }
     Ok(Manifest {
         path: path.to_path_buf(),
         name,
@@ -2080,6 +2348,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         rewriters,
         formatters,
         recognizers,
+        renderers,
     })
 }
 
@@ -2183,6 +2452,19 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                             ));
                         }
                         register_recognizer(Arc::new(recognizer.clone()));
+                    }
+                    for renderer in &manifest.renderers {
+                        if manifests
+                            .iter()
+                            .any(|known| known.renderers.iter().any(|r| r.name == renderer.name))
+                        {
+                            problems.push(format!(
+                                "{}: the renderer {:?} is declared again, and replaces the first",
+                                path.display(),
+                                renderer.name
+                            ));
+                        }
+                        register_renderer(Arc::new(renderer.clone()));
                     }
                     manifests.push(manifest);
                 }
@@ -3464,5 +3746,391 @@ mod tests {
         // registry is the whole process's.
         unregister_recognizer("xor");
         unregister_recognizer("ra-1");
+    }
+
+    /// A graph with constants: an assignment of one, and a switch whose
+    /// case values are constants too.
+    fn constant_blocks() -> Vec<Node> {
+        vec![
+            Node {
+                address: 0x1000,
+                statements: vec![Rewrite::statement(
+                    AstNode::Assign {
+                        lhs: Box::new(AstNode::var("x")),
+                        rhs: Box::new(AstNode::constant(0xc000_0005, 4)),
+                    },
+                    vec![0x10],
+                )],
+                terminator: Terminator::Switch {
+                    index: AstNode::var("x"),
+                    cases: vec![(vec![7], 1)],
+                    addresses: vec![0x14],
+                },
+            },
+            Node {
+                address: 0x1010,
+                statements: Vec::new(),
+                terminator: Terminator::Return,
+            },
+        ]
+    }
+
+    /// A renderer that names one fixed constant, for the function it wants.
+    struct FixedNames;
+
+    impl ConstantRenderer for FixedNames {
+        fn name(&self) -> &str {
+            "fixed-names-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "wanted"
+        }
+        fn render(&self, rendering: &Rendering) -> Result<Vec<RenderedConstant>, String> {
+            assert_eq!(rendering.function, 0x7000);
+            // The constants of the statements and the switch's cases, each
+            // once, in value order.
+            assert_eq!(
+                rendering.constants,
+                [
+                    Constant {
+                        value: 7,
+                        width_bytes: 8
+                    },
+                    Constant {
+                        value: 0xc000_0005,
+                        width_bytes: 4
+                    },
+                ]
+            );
+            Ok(vec![RenderedConstant {
+                value: 0xc000_0005,
+                width_bytes: None,
+                text: "STATUS_ACCESS_VIOLATION".to_string(),
+            }])
+        }
+    }
+
+    /// A renderer that fails: its failure is a warning, not the lift's.
+    struct FailingNames;
+
+    impl ConstantRenderer for FailingNames {
+        fn name(&self) -> &str {
+            "failing-names-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "wanted"
+        }
+        fn render(&self, _rendering: &Rendering) -> Result<Vec<RenderedConstant>, String> {
+            Err("no table".to_string())
+        }
+    }
+
+    /// A renderer that names what the first already named, and one more.
+    struct LateNames;
+
+    impl ConstantRenderer for LateNames {
+        fn name(&self) -> &str {
+            "late-names-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "wanted"
+        }
+        fn render(&self, _rendering: &Rendering) -> Result<Vec<RenderedConstant>, String> {
+            Ok(vec![
+                RenderedConstant {
+                    value: 0xc000_0005,
+                    width_bytes: None,
+                    text: "LATE".to_string(),
+                },
+                RenderedConstant {
+                    value: 7,
+                    width_bytes: Some(8),
+                    text: "SEVEN".to_string(),
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn renderers_run_for_the_functions_they_want_and_a_failure_is_a_warning() {
+        let nodes = constant_blocks();
+        // The request as JSON: each constant its value, a hex twin and its
+        // width.
+        let constants = [Constant {
+            value: 7,
+            width_bytes: 8,
+        }];
+        let rendering = Rendering {
+            function: 0x7000,
+            name: "wanted",
+            constants: &constants,
+        };
+        let json = rendering.to_json();
+        assert_eq!(json["function_hex"], "0x7000");
+        assert_eq!(json["constants"][0]["value"], 7);
+        assert_eq!(json["constants"][0]["value_hex"], "0x7");
+        assert_eq!(json["constants"][0]["width"], 8);
+
+        register_renderer(Arc::new(FailingNames));
+        register_renderer(Arc::new(FixedNames));
+        register_renderer(Arc::new(LateNames));
+        assert!(renderers()
+            .iter()
+            .any(|renderer| renderer.name() == "fixed-names-test"));
+        // The failing one warns, the first name for a value and width is
+        // kept, and the rest come through; a function none wants is not
+        // rendered at all.
+        let rendered = render_constants(0x7000, "wanted", &nodes);
+        assert_eq!(
+            rendered,
+            vec![
+                RenderedConstant {
+                    value: 0xc000_0005,
+                    width_bytes: None,
+                    text: "STATUS_ACCESS_VIOLATION".to_string(),
+                },
+                RenderedConstant {
+                    value: 7,
+                    width_bytes: Some(8),
+                    text: "SEVEN".to_string(),
+                },
+            ]
+        );
+        assert!(render_constants(0x7000, "other", &nodes).is_empty());
+        // A graph with no constants starts no renderer.
+        assert!(render_constants(0x7000, "wanted", &two_blocks().nodes).is_empty());
+        // One of the same name is replaced, not run twice.
+        register_renderer(Arc::new(FixedNames));
+        assert_eq!(render_constants(0x7000, "wanted", &nodes).len(), 2);
+        unregister_renderer("fixed-names-test");
+        unregister_renderer("failing-names-test");
+        unregister_renderer("late-names-test");
+        assert!(render_constants(0x7000, "wanted", &nodes).is_empty());
+    }
+
+    #[test]
+    fn an_external_renderer_answers_with_names_or_nothing_and_a_bad_answer_is_named() {
+        // `sh -c` answers with fixed JSON whatever it is asked: one name,
+        // its value as hex text, its width said.
+        let renderer = ExternalRenderer {
+            name: "fixed".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                concat!(
+                    "cat >/dev/null; printf '%s' ",
+                    "'{\"constants\":[{\"value\":\"0xc0000005\",\"text\":\"STATUS_ACCESS_VIOLATION\",\"width\":4}]}'"
+                )
+                .to_string(),
+            ],
+            timeout: DEFAULT_TIMEOUT,
+            functions: Vec::new(),
+        };
+        let constants = [Constant {
+            value: 0xc000_0005,
+            width_bytes: 4,
+        }];
+        let rendering = Rendering {
+            function: 0x100,
+            name: "f",
+            constants: &constants,
+        };
+        assert_eq!(
+            renderer.render(&rendering).unwrap(),
+            vec![RenderedConstant {
+                value: 0xc000_0005,
+                width_bytes: Some(4),
+                text: "STATUS_ACCESS_VIOLATION".to_string(),
+            }]
+        );
+        // Nothing, or an answer without constants, names none.
+        let quiet = ExternalRenderer {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null".to_string(),
+            ],
+            ..renderer.clone()
+        };
+        assert!(quiet.render(&rendering).unwrap().is_empty());
+        let none = ExternalRenderer {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null; echo '{}'".to_string(),
+            ],
+            ..renderer.clone()
+        };
+        assert!(none.render(&rendering).unwrap().is_empty());
+        // A bad answer is named: not JSON, not an object, "constants" not
+        // an array, a row without a value or without a text.
+        for (answer, wanted) in [
+            ("hello", "not JSON"),
+            ("[1]", "JSON object"),
+            ("{\"constants\":\"x\"}", "JSON array"),
+            (
+                "{\"constants\":[{\"text\":\"x\"}]}",
+                "constant 0 names its value",
+            ),
+            ("{\"constants\":[{\"value\":1}]}", "constant 0"),
+        ] {
+            let bad = ExternalRenderer {
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("cat >/dev/null; printf '%s' '{answer}'"),
+                ],
+                ..renderer.clone()
+            };
+            let error = bad.render(&rendering).unwrap_err();
+            assert!(error.contains(wanted), "{error}");
+        }
+        // A command that fails, or goes on past its time, is ended.
+        let failing = ExternalRenderer {
+            command: vec!["sh".to_string(), "-c".to_string(), "exit 2".to_string()],
+            ..renderer.clone()
+        };
+        assert!(failing
+            .render(&rendering)
+            .unwrap_err()
+            .contains("ended with"));
+        let slow = ExternalRenderer {
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 5".to_string()],
+            timeout: Duration::from_secs(1),
+            ..renderer.clone()
+        };
+        let started = Instant::now();
+        assert!(slow
+            .render(&rendering)
+            .unwrap_err()
+            .contains("within 1 seconds"));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        // The functions it runs for, by name or address; every function
+        // when it names none.
+        assert!(renderer.wants(0x999, "anything"));
+        let scoped = ExternalRenderer {
+            functions: vec!["wanted".to_string(), "0x7000".to_string()],
+            ..renderer
+        };
+        assert!(scoped.wants(0x1, "wanted"));
+        assert!(scoped.wants(0x7000, "other"));
+        assert!(!scoped.wants(0x7001, "other"));
+    }
+
+    #[test]
+    fn renderings_of_reads_the_answer_and_names_a_bad_row_by_its_place() {
+        let answer = serde_json::json!({
+            "constants": [
+                { "value": "0x10", "text": "SIXTEEN" },
+                { "value": 17, "text": "SEVENTEEN", "width": 4 },
+            ]
+        });
+        assert_eq!(
+            renderings_of(&answer).unwrap(),
+            vec![
+                RenderedConstant {
+                    value: 16,
+                    width_bytes: None,
+                    text: "SIXTEEN".to_string(),
+                },
+                RenderedConstant {
+                    value: 17,
+                    width_bytes: Some(4),
+                    text: "SEVENTEEN".to_string(),
+                },
+            ]
+        );
+        assert!(renderings_of(&serde_json::json!({})).unwrap().is_empty());
+        assert!(renderings_of(&serde_json::json!({ "constants": [] }))
+            .unwrap()
+            .is_empty());
+        // A width left out, or null, is every width.
+        assert_eq!(
+            renderings_of(&serde_json::json!({
+                "constants": [{ "value": 1, "text": "x", "width": null }]
+            }))
+            .unwrap()[0]
+                .width_bytes,
+            None
+        );
+        let error = renderings_of(&serde_json::json!({
+            "constants": [{ "value": 1, "text": "ok" }, { "value": 2, "text": "" }]
+        }))
+        .unwrap_err();
+        assert!(error.contains("constant 1"), "{error}");
+        // A text that is not one line, and a width that is not 1 to 8
+        // bytes, are refused, named by their place.
+        for (row, wanted) in [
+            (
+                serde_json::json!({ "value": 1, "text": "a\nb" }),
+                "one line",
+            ),
+            (
+                serde_json::json!({ "value": 1, "text": "x", "width": 9 }),
+                "width is 1 to 8",
+            ),
+            (
+                serde_json::json!({ "value": 1, "text": "x", "width": "wide" }),
+                "width is 1 to 8",
+            ),
+        ] {
+            let error = renderings_of(&serde_json::json!({ "constants": [row] })).unwrap_err();
+            assert!(error.contains("constant 0"), "{error}");
+            assert!(error.contains(wanted), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_declares_renderers_and_a_duplicate_is_reported() {
+        let dir = Dir::new("renderers");
+        std::fs::write(
+            dir.0.join("a.json"),
+            r#"{
+                "name": "na",
+                "renderers": [
+                    { "name": "hresults", "command": ["sh", "-c", "cat"], "timeout": 7, "functions": ["nowhere"] },
+                    { "command": ["cat"], "functions": ["nowhere"] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = read_manifest(&dir.0.join("a.json")).expect("reads");
+        assert_eq!(manifest.renderers[0].name, "hresults");
+        assert_eq!(manifest.renderers[0].timeout, Duration::from_secs(7));
+        assert_eq!(manifest.renderers[0].functions, vec!["nowhere".to_string()]);
+        // An unnamed entry is named for the manifest, the second with its
+        // place; the timeout defaults.
+        assert_eq!(manifest.renderers[1].name, "na-1");
+        assert_eq!(manifest.renderers[1].timeout, DEFAULT_TIMEOUT);
+        // A renderer without a command is refused, named.
+        std::fs::write(
+            dir.0.join("bad.json"),
+            r#"{ "renderers": [{ "name": "x" }] }"#,
+        )
+        .unwrap();
+        let error = read_manifest(&dir.0.join("bad.json")).unwrap_err();
+        assert!(error.contains("renderer"), "{error}");
+        assert!(error.contains("names no command"), "{error}");
+        std::fs::remove_file(dir.0.join("bad.json")).unwrap();
+        // The same name in two manifests: the later replaces the first,
+        // and the clash is reported.
+        std::fs::write(
+            dir.0.join("b.json"),
+            r#"{ "name": "nb", "renderers": [{ "name": "hresults", "command": ["cat"], "functions": ["nowhere"] }] }"#,
+        )
+        .unwrap();
+        let (manifests, problems) = load_manifests(std::slice::from_ref(&dir.0));
+        assert_eq!(manifests.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("the renderer \"hresults\" is declared again"),
+            "{problems:?}"
+        );
+        assert!(renderers().iter().any(|r| r.name() == "hresults"));
+        assert!(renderers().iter().any(|r| r.name() == "na-1"));
+        // Scoped to a function no test lifts, and taken off after: the
+        // registry is the whole process's.
+        unregister_renderer("hresults");
+        unregister_renderer("na-1");
     }
 }

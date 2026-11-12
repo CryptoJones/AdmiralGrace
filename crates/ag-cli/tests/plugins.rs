@@ -1,6 +1,6 @@
 //! Plugins declared in a manifest: a loader, an architecture, a tool, a
-//! rewriter, a formatter and a recognizer that are commands, found by `ag`
-//! as it starts.
+//! rewriter, a formatter, a recognizer and a renderer that are commands,
+//! found by `ag` as it starts.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -797,4 +797,97 @@ json.dump({"strings": strings}, sys.stdout)
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("the recognizer garbler"), "{stderr}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("// string: \"hi\""));
+}
+
+#[test]
+fn a_manifests_renderer_names_a_constant_and_a_failure_is_a_warning() {
+    if !has_python() {
+        eprintln!("python3 is not on this machine: the renderer is not run");
+        return;
+    }
+    let dir = Dir::new("render");
+    // The renderer is given the function's constants, each its value and
+    // width, and names the ones it knows.
+    std::fs::write(
+        dir.0.join("names.py"),
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+names = {0xc0000005: "STATUS_ACCESS_VIOLATION"}
+constants = [{"value": c["value"], "text": names[c["value"]]}
+             for c in request["constants"] if c["value"] in names]
+json.dump({"constants": constants}, sys.stdout)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.0.join("ren.json"),
+        serde_json::json!({
+            "name": "ren",
+            "renderers": [{ "name": "hresults", "command": ["python3", dir.0.join("names.py")] }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // mov eax, 0xc0000005; ret — an HRESULT returned.
+    let raw = dir.0.join("program.bin");
+    std::fs::write(&raw, [0xb8, 0x05, 0x00, 0x00, 0xc0, 0xc3]).unwrap();
+    let flags = [
+        "--raw", "x86-64", "--base", "0x1000", "--offset", "0", "--length", "0x6", "--entry",
+        "0x1000",
+    ];
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("return STATUS_ACCESS_VIOLATION;"), "{text}");
+    // The name is in the JSON lines too.
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert!(
+        report["lines"].as_array().unwrap().iter().any(|line| {
+            line["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("return STATUS_ACCESS_VIOLATION;"))
+        }),
+        "{report}"
+    );
+    // Listed with the rest.
+    let output = ag(&dir.0).arg("plugins").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("renderers: hresults"), "{stdout}");
+    let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["renderers"][0], "hresults");
+    assert_eq!(report["manifests"][0]["renderers"][0], "hresults");
+    // A renderer that fails is a warning, not the lift's: the pseudocode
+    // still prints, with the other renderer's name.
+    std::fs::write(
+        dir.0.join("bad.json"),
+        r#"{ "name": "bad", "renderers": [{ "name": "garbler", "command": ["sh", "-c", "cat >/dev/null; exit 3"] }] }"#,
+    )
+    .unwrap();
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the renderer garbler"), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("return STATUS_ACCESS_VIOLATION;"));
 }

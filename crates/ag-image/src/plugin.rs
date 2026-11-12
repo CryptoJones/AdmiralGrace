@@ -19,10 +19,11 @@ use ag_engine::plugin::ExternalTool;
 pub use ag_engine::plugin::{
     architecture_for, architectures, formatters, loader_for, loaders, manifest_dirs,
     number as plugin_number, read_manifest, recognizers, register_architecture, register_formatter,
-    register_loader, register_recognizer, register_rewriter, rewriters, Architecture,
-    DecodedSection, DecodedString, ExternalFormatter, ExternalRecognizer, ExternalRewriter,
-    Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest, Recognition,
-    Recognizer, RecoveredBlock, Rewrite, Rewriter,
+    register_loader, register_recognizer, register_renderer, register_rewriter, renderers,
+    rewriters, Architecture, Constant, ConstantRenderer, DecodedSection, DecodedString,
+    ExternalFormatter, ExternalRecognizer, ExternalRenderer, ExternalRewriter, Formatter,
+    Formatting, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest, Recognition, Recognizer,
+    RecoveredBlock, RenderedConstant, Rendering, Rewrite, Rewriter,
 };
 
 use crate::Binary;
