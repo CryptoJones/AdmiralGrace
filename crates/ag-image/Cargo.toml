@@ -10,3 +10,5 @@ anyhow.workspace = true
 # A plugin's tool takes and gives JSON.
 serde_json.workspace = true
 iced-x86 = { version = "1.21.0", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
+# The code pages the string scanner reads: cp932, GBK and EUC-KR.
+encoding_rs = "0.8"

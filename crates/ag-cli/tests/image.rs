@@ -525,6 +525,150 @@ fn the_strings_of_a_32_bit_elf_are_reported() {
 }
 
 #[test]
+fn the_strings_command_reads_an_encoding_by_name() {
+    // The ASCII strings carry their encoding, and naming ascii gives the
+    // same list as the default.
+    let report = image_json("sample32.elf", &["strings", "--encoding", "ascii"]);
+    let strings = report["strings"].as_array().expect("the strings");
+    assert!(!strings.is_empty(), "{report}");
+    assert!(strings.iter().all(|s| s["encoding"] == "ascii"), "{report}");
+
+    // utf16le and the --utf16 flag read the same bucket.
+    let named = image_json("sample32.elf", &["strings", "--encoding", "utf16le"]);
+    let flagged = image_json("sample32.elf", &["strings", "--utf16"]);
+    assert_eq!(named, flagged, "utf16le and --utf16 agree");
+
+    // A code page the fixture holds none of reports none, without error.
+    let report = image_json("sample32.elf", &["strings", "--encoding", "gbk"]);
+    assert_eq!(
+        report["strings"].as_array().map(Vec::len),
+        Some(0),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_unknown_encoding_is_refused_by_name() {
+    let (ok, _, stderr) = image_result("sample32.elf", &["strings", "--encoding", "nonesuch"]);
+    assert!(!ok, "an unknown encoding is refused");
+    assert!(stderr.contains("nonesuch"), "{stderr}");
+    assert!(
+        stderr.contains("utf16be"),
+        "the names it takes are listed: {stderr}"
+    );
+    assert!(stderr.contains("euc-kr"), "{stderr}");
+}
+
+#[test]
+fn the_utf16_flag_and_an_encoding_cannot_both_be_given() {
+    let (ok, _, stderr) =
+        image_result("sample32.elf", &["strings", "--utf16", "--encoding", "gbk"]);
+    assert!(!ok, "the two are refused together");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+#[test]
+fn the_strings_of_an_encoding_are_reported_through_a_project_segment() {
+    // A copy of the sample with a block of encoded strings appended, mapped
+    // as a data segment through a project, and read back one encoding at a
+    // time.
+    let dir = std::env::temp_dir().join(format!(
+        "ag-cli-encoded-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let target = dir.join("encoded.elf");
+    let project = dir.join("encoded.agproject");
+
+    let original = std::fs::read(fixture("sample.elf")).expect("the sample's bytes");
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&[0xff, 0xff]);
+    let gbk_at = blob.len() as u64;
+    blob.extend_from_slice(&[0xd6, 0xd0, 0xce, 0xc4, 0x00]); // 中文 as GBK
+    blob.extend_from_slice(&[0xff, 0xff]);
+    let utf32_at = blob.len() as u64;
+    blob.extend_from_slice(b"\0\0\0h\0\0\0i\0\0\0\0"); // hi as UTF-32BE
+    let offset = original.len() as u64;
+    let mut file = original;
+    file.extend_from_slice(&blob);
+    std::fs::write(&target, &file).expect("the copy is written");
+
+    let ag = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let target = target.to_str().expect("a path");
+    let project = project.to_str().expect("a path");
+
+    let vma = 0x90_0000u64;
+    let (ok, _, stderr) = ag(&[
+        "project",
+        target,
+        "segment",
+        "--file",
+        project,
+        "add",
+        "encoded",
+        &format!("{vma:#x}"),
+        &format!("{:#x}", blob.len()),
+        "--file-offset",
+        &format!("{offset:#x}"),
+    ]);
+    assert!(ok, "{stderr}");
+
+    let (ok, stdout, stderr) = ag(&[
+        "image",
+        target,
+        "strings",
+        "--encoding",
+        "gbk",
+        "--project",
+        project,
+        "--json",
+    ]);
+    assert!(ok, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+    let strings = report["strings"].as_array().expect("the strings");
+    assert!(
+        strings.iter().any(|s| s["text"] == "中文"
+            && s["encoding"] == "gbk"
+            && s["address"] == serde_json::json!(vma + gbk_at)),
+        "{report}"
+    );
+
+    let (ok, stdout, stderr) = ag(&[
+        "image",
+        target,
+        "strings",
+        "--encoding",
+        "utf32be",
+        "--project",
+        project,
+        "--json",
+    ]);
+    assert!(ok, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+    let strings = report["strings"].as_array().expect("the strings");
+    assert!(
+        strings.iter().any(|s| s["text"] == "hi"
+            && s["encoding"] == "utf32be"
+            && s["address"] == serde_json::json!(vma + utf32_at)),
+        "{report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_data_of_a_32_bit_elf_is_found_through_absolute_operands() {
     let report = image("sample32.elf", &["data", "main"]);
 

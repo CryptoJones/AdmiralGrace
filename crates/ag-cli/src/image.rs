@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ag_image::{Binary, Options};
+use ag_image::{Binary, Options, StringEncoding};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use regex::Regex;
@@ -99,9 +99,18 @@ pub enum ImageCmd {
         /// Report the strings that are held as UTF-16LE.
         #[arg(long)]
         utf16: bool,
+        /// Report the strings held in one encoding: ascii, utf16le, utf16be,
+        /// utf32le, utf32be, cp932, gbk or euc-kr. `utf16` and `utf32` mean
+        /// the little-endian ones.
+        #[arg(long, value_name = "NAME", conflicts_with = "utf16")]
+        encoding: Option<String>,
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// A project file whose layout — the base and the segments — the
+        /// image is read under.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// The control-flow graph of one function.
     Cfg {
@@ -686,6 +695,8 @@ struct StringJson {
     section: String,
     /// How many bytes the string holds, the terminator included.
     length: u64,
+    /// The encoding the string is held in.
+    encoding: &'static str,
     /// The functions that refer to the string.
     functions: Vec<StringFunctionJson>,
 }
@@ -1239,6 +1250,7 @@ pub fn run(
     // stand in where the walk cannot read a table from the code.
     let project = match &cmd {
         ImageCmd::Info { project, .. }
+        | ImageCmd::Strings { project, .. }
         | ImageCmd::Symbols { project, .. }
         | ImageCmd::Disasm { project, .. }
         | ImageCmd::Cfg { project, .. }
@@ -1278,8 +1290,27 @@ pub fn run(
         ImageCmd::Strings {
             filter,
             utf16,
+            encoding,
             json,
-        } => strings(&image, filter.as_deref(), utf16, json),
+            ..
+        } => {
+            let encoding = encoding
+                .as_deref()
+                .map(|name| {
+                    StringEncoding::of_name(name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "encoding {name:?} is not one of: {}",
+                            StringEncoding::ALL
+                                .iter()
+                                .map(|encoding| encoding.name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                })
+                .transpose()?;
+            strings(&image, filter.as_deref(), utf16, encoding, json)
+        }
         ImageCmd::Cfg {
             target,
             json,
@@ -1957,8 +1988,14 @@ pub(crate) fn listing_text(
 /// The strings are found in the sections that are not code. The functions
 /// that refer to them are worked out as well, which needs the whole program
 /// read, so that is what this call costs.
-fn strings(image: &Binary, filter: Option<&str>, utf16: bool, json: bool) -> Result<i32> {
-    let strings = strings_of(image, filter, utf16)?;
+fn strings(
+    image: &Binary,
+    filter: Option<&str>,
+    utf16: bool,
+    encoding: Option<StringEncoding>,
+    json: bool,
+) -> Result<i32> {
+    let strings = strings_of(image, filter, utf16, encoding)?;
 
     if json {
         let report = StringsJson { strings };
@@ -1992,15 +2029,22 @@ fn strings(image: &Binary, filter: Option<&str>, utf16: bool, json: bool) -> Res
 /// Every string of the image, with the functions that use it, as JSON.
 pub(crate) fn strings_json(image: &Binary) -> Result<StringsJson> {
     Ok(StringsJson {
-        strings: strings_of(image, None, false)?,
+        strings: strings_of(image, None, false, None)?,
     })
 }
 
 /// The strings of the image that match the filter.
 ///
-/// The wide strings are the ones held as UTF-16LE; they are not in the index
-/// of the users of a string, so they carry none.
-fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<StringJson>> {
+/// Without an encoding the ASCII strings are reported, or the UTF-16LE ones
+/// when `utf16` is set; an encoding names the one bucket to read. The wide
+/// and encoded strings are not in the index of the users of a string, so
+/// they carry none.
+fn strings_of(
+    image: &Binary,
+    filter: Option<&str>,
+    utf16: bool,
+    encoding: Option<StringEncoding>,
+) -> Result<Vec<StringJson>> {
     let pattern = filter.map(Regex::new).transpose()?;
 
     let matches = |text: &str| match &pattern {
@@ -2008,10 +2052,16 @@ fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<S
         None => true,
     };
 
-    let found = if utf16 {
-        image.wide_strings()
-    } else {
-        image.strings()
+    let found: Vec<&ag_image::ImageString> = match encoding {
+        Some(StringEncoding::Ascii) => image.strings().iter().collect(),
+        Some(StringEncoding::Utf16Le) => image.wide_strings().iter().collect(),
+        Some(encoding) => image
+            .encoded_strings()
+            .iter()
+            .filter(|string| string.encoding == encoding)
+            .collect(),
+        None if utf16 => image.wide_strings().iter().collect(),
+        None => image.strings().iter().collect(),
     };
 
     // Who refers to each string is only known once the whole program has been
@@ -2027,6 +2077,7 @@ fn strings_of(image: &Binary, filter: Option<&str>, utf16: bool) -> Result<Vec<S
             text: string.text.clone(),
             section: string.section.clone(),
             length: string.length,
+            encoding: string.encoding.name(),
             functions: users
                 .get(&string.address)
                 .map(|functions| {
@@ -4417,7 +4468,7 @@ mod tests {
     fn the_strings_of_the_image_are_listed_with_the_functions_that_use_them() {
         let image = sample();
 
-        let strings = strings_of(&image, None, false).expect("the strings are listed");
+        let strings = strings_of(&image, None, false, None).expect("the strings are listed");
 
         let format = strings
             .iter()
@@ -4427,6 +4478,7 @@ mod tests {
         assert_eq!(format.address_hex, "0x2004");
         assert_eq!(format.section, ".rodata");
         assert_eq!(format.length, 5, "the string holds four bytes and its NUL");
+        assert_eq!(format.encoding, "ascii");
 
         assert_eq!(format.functions.len(), 1, "one function uses it");
         assert_eq!(format.functions[0].name, "main");
@@ -4437,7 +4489,8 @@ mod tests {
     fn a_filter_leaves_out_the_strings_that_do_not_match() {
         let image = sample();
 
-        let strings = strings_of(&image, Some("^%ld"), false).expect("the strings are listed");
+        let strings =
+            strings_of(&image, Some("^%ld"), false, None).expect("the strings are listed");
 
         assert_eq!(strings.len(), 1, "{strings:?}");
         assert_eq!(strings[0].address_hex, "0x2004");
@@ -4447,9 +4500,31 @@ mod tests {
     fn a_filter_that_matches_nothing_lists_no_strings() {
         let image = sample();
 
-        let strings = strings_of(&image, Some("nonesuch"), false).expect("the strings are listed");
+        let strings =
+            strings_of(&image, Some("nonesuch"), false, None).expect("the strings are listed");
 
         assert!(strings.is_empty(), "{strings:?}");
+    }
+
+    #[test]
+    fn an_encoding_selects_the_strings_held_in_it() {
+        let image = sample();
+
+        // The sample's strings are ASCII: asking for them by name gives the
+        // same list as the default, and asking for a code page it holds none
+        // of gives none.
+        let default = strings_of(&image, None, false, None).expect("listed");
+        let ascii = strings_of(&image, None, false, Some(StringEncoding::Ascii)).expect("listed");
+        assert_eq!(ascii.len(), default.len());
+        assert!(ascii.iter().all(|string| string.encoding == "ascii"));
+
+        let gbk = strings_of(&image, None, false, Some(StringEncoding::Gbk)).expect("listed");
+        assert!(gbk.is_empty(), "the sample holds no GBK: {gbk:?}");
+
+        // The UTF-16LE flag and the utf16le name read the same bucket.
+        let flagged = strings_of(&image, None, true, None).expect("listed");
+        let named = strings_of(&image, None, false, Some(StringEncoding::Utf16Le)).expect("listed");
+        assert_eq!(flagged.len(), named.len());
     }
 
     #[test]
