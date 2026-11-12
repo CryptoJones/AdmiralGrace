@@ -229,6 +229,7 @@ const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
     ("aarch64", "AARCH64:LE:64:v8A:default"),
     ("riscv64", "RISCV:LE:64:default"),
     ("riscv32", "RISCV:LE:32:default"),
+    ("msp430", "TI_MSP430:LE:16:default"),
 ];
 
 /// The language id an architecture's name stands for, as the command line
@@ -243,6 +244,7 @@ pub fn raw_language(arch: &str) -> Option<&'static str> {
         "aarch64" | "arm64" => "aarch64",
         "riscv64" | "rv64" => "riscv64",
         "riscv32" | "rv32" => "riscv32",
+        "msp430" => "msp430",
         _ => return None,
     };
     RAW_ARCHITECTURE_TABLE
@@ -261,7 +263,17 @@ pub fn raw_arch(language: &str) -> Option<&'static str> {
 }
 
 /// The architecture names [`raw_language`] knows, for a message.
-pub const RAW_ARCHITECTURES: &str = "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32";
+pub const RAW_ARCHITECTURES: &str = "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32, msp430";
+
+/// The language an `EM_MSP430` ELF decodes under, when the bytes are one.
+/// The loader has no opinion for the MSP430, so the engine reads the
+/// architecture from the container and names the target itself: the 16-bit
+/// core, little-endian, the only MSP430 specification carried here.
+fn msp430_target(bytes: &[u8]) -> Option<&'static str> {
+    use object::Object as _;
+    let file = object::File::parse(bytes).ok()?;
+    (file.architecture() == object::Architecture::Msp430).then_some("TI_MSP430:LE:16:default")
+}
 
 impl std::fmt::Debug for Image {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -378,8 +390,19 @@ impl Image {
                 ),
             }
         }
-        let inner = ObjectLoadImage::from_bytes(name, &bytes)
-            .map_err(|error| anyhow::anyhow!("loading {name}: {error}"))?;
+        let inner = match ObjectLoadImage::from_bytes(name, &bytes) {
+            Ok(inner) => inner,
+            Err(error) => {
+                // The MSP430: the loader has no opinion for it, so the
+                // engine names the target itself and reads the file under
+                // that, the way a raw image is read under a named language.
+                match msp430_target(&bytes) {
+                    Some(target) => ObjectLoadImage::from_bytes_with_target(name, &bytes, target)
+                        .map_err(|error| anyhow::anyhow!("loading {name}: {error}"))?,
+                    None => return Err(anyhow::anyhow!("loading {name}: {error}")),
+                }
+            }
+        };
         Ok(Image {
             inner: Loaded::Object(Box::new(inner)),
             bytes,

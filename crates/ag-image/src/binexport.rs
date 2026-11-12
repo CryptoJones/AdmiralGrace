@@ -278,6 +278,7 @@ pub fn architecture_name(language: &str) -> String {
         "arm" => "ARM-32".to_string(),
         "mips" => format!("MIPS-{bits}"),
         "riscv" => format!("RISCV-{bits}"),
+        "ti_msp430" => "MSP430".to_string(),
         "powerpc" | "ppc" => format!("PPC-{bits}"),
         "" => format!("GENERIC-{bits}"),
         _ => format!("{}-{bits}", processor.to_ascii_uppercase()),

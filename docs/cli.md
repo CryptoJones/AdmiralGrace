@@ -88,7 +88,7 @@ corpus-format` describes both layouts.
 own loader rather than read out of a corpus — or raw bytes, with `--raw ARCH --base ADDRESS`
 before the subcommand: firmware, shellcode, a dump, a file with no container to say where
 it loads. `ARCH` is `x86-64`, `x86`, `arm`, `thumb` (Cortex-M: Thumb throughout, under the ARMv7
-specification), `aarch64`, `riscv64` or `riscv32`; the base cannot be 0, where nothing is mapped;
+specification), `aarch64`, `riscv64`, `riscv32` or `msp430`; the base cannot be 0, where nothing is mapped;
 `--entry`, `--offset` into the file and `--length` apply when they are not the start and the
 rest of the file. The bytes are one section of code, and the entry, when named, is a
 function. `ag project TARGET --raw … save` records the same in the project file, and every

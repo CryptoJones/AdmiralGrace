@@ -1844,6 +1844,61 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
 }
 
 #[test]
+fn a_msp430_image_decodes_and_lifts() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join("msp430.elf");
+    let binary = Binary::open(&path).expect("the MSP430 fixture loads");
+    assert!(
+        binary.language().starts_with("TI_MSP430:LE:16"),
+        "{}",
+        binary.language()
+    );
+    assert!(binary.supports_disassembly());
+    assert!(binary.supports_pseudocode());
+
+    let address_of = |name: &str| {
+        binary
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("{name} is a function"))
+            .address
+    };
+
+    // The leaf decodes to a word add and a return.
+    let add = binary
+        .disassembly(address_of("add"))
+        .expect("add is decoded");
+    let lines: Vec<&Instruction> = add
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    assert_eq!(lines[0].mnemonic, "ADD.W");
+    assert_eq!(lines[1].mnemonic, "RET");
+
+    // The loop decodes with its call, and lifts to a loop with the call.
+    let sum = binary
+        .disassembly(address_of("sum"))
+        .expect("sum is decoded");
+    assert!(sum.blocks.len() > 1, "sum loops");
+    assert!(sum
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|line| line.mnemonic == "CALL" && line.call.is_some()));
+    // The MSP430's int is sixteen bits: a word-wide value is a short.
+    let add = binary.pseudocode(address_of("add")).expect("add is lifted");
+    assert!(add.text().contains("short add("), "{}", add.text());
+    let sum = binary.pseudocode(address_of("sum")).expect("sum is lifted");
+    let text = sum.text();
+    // The call resolves to its symbol: the image names the functions.
+    assert!(text.contains("add("), "{text}");
+    assert!(text.contains("while") || text.contains("do"), "{text}");
+}
+
+#[test]
 fn raw_bytes_are_read_as_a_program_with_the_entry_for_a_function() {
     use ag_image::{raw_language, Layout, RawSpec};
 
