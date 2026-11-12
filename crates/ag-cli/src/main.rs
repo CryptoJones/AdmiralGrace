@@ -15,6 +15,7 @@ mod docs;
 mod dwarf;
 mod export;
 mod funcid;
+mod gzf;
 mod image;
 mod mcp;
 mod platform;

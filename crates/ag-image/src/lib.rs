@@ -113,6 +113,7 @@ pub mod binexport;
 pub mod diff;
 pub mod dwarf;
 pub mod graph_export;
+pub mod gzf;
 pub mod plugin;
 pub mod port;
 mod strings;

@@ -259,6 +259,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |
 | `binexport FILE [--project FILE]` | The analysis as a BinExport file, the format BinDiff compares: the call graph, every function's flow graph, the basic blocks, the instructions with their bytes, mnemonics and operands, the strings and data they refer to, and the sections. With `--project FILE` the project's renames are the functions' names and its comments are written on their instructions. One line on stdout: the functions, the flow graphs, the basic blocks, the instructions and the bytes written. |
 | `dwarf FILE [--project FILE]` | The analysis as DWARF debug information, the format debuggers read: the functions and data at their addresses under the analyst's names, and the types the analysis gives them. With `--project FILE` the project's renames, types, prototypes and byte-type marks are written. Load it beside the program (`add-symbol-file` in gdb) to use the names and types in a debugger. One line on stdout: the functions, the types, the data symbols and the bytes written. |
+| `gzf FILE [--project FILE]` | The analysis for Ghidra, as its XML program format: the processor, the memory map, the code ranges, the functions under the analyst's names and prototypes, the types, the symbols and the comments. The memory bytes are written beside it as `<name>.bytes`, which Ghidra reads from the same directory, so keep the two together. With `--project FILE` the project's renames, types, prototypes and comments are written. Import it into Ghidra (File → Import File). Two lines on stdout: the program and the memory sidecar. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
@@ -601,6 +602,53 @@ parameter or a local, and no calling convention. A function the decoder cannot r
 its name and address with no extent. Unlike `binexport`, an image the decoder does not read
 is still written — its names and types need no disassembly. The file's directory is made
 when it is not there, and a file already there is written over.
+
+## Ghidra: `ag image … gzf`
+
+`gzf` writes the analysis for Ghidra — the other workbench a reverse engineer keeps open — so
+the names, the functions, the types and the comments worked out here can be used in Ghidra
+without typing them in again. The file is Ghidra's XML program format, the format it reads and
+writes for interchange; import it with *File → Import File* and Ghidra opens it under the
+image's processor, disassembles the code, and sets the names and types:
+
+```sh
+cargo run --bin ag -- image ./program.elf gzf program.gzf
+cargo run --bin ag -- image ./program.elf gzf program.gzf --project program.agproj
+```
+
+By convention the file is named `<name>.gzf`. A `.gzf` as Ghidra itself exports one is its
+packed native database — an internal storage engine, not a format to write by hand — so this
+writes the XML interchange format instead, which Ghidra's loader recognises by content whether
+the file is named `.xml` or `.gzf`. The memory bytes cannot live in the XML, so they are
+written beside it as `<name>.bytes`, which the document's memory contents point at; keep the
+two together, as Ghidra reads the sidecar from the XML's own directory. The program holds:
+
+- the *processor*: the SLEIGH language id and compiler spec the image is read as
+  (`x86:LE:64:default:gcc`), and its byte order, so Ghidra opens it under the right
+  architecture;
+- the *memory map*, one section a block, with the bytes of the file behind it and the
+  permissions it is mapped with; a section the file holds no bytes for (`.bss`) is an
+  uninitialized block. The container's debug and symbol sections, which the loader keeps out
+  of memory, are left out;
+- the *code* ranges, which Ghidra disassembles on import;
+- the *data types* the image is read with — every structure, union, enumeration and typedef
+  the store holds, the project's among them, each member at the offset the layout gives it;
+- one *function* a function, at its entry, under the name the analysis gives it or the
+  analyst's rename, with the return type of the analyst's prototype when one is recorded and
+  the lift's own otherwise, and the extent of its body. The analyst's whole prototype travels
+  as the type-information comment Ghidra parses on import, so the names and types they gave
+  the parameters are set too;
+- the *symbol table* — the functions, the data and the imports — the analyst's *comments*,
+  and the program's *entry point*.
+
+With `--project FILE` the image is read under the project's types and prototypes, and its
+renames and comments are the names and comments written. What the image does not say is left
+out: there is no stack frame for a function, no register variables, and no line information.
+A bit-field is written as the integer that holds it, at its byte offset — the XML format has
+no spelling for a field's bit place. An image the decoder does not read is still written —
+its names and types need no disassembly, though it has no code ranges then. Two lines on
+stdout: the program (its functions, types, symbols and bytes) and the memory sidecar. The
+file's directory is made when it is not there, and a file already there is written over.
 
 ## Assembling one instruction: `ag asm`
 

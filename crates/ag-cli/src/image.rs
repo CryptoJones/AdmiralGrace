@@ -326,6 +326,19 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The analysis for Ghidra, as its XML program format: the memory map,
+    /// the code, the functions under the analyst's names and prototypes, the
+    /// types, the symbols and the comments. Import it into Ghidra (File →
+    /// Import File); the memory bytes are written beside it as `<file>.bytes`,
+    /// which Ghidra reads from the same directory, so keep the two together.
+    Gzf {
+        /// The file to write, by convention `<name>.gzf`.
+        file: PathBuf,
+        /// A project file: the image is read under its types and prototypes,
+        /// and its renames and comments are the names and comments written.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The opaque predicates of functions: the conditional branches whose
     /// condition is decided whatever the input, each with whether it is
     /// always or never taken, why, and the bytes that patch it out.
@@ -1291,6 +1304,7 @@ pub fn run(
         | ImageCmd::Emulate { project, .. }
         | ImageCmd::Binexport { project, .. }
         | ImageCmd::Dwarf { project, .. }
+        | ImageCmd::Gzf { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -1491,6 +1505,7 @@ pub fn run(
             crate::binexport::run(&image, binary, &file, project.as_ref())
         }
         ImageCmd::Dwarf { file, .. } => crate::dwarf::run(&image, binary, &file, project.as_ref()),
+        ImageCmd::Gzf { file, .. } => crate::gzf::run(&image, binary, &file, project.as_ref()),
     }
 }
 
