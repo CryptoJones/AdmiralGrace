@@ -129,6 +129,9 @@ impl Platform {
             "riscv64" | "rv64" => "riscv64",
             "riscv32" | "rv32" => "riscv32",
             "msp430" => "msp430",
+            "6502" | "m6502" | "mos6502" => "6502",
+            "z80" => "z80",
+            "superh" | "sh4" | "sh" => "superh",
             _ => return None,
         };
         Some(Platform { os, arch: word })
@@ -139,7 +142,8 @@ impl Platform {
     pub fn candidates(self) -> Vec<Platform> {
         let mut out = vec![self];
         for arch in [
-            "x86-64", "aarch64", "x86", "arm", "thumb", "riscv64", "riscv32", "msp430",
+            "x86-64", "aarch64", "x86", "arm", "thumb", "riscv64", "riscv32", "msp430", "6502",
+            "z80", "superh",
         ] {
             if arch != self.arch {
                 out.push(Platform {
@@ -201,6 +205,9 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
             _ => "riscv32",
         },
         "ti_msp430" => "msp430",
+        "6502" => "6502",
+        "z80" => "z80",
+        "superh4" => "superh",
         _ => return None,
     })
 }
@@ -209,8 +216,8 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
 fn arch_bits(arch: &str) -> Option<u64> {
     match arch {
         "x86-64" | "aarch64" | "riscv64" => Some(64),
-        "x86" | "arm" | "thumb" | "mips" | "riscv32" => Some(32),
-        "msp430" => Some(16),
+        "x86" | "arm" | "thumb" | "mips" | "riscv32" | "superh" => Some(32),
+        "msp430" | "6502" | "z80" => Some(16),
         _ => None,
     }
 }

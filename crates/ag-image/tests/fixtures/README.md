@@ -21,6 +21,13 @@ The images the image tests read, and how they were made.
 | `mips_sample.c`, `mips_cpload.s`, `mips_start.s`, `mips_stub.c` | The sources of the three MIPS executables. |
 | `msp430.elf` | A 16-bit MSP430 ELF executable built from `msp430_sample.c`, statically linked with no C library: a leaf, a subtraction, a compare-and-branch, and a loop with a call. The loader has no opinion for `EM_MSP430`, so the engine names the target `TI_MSP430:LE:16:default` itself. |
 | `msp430_sample.c` | The source of the MSP430 executable. |
+| `superh4.elf` | A 32-bit SuperH SH4 ELF executable built from `superh_sample.c`, statically linked with no C library: a leaf, a subtraction, a compare-and-branch, and a loop with a call, each branch with its delay slot. The loader names no language for `EM_SH`, so the engine names the little-endian SH4 `SuperH4:LE:32:default` itself. |
+| `superh_sample.c` | The source of the SuperH executable. |
+| `m6502.elf` | A 6502 ELF wrapped from the flat binary cc65 linked: a leaf, a subtraction, a compare-and-branch and a loop with a call. The 6502 has no machine word of its own, so the wrapper writes `255` (`EM_65816`, the registered number of the 6502 family) and the engine names `6502:LE:16:default`. |
+| `m6502.s` | The source of the 6502 executable. |
+| `z80.elf` | A Z80 ELF wrapped from the Intel HEX sdldz80 linked: the same shapes. The wrapper writes `220` (`EM_Z80`) and the engine names `z80:LE:16:default`. |
+| `z80.s` | The source of the Z80 executable. |
+| `wrap_retro_elf.py` | Wraps a flat retro binary — or Intel HEX, with `--ihx` — in a minimal ELF with one loadable `.text` and a symbol per function, for cores whose toolchains do not emit one. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
@@ -226,6 +233,47 @@ ld.lld-21 -e sum --gc-sections --image-base=0x4000 -z max-page-size=4096 \
 
 The 20-bit MSP430X is not built: the toolchain here targets the 16-bit core, and the engine
 carries only the `TI_MSP430` specification, not `TI_MSP430X`.
+
+The SuperH executable was built with the SH4 cross toolchain (gcc and GNU ld, Ubuntu), with no
+C library and `.text` pinned at `0x4000`, then stripped to the four functions:
+
+```sh
+sh4-linux-gnu-gcc -O1 -nostdlib -static -fno-stack-protector -fno-asynchronous-unwind-tables \
+    -Wl,-e,sum -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,-z,noseparate-code \
+    -Wl,-Ttext=0x4000 superh_sample.c -o superh4.elf
+sh4-linux-gnu-objcopy --strip-all --keep-symbol=add --keep-symbol=sub --keep-symbol=max \
+    --keep-symbol=sum superh4.elf superh4_stripped.elf && mv superh4_stripped.elf superh4.elf
+```
+
+`add` is at `0x4000`, `sub` at `0x4006`, `max` at `0x400c` and `sum` (the entry) at `0x4018`.
+The big-endian twin is not built: the SH4 linker here links little-endian only, and the engine
+carries only `SuperH4_le.sla`. The earlier SH-1, SH-2 and SH-2A cores are not carried either.
+
+The 6502 and the Z80 toolchains do not emit ELF — cc65 links a flat binary, sdldz80 links Intel
+HEX — so each is assembled and linked to a flat image, then wrapped in a minimal ELF by
+`wrap_retro_elf.py`, which writes the machine word the engine reads, one loadable `.text` at
+`0x4000`, and a symbol per function:
+
+```sh
+# The 6502: cc65 (ca65 and ld65)
+ca65 m6502.s -o m6502.o
+ld65 -t none --start-addr 0x4000 -o m6502.bin -Ln m6502.lbl m6502.o
+python3 wrap_retro_elf.py m6502.elf m6502.bin --base 0x4000 --machine 255 --entry sum \
+    add=0x4000 sub=0x4004 max=0x4008 sum=0x400f
+
+# The Z80: sdcc (sdasz80 and sdldz80)
+sdasz80 -o -l -s z80.s
+sdldz80 -n -i z80.rel
+python3 wrap_retro_elf.py z80.elf z80.ihx --ihx --base 0x4000 --machine 220 --entry sum \
+    add=0x4000 sub=0x4002 max=0x4004 sum=0x4009
+```
+
+In `m6502.elf` `add` is at `0x4000`, `sub` at `0x4004`, `max` at `0x4008` and `sum` (the entry)
+at `0x400f`; in `z80.elf` `add` is at `0x4000`, `sub` at `0x4002`, `max` at `0x4004` and `sum`
+at `0x4009`. The 6502 carries machine word `255` (`EM_65816`, the 6502 family — the 8-bit core
+has no word of its own) and the Z80 `220` (`EM_Z80`); the engine names the targets from those
+words, the loader having no opinion for either. The 65C02 and the Z180/Z182/Z8401x are separate
+specifications, not carried.
 
 A Thumb function's symbol has its low bit set (`add` is `0x20001` in `arm_thumb.elf`), the
 entry point's low bit says the same, and the assembler's `$t`/`$a` mapping symbols mark where

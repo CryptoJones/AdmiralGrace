@@ -53,6 +53,41 @@ fn the_loader_reads_an_msp430_elf_under_a_named_target() {
 }
 
 #[test]
+fn the_loader_reads_a_6502_elf_under_a_named_target() {
+    // The 6502 has no architecture of its own in the reader, so the engine
+    // reads the machine word (255, the 6502 family) and names the target.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/m6502.elf");
+    let image = Image::open(&path).expect("the 6502 ELF loads");
+    assert_eq!(image.language(), "6502:LE:16:default");
+    assert_eq!(image.entry(), Some(0x400f));
+    assert_eq!(image.function_name(0x4000).as_deref(), Some("add"));
+    assert_eq!(image.function_name(0x400f).as_deref(), Some("sum"));
+}
+
+#[test]
+fn the_loader_reads_a_z80_elf_under_a_named_target() {
+    // Nor does the Z80: the engine reads its machine word (220) itself.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/z80.elf");
+    let image = Image::open(&path).expect("the Z80 ELF loads");
+    assert_eq!(image.language(), "z80:LE:16:default");
+    assert_eq!(image.entry(), Some(0x4009));
+    assert_eq!(image.function_name(0x4000).as_deref(), Some("add"));
+    assert_eq!(image.function_name(0x4009).as_deref(), Some("sum"));
+}
+
+#[test]
+fn the_loader_reads_a_superh_elf_under_a_named_target() {
+    // The reader knows SuperH but names no language for it, so the engine
+    // names the little-endian SH4 itself from the machine word (42).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/superh4.elf");
+    let image = Image::open(&path).expect("the SuperH ELF loads");
+    assert_eq!(image.language(), "SuperH4:LE:32:default");
+    assert_eq!(image.entry(), Some(0x4018));
+    assert_eq!(image.function_name(0x4000).as_deref(), Some("add"));
+    assert_eq!(image.function_name(0x4018).as_deref(), Some("sum"));
+}
+
+#[test]
 fn the_code_section_decodes_into_a_cfg_with_named_callees() {
     let image = sample();
     let (text, bytes) = image
@@ -253,6 +288,20 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
     assert_eq!(
         ag_engine::image::raw_arch("TI_MSP430:LE:16:default"),
         Some("msp430")
+    );
+    assert_eq!(raw_language("6502"), Some("6502:LE:16:default"));
+    assert_eq!(raw_language("m6502"), Some("6502:LE:16:default"));
+    assert_eq!(raw_language("z80"), Some("z80:LE:16:default"));
+    assert_eq!(raw_language("superh"), Some("SuperH4:LE:32:default"));
+    assert_eq!(raw_language("sh4"), Some("SuperH4:LE:32:default"));
+    assert_eq!(
+        ag_engine::image::raw_arch("6502:LE:16:default"),
+        Some("6502")
+    );
+    assert_eq!(ag_engine::image::raw_arch("z80:LE:16:default"), Some("z80"));
+    assert_eq!(
+        ag_engine::image::raw_arch("SuperH4:LE:32:default"),
+        Some("superh")
     );
 
     // Nowhere to load: address 0, no bytes, or past a 32-bit program's space.
