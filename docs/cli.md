@@ -680,8 +680,10 @@ can be named by a fingerprint of its body without lifting a line.
 fingerprints, reads them back onto an image, and writes what a match knows
 — the name, the prototype, the comment — into a project, keeping the
 analyst's own words. The engine ships signatures for libc, libstdc++ and
-libgcc. See `ag docs funcid` for the fingerprint, its constraints and the
-file format.
+libgcc. Signatures can be shared through a signature server: `serve` runs
+one, `push` and `pull` move signature files to and from it, and `--server`
+matches against it, sending only hashes. See `ag docs funcid` for the
+fingerprint, its constraints, the file format and the server.
 
 ```sh
 ag funcid list
@@ -695,7 +697,11 @@ ag funcid apply ./program --project program.agproj --sig libc.agsig
 | `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT] [--no-types] [--json]` | Fingerprints every named function of an image; a function the type libraries know carries its prototype unless `--no-types`. |
 | `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more. When several signatures know one function, the first is the match and the rest are named as alternatives (`also NAME (LIBRARY)`; an `alternatives` array in JSON). |
 | `ag funcid apply BINARY --project PROJECT [--sig FILE]… [--no-builtin] [--json]` | Writes each match's name, prototype and comment into a project, made from the image when not there yet. A rename or type already on a function stands. |
-| `ag funcid list [--json]` | The signature databases the engine ships, with their counts and provenance. |
+| `ag funcid list [--server URL] [--json]` | The signature databases the engine ships, with their counts and provenance; with `--server`, the libraries a signature server holds. |
+| `ag funcid serve --store DIR [--listen ADDR] [--token TOKEN] [--private]` | Runs a signature server over a directory of signature files, on `127.0.0.1:7395` unless `--listen`. Plain HTTP. A push needs the token (`--token` or `AG_FUNCID_TOKEN`); without one the server is read-only; `--private` asks for it to read as well. |
+| `ag funcid push FILE… --server URL [--token TOKEN] [--json]` | Sends signature files for the server to merge: new hashes are added, a hash already held keeps its name and only gains a missing prototype or comment. |
+| `ag funcid pull --server URL [--library NAME]… [--arch ARCH] [-o DIR] [--token TOKEN] [--json]` | Writes the server's libraries into a directory as signature files (`LIBRARY@ARCH.agsig`), to match offline with `--sig`. |
+| `ag funcid match\|apply … --server URL [--token TOKEN]` | Asks a signature server about the image's functions as well, after the built-ins and each `--sig`. Only the functions' hashes are sent. May be repeated. |
 
 ## Platform types: `ag platform`
 

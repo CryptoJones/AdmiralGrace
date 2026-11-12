@@ -278,6 +278,54 @@ impl SignatureDb {
         text
     }
 
+    /// Merge `other`'s signatures into this database, the way a shared
+    /// server takes a push (#395). A hash not held yet is added. A hash
+    /// already held keeps its name — the first to say it stands — and only
+    /// has its missing prototype or comment filled, when `other` gives the
+    /// function the same name. The database's `source` is filled when it had
+    /// none. `other`'s own repeats of a hash count as known.
+    pub fn merge(&mut self, other: &SignatureDb) -> Merge {
+        let mut index: std::collections::HashMap<String, usize> = self
+            .signatures
+            .iter()
+            .enumerate()
+            .map(|(at, signature)| (signature.hash.clone(), at))
+            .collect();
+        let mut report = Merge::default();
+        for incoming in &other.signatures {
+            match index.get(&incoming.hash) {
+                None => {
+                    index.insert(incoming.hash.clone(), self.signatures.len());
+                    self.signatures.push(incoming.clone());
+                    report.added += 1;
+                }
+                Some(&at) => {
+                    let held = &mut self.signatures[at];
+                    let mut filled = false;
+                    if held.name == incoming.name {
+                        if held.prototype.is_none() && incoming.prototype.is_some() {
+                            held.prototype = incoming.prototype.clone();
+                            filled = true;
+                        }
+                        if held.comment.is_none() && incoming.comment.is_some() {
+                            held.comment = incoming.comment.clone();
+                            filled = true;
+                        }
+                    }
+                    if filled {
+                        report.filled += 1;
+                    } else {
+                        report.known += 1;
+                    }
+                }
+            }
+        }
+        if self.source.is_none() {
+            self.source = other.source.clone();
+        }
+        report
+    }
+
     /// How many signatures the database holds.
     pub fn len(&self) -> usize {
         self.signatures.len()
@@ -287,6 +335,17 @@ impl SignatureDb {
     pub fn is_empty(&self) -> bool {
         self.signatures.is_empty()
     }
+}
+
+/// What [`SignatureDb::merge`] did with the signatures it was given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Merge {
+    /// Signatures whose hash was not held, and now is.
+    pub added: usize,
+    /// Signatures already held that gained a prototype or a comment.
+    pub filled: usize,
+    /// Signatures already held, left as they were.
+    pub known: usize,
 }
 
 /// One signature a hash names, with the library that carries it. Several
@@ -521,6 +580,55 @@ mod tests {
         let text = db.to_json();
         let read = SignatureDb::parse(&text).expect("round trips");
         assert_eq!(read, db);
+    }
+
+    #[test]
+    fn a_merge_adds_new_hashes_and_only_fills_what_a_held_one_lacks() {
+        let sig = |hash: &str, name: &str, prototype: Option<&str>| Signature {
+            hash: hash.to_string(),
+            length: 4,
+            name: name.to_string(),
+            prototype: prototype.map(str::to_string),
+            comment: None,
+        };
+        let mut held = SignatureDb::new("libc", "x86-64");
+        held.signatures.push(sig("aa", "free", None));
+        held.signatures.push(sig("bb", "malloc", None));
+        let mut pushed = SignatureDb::new("libc", "x86-64");
+        pushed.source = Some("a build".to_string());
+        // The same name with a prototype fills it in.
+        pushed
+            .signatures
+            .push(sig("aa", "free", Some("void free(void *)")));
+        // Another name for a held hash does not rename it or type it.
+        pushed
+            .signatures
+            .push(sig("bb", "xmalloc", Some("void *xmalloc(size_t)")));
+        // A new hash is added, once, however often the push repeats it.
+        pushed.signatures.push(sig("cc", "strlen", None));
+        pushed.signatures.push(sig("cc", "strlen_again", None));
+
+        let report = held.merge(&pushed);
+        assert_eq!(
+            report,
+            Merge {
+                added: 1,
+                filled: 1,
+                known: 2
+            }
+        );
+        assert_eq!(held.len(), 3);
+        assert_eq!(
+            held.signatures[0].prototype.as_deref(),
+            Some("void free(void *)")
+        );
+        assert_eq!(held.signatures[1].name, "malloc");
+        assert_eq!(held.signatures[1].prototype, None);
+        assert_eq!(held.signatures[2].name, "strlen");
+        assert_eq!(held.source.as_deref(), Some("a build"));
+        // Merging the same push again changes nothing.
+        assert_eq!(held.merge(&pushed).added, 0);
+        assert_eq!(held.len(), 3);
     }
 
     #[test]

@@ -131,9 +131,17 @@ cargo run --bin ag -- funcid list
 cargo run --bin ag -- funcid create /lib/x86_64-linux-gnu/libc.so.6 -o libc.agsig --library libc
 cargo run --bin ag -- funcid match ./program --sig libc.agsig
 cargo run --bin ag -- funcid apply ./program --project program.agproj --sig libc.agsig
+
+# Share signatures: run a server, push to it, match against it
+AG_FUNCID_TOKEN=secret cargo run --bin ag -- funcid serve --store ./sigstore
+AG_FUNCID_TOKEN=secret cargo run --bin ag -- funcid push libc.agsig --server http://127.0.0.1:7395
+cargo run --bin ag -- funcid match ./program --server http://127.0.0.1:7395
+cargo run --bin ag -- funcid pull --server http://127.0.0.1:7395 -o sigs/
 ```
 
-The fingerprint, its constraints and the file format are in [docs/funcid.md](docs/funcid.md), also `ag docs funcid`.
+A signature server (`ag funcid serve`) is one store of signatures a team pushes to, pulls from and matches against, so a library one analyst has fingerprinted is recognised in everyone's images. A match sends the server only the hashes of the image's functions, never their bytes; a push needs the server's token. The server speaks plain HTTP, so it belongs on the loopback, a private network or behind an SSH tunnel.
+
+The fingerprint, its constraints, the file format and the server are in [docs/funcid.md](docs/funcid.md), also `ag docs funcid`.
 
 ## MCP server
 

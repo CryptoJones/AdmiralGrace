@@ -87,7 +87,7 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         topic: "funcid",
-        summary: "Library identification by whole-function hash: signature files, matching, and applying names, types and comments.",
+        summary: "Library identification by whole-function hash: signature files, matching, applying names, types and comments, and the shared signature server.",
         readme_sections: &[],
         body: include_str!("../../../docs/funcid.md"),
     },
