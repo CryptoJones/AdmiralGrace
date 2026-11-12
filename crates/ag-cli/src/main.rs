@@ -20,6 +20,7 @@ mod plugins;
 mod port;
 mod project;
 mod run;
+mod sigserver;
 mod skill;
 mod types;
 
@@ -214,7 +215,8 @@ enum Cmd {
         cmd: platform::PlatformCmd,
     },
     /// Library identification by whole-function hash: make signature files,
-    /// match an image's functions against them, and apply what a match knows.
+    /// match an image's functions against them, apply what a match knows,
+    /// and share signatures through a server (serve, push, pull).
     Funcid {
         #[command(subcommand)]
         cmd: funcid::FuncidCmd,

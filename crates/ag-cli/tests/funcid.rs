@@ -304,3 +304,200 @@ fn the_builtin_databases_are_listed_with_their_counts() {
         );
     }
 }
+
+/// A running `ag funcid serve`, stopped when it goes out of scope.
+struct SigServer {
+    child: std::process::Child,
+    url: String,
+    store: PathBuf,
+}
+
+impl SigServer {
+    /// Start a server over a fresh store on a free loopback port, taking
+    /// pushes that carry `token`, and read its address off its first line.
+    fn start(tag: &str, token: &str) -> SigServer {
+        use std::io::BufRead;
+
+        let store = stem(tag).with_extension("store");
+        let _ = std::fs::remove_dir_all(&store);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(["funcid", "serve", "--listen", "127.0.0.1:0", "--store"])
+            .arg(&store)
+            .env("AG_FUNCID_TOKEN", token)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the server starts");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("the server's stdout"))
+            .read_line(&mut line)
+            .expect("the server says where it listens");
+        let url = line
+            .trim()
+            .rsplit(' ')
+            .next()
+            .expect("an address")
+            .to_string();
+        assert!(url.starts_with("http://127.0.0.1:"), "{line}");
+        SigServer { child, url, store }
+    }
+}
+
+impl Drop for SigServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.store);
+    }
+}
+
+#[test]
+fn signatures_are_pushed_to_pulled_from_and_matched_against_a_server() {
+    let server = SigServer::start("server", "s3cret");
+    let url = server.url.as_str();
+    let sig = stem("server").with_extension("agsig");
+    let sig_arg = sig.to_str().unwrap();
+    let pulled = stem("server").with_extension("pulled");
+    let binary = fixture("sample.elf");
+    let binary = binary.to_str().unwrap();
+
+    ag(&[
+        "funcid",
+        "create",
+        binary,
+        "-o",
+        sig_arg,
+        "--library",
+        "sample",
+    ]);
+    let made: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sig).unwrap()).unwrap();
+    let count = made["signatures"].as_array().unwrap().len();
+
+    // Nothing local knows the fixture, and the server holds nothing yet.
+    let none = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--server",
+        url,
+        "--json",
+    ]);
+    assert_eq!(none.trim(), "[]", "{none}");
+
+    // A push without the token is refused and stores nothing.
+    let refused = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["funcid", "push", sig_arg, "--server", url])
+        .env_remove("AG_FUNCID_TOKEN")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("token"), "{stderr}");
+    let listed = ag(&["funcid", "list", "--server", url, "--json"]);
+    assert_eq!(listed.trim(), "[]", "{listed}");
+
+    // With it, the server takes every signature — once.
+    let report = ag(&[
+        "funcid", "push", sig_arg, "--server", url, "--token", "s3cret", "--json",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report[0]["library"], "sample");
+    assert_eq!(report[0]["added"], count);
+    assert_eq!(report[0]["total"], count);
+    let again = ag(&[
+        "funcid", "push", sig_arg, "--server", url, "--token", "s3cret", "--json",
+    ]);
+    let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert_eq!(again[0]["added"], 0);
+    assert_eq!(again[0]["known"], count);
+
+    // Anyone can now list it, and match against it with no signature file
+    // on this machine: the server names the fixture's functions.
+    let listed = ag(&["funcid", "list", "--server", url, "--json"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed[0]["library"], "sample");
+    assert_eq!(listed[0]["arch"], "x86-64");
+    assert_eq!(listed[0]["signatures"], count);
+    let json = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--server",
+        url,
+        "--json",
+    ]);
+    let matches: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let matches = matches.as_array().unwrap();
+    assert!(matches.iter().any(|m| m["name"] == "main"), "{json}");
+    assert!(matches.iter().all(|m| m["library"] == "sample"), "{json}");
+    // The server answers what the file itself would.
+    let local = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        sig_arg,
+        "--json",
+    ]);
+    assert_eq!(json, local);
+
+    // apply reads the server the same way.
+    let project = stem("server").with_extension("agproj");
+    let project_arg = project.to_str().unwrap();
+    let applied = ag(&[
+        "funcid",
+        "apply",
+        binary,
+        "--project",
+        project_arg,
+        "--no-builtin",
+        "--server",
+        url,
+        "--json",
+    ]);
+    let applied: serde_json::Value = serde_json::from_str(&applied).unwrap();
+    assert_eq!(applied["matched"], matches.len());
+    assert!(applied["named"].as_u64().unwrap() > 0, "{applied}");
+
+    // A pull brings the library back as a signature file that matches
+    // offline, signature for signature what was pushed.
+    let out = ag(&[
+        "funcid",
+        "pull",
+        "--server",
+        url,
+        "-o",
+        pulled.to_str().unwrap(),
+        "--json",
+    ]);
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let file = pulled.join("sample@x86-64.agsig");
+    assert_eq!(out[0]["file"], file.to_str().unwrap());
+    let back: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(back["signatures"], made["signatures"]);
+    let offline = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        file.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(offline, local);
+    // A library the server does not hold is an error, not an empty pull.
+    let missing = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(["funcid", "pull", "--server", url, "--library", "nope", "-o"])
+        .arg(&pulled)
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+
+    let _ = std::fs::remove_file(&sig);
+    let _ = std::fs::remove_file(&project);
+    let _ = std::fs::remove_dir_all(&pulled);
+}

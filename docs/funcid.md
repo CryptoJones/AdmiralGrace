@@ -6,14 +6,21 @@ it can be named by a fingerprint of its body without lifting a line.
 `ag funcid` makes the signature files that hold those fingerprints
 (`create`), reads them back onto an image (`match`), and writes what a
 match knows — the name, the prototype, the comment — into a project
-(`apply`). Recognising library code lets the analyst skip it and spend
-the session on what is unique to the program.
+(`apply`). The signatures can be shared: `serve` runs a signature server,
+`push` and `pull` move signature files to and from it, and `--server`
+matches an image against it. Recognising library code lets the analyst
+skip it and spend the session on what is unique to the program.
 
 ```sh
 ag funcid list
 ag funcid create /lib/x86_64-linux-gnu/libc.so.6 -o libc.agsig --library libc
 ag funcid match ./program --sig libc.agsig
 ag funcid apply ./program --project program.agproj --sig libc.agsig
+
+ag funcid serve --store /srv/agsig                   # on the shared host
+ag funcid push libc.agsig --server http://sigs:7395  # give the team your signatures
+ag funcid match ./program --server http://sigs:7395  # match against everyone's
+ag funcid pull --server http://sigs:7395 -o sigs/    # or take them offline
 ```
 
 ## The fingerprint and its constraints
@@ -103,11 +110,105 @@ signature, the first name at the first address keeping it.
   match only fills what is not said. Applying twice names nothing new the
   second time.
 - `ag funcid list [--json]` — the signature databases the engine ships,
-  with their counts and provenance.
+  with their counts and provenance. With `--server URL`, the libraries a
+  signature server holds instead.
+- `ag funcid serve`, `push`, `pull`, and `--server URL` on `match` and
+  `apply` — the shared signature server, below.
 
 `match` and `apply` take the same image options as the other image
 commands (`--raw`, a slice), so a signature can be matched against a
 carved region as well as a whole file.
+
+## The signature server
+
+A team that reverses the same kind of target keeps meeting the same
+libraries. A signature server is one store of signatures that everyone
+pushes what they have made to, and matches against, so a library one
+analyst has fingerprinted is recognised in everyone's images.
+
+```sh
+# On the shared host: serve a directory of signature files.
+AG_FUNCID_TOKEN=… ag funcid serve --store /srv/agsig --listen 10.0.0.5:7395
+
+# On an analyst's machine.
+export AG_FUNCID_TOKEN=…
+ag funcid push libfoo.agsig libbar.agsig --server http://10.0.0.5:7395
+ag funcid list --server http://10.0.0.5:7395
+ag funcid match ./program --server http://10.0.0.5:7395
+ag funcid apply ./program --project program.agproj --server http://10.0.0.5:7395
+ag funcid pull --server http://10.0.0.5:7395 --library libfoo -o sigs/
+```
+
+- `ag funcid serve --store DIR [--listen ADDR] [--token TOKEN]
+  [--private]` — run a server over `DIR` until it is stopped. The store is
+  a directory of ordinary signature files, one a library and architecture
+  (`libc@x86-64.agsig`); it is made when not there, and signature files
+  already in it — copied in by hand as much as pushed — are served. The
+  server listens on `127.0.0.1:7395` unless `--listen` says otherwise
+  (port `0` takes a free one), and its first line of output is the address
+  it is listening on.
+- `ag funcid push FILE… --server URL [--token TOKEN] [--json]` — send
+  signature files for the server to **merge** into the libraries they
+  name. A hash the server does not hold is *added*. A hash it already
+  holds keeps the name it has — the first to name a function stands, so a
+  push never renames what others already match — and only has a missing
+  prototype or comment *filled*, when the push gives it the same name. The
+  report counts what was added, filled and already known. Pushing the same
+  file twice adds nothing the second time.
+- `ag funcid pull --server URL [--library NAME]… [--arch ARCH] [-o DIR]
+  [--token TOKEN] [--json]` — write the server's libraries into `DIR` (the
+  current directory when not said) as signature files, to match against
+  offline with `--sig`. All of them unless `--library` or `--arch` narrow
+  it; a library the server does not hold is an error.
+- `ag funcid match … --server URL` and `ag funcid apply … --server URL` —
+  ask the server about the image's functions as well. What is on this
+  machine is consulted first — the built-ins, then each `--sig` — and the
+  server after, so the server names the functions nothing local knows and
+  is offered as an alternative for the ones something does. `--server` may
+  be repeated.
+- `ag funcid list --server URL [--json]` — the libraries the server holds.
+
+**What leaves the machine.** A match sends the server the *hashes* of the
+image's named functions and the architecture, and nothing else — not the
+bytes, not the names, not the file. The hash is a SHA-256 of the masked
+body, so the server learns only whether it already knows a function. A
+push sends the signature file as it is: hashes, lengths, names,
+prototypes, comments and the `source` line.
+
+**Who may do what.** A push must carry the server's **token**, given to
+`serve` and to the clients with `--token` or — better, since a command
+line is visible to other users of a machine — in the `AG_FUNCID_TOKEN`
+environment variable. A server started without a token is **read-only**:
+it serves its store and refuses every push. Listing, pulling and matching
+need no token unless the server is started `--private`, when every request
+does. The server refuses a library or architecture name that is not a
+plain name (letters, digits and `. _ + -`), a hash that is not a hash, and
+a request larger than it reads, and a client checks what a server sends it
+the same way.
+
+**The wire is plain HTTP.** The server and client carry no TLS: hashes,
+signatures and the token travel unencrypted, and `https://` addresses are
+refused. Keep the server on the loopback (the default), a private network
+or a VPN, or reach it through an SSH tunnel:
+
+```sh
+ssh -N -L 7395:127.0.0.1:7395 sigs.example &
+ag funcid match ./program --server http://127.0.0.1:7395
+```
+
+The protocol is small JSON over HTTP/1.1, so a script can speak it:
+
+| Request | Answer |
+|---|---|
+| `GET /v1` | the service's name, protocol version, and whether it is writable and private |
+| `GET /v1/libraries` | every library held: `library`, `arch`, `source`, `signatures` (a count) |
+| `GET /v1/libraries/LIBRARY/ARCH` | that library's signature file |
+| `POST /v1/libraries` with a signature file | merges it; `library`, `arch`, `added`, `filled`, `known`, `total` |
+| `POST /v1/match` with `{"arch": "x86-64", "hashes": ["…"]}` | `{"databases": […]}` — a signature file a library, holding only the hashes asked for |
+
+The token goes in an `Authorization: Bearer TOKEN` header. An error is a
+status with `{"error": "…"}`. One match request carries at most 100,000
+hashes; the client sends a larger image's in several.
 
 ## In the workbench
 
