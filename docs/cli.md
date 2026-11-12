@@ -708,6 +708,10 @@ ag project ./bin/ls segment --file ls.agproj rename .text code
 ag project ./bin/ls segment --file ls.agproj add extra 0x405000 16 --file-offset 0x3000
 ag project ./bin/ls segment --file ls.agproj remove .comment
 ag image ./bin/ls info --project ls.agproj
+
+# Import a microcontroller's peripheral map: segments, register structs, comments
+ag project ./firmware.elf svd --file fw.agproj STM32F103.svd --preview
+ag project ./firmware.elf svd --file fw.agproj STM32F103.svd GPIOA USART1
 ag asm "jmp 0x401010" --at 0x401000
 ag image ./bin/ls cfg 0x1200 --project ls.agproj
 
@@ -776,6 +780,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET segment --file FILE add NAME ADDRESS SIZE [--file-offset OFF] [--exec]` | Adds a segment the loader missed, at `ADDRESS` in the moved image's addresses, `SIZE` bytes long (`16` or `0x10`), holding the file's bytes from `--file-offset` when the file holds them, and code with `--exec`. One that would overlap a segment the image has, or reuse a name, is refused. |
 | `ag project TARGET segment --file FILE remove NAME` | Takes the segment out of the image, and the functions, data and import slots that lay in it with it. Removing a segment the layout added drops the addition. |
 | `ag project TARGET segment --file FILE rename NAME NEW` | Calls the segment `NEW`. Renaming one the layout added or renamed folds into that edit. |
+| `ag project TARGET svd --file FILE MAP [NAME…] [--preview] [--json]` | Imports a CMSIS SVD peripheral map: for each peripheral — or only the `NAME`s given — a segment for each address block it decodes, a C structure of its registers (`struct GPIOA`: each register a member of its width at its offset, the gaps reserved bytes, a packed `dim` array one C array), a label at its base, and a comment at the base and at each register's address saying what it is, its access and reset value, and its fields with their bits and the values they take. `derivedFrom` inheritance, peripheral and register arrays and clusters are resolved; a peripheral with no base address is skipped with its reason, a register C cannot hold is left out with a note. What the analyst recorded stands: a name or comment in place is kept, a struct defined already and a segment that would overlap the image are held back with a note, so importing the same map twice changes nothing. `--preview` says what the map holds and writes nothing; `--json` reports the preview as JSON. |
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 

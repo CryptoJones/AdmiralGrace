@@ -596,6 +596,24 @@ pub enum ProjectCmd {
         #[command(subcommand)]
         edit: SegmentCmd,
     },
+    /// Import a CMSIS SVD peripheral map: segments, register structs and
+    /// comments for a microcontroller's peripherals.
+    Svd {
+        /// The project file to change.
+        #[arg(long)]
+        file: PathBuf,
+        /// The SVD file to read.
+        map: PathBuf,
+        /// The peripherals to import, by name; every one when none are
+        /// named.
+        names: Vec<String>,
+        /// Say what the map holds without writing anything.
+        #[arg(long)]
+        preview: bool,
+        /// Report as JSON, with `--preview`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
         /// The project file to read.
@@ -695,6 +713,13 @@ pub fn run(
         }
         ProjectCmd::Rebase { file, base } => rebase(&target, &file, &base),
         ProjectCmd::Segment { file, edit } => segment(&target, &file, edit),
+        ProjectCmd::Svd {
+            file,
+            map,
+            names,
+            preview,
+            json,
+        } => svd_import(&target, &file, &map, &names, preview, json),
         ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
         ProjectCmd::Opaque {
             file,
@@ -2387,6 +2412,221 @@ fn segment(target: &Path, file: &Path, edit: SegmentCmd) -> Result<i32> {
     check_layout(target, &project)?;
     project.save(file)?;
     println!("{}: {said}", file.display());
+    Ok(0)
+}
+
+/// Import a CMSIS SVD peripheral map into the project: a segment for each
+/// address block a peripheral decodes, a C structure of its registers, a
+/// label at its base, and a comment at the base and at each register's
+/// address.
+///
+/// What the analyst recorded already is kept: a name or a comment in place
+/// is not replaced, a structure defined already is held back, and a
+/// segment that would overlap the image or another is held back with a
+/// note — so importing the same map twice changes nothing the second time.
+/// `--preview` reads the map alone and writes nothing.
+fn svd_import(
+    target: &Path,
+    file: &Path,
+    map: &Path,
+    names: &[String],
+    preview: bool,
+    json: bool,
+) -> Result<i32> {
+    let text = std::fs::read_to_string(map)
+        .with_context(|| format!("{} cannot be read", map.display()))?;
+    let parsed = ag_image::svd::parse(&text).map_err(anyhow::Error::msg)?;
+    let selected: Vec<&ag_image::svd::Peripheral> = if names.is_empty() {
+        parsed.peripherals.iter().collect()
+    } else {
+        let mut chosen = Vec::new();
+        for name in names {
+            match parsed.peripherals.iter().find(|p| &p.name == name) {
+                Some(p) => chosen.push(p),
+                None => anyhow::bail!(
+                    "{name} is not a peripheral of {}: {}",
+                    parsed.device,
+                    parsed
+                        .peripherals
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        chosen
+    };
+    if preview {
+        if json {
+            let list: Vec<serde_json::Value> = selected
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "base": format!("{:#x}", p.base),
+                        "struct": ag_image::svd::struct_name(p),
+                        "size": ag_image::svd::struct_size(p),
+                        "registers": p.registers.len(),
+                        "segments": ag_image::svd::segments(p).iter().map(|s| serde_json::json!({
+                            "name": s.name,
+                            "address": format!("{:#x}", s.address),
+                            "size": s.size,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "device": parsed.device,
+                    "peripherals": list,
+                    "skipped": parsed.skipped.iter().map(|s| serde_json::json!({"name": s.name, "reason": s.reason})).collect::<Vec<_>>(),
+                    "notes": parsed.notes,
+                }))?
+            );
+            return Ok(0);
+        }
+        for p in &selected {
+            let segments: Vec<String> = ag_image::svd::segments(p)
+                .iter()
+                .map(|s| format!("{} at {:#x} ({} bytes)", s.name, s.address, s.size))
+                .collect();
+            println!(
+                "{}: {} ({} bytes), {} registers; segments {}",
+                p.name,
+                ag_image::svd::struct_name(p),
+                ag_image::svd::struct_size(p),
+                p.registers.len(),
+                if segments.is_empty() {
+                    "none".to_string()
+                } else {
+                    segments.join(", ")
+                }
+            );
+        }
+        for skipped in &parsed.skipped {
+            println!("{}: held back ({})", skipped.name, skipped.reason);
+        }
+        for note in &parsed.notes {
+            eprintln!("note: {note}");
+        }
+        if selected.is_empty() && parsed.skipped.is_empty() {
+            println!("{}: no peripherals", map.display());
+        }
+        return Ok(0);
+    }
+    let mut project = open_project(target, file)?;
+    let image = image_under(target, &project)?;
+    let model = image.data_model();
+    // The sections the image maps under the project's layout already: a
+    // new segment may not overlap any of them, nor one added here before.
+    let mut sections = image.sections().to_vec();
+    let mut held = crate::types::texts(&project);
+    let mut notes = parsed.notes.clone();
+    let (mut mapped, mut segments_added, mut structs_added, mut comments_added) = (0, 0, 0, 0);
+    for peripheral in &selected {
+        let mut touched = false;
+        let name = ag_image::svd::struct_name(peripheral);
+        match ag_image::ctype::add(model, &held, &ag_image::svd::struct_c(peripheral)) {
+            Ok((defined, added, said)) => {
+                held = defined;
+                structs_added += added.len();
+                notes.extend(said);
+                touched = true;
+            }
+            Err(reason) => {
+                // The parser's position prefix and the name said again are
+                // noise in a note that names the struct already.
+                let why = if reason.contains("is defined already") {
+                    "defined already".to_string()
+                } else {
+                    reason
+                };
+                notes.push(format!("{name} held back: {why}"));
+            }
+        }
+        for segment in ag_image::svd::segments(peripheral) {
+            let end = segment.address + segment.size;
+            if let Some(clash) = sections
+                .iter()
+                .find(|s| segment.address < s.vma + s.size && s.vma < end)
+            {
+                notes.push(format!(
+                    "segment {} held back: overlaps {} at {:#x}",
+                    segment.name, clash.name, clash.vma
+                ));
+                continue;
+            }
+            let edit = ag_corpus::project::SegmentEdit::Add {
+                name: segment.name.clone(),
+                address: format!("{:#x}", segment.address),
+                size: segment.size,
+                file_offset: None,
+                executable: false,
+            };
+            match project.edit_segment(edit) {
+                Ok(()) => {
+                    sections.push(ag_image::SectionInfo {
+                        name: segment.name,
+                        vma: segment.address,
+                        size: segment.size,
+                        executable: false,
+                        file_offset: None,
+                        file_size: None,
+                    });
+                    segments_added += 1;
+                    touched = true;
+                }
+                Err(reason) => notes.push(format!("segment {} held back: {reason}", segment.name)),
+            }
+        }
+        let annotation =
+            project.annotation_mut(TargetKind::Address, &format!("{:#x}", peripheral.base));
+        if annotation.name.is_none() {
+            annotation.name = Some(peripheral.name.clone());
+        }
+        if annotation.comment.is_none() {
+            let mut text = ag_image::svd::peripheral_comment(peripheral);
+            // A register at offset 0 shares the base's address: its
+            // comment joins the peripheral's rather than being lost.
+            if let Some(first) = peripheral.registers.iter().find(|r| r.offset == 0) {
+                text.push_str("; ");
+                text.push_str(&ag_image::svd::register_comment(peripheral, first));
+            }
+            annotation.comment = Some(text);
+            comments_added += 1;
+        }
+        for register in &peripheral.registers {
+            if register.offset == 0 {
+                continue;
+            }
+            let key = format!("{:#x}", peripheral.base + register.offset);
+            let annotation = project.annotation_mut(TargetKind::Address, &key);
+            if annotation.comment.is_none() {
+                annotation.comment = Some(ag_image::svd::register_comment(peripheral, register));
+                comments_added += 1;
+            }
+        }
+        if touched {
+            mapped += 1;
+        }
+    }
+    project.types = crate::types::definitions(&held);
+    project.prune();
+    check_layout(target, &project)?;
+    project.save(file)?;
+    for note in &notes {
+        eprintln!("note: {note}");
+    }
+    println!(
+        "{}: {} peripherals mapped, {} segments, {} structs, {} comments",
+        file.display(),
+        mapped,
+        segments_added,
+        structs_added,
+        comments_added
+    );
     Ok(0)
 }
 

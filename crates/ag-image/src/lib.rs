@@ -93,6 +93,7 @@ pub use ag_engine::smart_struct::{
 };
 pub use ag_engine::stack_offsets::StackOffset;
 pub use ag_engine::stack_vars::{parse_type, parse_type_in, StackVar};
+pub use ag_engine::svd;
 pub use ag_engine::swift::{
     SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
 };

@@ -4316,3 +4316,311 @@ fn archive_with(args: &[&str]) -> (bool, String, String) {
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
+
+/// A small device map: one peripheral with two registers and a field, and
+/// a second that derives from it at its own base.
+const SVD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<device schemaVersion="1.1">
+  <name>TESTDEV</name>
+  <width>32</width>
+  <peripherals>
+    <peripheral>
+      <name>GPIOA</name>
+      <description>General purpose I/O</description>
+      <groupName>GPIO</groupName>
+      <baseAddress>0x40010800</baseAddress>
+      <addressBlock><offset>0</offset><size>0x400</size><usage>registers</usage></addressBlock>
+      <interrupt><name>EXTI0</name><value>6</value></interrupt>
+      <registers>
+        <register>
+          <name>CRL</name>
+          <description>Port configuration register low</description>
+          <addressOffset>0x0</addressOffset>
+          <resetValue>0x44444444</resetValue>
+          <fields>
+            <field>
+              <name>MODE0</name>
+              <bitOffset>0</bitOffset>
+              <bitWidth>2</bitWidth>
+              <enumeratedValues>
+                <enumeratedValue><name>INPUT</name><value>0</value></enumeratedValue>
+                <enumeratedValue><name>OUTPUT</name><value>1</value></enumeratedValue>
+              </enumeratedValues>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>IDR</name>
+          <addressOffset>0x8</addressOffset>
+          <access>read-only</access>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="GPIOA">
+      <name>GPIOB</name>
+      <baseAddress>0x40010C00</baseAddress>
+    </peripheral>
+  </peripherals>
+</device>
+"#;
+
+/// An SVD file written for one test, removed when the test is done.
+struct SvdFile(PathBuf);
+
+impl SvdFile {
+    fn new(tag: &str, text: &str) -> SvdFile {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-svd-cli-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the SVD dir is made");
+        let path = dir.join("device.svd");
+        std::fs::write(&path, text).expect("the SVD is written");
+        SvdFile(path)
+    }
+
+    fn text(&self) -> String {
+        self.0.display().to_string()
+    }
+}
+
+impl Drop for SvdFile {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
+fn svd_peripherals_map_segments_structs_and_comments() {
+    let file = TempFile::new("svd");
+    let svd = SvdFile::new("map", SVD);
+    // The preview reads the map and writes nothing.
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text(), "--preview"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("GPIOA: struct GPIOA (1024 bytes), 2 registers"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("GPIOB: struct GPIOB"), "{stdout}");
+    assert!(!file.path().exists(), "the preview writes nothing");
+
+    // The import maps both peripherals.
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("2 peripherals mapped, 2 segments, 2 structs, 4 comments"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    let types = report["types"].as_array().expect("the types");
+    assert_eq!(types.len(), 2, "{report}");
+    assert_eq!(types[0]["name"], serde_json::json!("struct GPIOA"));
+    let c = types[0]["c"].as_str().expect("the C");
+    assert!(c.contains("uint32_t CRL; /* 0x0 */"), "{c}");
+    assert!(c.contains("uint8_t reserved_4[4];"), "{c}");
+    assert!(c.contains("uint32_t IDR; /* 0x8 */"), "{c}");
+    let segments = report["layout"]["segments"]
+        .as_array()
+        .expect("the segments");
+    assert_eq!(segments.len(), 2, "{report}");
+    assert_eq!(segments[0]["name"], serde_json::json!("GPIOA"));
+    assert_eq!(segments[0]["address"], serde_json::json!("0x40010800"));
+    assert_eq!(segments[0]["size"], serde_json::json!(1024));
+    assert_eq!(segments[1]["name"], serde_json::json!("GPIOB"));
+    assert_eq!(segments[1]["address"], serde_json::json!("0x40010c00"));
+    let annotations = report["annotations"].as_array().expect("the annotations");
+    assert_eq!(annotations.len(), 4, "{report}");
+    let base = annotations
+        .iter()
+        .find(|a| a["address"] == serde_json::json!("0x40010800"))
+        .expect("the base record");
+    assert_eq!(base["name"], serde_json::json!("GPIOA"));
+    let comment = base["comment"].as_str().expect("the comment");
+    assert!(
+        comment.contains("GPIOA: General purpose I/O (group GPIO)"),
+        "{comment}"
+    );
+    assert!(comment.contains("interrupt 6 (EXTI0)"), "{comment}");
+    // The register at offset 0 shares the base's address and comment.
+    assert!(
+        comment.contains("GPIOA.CRL: Port configuration register low"),
+        "{comment}"
+    );
+    assert!(comment.contains("reset 0x44444444"), "{comment}");
+    assert!(comment.contains("MODE0[1:0]"), "{comment}");
+    assert!(comment.contains("INPUT=0, OUTPUT=1"), "{comment}");
+    let idr = annotations
+        .iter()
+        .find(|a| a["address"] == serde_json::json!("0x40010808"))
+        .expect("the IDR record");
+    assert_eq!(idr["comment"], serde_json::json!("GPIOA.IDR (read-only)"));
+    // The derived peripheral carries the same registers at its own base.
+    let b = annotations
+        .iter()
+        .find(|a| a["address"] == serde_json::json!("0x40010c08"))
+        .expect("the GPIOB.IDR record");
+    assert_eq!(b["comment"], serde_json::json!("GPIOB.IDR (read-only)"));
+
+    // Importing the same map again changes nothing.
+    let before = std::fs::read_to_string(file.path()).expect("the project reads");
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("0 peripherals mapped, 0 segments, 0 structs, 0 comments"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("defined already"), "{stderr}");
+    let after = std::fs::read_to_string(file.path()).expect("the project reads");
+    assert_eq!(before, after, "the second import writes nothing new");
+}
+
+#[test]
+fn svd_import_keeps_what_the_analyst_recorded() {
+    let file = TempFile::new("svd-keeps");
+    let svd = SvdFile::new("keeps", SVD);
+    // The analyst's own label, comment and struct at GPIOA's base.
+    let (ok, _, stderr) = project(&["label", "--file", &file.text(), "0x40010800", "ports"]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "comment",
+        "--file",
+        &file.text(),
+        "0x40010800",
+        "my own note",
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = project(&[
+        "types",
+        "--file",
+        &file.text(),
+        "add",
+        "struct GPIOA { int mine; };",
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("struct GPIOA held back: defined already"),
+        "{stderr}"
+    );
+    // GPIOB still maps whole; GPIOA's segment and IDR comment still land,
+    // but the analyst's label, comment and struct stand.
+    assert!(
+        stdout.contains("2 peripherals mapped, 2 segments, 1 structs, 3 comments"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    let base = report["annotations"]
+        .as_array()
+        .expect("the annotations")
+        .iter()
+        .find(|a| a["address"] == serde_json::json!("0x40010800"))
+        .expect("the base record")
+        .clone();
+    assert_eq!(base["name"], serde_json::json!("ports"));
+    assert_eq!(base["comment"], serde_json::json!("my own note"));
+    let types = report["types"].as_array().expect("the types");
+    assert_eq!(types.len(), 2, "{report}");
+    assert!(
+        types[0]["c"].as_str().expect("the C").contains("int mine;"),
+        "{report}"
+    );
+}
+
+#[test]
+fn svd_import_selects_peripherals_by_name() {
+    let file = TempFile::new("svd-select");
+    let svd = SvdFile::new("select", SVD);
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text(), "GPIOB"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("1 peripherals mapped, 1 segments, 1 structs, 2 comments"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    assert_eq!(
+        report["types"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+    assert_eq!(
+        report["types"][0]["name"],
+        serde_json::json!("struct GPIOB")
+    );
+    // A name the device does not have is refused, with the names it has.
+    let (ok, _, stderr) = project(&["svd", "--file", &file.text(), &svd.text(), "NOSUCH"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("NOSUCH is not a peripheral of TESTDEV: GPIOA, GPIOB"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn svd_preview_reports_the_map_as_json() {
+    let file = TempFile::new("svd-json");
+    let svd = SvdFile::new("json", SVD);
+    let (ok, stdout, stderr) = project(&[
+        "svd",
+        "--file",
+        &file.text(),
+        &svd.text(),
+        "--preview",
+        "--json",
+    ]);
+    assert!(ok, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("the preview is JSON");
+    assert_eq!(report["device"], serde_json::json!("TESTDEV"));
+    let peripherals = report["peripherals"].as_array().expect("the peripherals");
+    assert_eq!(peripherals.len(), 2, "{report}");
+    assert_eq!(peripherals[0]["name"], serde_json::json!("GPIOA"));
+    assert_eq!(peripherals[0]["base"], serde_json::json!("0x40010800"));
+    assert_eq!(peripherals[0]["struct"], serde_json::json!("struct GPIOA"));
+    assert_eq!(peripherals[0]["size"], serde_json::json!(1024));
+    assert_eq!(peripherals[0]["registers"], serde_json::json!(2));
+    assert_eq!(
+        peripherals[0]["segments"][0]["address"],
+        serde_json::json!("0x40010800")
+    );
+    assert!(!file.path().exists(), "the preview writes nothing");
+}
+
+#[test]
+fn svd_segments_that_overlap_the_image_are_held_back() {
+    let file = TempFile::new("svd-overlap");
+    // A peripheral whose block sits on the sample's .text at 0x1060.
+    let text = SVD.replace("0x40010800", "0x1060");
+    let svd = SvdFile::new("overlap", &text);
+    let (ok, stdout, stderr) = project(&["svd", "--file", &file.text(), &svd.text(), "GPIOA"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("segment GPIOA held back: overlaps .text"),
+        "{stderr}"
+    );
+    // The struct and the comments still land without the segment.
+    assert!(
+        stdout.contains("1 peripherals mapped, 0 segments, 1 structs, 2 comments"),
+        "{stdout}"
+    );
+    let report = show_json(&file);
+    assert!(report["layout"]["segments"].is_null(), "{report}");
+    assert_eq!(
+        report["types"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+}
+
+#[test]
+fn svd_that_is_not_a_device_map_is_refused() {
+    let file = TempFile::new("svd-bad");
+    let svd = SvdFile::new("bad", "<html><body>not a device</body></html>");
+    let (ok, _, stderr) = project(&["svd", "--file", &file.text(), &svd.text()]);
+    assert!(!ok);
+    assert!(stderr.contains("not an SVD file"), "{stderr}");
+    assert!(!file.path().exists(), "nothing is written");
+}
