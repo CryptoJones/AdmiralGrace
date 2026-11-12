@@ -240,7 +240,7 @@ Filed 2026-10-26.
 
 - [ ] Import PDB debug info, with symbol server download — [#400](https://github.com/CryptoJones/AdmiralGrace/issues/400)
 - [ ] Import DWARF from the image, a sibling file, a dSYM, debuginfod or a build-ID directory — [#401](https://github.com/CryptoJones/AdmiralGrace/issues/401)
-- [ ] Export the analysis as DWARF — [#402](https://github.com/CryptoJones/AdmiralGrace/issues/402)
+- [x] Export the analysis as DWARF — [#402](https://github.com/CryptoJones/AdmiralGrace/issues/402)
 - [ ] Import IDA databases and type libraries — [#403](https://github.com/CryptoJones/AdmiralGrace/issues/403)
 - [ ] Import Ghidra databases and projects — [#404](https://github.com/CryptoJones/AdmiralGrace/issues/404)
 - [ ] Export to a Ghidra .gzf — [#405](https://github.com/CryptoJones/AdmiralGrace/issues/405)

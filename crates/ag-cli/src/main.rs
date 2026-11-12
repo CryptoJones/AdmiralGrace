@@ -12,6 +12,7 @@ mod catalog;
 mod debug;
 mod diff;
 mod docs;
+mod dwarf;
 mod export;
 mod funcid;
 mod image;

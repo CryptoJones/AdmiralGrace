@@ -121,6 +121,8 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 `binexport FILE` writes the analysis as a BinExport file — the call graph, the flow graphs, the instructions and their operands — so two versions read by `ag` can be compared in BinDiff. `--project FILE` writes the project's renames and comments with it.
 
+`dwarf FILE` writes the analysis as DWARF debug information — the functions and data at their addresses under the analyst's names, and the types the analysis gives them — so the work done here can be used in a debugger without typing it in again: `gdb ./program.elf -ex 'add-symbol-file program.debug'`. `--project FILE` writes the project's renames, types, prototypes and byte-type marks with it.
+
 ## Library identification
 
 A library function is the same code in every program that links it, so `ag funcid` names it by a hash of its whole body without lifting a line. The bytes that carry an address — a branch's relative target, a RIP-relative or absolute displacement — are masked before hashing, so the same function matches at any load address, while a stack or structure offset is kept. `create` makes a signature file (`.agsig`) from a named library, `match` reports the functions of an image a signature knows, and `apply` writes what a match knows — the name, the prototype, the comment — into a project, keeping the analyst's own words. The engine ships signatures for libc, libstdc++ and libgcc; a whole-function hash is exact, so they match the build they were taken from and `create` makes signatures for the exact libraries a target links.
