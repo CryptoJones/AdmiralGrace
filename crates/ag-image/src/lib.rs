@@ -109,6 +109,9 @@ pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverr
 
 pub mod graph_export;
 pub mod plugin;
+mod strings;
+
+pub use strings::StringEncoding;
 
 /// One section of the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +165,8 @@ pub struct ImageString {
     pub text: String,
     /// How many bytes the string holds, the terminator included.
     pub length: u64,
+    /// The encoding the string is held in.
+    pub encoding: StringEncoding,
 }
 
 /// An address an instruction points at.
@@ -516,6 +521,7 @@ pub struct Binary {
     file: Vec<FileSection>,
     strings: Vec<ImageString>,
     wide_strings: Vec<ImageString>,
+    encoded_strings: Vec<ImageString>,
     /// The engine's options, fixed for the life of the image.
     options: Options,
     /// What the analyst said about the jump tables the image's indirect
@@ -900,7 +906,7 @@ impl Binary {
 
         // The strings are found in the bytes of the file: the data sections
         // are not code, so they are never decoded.
-        let (strings, wide_strings) = scan_strings(&file);
+        let (strings, wide_strings, encoded_strings) = scan_strings(&file);
 
         Binary {
             language,
@@ -932,6 +938,7 @@ impl Binary {
             file,
             strings,
             wide_strings,
+            encoded_strings,
             options: Options::default(),
             table_hints: Mutex::new(BTreeMap::new()),
             patches: Mutex::new(BTreeMap::new()),
@@ -1495,9 +1502,10 @@ impl Binary {
         }
         // The strings are found again: a segment added holds some, one
         // removed held some, and every one sits at a moved address.
-        let (strings, wide_strings) = scan_strings(&self.file);
+        let (strings, wide_strings, encoded_strings) = scan_strings(&self.file);
         self.strings = strings;
         self.wide_strings = wide_strings;
+        self.encoded_strings = encoded_strings;
         Ok(())
     }
 
@@ -2802,6 +2810,13 @@ impl Binary {
     /// A wide string is a run of characters that each take a byte and a NUL.
     pub fn wide_strings(&self) -> &[ImageString] {
         &self.wide_strings
+    }
+
+    /// The strings the image holds in the other encodings: big-endian
+    /// UTF-16, UTF-32 of either byte order, and the code pages cp932, GBK
+    /// and EUC-KR. Each carries the encoding it was read as.
+    pub fn encoded_strings(&self) -> &[ImageString] {
+        &self.encoded_strings
     }
 
     /// The strings the function at `address` refers to.
@@ -4717,18 +4732,17 @@ struct FileSection {
     decoded: Mutex<Option<Arc<Decoded>>>,
 }
 
-/// The shortest string the scanner reports, in bytes, the terminator included.
-const MIN_STRING: usize = 5;
-
-/// The strings of an image, and the wide strings it holds.
+/// The strings of an image: the ASCII ones, the wide ones it holds as
+/// UTF-16LE, and the ones held in the other encodings.
 ///
 /// Every section that is not code and that the file holds bytes for is
 /// scanned: a string is a run of text that ends in a NUL. A section that is
 /// not mapped into memory has no address, so its text is not a string of the
 /// program, and it is left out.
-fn scan_strings(file: &[FileSection]) -> (Vec<ImageString>, Vec<ImageString>) {
+fn scan_strings(file: &[FileSection]) -> (Vec<ImageString>, Vec<ImageString>, Vec<ImageString>) {
     let mut strings = Vec::new();
     let mut wide = Vec::new();
+    let mut encoded = Vec::new();
 
     for section in file.iter().filter(|section| !section.section.executable) {
         // A section that is not mapped into memory has no address.
@@ -4736,126 +4750,14 @@ fn scan_strings(file: &[FileSection]) -> (Vec<ImageString>, Vec<ImageString>) {
             continue;
         }
 
-        strings.extend(scan_ascii(
-            &section.bytes,
-            section.section.vma,
-            &section.section.name,
-        ));
-        wide.extend(scan_wide(
-            &section.bytes,
-            section.section.vma,
-            &section.section.name,
-        ));
+        let (ascii, utf16, rest) =
+            strings::scan_section(&section.bytes, section.section.vma, &section.section.name);
+        strings.extend(ascii);
+        wide.extend(utf16);
+        encoded.extend(rest);
     }
 
-    (strings, wide)
-}
-
-/// The strings of a run of bytes.
-///
-/// A string is a run of text that ends in a NUL, and the NUL is part of it.
-/// A tab, a newline and a carriage return count as text, because a format
-/// string holds them.
-fn scan_ascii(bytes: &[u8], base: u64, section: &str) -> Vec<ImageString> {
-    let mut strings = Vec::new();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if !is_text(bytes[index]) {
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        while index < bytes.len() && is_text(bytes[index]) {
-            index += 1;
-        }
-
-        // A string ends in a NUL, and it is long enough to be one.
-        let length = index - start;
-        if length + 1 < MIN_STRING || index >= bytes.len() || bytes[index] != 0 {
-            continue;
-        }
-
-        strings.push(ImageString {
-            address: base + start as u64,
-            section: section.to_string(),
-            text: escape(&bytes[start..index]),
-            length: (length + 1) as u64,
-        });
-    }
-
-    strings
-}
-
-/// The wide strings of a run of bytes.
-///
-/// A wide string is a run of characters that each take a byte and a NUL, and
-/// that ends in two NULs.
-fn scan_wide(bytes: &[u8], base: u64, section: &str) -> Vec<ImageString> {
-    let mut strings = Vec::new();
-    let mut index = 0;
-
-    while index + 1 < bytes.len() {
-        if !is_text(bytes[index]) || bytes[index + 1] != 0 {
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        while index + 1 < bytes.len() && is_text(bytes[index]) && bytes[index + 1] == 0 {
-            index += 2;
-        }
-
-        // A wide string ends in two NULs, and it is long enough to be one.
-        let length = index - start;
-        if length + 2 < MIN_STRING
-            || index + 1 >= bytes.len()
-            || bytes[index] != 0
-            || bytes[index + 1] != 0
-        {
-            continue;
-        }
-
-        let text: String = bytes[start..index]
-            .iter()
-            .step_by(2)
-            .map(|byte| escape(&[*byte]))
-            .collect();
-
-        strings.push(ImageString {
-            address: base + start as u64,
-            section: section.to_string(),
-            text,
-            length: (length + 2) as u64,
-        });
-
-        index += 2;
-    }
-
-    strings
-}
-
-/// Whether a byte is part of the text of a string.
-fn is_text(byte: u8) -> bool {
-    byte.is_ascii_graphic() || matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-/// The text of a string, with the control characters written out.
-fn escape(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-
-    for &byte in bytes {
-        match byte {
-            b'\t' => out.push_str("\\t"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            byte if byte.is_ascii_graphic() || byte == b' ' => out.push(byte as char),
-            byte => out.push_str(&format!("\\x{byte:02x}")),
-        }
-    }
-
-    out
+    (strings, wide, encoded)
 }
 
 /// The instructions of a section, and their text.
@@ -5493,59 +5395,6 @@ mod tests {
                 "ebp,esp".to_string(),
                 vec!["ebp".to_string(), "esp".to_string()]
             ))
-        );
-    }
-
-    #[test]
-    fn a_run_of_text_that_ends_in_a_nul_is_a_string() {
-        let strings = scan_ascii(b"abcde\0", 0x1000, ".rodata");
-
-        assert_eq!(strings.len(), 1, "{strings:?}");
-        assert_eq!(strings[0].address, 0x1000);
-        assert_eq!(strings[0].text, "abcde");
-        assert_eq!(strings[0].length, 6, "the NUL is part of the string");
-    }
-
-    #[test]
-    fn a_run_of_text_that_is_too_short_is_not_a_string() {
-        assert!(
-            scan_ascii(b"abc\0", 0x1000, ".rodata").is_empty(),
-            "three bytes and a NUL are too few"
-        );
-    }
-
-    #[test]
-    fn a_run_of_text_that_does_not_end_in_a_nul_is_not_a_string() {
-        assert!(
-            scan_ascii(b"abcdef", 0x1000, ".rodata").is_empty(),
-            "a string ends in a NUL"
-        );
-    }
-
-    #[test]
-    fn a_newline_in_a_string_is_part_of_it() {
-        let strings = scan_ascii(b"%ld\n\0", 0x2004, ".rodata");
-
-        assert_eq!(strings.len(), 1, "{strings:?}");
-        assert_eq!(strings[0].text, "%ld\\n", "the newline is written out");
-        assert_eq!(strings[0].length, 5);
-    }
-
-    #[test]
-    fn a_wide_string_is_scanned_as_a_wide_one() {
-        let strings = scan_wide(b"h\0e\0l\0l\0o\0\0\0", 0x3000, ".data");
-
-        assert_eq!(strings.len(), 1, "{strings:?}");
-        assert_eq!(strings[0].address, 0x3000);
-        assert_eq!(strings[0].text, "hello");
-        assert_eq!(strings[0].length, 12, "the two NULs are part of it");
-    }
-
-    #[test]
-    fn a_wide_string_is_not_scanned_as_a_narrow_one() {
-        assert!(
-            scan_ascii(b"h\0e\0l\0l\0o\0\0\0", 0x3000, ".data").is_empty(),
-            "the NULs between the characters break the run"
         );
     }
 

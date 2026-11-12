@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ag_corpus::project::{Annotation, ProjectFile, TargetKind};
-use ag_image::Binary;
+use ag_image::{Binary, StringEncoding};
 
 /// The protocol version the server speaks when the client's is unknown.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -294,11 +294,12 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "strings",
-            description: "The strings of the image, each with its address, its section, its length and the functions that refer to it. The first call reads every function to find the users, which takes a while on a large image; the server warms that up as it starts.",
+            description: "The strings of the image, each with its address, its section, its length, its encoding and the functions that refer to it. The first call reads every function to find the users, which takes a while on a large image; the server warms that up as it starts.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "filter": { "type": "string", "description": "A regular expression (case-insensitive) the text must match." },
+                    "encoding": { "type": "string", "description": "Only the strings held in this encoding: ascii, utf16le, utf16be, utf32le, utf32be, cp932, gbk or euc-kr. `utf16` and `utf32` mean the little-endian ones." },
                     "limit": limit,
                 }
             }),
@@ -1308,7 +1309,21 @@ impl Server {
                 let filter = optional_text("filter")?
                     .map(|text| matcher(&text))
                     .transpose()?;
-                Ok(self.strings(filter.as_ref(), limit))
+                let encoding = optional_text("encoding")?
+                    .map(|name| {
+                        StringEncoding::of_name(&name).ok_or_else(|| {
+                            format!(
+                                "encoding {name:?} is not one of: {}",
+                                StringEncoding::ALL
+                                    .iter()
+                                    .map(|encoding| encoding.name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                    })
+                    .transpose()?;
+                Ok(self.strings(filter.as_ref(), encoding, limit))
             }
             "read_bytes" => {
                 let address = parse_address(&text("address")?)?;
@@ -2340,7 +2355,11 @@ impl Server {
             serde_json::to_value(crate::image::info_json(&self.image)).unwrap_or_default();
         info["file"] = Value::String(self.binary.display().to_string());
         info["functions"] = json!(self.image.functions().len());
-        info["strings"] = json!(self.image.strings().len() + self.image.wide_strings().len());
+        info["strings"] = json!(
+            self.image.strings().len()
+                + self.image.wide_strings().len()
+                + self.image.encoded_strings().len()
+        );
         info["disassembly"] = json!(self.image.supports_disassembly());
         info["pseudocode"] = json!(self.image.supports_pseudocode());
         info["project"] = match &self.project {
@@ -2423,6 +2442,7 @@ impl Server {
             .strings()
             .iter()
             .chain(self.image.wide_strings().iter())
+            .chain(self.image.encoded_strings().iter())
             .filter(|string| query.is_match(&string.text))
             .take(limit)
             .map(|string| {
@@ -2431,6 +2451,7 @@ impl Server {
                     "address_hex": format!("{:#x}", string.address),
                     "text": string.text,
                     "section": string.section,
+                    "encoding": string.encoding.name(),
                 })
             })
             .collect();
@@ -2441,14 +2462,21 @@ impl Server {
         }))
     }
 
-    fn strings(&self, filter: Option<&regex::Regex>, limit: usize) -> Answer {
+    fn strings(
+        &self,
+        filter: Option<&regex::Regex>,
+        encoding: Option<StringEncoding>,
+        limit: usize,
+    ) -> Answer {
         let users = self.image.string_users();
         let matching: Vec<&ag_image::ImageString> = self
             .image
             .strings()
             .iter()
             .chain(self.image.wide_strings().iter())
+            .chain(self.image.encoded_strings().iter())
             .filter(|string| filter.is_none_or(|filter| filter.is_match(&string.text)))
+            .filter(|string| encoding.is_none_or(|encoding| string.encoding == encoding))
             .collect();
         let total = matching.len();
         let strings: Vec<Value> = matching
@@ -2461,6 +2489,7 @@ impl Server {
                     "text": string.text,
                     "section": string.section,
                     "length": string.length,
+                    "encoding": string.encoding.name(),
                     "functions": users
                         .get(&string.address)
                         .map(|functions| functions.iter().map(|function| self.function_json(*function)).collect::<Vec<Value>>())
@@ -2499,6 +2528,7 @@ impl Server {
                         .strings()
                         .iter()
                         .chain(self.image.wide_strings().iter())
+                        .chain(self.image.encoded_strings().iter())
                         .any(|string| string.address == *address)
             })
             .or_else(|| {
@@ -2605,6 +2635,7 @@ impl Server {
                 .strings()
                 .iter()
                 .chain(self.image.wide_strings().iter())
+                .chain(self.image.encoded_strings().iter())
                 .find(|string| string.address == address)
                 .map(|string| string.text.clone()),
             "used_by": users,
@@ -3205,6 +3236,32 @@ mod tests {
         assert!(text_of(&unwritable).contains("without --project"));
         let bad = call(&mut server, "read_bytes", json!({ "address": "zzz" }));
         assert_eq!(bad["isError"], true);
+    }
+
+    #[test]
+    fn the_strings_tool_reads_one_encoding_at_a_time() {
+        let mut server = server(None);
+        // Naming ascii gives only the ASCII strings, each labelled.
+        let ascii = call(
+            &mut server,
+            "strings",
+            json!({ "encoding": "ascii", "limit": 5000 }),
+        );
+        let strings = ascii["structuredContent"]["strings"]
+            .as_array()
+            .expect("the strings");
+        assert!(!strings.is_empty(), "{ascii}");
+        assert!(strings.iter().all(|s| s["encoding"] == "ascii"), "{ascii}");
+
+        // A code page the fixture holds none of reports none, without error.
+        let gbk = call(&mut server, "strings", json!({ "encoding": "gbk" }));
+        assert_eq!(gbk["structuredContent"]["total"], 0, "{gbk}");
+
+        // An unknown encoding is told to the model, not refused.
+        let bad = call(&mut server, "strings", json!({ "encoding": "nonesuch" }));
+        assert_eq!(bad["isError"], true);
+        assert!(text_of(&bad).contains("nonesuch"), "{bad}");
+        assert!(text_of(&bad).contains("utf16be"), "{bad}");
     }
 
     #[test]

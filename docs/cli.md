@@ -215,7 +215,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `jni` | The JNI functions the image holds — each `Java_<class>_<method>` export and `JNI_OnLoad` and its kin — with the types their names give: `JNIEnv *`, the object or class the method runs on, and the overload signature's own when the name carries one, and the return; `--json` gives `functions` with each `address`, `name`, `params` and `returns`; `--header` writes the JNI types as a C header. |
 | `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
-| `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info` and `symbols` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
+| `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info`, `symbols` and `strings` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name` — the functions the unwind data alone knows as `sub_<address>` — and the data symbols with their size; `--json` carries each function's `end` where the unwind data says. A C++ or Rust name is shown demangled, with its signature — `geometry::area(int, int)` for `_ZN8geometry4areaEii` or `?area@geometry@@YAHHH@Z` — and `--json` carries the mangled name beside it as `mangled`; `--filter` matches either. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |
 | `disasm TARGET` | The blocks of the function: a `; block 0x…` header with its successors, then `address bytes mnemonic operands` for each instruction. |
@@ -248,9 +248,10 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `struct-from FUNCTION VARIABLE [--name NAME] [--json] [--project FILE]` | The structure the accesses through the pointer `VARIABLE` of `FUNCTION` — its lift name, or the project's rename — draft: one member each offset and width the function reads or writes through it, through its copies (`q = p;`, `q = p + 8;`) and, one level deep, through the callees it is passed to; named `field_<hex offset>` and typed by width and use — `int`, `unsigned short` where the value is zero-extended or compared unsigned, `char *` where it is dereferenced at one byte, `int field_18[4]` for an access indexed by a variable — with `char gap_<hex>[n]` for bytes no access reaches where natural alignment does not leave them. The size is the allocation's when the pointer is the result of a known allocator with constant arguments — `malloc(0x28)`, `calloc(2, 8)`, `operator new(0x20)`, `HeapAlloc(h, 0, 0x40)` — else the accesses' extent. The tag is `NAME`, or `struct_<function>_<variable>`. Prints the C, the size and what decided it, each member with its reads, its writes and the addresses of their statements (`(through read_conn)` for a callee's), and notes on what was chosen between or left out. `--json` gives `name`, `size`, `sized_by`, `packed`, `members` (`offset`, `size`, `name`, `type`, `gap`, `reads`, `writes`, `at`, `via`), `notes`, `c`, `function` and `variable`. A variable nothing is read or written through is refused. See `docs/types.md`, Smart structures. |
 | `il TARGET --opcodes --flags --stack-pointer --types --casts` | The same with notes beside each item: its opcode (the instruction's form, or the statement's kind), the flags an instruction reads and writes, the stack pointer's offset from the entry's, the type of every name; `--casts` spells every constant with its width and casts a value stored at another width. Each flag on its own. The JSON has them all without asking. |
 | `calls [TARGET]` | With a function, the calls it makes and the functions that call it. Without one, the whole call graph: every function with the calls it makes and the calls it gets, the functions reachable from the entry point, and the functions nothing calls. A `jmp` out of a function — to a function the image names, or through a GOT slot it resolves to an import — is a call marked `(tail call)`. |
-| `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. |
+| `strings` | The strings the image holds: the address, the section, the text, and the functions that use it. `--json` carries each string's `encoding` too. |
 | `strings --filter REGEX` | Only the strings whose text matches the regular expression. |
 | `strings --utf16` | The strings that are held as UTF-16LE. |
+| `strings --encoding NAME` | The strings held in one encoding: `ascii`, `utf16le`, `utf16be`, `utf32le`, `utf32be`, `cp932`, `gbk` or `euc-kr`. `utf16` and `utf32` mean the little-endian ones; `shiftjis`, `sjis` and `windows-31j` mean `cp932`, `cp936` means `gbk`, and `cp949` and `windows-949` mean `euc-kr`. Cannot be given with `--utf16`. |
 | `data [TARGET]` | The data of the image: the address, the section, the name, and the functions that use it. With a function, the data that function refers to. With a piece of data, the functions that use it. |
 | `export DIR` | The whole analysis, written to `DIR` as files: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, `objc.json` and `objc.h` when the image has Objective-C, `swift.json` when it has Swift, one `functions/<address>.json` and `functions/<address>.asm` per function, an `index.json` and a `README.md`. One line on stdout: the functions, the files and the bytes written. |
 | `export DIR --functions REGEX` | Only the per-function files of the functions whose name matches the regular expression. |
@@ -445,8 +446,18 @@ written out as `\t`, `\n` and `\r`, so a string never breaks the line it is prin
 A section that is not mapped into memory holds text as well — the debug sections do — but
 it has no address, so it is left out.
 
+By default the ASCII strings are reported. `--utf16` reports the UTF-16LE ones, and
+`--encoding NAME` reports the strings held in one encoding: `ascii`, `utf16le`, `utf16be`,
+`utf32le`, `utf32be`, `cp932`, `gbk` or `euc-kr`. The wide encodings read text of the
+ASCII range held two or four bytes wide, in either byte order; the code pages read
+Shift_JIS (cp932), GBK and EUC-KR text. A code-page string must use its page — a run of
+plain ASCII is not reported again as `cp932`, `gbk` or `euc-kr` — and its bytes must
+decode in the page without error. The same bytes can read as text in more than one
+encoding; each reading is reported, and `--encoding` tells them apart.
+
 Who uses a string is found from the instructions that point at it, which needs the whole
-program read. The wide strings are not in that index, so they are reported without users.
+program read. The wide and code-page strings are not in that index, so they are reported
+without users.
 
 `cfg` reports the graph the Graph tab of the workbench draws: the blocks the walk found,
 and the ways the code goes from one block to the next. An edge that leaves the end of a
@@ -742,7 +753,7 @@ The tools, each answering with text and, where the answer is a record, the same 
 | `il target [level] [ssa] [opcodes] [flags] [stack_pointer] [types] [casts]` | The function at one level of the lift — `lifted`, `low`, `medium` (the default) or `high` — in SSA form when `ssa` is true, as `ag image il --json` reports it; the booleans show the opcodes, flags, stack pointer and types in the text and make the casts explicit (`docs/il.md`). |
 | `callers target`, `callees target` | Who calls the function; the calls it makes, tail calls marked. |
 | `cross_references target` | For a function: the data and strings it refers to, its callers and callees. For a piece of data or a string: the functions that refer to it. Both with the references the analyst recorded in the project, to and from the address. |
-| `strings [filter] [limit]` | The strings of the image with the functions that use them. |
+| `strings [filter] [encoding] [limit]` | The strings of the image with the functions that use them, each with its `encoding`; `encoding` keeps only the strings held in one — `ascii`, `utf16le`, `utf16be`, `utf32le`, `utf32be`, `cp932`, `gbk` or `euc-kr`, as `ag image strings --encoding` takes them. |
 | `read_bytes address [length]` | The bytes at an address, as hex and ASCII; 64 unless said, 4096 at most. |
 | `annotations address` | The analyst's records at an address from the project file: the address's own and the block's. |
 | `set_name address name` | Names the function at the address; an empty name clears the analyst's. |

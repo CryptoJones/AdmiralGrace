@@ -107,7 +107,7 @@ reads eax after the call`, `// void: no caller reads the result`); a `jmp` out i
 callee(args);`, a PLT stub `// thunk for printf`; one it cannot read prints `not lifted yet`. `cfg` gives the blocks and the edges between them, each marked
 fall-through or taken. `calls` gives who calls whom, a `jmp` out marked `(tail call)`: with a
 function, what it calls and who calls it; without one, the whole call graph. `strings` gives
-the text the image holds and `data` the data, each with the functions that use it. `--json`
+the text the image holds — `--utf16` the UTF-16LE strings, `--encoding NAME` one encoding (`ascii`, `utf16le`, `utf16be`, `utf32le`, `utf32be`, `cp932`, `gbk`, `euc-kr`) — and `data` the data, each with the functions that use it. `--json`
 reports the same as JSON, every address a number and a hex string. `export DIR` writes all of
 it in one pass: `info.json`, `symbols.json`, `strings.json`, `data.json`, `calls.json`, a
 `functions/<address>.json` (cfg, calls, data, pseudocode) and `.asm` per function, an

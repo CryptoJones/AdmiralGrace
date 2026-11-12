@@ -2439,3 +2439,78 @@ fn a_jni_image_types_its_jni_functions_from_their_names() {
         .iter()
         .any(|f| f.name == "JNI_OnLoad" && f.params[0] == "JavaVM *"));
 }
+
+#[test]
+fn the_encoded_strings_of_a_segment_are_found() {
+    use ag_image::{Layout, SegmentEdit, StringEncoding};
+
+    // A block holding one string in each of the encodings beyond ASCII and
+    // UTF-16LE, separated by bytes that are text in none of them.
+    let mut blob = Vec::new();
+    let mut put = |run: &[u8]| {
+        blob.extend_from_slice(&[0xff, 0xff]);
+        let at = blob.len() as u64;
+        blob.extend_from_slice(run);
+        at
+    };
+    let utf16be = put(b"\0h\0i\0\0");
+    let utf32le = put(b"h\0\0\0i\0\0\0\0\0\0\0");
+    let utf32be = put(b"\0\0\0h\0\0\0i\0\0\0\0");
+    let cp932 = put(&[0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x00]);
+    let gbk = put(&[0xd6, 0xd0, 0xce, 0xc4, 0x00]);
+    let euc_kr = put(&[0xc7, 0xd1, 0xb1, 0xb9, 0xbe, 0xee, 0x00]);
+
+    // A copy of the sample with the block appended, mapped as a data segment
+    // of its own at an address the sample does not use.
+    let original = std::fs::read(sample_path()).expect("the sample's bytes");
+    let dir = std::env::temp_dir().join(format!(
+        "ag-image-encoded-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let path = dir.join("encoded.elf");
+    let offset = original.len() as u64;
+    let mut file = original;
+    file.extend_from_slice(&blob);
+    std::fs::write(&path, &file).expect("the copy is written");
+
+    let vma = 0x90_0000;
+    let binary = Binary::open_with_layout(
+        &path,
+        &Layout {
+            base: None,
+            segments: vec![SegmentEdit::Add {
+                name: "encoded".into(),
+                vma,
+                size: blob.len() as u64,
+                file_offset: Some(offset),
+                executable: false,
+            }],
+        },
+    )
+    .expect("the copy loads with its encoded segment");
+
+    let encoded = binary.encoded_strings();
+    let holds = |text: &str, encoding: StringEncoding, at: u64| {
+        encoded.iter().any(|string| {
+            string.text == text && string.encoding == encoding && string.address == vma + at
+        })
+    };
+    assert!(holds("hi", StringEncoding::Utf16Be, utf16be), "{encoded:?}");
+    assert!(holds("hi", StringEncoding::Utf32Le, utf32le), "{encoded:?}");
+    assert!(holds("hi", StringEncoding::Utf32Be, utf32be), "{encoded:?}");
+    assert!(holds("日本語", StringEncoding::Cp932, cp932), "{encoded:?}");
+    assert!(holds("中文", StringEncoding::Gbk, gbk), "{encoded:?}");
+    assert!(
+        holds("한국어", StringEncoding::EucKr, euc_kr),
+        "{encoded:?}"
+    );
+
+    // The sample's own ASCII strings are still found beside the new ones.
+    let ascii = binary.strings();
+    assert!(ascii.iter().any(|string| string.text == "%ld\\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
