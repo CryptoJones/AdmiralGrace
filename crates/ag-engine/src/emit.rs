@@ -107,6 +107,9 @@ struct Style {
     /// What is known of the calls, for the end of their lines: that a
     /// callee does not return when the arguments are such.
     call_notes: Vec<CallNote>,
+    /// The strings a recognizer decoded, for the end of the lines that
+    /// build them: `string: "hello"`.
+    decoded_strings: Vec<crate::plugin::DecodedString>,
     /// The possible values of what each statement reads, `a: 0..=9`, by
     /// its index in the walk, for the end of its line, when the
     /// pseudocode is printed with them.
@@ -126,6 +129,7 @@ impl Style {
             wrap: usize::from(options.wrap),
             hints: BTreeMap::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             values: BTreeMap::new(),
         }
     }
@@ -371,6 +375,7 @@ fn emit_marked(
         style.hints = parameter_names_of(function, callees);
     }
     style.call_notes = function.call_notes.clone();
+    style.decoded_strings = function.decoded_strings.clone();
     if let Some(words) = words {
         style.values = crate::pvs::possible_values(function, words)
             .into_iter()
@@ -1063,6 +1068,26 @@ fn emit_statements(
                             });
                         if holds_the_call && !notes.contains(&note.text.as_str()) {
                             notes.push(&note.text);
+                        }
+                    }
+                    // The strings a recognizer decoded from what the
+                    // statement builds, at the end of its line: one note
+                    // per string, however many of its instructions went
+                    // into the line.
+                    let decoded: Vec<String> = style
+                        .decoded_strings
+                        .iter()
+                        .filter(|decoded| {
+                            decoded
+                                .addresses
+                                .iter()
+                                .any(|at| statement.addresses.contains(at))
+                        })
+                        .map(|decoded| format!("string: {}", string_literal(&decoded.text)))
+                        .collect();
+                    for note in &decoded {
+                        if !notes.contains(&note.as_str()) {
+                            notes.push(note);
                         }
                     }
                     // A definition the analyst put says so.
@@ -2246,6 +2271,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: Some("main reads rax after the call".to_string()),
         }
@@ -2340,6 +2366,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         }
@@ -2551,6 +2578,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2607,6 +2635,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2750,6 +2779,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2869,6 +2899,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -3214,6 +3245,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -3352,6 +3384,7 @@ mod tests {
             thunk: None,
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         }

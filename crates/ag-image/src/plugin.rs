@@ -18,10 +18,11 @@ use ag_engine::plugin::ExternalTool;
 // on the image alone has the whole of it.
 pub use ag_engine::plugin::{
     architecture_for, architectures, formatters, loader_for, loaders, manifest_dirs,
-    number as plugin_number, read_manifest, register_architecture, register_formatter,
-    register_loader, register_rewriter, rewriters, Architecture, DecodedSection, ExternalFormatter,
-    ExternalRewriter, Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage, Loader,
-    Manifest, RecoveredBlock, Rewrite, Rewriter,
+    number as plugin_number, read_manifest, recognizers, register_architecture, register_formatter,
+    register_loader, register_recognizer, register_rewriter, rewriters, Architecture,
+    DecodedSection, DecodedString, ExternalFormatter, ExternalRecognizer, ExternalRewriter,
+    Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage, Loader, Manifest, Recognition,
+    Recognizer, RecoveredBlock, Rewrite, Rewriter,
 };
 
 use crate::Binary;

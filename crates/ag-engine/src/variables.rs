@@ -332,6 +332,7 @@ mod tests {
             frame: Vec::new(),
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             thunk: None,
             return_reason: None,

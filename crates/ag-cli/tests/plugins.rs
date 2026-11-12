@@ -1,5 +1,6 @@
-//! Plugins declared in a manifest: a loader, an architecture and a tool
-//! that are commands, found by `ag` as it starts.
+//! Plugins declared in a manifest: a loader, an architecture, a tool, a
+//! rewriter, a formatter and a recognizer that are commands, found by `ag`
+//! as it starts.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -666,4 +667,134 @@ json.dump({"lines": lines}, sys.stdout)
             && stdout.contains("line 0 is a string or an object"),
         "{stdout}"
     );
+}
+
+#[test]
+fn a_manifests_recognizer_decodes_an_obfuscated_string_and_a_failure_is_a_warning() {
+    if !has_python() {
+        eprintln!("python3 is not on this machine: the recognizer is not run");
+        return;
+    }
+    let dir = Dir::new("recognize");
+    // The recognizer reads the byte stores into one stack variable out of
+    // the medium graph's text and XORs them with 0x80 — an obfuscated stack
+    // string the lifter's own merge leaves as stores, the bytes not being
+    // printable until they are decoded.
+    std::fs::write(
+        dir.0.join("xor.py"),
+        r#"
+import json, re, sys
+graph = json.load(sys.stdin)
+store = re.compile(r'^(?:\*\(char \*\)\(\(char \*\)&(?P<deref>\w+) \+ (?P<off>\d+)\)|(?P<var>\w+)) = (?P<val>-?\d+|0x[0-9a-fA-F]+)$')
+variables = {}
+for block in graph["blocks"]:
+    for s in block["statements"]:
+        m = store.match(s["text"].strip())
+        if not m:
+            continue
+        name = m.group("deref") or m.group("var")
+        off = int(m.group("off") or 0)
+        val = int(m.group("val"), 0) & 0xff
+        variables.setdefault(name, {})[off] = (val, s["addresses"])
+strings = []
+for name, bytes_ in variables.items():
+    text, addresses = "", []
+    for off in sorted(bytes_):
+        val, ats = bytes_[off]
+        clear = val ^ 0x80
+        if clear == 0:
+            break
+        if not (0x20 <= clear <= 0x7e):
+            text = ""
+            break
+        text += chr(clear)
+        addresses += ats
+    if len(text) >= 2:
+        strings.append({"text": text, "addresses": addresses})
+json.dump({"strings": strings}, sys.stdout)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.0.join("rec.json"),
+        serde_json::json!({
+            "name": "rec",
+            "recognizers": [{ "name": "xor-strings", "command": ["python3", dir.0.join("xor.py")] }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // sub rsp, 16; mov byte [rsp], 0xe8; mov byte [rsp+1], 0xe9; mov byte
+    // [rsp+2], 0x80; lea rax, [rsp]; add rsp, 16; ret — "hi\0" XOR 0x80.
+    let raw = dir.0.join("program.bin");
+    std::fs::write(
+        &raw,
+        [
+            0x48, 0x83, 0xec, 0x10, 0xc6, 0x04, 0x24, 0xe8, 0xc6, 0x44, 0x24, 0x01, 0xe9, 0xc6,
+            0x44, 0x24, 0x02, 0x80, 0x48, 0x8d, 0x04, 0x24, 0x48, 0x83, 0xc4, 0x10, 0xc3,
+        ],
+    )
+    .unwrap();
+    let flags = [
+        "--raw", "x86-64", "--base", "0x1000", "--offset", "0", "--length", "0x1b", "--entry",
+        "0x1000",
+    ];
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("// string: \"hi\""), "{text}");
+    assert!(!text.contains("__builtin_strcpy"), "{text}");
+    // The note is in the JSON lines too, on a line that builds the string.
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let noted = report["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|line| {
+            line["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("// string: \"hi\""))
+        })
+        .count();
+    assert!(noted >= 1, "{report}");
+    // Listed with the rest.
+    let output = ag(&dir.0).arg("plugins").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("recognizers: xor-strings"), "{stdout}");
+    let output = ag(&dir.0).arg("plugins").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["recognizers"][0], "xor-strings");
+    assert_eq!(report["manifests"][0]["recognizers"][0], "xor-strings");
+    // A recognizer that fails is a warning, not the lift's: the pseudocode
+    // still prints, with the other recognizer's string.
+    std::fs::write(
+        dir.0.join("bad.json"),
+        r#"{ "name": "bad", "recognizers": [{ "name": "garbler", "command": ["sh", "-c", "cat >/dev/null; exit 3"] }] }"#,
+    )
+    .unwrap();
+    let output = ag(&dir.0)
+        .arg("image")
+        .arg(&raw)
+        .args(flags)
+        .args(["pseudocode", "entry_0x1000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the recognizer garbler"), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("// string: \"hi\""));
 }
