@@ -2373,6 +2373,156 @@ fn a_functions_properties_are_recorded_and_read_by_the_lift() {
 }
 
 #[test]
+fn a_functions_options_and_emulation_limits_are_recorded_and_read() {
+    let file = TempFile::new("funcopts");
+    let pseudocode = |function: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(["pseudocode", function, "--project", &file.text()])
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let emulate = |args: &[&str]| -> String {
+        let path = file.text();
+        let mut all = vec!["emulate", "ping", "--arg", "3", "--project", &path];
+        all.extend_from_slice(args);
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("image")
+            .arg(fixture("inline.elf"))
+            .args(&all)
+            .output()
+            .expect("the ag binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let props = |args: &[&str]| -> (bool, String, String) {
+        let path = file.text();
+        let mut all = vec!["function-props", "--file", &path, "ping"];
+        all.extend_from_slice(args);
+        project_with("inline.elf", &all)
+    };
+    let (ok, _, stderr) = project_with("inline.elf", &["save", "--out", &file.text()]);
+    assert!(ok, "{stderr}");
+
+    // An option set for ping alone is read by the lift: Rust where the run
+    // reads C, and the limits ride on the same record.
+    let (ok, stdout, stderr) = props(&[
+        "--option", "language", "rust", "--steps", "500", "--depth", "3",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("opt language rust"), "{stdout}");
+    assert!(stdout.contains("steps 500"), "{stdout}");
+    assert!(stdout.contains("depth 3"), "{stdout}");
+    assert!(
+        pseudocode("ping").contains("fn ping("),
+        "{}",
+        pseudocode("ping")
+    );
+    // pong is untouched: it still reads C.
+    assert!(
+        pseudocode("pong").contains("int pong("),
+        "{}",
+        pseudocode("pong")
+    );
+
+    // With no flag, the properties print in the prompt's own grammar.
+    let (ok, stdout, stderr) = props(&[]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("ping: opt language rust steps 500 depth 3"),
+        "{stdout}"
+    );
+
+    // The file keeps them, and `show` reads them back.
+    let report = show_json(&file);
+    let record = report["annotations"]
+        .as_array()
+        .expect("annotations")
+        .iter()
+        .find(|a| a["address"] == "0x401000")
+        .expect("the function's record");
+    assert_eq!(
+        record["options"]["language"],
+        serde_json::json!("rust"),
+        "{report}"
+    );
+    assert_eq!(
+        record["emulation_steps"],
+        serde_json::json!(500),
+        "{report}"
+    );
+    assert_eq!(record["emulation_depth"], serde_json::json!(3), "{report}");
+
+    // A second option, and `--option NAME clear` takes just that one back.
+    let (ok, _, stderr) = props(&["--option", "indent", "4"]);
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = props(&["--option", "indent", "clear"]);
+    assert!(ok, "{stderr}");
+    assert!(!stdout.contains("opt indent"), "{stdout}");
+    assert!(stdout.contains("opt language rust"), "{stdout}");
+
+    // `--clear-options` takes every option back and keeps the limits.
+    let (ok, stdout, stderr) = props(&["--clear-options"]);
+    assert!(ok, "{stderr}");
+    assert!(!stdout.contains("opt "), "{stdout}");
+    assert!(stdout.contains("steps 500"), "{stdout}");
+    assert!(
+        pseudocode("ping").contains("int ping("),
+        "{}",
+        pseudocode("ping")
+    );
+
+    // A word that is not one is refused, and leaves the record untouched.
+    for (args, why) in [
+        (
+            vec!["--option", "code-sections", ".text"],
+            "a word on the whole image",
+        ),
+        (vec!["--option", "language", "bogus"], "takes"),
+        (vec!["--option", "nope", "x"], "no option named"),
+        (vec!["--steps", "0"], "from 1"),
+        (vec!["--steps", "xyz"], "no whole number of steps"),
+        (vec!["--depth", "xyz"], "no whole call depth"),
+    ] {
+        let (ok, _, stderr) = props(&args);
+        assert!(!ok, "{args:?} was accepted");
+        assert!(stderr.contains(why), "{stderr}");
+    }
+
+    // The stored step limit bounds the emulator, and an explicit `--steps`
+    // stands over it.
+    let (ok, _, stderr) = props(&["--steps", "2"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        emulate(&[]).contains("stopped after 2 steps"),
+        "{}",
+        emulate(&[])
+    );
+    assert!(
+        emulate(&["--steps", "100"]).contains("returned 10"),
+        "{}",
+        emulate(&["--steps", "100"])
+    );
+
+    // Taking the limits back leaves the run's own.
+    let (ok, stdout, stderr) = props(&["--steps", "clear", "--depth", "clear"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("function 0x401000 cleared"), "{stdout}");
+    assert!(emulate(&[]).contains("returned 10"), "{}", emulate(&[]));
+}
+
+#[test]
 fn opaque_predicates_are_found_and_patched_out_of_the_pseudocode() {
     let file = TempFile::new("opaque");
     let ag = |args: &[&str]| -> String {

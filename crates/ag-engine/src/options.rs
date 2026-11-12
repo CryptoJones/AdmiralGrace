@@ -605,6 +605,14 @@ pub fn spec(name: &str) -> Option<&'static OptionSpec> {
     OPTIONS.iter().find(|spec| spec.name == name)
 }
 
+/// Whether the option `name` may be set on one function's record, over the
+/// run's own: every option but `code-sections`, which decides what functions
+/// the image holds rather than how one of them is analyzed, and so is a word
+/// on the whole image and not on a function.
+pub fn per_function(name: &str) -> bool {
+    spec(name).is_some_and(|spec| spec.name != "code-sections")
+}
+
 /// What went wrong with an option: an unknown name, or a value the row
 /// does not take.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1144,6 +1152,20 @@ impl Options {
             }
         }
         Ok(options)
+    }
+
+    /// These options with the analyst's per-function `overrides` laid over
+    /// them: each `(name, value)` applied in order, the run's own kept for
+    /// every option the function says nothing of. A name or a value that does
+    /// not read is simply not followed, as a convention that is none is — the
+    /// word is validated where it is written, and a project a newer writer
+    /// made still lifts.
+    pub fn overlaid(&self, overrides: &std::collections::BTreeMap<String, String>) -> Options {
+        let mut options = *self;
+        for (name, value) in overrides {
+            let _ = options.set(name, value);
+        }
+        options
     }
 
     /// Set the option `name` to `value`.
@@ -1937,5 +1959,52 @@ mod tests {
             assert!(word.get(kind).is_some(), "{kind}");
         }
         assert_eq!(SiteOverride::KINDS.len(), 6);
+    }
+
+    #[test]
+    fn per_function_refuses_only_the_whole_image_option() {
+        // Every row but `code-sections` may be set on one function; that one
+        // decides what functions the image holds, so it is the whole image's.
+        for spec in OPTIONS {
+            assert_eq!(
+                per_function(spec.name),
+                spec.name != "code-sections",
+                "{}",
+                spec.name
+            );
+        }
+        assert!(!per_function("code-sections"));
+        assert!(per_function("parameters"));
+        assert!(per_function("language"));
+        // A name no row has is not a per-function option either.
+        assert!(!per_function("nope"));
+    }
+
+    #[test]
+    fn overlaid_lays_the_functions_words_over_the_runs() {
+        let mut run = Options::default();
+        run.set("language", "c").unwrap();
+        run.set("indent", "2").unwrap();
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("language".to_string(), "rust".to_string());
+        let effective = run.overlaid(&overrides);
+        // The function's word stands over the run's; the rest is the run's.
+        assert_eq!(effective.get("language").as_deref(), Some("rust"));
+        assert_eq!(effective.get("indent").as_deref(), Some("2"));
+        // The run itself is untouched.
+        assert_eq!(run.get("language").as_deref(), Some("c"));
+        // An empty overlay is the run's own.
+        assert_eq!(
+            run.overlaid(&std::collections::BTreeMap::new())
+                .get("language"),
+            run.get("language")
+        );
+        // A name or value that does not read is not followed, so a project a
+        // newer writer made still lifts.
+        let mut stale = std::collections::BTreeMap::new();
+        stale.insert("nope".to_string(), "x".to_string());
+        stale.insert("language".to_string(), "bogus".to_string());
+        let effective = run.overlaid(&stale);
+        assert_eq!(effective.get("language").as_deref(), Some("c"));
     }
 }

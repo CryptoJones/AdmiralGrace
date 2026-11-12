@@ -997,28 +997,35 @@ impl Binary {
                 cache.clear();
             }
         }
-        if self.options.code_sections == CodeSections::Procedures {
-            // Each procedure found is a function the next walks stop at —
-            // and, under `branches-end-procedures`, bound their branches
-            // by — so the list is worked out again until it stops growing.
-            loop {
-                let found = self.every_procedure();
-                if found == self.functions {
-                    break;
-                }
-                self.functions = found;
-                if let Ok(mut cache) = self.disassembly.lock() {
-                    cache.clear();
-                }
-                if let Ok(mut cache) = self.cfgs.lock() {
-                    cache.clear();
-                }
-                if let Ok(mut cache) = self.plugin_stages.lock() {
-                    cache.clear();
-                }
+        self.rediscover_procedures();
+        self
+    }
+
+    /// Under `code-sections procedures`, work the function list out again
+    /// until it stops growing: each procedure found is a function the next
+    /// walks stop at — and, under `branches-end-procedures`, bound their
+    /// branches by — so a decode option changed may change the list itself.
+    /// The walks read under the old options are forgotten as it grows.
+    fn rediscover_procedures(&mut self) {
+        if self.options.code_sections != CodeSections::Procedures {
+            return;
+        }
+        loop {
+            let found = self.every_procedure();
+            if found == self.functions {
+                break;
+            }
+            self.functions = found;
+            if let Ok(mut cache) = self.disassembly.lock() {
+                cache.clear();
+            }
+            if let Ok(mut cache) = self.cfgs.lock() {
+                cache.clear();
+            }
+            if let Ok(mut cache) = self.plugin_stages.lock() {
+                cache.clear();
             }
         }
-        self
     }
 
     /// Write the analyst's `patches` over the image's bytes, by the address
@@ -2277,22 +2284,49 @@ impl Binary {
     }
 
     /// Tell the lift each function's signature and analysis properties —
-    /// prototype, convention, stack adjustment, clobbers and value locations
-    /// — by entry, and say whether that changed anything. The pseudocode and
-    /// the levels are read again after; the walks are kept, since a
-    /// signature changes no function's graph.
+    /// prototype, convention, stack adjustment, clobbers, value locations,
+    /// per-function options and emulation limits — by entry, and say whether
+    /// that changed anything. The pseudocode and the levels are read again
+    /// after. A signature or a lift option changes no function's graph, so
+    /// the walks are kept; but `branches-end-procedures` is a decode option,
+    /// and a function whose word on it changed is walked again, with what was
+    /// read off the old walks forgotten. The function list itself is worked
+    /// out under the run's decode options when the image is read.
     pub fn set_function_properties(&self, props: BTreeMap<u64, FunctionProperties>) -> bool {
         let props: BTreeMap<u64, FunctionProperties> = props
             .into_iter()
             .filter(|(_, props)| !props.is_empty())
             .collect();
-        if let Ok(mut held) = self.function_properties.lock() {
-            if *held == props {
-                return false;
-            }
-            *held = props;
-        } else {
+        // Whether a branch out of the function ends it, under its own word
+        // over the run's; a value that does not read leaves the run's.
+        let leaves = |props: Option<&FunctionProperties>| -> bool {
+            props
+                .and_then(|props| props.options.get("branches-end-procedures"))
+                .and_then(|value| match value.as_str() {
+                    "yes" => Some(true),
+                    "no" => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(self.options.branches_end_procedures == BranchesEndProcedures::Yes)
+        };
+        let mut held = match self.function_properties.lock() {
+            Ok(held) => held,
+            Err(_) => return false,
+        };
+        if *held == props {
             return false;
+        }
+        let rewalk = held
+            .keys()
+            .chain(props.keys())
+            .any(|address| leaves(held.get(address)) != leaves(props.get(address)));
+        *held = props;
+        drop(held);
+        if rewalk {
+            // A decode option changed: the walks and what was read off them
+            // are forgotten, so the function is walked again under its word.
+            self.forget_decoded();
+            return true;
         }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
@@ -2997,6 +3031,50 @@ impl Binary {
         self.options.abi_for(&self.language)
     }
 
+    /// The engine options the function at `address` is analyzed under: the
+    /// run's own with the analyst's per-function overrides laid over them.
+    /// What the function says nothing of, the run decides.
+    pub fn options_for(&self, address: u64) -> Options {
+        self.options
+            .overlaid(&self.function_properties(address).options)
+    }
+
+    /// The calling convention the function at `address` is lifted with: its
+    /// own `abi` option over the run's, over the image's language.
+    pub fn abi_for(&self, address: u64) -> Abi {
+        self.options_for(address).abi_for(&self.language)
+    }
+
+    /// The limits the function at `address` is emulated within: the analyst's
+    /// per-function steps and depth over the run's defaults, each left to the
+    /// default where the function says nothing. An explicit `--steps` or
+    /// `--depth` on the command line stands over these.
+    pub fn emulation_limits(&self, address: u64) -> ag_engine::emulate::Limits {
+        let props = self.function_properties(address);
+        let defaults = ag_engine::emulate::Limits::default();
+        ag_engine::emulate::Limits {
+            steps: props.emulation_steps.unwrap_or(defaults.steps),
+            depth: props.emulation_depth.unwrap_or(defaults.depth),
+        }
+    }
+
+    /// Whether a branch out of the function at `entry` ends it: the
+    /// function's own `branches-end-procedures` option over the run's. Only
+    /// the one option is read, since the walk asks at every branch; a value
+    /// that is neither `yes` nor `no` is not followed, and the run's stands.
+    fn branches_end_procedures_for(&self, entry: u64) -> bool {
+        let overridden = self.function_properties.lock().ok().and_then(|held| {
+            held.get(&entry)
+                .and_then(|props| props.options.get("branches-end-procedures"))
+                .and_then(|value| match value.as_str() {
+                    "yes" => Some(true),
+                    "no" => Some(false),
+                    _ => None,
+                })
+        });
+        overridden.unwrap_or(self.options.branches_end_procedures == BranchesEndProcedures::Yes)
+    }
+
     /// The pseudocode of the function at `address`, or why it was not lifted.
     ///
     /// The lifter reads x86-64 code through its control-flow graph: calls,
@@ -3231,6 +3309,9 @@ impl Binary {
             .map(str::to_string)
             .unwrap_or_else(|| format!("sub_{address:x}"));
 
+        // The function's own options over the run's: the analysis mode it is
+        // lifted under and the rendering it is emitted with.
+        let options = self.options_for(address);
         let removable = self.removable_of(address);
         let callees = ImageCallees {
             image: self,
@@ -3242,7 +3323,7 @@ impl Binary {
                 &mut pseudocode,
                 address,
                 &name,
-                self.options.language.name(),
+                options.language.name(),
             )
             .map_err(|reason| NotLifted { reason })?;
             Ok(pseudocode)
@@ -3250,22 +3331,12 @@ impl Binary {
         let words = self.variable_edits(address).values;
         let emit = |function: &ag_engine::LiftedFunction| match slice {
             _ if values => {
-                emit_function_valued(function, &self.options, &removable, &callees, slice, &words)
+                emit_function_valued(function, &options, &removable, &callees, slice, &words)
                     .map_err(|reason| NotLifted { reason })
             }
-            None => Ok(emit_function_in(
-                function,
-                &self.options,
-                &removable,
-                &callees,
-            )),
+            None => Ok(emit_function_in(function, &options, &removable, &callees)),
             Some((criterion, direction)) => emit_function_sliced(
-                function,
-                &self.options,
-                &removable,
-                &callees,
-                criterion,
-                direction,
+                function, &options, &removable, &callees, criterion, direction,
             )
             .map_err(|reason| NotLifted { reason }),
         };
@@ -3280,9 +3351,9 @@ impl Binary {
                 address,
                 &name,
                 code.bitness,
-                self.abi(),
+                options.abi_for(&self.language),
                 &ImageSymbols(self),
-                &self.options,
+                &options,
             )?
         };
         formatted(emit(&function)?)
@@ -3629,9 +3700,9 @@ impl Binary {
                     address,
                     name,
                     code.bitness,
-                    self.abi(),
+                    self.abi_for(address),
                     &ImageSymbols(self),
-                    &self.options,
+                    &self.options_for(address),
                 )?))
             }
         }
@@ -3894,7 +3965,7 @@ impl Binary {
                 cfg,
                 address,
                 name,
-                &self.options,
+                &self.options_for(address),
             )
             .map(Arc::new),
             Some(Err(error)) => Err(NotLifted {
@@ -4214,7 +4285,7 @@ impl Entries for Binary {
     /// the entry or at or past the next function the image knows leaves
     /// the procedure.
     fn branch_leaves(&self, entry: u64, target: u64) -> bool {
-        if self.options.branches_end_procedures != BranchesEndProcedures::Yes {
+        if !self.branches_end_procedures_for(entry) {
             return false;
         }
         target < entry

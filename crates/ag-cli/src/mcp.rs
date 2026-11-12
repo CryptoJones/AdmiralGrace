@@ -1222,9 +1222,12 @@ impl Server {
                             .ok_or_else(|| format!("{key:?} is a whole number from 1")),
                     }
                 };
+                // An explicit step or depth stands over the function's own
+                // limit, which stands over the run's default.
+                let stored = self.image.emulation_limits(address);
                 let limits = ag_image::EmulationLimits {
-                    steps: whole("steps", 10_000)?,
-                    depth: whole("depth", 8)?,
+                    steps: whole("steps", stored.steps)?,
+                    depth: whole("depth", stored.depth)?,
                 };
                 let run = self
                     .image

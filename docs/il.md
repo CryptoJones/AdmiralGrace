@@ -45,7 +45,9 @@ image's bytes under what the run has written, and a call to a function of the im
 turn (`--depth` calls deep, 8 unless said) while any other call — an import, a function the
 lifter refuses — leaves its result unknown. The run stops when the function returns, after
 `--steps` statements (10000 unless said), or when a branch, a switch, a return or an address
-depends on a value the run does not know, and says why:
+depends on a value the run does not know, and says why. With `--project FILE`, the function's
+own `steps` and `depth` (set with `ag project function-props`, `docs/cli.md`) stand over the
+defaults of 10000 and 8, and an explicit `--steps` or `--depth` stands over the function's own:
 
 ```
 ; sum_to at 0x1161: emulated

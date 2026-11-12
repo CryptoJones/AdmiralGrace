@@ -3683,6 +3683,9 @@ impl App {
                         clobbers: props.clobbers,
                         arguments: props.arguments,
                         returns: props.returns,
+                        options: props.options,
+                        emulation_steps: props.emulation_steps,
+                        emulation_depth: props.emulation_depth,
                     },
                 )
             })
@@ -4365,12 +4368,15 @@ impl App {
                         clobbers: a.clobbers.clone(),
                         arguments: a.arg_locations.clone(),
                         returns: a.return_location.clone(),
+                        options: a.options.clone(),
+                        emulation_steps: a.emulation_steps,
+                        emulation_depth: a.emulation_depth,
                     })
                     .unwrap_or_default()
                     .label();
                 self.prompt = Some(Prompt {
                     kind: PromptKind::FunctionProperties,
-                    title: "Function properties (conv NAME stack N clobbers R,… args R,… ret R proto SIGNATURE)",
+                    title: "Function properties (conv NAME stack N clobbers R,… args R,… ret R opt NAME VALUE steps N depth N proto SIGNATURE)",
                     value: current,
                 });
             }
@@ -6028,6 +6034,9 @@ impl App {
                             record.clobbers = props.clobbers;
                             record.arg_locations = props.arguments;
                             record.return_location = props.returns;
+                            record.options = props.options;
+                            record.emulation_steps = props.emulation_steps;
+                            record.emulation_depth = props.emulation_depth;
                         }
                         self.annotations.prune();
                         self.notice = Some(notice);
@@ -7670,6 +7679,48 @@ fn parse_function_properties(text: &str) -> Result<ag_corpus::project::FunctionP
                     return Err(format!("{register:?} names no general register"));
                 }
                 props.returns = Some(register);
+            }
+            "opt" => {
+                let name = words
+                    .next()
+                    .ok_or_else(|| "opt needs an option name".to_string())?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| "opt needs a value".to_string())?;
+                if ag_image::options::spec(name).is_none() {
+                    return Err(format!("no option named {name:?}"));
+                }
+                if !ag_image::options::per_function(name) {
+                    return Err(format!(
+                        "option {name:?} is a word on the whole image, not on one function"
+                    ));
+                }
+                ag_image::options::Options::default()
+                    .set(name, value)
+                    .map_err(|error| format!("{error}"))?;
+                props.options.insert(name.to_string(), value.to_string());
+            }
+            "steps" => {
+                let count = words
+                    .next()
+                    .ok_or_else(|| "steps needs a whole number".to_string())?;
+                let count = count
+                    .parse::<usize>()
+                    .map_err(|_| format!("{count:?} is no whole number of steps"))?;
+                if count < 1 {
+                    return Err("the step limit is a whole number from 1".to_string());
+                }
+                props.emulation_steps = Some(count);
+            }
+            "depth" => {
+                let count = words
+                    .next()
+                    .ok_or_else(|| "depth needs a whole number".to_string())?;
+                props.emulation_depth = Some(
+                    count
+                        .parse::<usize>()
+                        .map_err(|_| format!("{count:?} is no whole call depth"))?,
+                );
             }
             "proto" => {
                 let rest: Vec<&str> = words.collect();
@@ -13681,6 +13732,26 @@ mod tests {
         assert_eq!(props.convention.as_deref(), Some("cdecl"));
         assert!(props.prototype.is_none());
         assert!(props.clobbers.is_empty());
+        assert!(props.options.is_empty());
+        assert!(props.emulation_steps.is_none());
+        assert!(props.emulation_depth.is_none());
+        // The options and the emulation limits ride on the same line, and
+        // the label spells them back in the prompt's own grammar.
+        let props = parse_function_properties(
+            "opt language rust opt indent 4 steps 500 depth 3 proto int f(int n)",
+        )
+        .expect("the line reads");
+        assert_eq!(
+            props.options.get("language").map(String::as_str),
+            Some("rust")
+        );
+        assert_eq!(props.options.get("indent").map(String::as_str), Some("4"));
+        assert_eq!(props.emulation_steps, Some(500));
+        assert_eq!(props.emulation_depth, Some(3));
+        assert_eq!(
+            parse_function_properties(&props.label()).unwrap().options,
+            props.options
+        );
         // A word that is not one, or a part missing its value, is refused.
         for bad in [
             "conv bogus",
@@ -13696,9 +13767,65 @@ mod tests {
             "args",
             "ret",
             "proto",
+            "opt",
+            "opt language",
+            "opt nope x",
+            "opt code-sections .text",
+            "opt language bogus",
+            "steps",
+            "steps xyz",
+            "steps 0",
+            "depth",
+            "depth xyz",
         ] {
             assert!(parse_function_properties(bad).is_err(), "{bad:?} read");
         }
+    }
+
+    #[test]
+    fn a_functions_option_and_limits_are_set_read_back_and_read_by_the_lift() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let main = |app: &App| app.work.pseudocode.clone().unwrap_or_default();
+        let _ = app.update(Message::FunctionSelected(0x1149));
+        assert!(
+            main(&app).contains("int add(int a, int b)\n"),
+            "{}",
+            main(&app)
+        );
+
+        // An option set for this function alone is read by the lift on its
+        // own screen: the pseudocode spells Rust where the run reads C.
+        let line = "opt language rust steps 500 depth 3";
+        let _ = app.update(Message::EditFunctionProperties);
+        let _ = app.update(Message::PromptChanged(line.into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.prompt.is_none(), "{:?}", app.notice);
+        let record = app.annotations.annotation_for("0x1149").expect("a record");
+        assert_eq!(
+            record.options.get("language").map(String::as_str),
+            Some("rust")
+        );
+        assert_eq!(record.emulation_steps, Some(500));
+        assert_eq!(record.emulation_depth, Some(3));
+        assert!(main(&app).contains("fn add("), "{}", main(&app));
+
+        // The prompt reads them back in their own grammar.
+        let _ = app.update(Message::EditFunctionProperties);
+        assert_eq!(app.prompt.as_ref().expect("a prompt").value, line);
+
+        // An empty line takes them back, and the lift reads C again.
+        let _ = app.update(Message::PromptChanged("".into()));
+        let _ = app.update(Message::PromptSubmit);
+        assert!(app.annotations.annotation_for("0x1149").is_none());
+        assert!(
+            main(&app).contains("int add(int a, int b)\n"),
+            "{}",
+            main(&app)
+        );
     }
 
     #[test]

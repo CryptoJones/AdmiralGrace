@@ -264,6 +264,26 @@ pub enum ProjectCmd {
         /// The register the result leaves in, `rdx`, or `clear`.
         #[arg(long = "return")]
         return_location: Option<String>,
+        /// An engine option for this function alone, over the run's own —
+        /// `--option parameters convention`, `--option type-propagation
+        /// off`. May be repeated. `--option NAME clear` takes one back.
+        /// `code-sections` is a word on the whole image and is refused here.
+        #[arg(long = "option", value_names = ["NAME", "VALUE"], num_args = 2, action = clap::ArgAction::Append)]
+        options: Vec<String>,
+        /// Take back every engine option set on the function, leaving the
+        /// run's own. The signature parts and the emulation limits are kept.
+        #[arg(long)]
+        clear_options: bool,
+        /// The emulator's step limit for this function — the statements and
+        /// blocks run over it and the calls it follows — or `clear`. An
+        /// explicit `--steps` on `ag image … emulate` stands over it.
+        #[arg(long)]
+        steps: Option<String>,
+        /// How many calls deep the emulator follows a call from this
+        /// function, or `clear`. An explicit `--depth` on `ag image …
+        /// emulate` stands over it.
+        #[arg(long)]
+        depth: Option<String>,
     },
     /// Say what the global pointer register — MIPS's `gp` — holds: in every
     /// function, or in one with `--function`, over what the image says (a
@@ -887,6 +907,10 @@ pub fn run(
             clobbers,
             args,
             return_location,
+            options,
+            clear_options,
+            steps,
+            depth,
         } => function_props(
             &target,
             &file,
@@ -897,6 +921,10 @@ pub fn run(
             clobbers.as_deref(),
             args.as_deref(),
             return_location.as_deref(),
+            &options,
+            clear_options,
+            steps.as_deref(),
+            depth.as_deref(),
         ),
         ProjectCmd::GlobalPointer {
             file,
@@ -2624,6 +2652,10 @@ fn function_props(
     clobbers: Option<&[String]>,
     args: Option<&[String]>,
     return_location: Option<&str>,
+    options: &[String],
+    clear_options: bool,
+    steps: Option<&str>,
+    depth: Option<&str>,
 ) -> Result<i32> {
     let address = function_key(target, file, function)?;
     let clears = |word: &str| {
@@ -2637,6 +2669,10 @@ fn function_props(
         && clobbers.is_none()
         && args.is_none()
         && return_location.is_none()
+        && options.is_empty()
+        && !clear_options
+        && steps.is_none()
+        && depth.is_none()
     {
         let project = open_project(target, file)?;
         let key =
@@ -2650,6 +2686,9 @@ fn function_props(
                 clobbers: a.clobbers.clone(),
                 arguments: a.arg_locations.clone(),
                 returns: a.return_location.clone(),
+                options: a.options.clone(),
+                emulation_steps: a.emulation_steps,
+                emulation_depth: a.emulation_depth,
             })
             .unwrap_or_default();
         if props.is_empty() {
@@ -2722,6 +2761,58 @@ fn function_props(
             Some(Some(word))
         }
     };
+    // The options, read in order: `--clear-options` takes every option back,
+    // `--option NAME clear` takes one back, `--option NAME VALUE` sets one.
+    // Each name and value is read against the registry before any is written;
+    // `code-sections` is a word on the whole image and is refused here.
+    let mut option_changes: Vec<(Option<String>, Option<String>)> = Vec::new();
+    if clear_options {
+        option_changes.push((None, None));
+    }
+    for pair in options.chunks(2) {
+        let [name, value] = pair else {
+            anyhow::bail!("--option takes a name and a value");
+        };
+        let name = name.trim();
+        anyhow::ensure!(
+            ag_image::options::spec(name).is_some(),
+            "no option named {name:?}"
+        );
+        anyhow::ensure!(
+            ag_image::options::per_function(name),
+            "option {name:?} is a word on the whole image, not on one function"
+        );
+        if clears(value) {
+            option_changes.push((Some(name.to_string()), None));
+        } else {
+            let value = value.trim();
+            ag_image::options::Options::default()
+                .set(name, value)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            option_changes.push((Some(name.to_string()), Some(value.to_string())));
+        }
+    }
+    let steps = match steps {
+        None => None,
+        Some(word) if clears(word) => Some(None),
+        Some(word) => {
+            let count = word
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("{word:?} is no whole number of steps"))?;
+            anyhow::ensure!(count >= 1, "the step limit is a whole number from 1");
+            Some(Some(count))
+        }
+    };
+    let depth = match depth {
+        None => None,
+        Some(word) if clears(word) => Some(None),
+        Some(word) => {
+            Some(Some(word.trim().parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("{word:?} is no whole call depth")
+            })?))
+        }
+    };
     edit(target, file, TargetKind::Function, &address, |a| {
         if let Some(change) = prototype {
             a.prototype = change;
@@ -2740,6 +2831,23 @@ fn function_props(
         }
         if let Some(change) = return_location {
             a.return_location = change;
+        }
+        for (name, value) in &option_changes {
+            match (name, value) {
+                (None, _) => a.options.clear(),
+                (Some(name), None) => {
+                    a.options.remove(name);
+                }
+                (Some(name), Some(value)) => {
+                    a.options.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        if let Some(change) = steps {
+            a.emulation_steps = change;
+        }
+        if let Some(change) = depth {
+            a.emulation_depth = change;
         }
     })
 }
@@ -3006,6 +3114,15 @@ fn summarize(annotation: &Annotation) -> String {
     }
     if let Some(returns) = &annotation.return_location {
         parts.push(format!("return {returns}"));
+    }
+    for (name, value) in &annotation.options {
+        parts.push(format!("opt {name} {value}"));
+    }
+    if let Some(steps) = annotation.emulation_steps {
+        parts.push(format!("steps {steps}"));
+    }
+    if let Some(depth) = annotation.emulation_depth {
+        parts.push(format!("depth {depth}"));
     }
     if let Some(value) = &annotation.global_pointer {
         parts.push(format!("global pointer {value}"));
