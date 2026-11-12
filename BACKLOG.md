@@ -229,7 +229,7 @@ Filed 2026-10-26.
 - [x] Function matching by whole-function hash that applies names, types and comments — [#394](https://github.com/CryptoJones/AdmiralGrace/issues/394)
 - [x] Networked signature server — [#395](https://github.com/CryptoJones/AdmiralGrace/issues/395)
 - [x] Highlight matched library functions and choose between matches — [#396](https://github.com/CryptoJones/AdmiralGrace/issues/396)
-- [ ] Byte-pattern signature libraries — [#397](https://github.com/CryptoJones/AdmiralGrace/issues/397)
+- [x] Byte-pattern signature libraries — [#397](https://github.com/CryptoJones/AdmiralGrace/issues/397)
 
 ### Diffing
 

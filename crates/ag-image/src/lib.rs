@@ -2749,6 +2749,13 @@ impl Binary {
         self.function_ends.get(&address).copied()
     }
 
+    /// Every function start the unwind data names, with where the function
+    /// ends. These are functions whether or not a symbol names them, so a
+    /// stripped image still has them.
+    pub fn function_ends(&self) -> &BTreeMap<u64, u64> {
+        &self.function_ends
+    }
+
     /// The name of the function at `address` as it stands in code: the
     /// scope and the name of a demangled symbol, without the signature, or
     /// the name as shown for any other.

@@ -682,20 +682,25 @@ fingerprints, reads them back onto an image, and writes what a match knows
 analyst's own words. The engine ships signatures for libc, libstdc++ and
 libgcc. Signatures can be shared through a signature server: `serve` runs
 one, `push` and `pull` move signature files to and from it, and `--server`
-matches against it, sending only hashes. See `ag docs funcid` for the
-fingerprint, its constraints, the file format and the server.
+matches against it, sending only hashes. A byte-pattern library
+(`.agpat`) is the classic, looser signature — a function's opening bytes
+with the address bytes as wildcards — and names library code in a
+stripped program. See `ag docs funcid` for the fingerprint, its
+constraints, the file formats and the server.
 
 ```sh
 ag funcid list
 ag funcid create /lib/x86_64-linux-gnu/libc.so.6 -o libc.agsig --library libc
 ag funcid match ./program --sig libc.agsig
 ag funcid apply ./program --project program.agproj --sig libc.agsig
+ag funcid create ./libfoo -o libfoo.agpat
+ag funcid match ./stripped-program --sig libfoo.agpat
 ```
 
 | Command | What it does |
 |---|---|
-| `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT] [--no-types] [--json]` | Fingerprints every named function of an image; a function the type libraries know carries its prototype unless `--no-types`. |
-| `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more. When several signatures know one function, the first is the match and the rest are named as alternatives (`also NAME (LIBRARY)`; an `alternatives` array in JSON). |
+| `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT] [--no-types] [--pattern] [--json]` | Fingerprints every named function of an image; a function the type libraries know carries its prototype unless `--no-types`. With `--pattern`, or a file ending in `.agpat`, writes a byte-pattern library instead of hashes. |
+| `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more — a signature file or a byte-pattern library, whose patterns are tried on every function, named or not, and marked `(pattern, LIBRARY)` (`"by": "pattern"` in JSON). When several signatures know one function, the first is the match and the rest are named as alternatives (`also NAME (LIBRARY)`; an `alternatives` array in JSON). |
 | `ag funcid apply BINARY --project PROJECT [--sig FILE]… [--no-builtin] [--json]` | Writes each match's name, prototype and comment into a project, made from the image when not there yet. A rename or type already on a function stands. |
 | `ag funcid list [--server URL] [--json]` | The signature databases the engine ships, with their counts and provenance; with `--server`, the libraries a signature server holds. |
 | `ag funcid serve --store DIR [--listen ADDR] [--token TOKEN] [--private]` | Runs a signature server over a directory of signature files, on `127.0.0.1:7395` unless `--listen`. Plain HTTP. A push needs the token (`--token` or `AG_FUNCID_TOKEN`); without one the server is read-only; `--private` asks for it to read as well. |

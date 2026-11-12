@@ -21,7 +21,14 @@ ag funcid serve --store /srv/agsig                   # on the shared host
 ag funcid push libc.agsig --server http://sigs:7395  # give the team your signatures
 ag funcid match ./program --server http://sigs:7395  # match against everyone's
 ag funcid pull --server http://sigs:7395 -o sigs/    # or take them offline
+
+ag funcid create ./libfoo -o libfoo.agpat            # a byte-pattern library
+ag funcid match ./stripped --sig libfoo.agpat        # names code with no symbols
 ```
+
+Beside the hashes there are the classic **byte-pattern libraries**
+(`.agpat`): looser, and able to name library code in a stripped program.
+See [Byte-pattern libraries](#byte-pattern-libraries).
 
 ## The fingerprint and its constraints
 
@@ -81,10 +88,112 @@ came from, for provenance. Each signature is one function: its `hash`, its
 `comment`. Identical bodies — a thunk and its target, an alias — are one
 signature, the first name at the first address keeping it.
 
+## Byte-pattern libraries
+
+A whole-function hash is exact, and it has to be told where the function
+ends and what it is called before it can look. The classic signature is
+looser: a **byte pattern** of the function's opening bytes, with the bytes
+that carry an address left as wildcards. Matching one is a masked compare
+of bytes, so it needs no decoder and no name to start from — which is what
+recognises a library linked statically into a stripped program, where the
+hashes have nothing to work with.
+
+```sh
+ag funcid create ./libfoo-with-symbols -o libfoo.agpat --library libfoo
+ag funcid match ./stripped-program --sig libfoo.agpat
+ag funcid apply ./stripped-program --project program.agproj --sig libfoo.agpat
+```
+
+`create` writes a pattern library when the file ends in `.agpat` or
+`--pattern` is given; `match` and `apply` read one through `--sig`, beside
+or instead of signature files, telling the two apart by what the file
+holds.
+
+A pattern library (`.agpat`) is versioned JSON, shaped like a signature
+file with `patterns` where that has `signatures`:
+
+```jsonc
+{
+  "format": 1,
+  "library": "libfoo",
+  "arch": "x86-64",
+  "source": "./libfoo-with-symbols",
+  "patterns": [
+    {
+      "head": "554889e5e8........b8........5dc3",
+      "crc_length": 0,
+      "crc": "00000000",
+      "length": 16,
+      "name": "foo_init",
+      "prototype": "int foo_init(void)"
+    }
+  ]
+}
+```
+
+A pattern is three checks, read in order:
+
+- `head` — the function's first 32 bytes (all of it, when it is shorter),
+  as hex, a variable byte written `..`;
+- `crc` — a CRC-32 (IEEE) of the `crc_length` bytes that follow the head:
+  the run up to the first variable byte, 255 bytes at most. It tells apart
+  functions that open alike;
+- `length` — the function's length in bytes. When the image knows where
+  the function ends (its unwind data says), only a pattern of exactly that
+  length fits; when it does not, the pattern fits wherever the section has
+  room for it.
+
+The variable bytes are the ones the hash masks — a relative branch's
+offset, a RIP-relative or absolute displacement — and one more: an
+immediate of four or eight bytes whose value is an address inside the
+image the pattern was taken from. Code that is not position-independent
+says `mov edi, 0x404010`, and the linker decides that number, so it must
+not be part of the pattern. Only an image linked at a base of its own
+(its lowest section at `0x10000` or above) is read this way; one that
+loads anywhere reaches its data relative to the instruction pointer. The
+wildcards are found once, when the pattern is made, and the pattern
+carries them. As with the hash, only x86 and x86-64 have wildcards; on
+another architecture a pattern is the bytes as they stand.
+
+What `create` leaves out and keeps:
+
+- a function with fewer than 8 fixed bytes in its head and CRC run — a
+  thunk that is one `jmp`, say — makes no pattern: it would match half of
+  every program. The report counts these (`skipped` in JSON);
+- identical bodies are one pattern, the first name keeping it, as with
+  the hashes;
+- two *different* functions the pattern cannot tell apart — they differ
+  only past the CRC run — are both kept, and a match offers both. The
+  report counts these (`ambiguous`).
+
+What a match does with them:
+
+- patterns are tried on every function the image knows: the symbols' and
+  the unwind data's, named or not;
+- a hash that knows the function stands first, since it is exact; the
+  patterns follow as alternatives, the one that pins down the most bytes
+  first. A library that gives the function the same name twice is listed
+  once;
+- the report marks a function a pattern named with `(pattern, LIBRARY)`,
+  and the JSON carries `"by": "hash"` or `"by": "pattern"` on the match
+  and on each alternative. A pattern match has no `hash`.
+
+A pattern is a weaker claim than a hash: it reads the opening of a
+function and its length, not all of it. Two functions that are the same
+bytes apart from where they branch — the variants of a `memcpy` thunk —
+are one pattern and get one name, and a short function in an image with
+no unwind data can be taken for another that opens the same way. Read a
+pattern's names as good leads; where a hash and a pattern disagree, the
+hash is right.
+
+Pattern libraries stay on this machine: a signature server holds
+whole-function hashes, and `push` refuses a pattern library. No pattern
+libraries are built in — make them from the libraries a target links.
+
 ## The commands
 
 - `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT]
-  [--no-types] [--json]` — fingerprint every named function of an image
+  [--no-types] [--pattern] [--json]` — fingerprint every named function of an image
   whose functions are named: a library with symbols, such as libc.so.6, or
   any binary the analysis has named. A name the analysis made up
   (`sub_…`, `nullsub_…`) is left out — a signature is a library's own name

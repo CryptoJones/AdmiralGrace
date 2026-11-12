@@ -52,6 +52,10 @@
 //! `ag funcid create` makes a new one from any image
 //! whose functions are named; `ag funcid match` and `ag funcid apply` read
 //! them back onto an image. See `docs/funcid.md`.
+//!
+//! A whole-function hash is exact. The classic alternative — a **byte
+//! pattern** of the function's opening bytes with the address bytes left as
+//! wildcards — is [`pattern`] (#397).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -60,6 +64,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::arch::Bitness;
+
+pub mod pattern;
 
 /// The signature-file format this module reads and writes.
 pub const FORMAT: u32 = 1;
@@ -107,12 +113,32 @@ pub fn arch_of_language(language: &str) -> String {
 /// addresses normalizes to the same bytes. An architecture other than x86 is
 /// returned unchanged.
 pub fn normalize(arch: &str, bytes: &[u8], base: u64) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for (at, len) in address_spans(arch, bytes, base, &|_| false) {
+        zero(&mut out, at, len);
+    }
+    out
+}
+
+/// The spans of `bytes` — each an offset and a length — that carry an
+/// address rather than the function's own code: what [`normalize`] zeroes
+/// and what a byte pattern ([`pattern`]) leaves as wildcards. `is_address`
+/// says whether a wide immediate's value is an address of the image — the
+/// `mov edi, 0x404010` of code that is not position-independent — and so a
+/// span too; the whole-function hash asks for none. Empty for an
+/// architecture the masker does not read.
+fn address_spans(
+    arch: &str,
+    bytes: &[u8],
+    base: u64,
+    is_address: &dyn Fn(u64) -> bool,
+) -> Vec<(usize, usize)> {
     let bitness = match arch {
         "x86-64" => 64,
         "x86" => 32,
-        _ => return bytes.to_vec(),
+        _ => return Vec::new(),
     };
-    let mut out = bytes.to_vec();
+    let mut spans = Vec::new();
     let mut decoder =
         iced_x86::Decoder::with_ip(bitness, bytes, base, iced_x86::DecoderOptions::NONE);
     let mut instruction = iced_x86::Instruction::new();
@@ -123,23 +149,30 @@ pub fn normalize(arch: &str, bytes: &[u8], base: u64) -> Vec<u8> {
         // A relative branch's target is its immediate: the distance to
         // another function or block, which the link layout decides.
         if is_branch(&instruction) && offsets.has_immediate() {
-            zero(
-                &mut out,
-                start + offsets.immediate_offset(),
-                offsets.immediate_size(),
-            );
+            spans.push((start + offsets.immediate_offset(), offsets.immediate_size()));
+        } else if offsets.has_immediate() && matches!(offsets.immediate_size(), 4 | 8) {
+            // An immediate wide enough to hold an address, whose value is
+            // one: the link layout decides it as it does a branch's target.
+            let at = start + offsets.immediate_offset();
+            let size = offsets.immediate_size();
+            if let Some(field) = bytes.get(at..at + size) {
+                let mut value = [0u8; 8];
+                value[..size].copy_from_slice(field);
+                if is_address(u64::from_le_bytes(value)) {
+                    spans.push((at, size));
+                }
+            }
         }
         // A memory displacement that names an address — RIP-relative, or
         // absolute with no base and no index — moves with the load address.
         if offsets.has_displacement() && displacement_is_address(&instruction) {
-            zero(
-                &mut out,
+            spans.push((
                 start + offsets.displacement_offset(),
                 offsets.displacement_size(),
-            );
+            ));
         }
     }
-    out
+    spans
 }
 
 /// Whether the instruction's first operand is a branch target — a relative

@@ -64,6 +64,7 @@ pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
 pub use diff::{diff, DiffOptions, DiffReport, FunctionFacts, FunctionMatch, FunctionRef, MatchKind};
 pub use emit::{Line, Pseudocode};
 pub use frame::{FrameRow, Region, StackFrame};
+pub use funcid::pattern::{Pattern, PatternCandidate, PatternDb, PatternSet};
 pub use funcid::{function_hash, Candidate, Signature, SignatureDb, SignatureSet};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};
