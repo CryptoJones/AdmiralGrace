@@ -19,6 +19,8 @@ The images the image tests read, and how they were made.
 | `mips_pic_nogp.elf` | The same with every symbol but the four functions removed: no `_gp`, so a function that sets no global pointer reads the GOT's start and 0x7ff0. |
 | `mips_nopic.elf` | A 32-bit big-endian MIPS ELF executable, statically linked: `mips_sample.c` built not position-independent, with small data reached through `gp`, `mips_stub.c`'s `puts`, and `mips_start.s`'s `__start`, which sets `gp` from `_gp` by `lui`/`addiu`. |
 | `mips_sample.c`, `mips_cpload.s`, `mips_start.s`, `mips_stub.c` | The sources of the three MIPS executables. |
+| `msp430.elf` | A 16-bit MSP430 ELF executable built from `msp430_sample.c`, statically linked with no C library: a leaf, a subtraction, a compare-and-branch, and a loop with a call. The loader has no opinion for `EM_MSP430`, so the engine names the target `TI_MSP430:LE:16:default` itself. |
+| `msp430_sample.c` | The source of the MSP430 executable. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
@@ -211,6 +213,19 @@ In `mips_pic.elf` `_gp` is `0x2a210`, 0x7ff0 past the `.got` at `0x22220`, whose
 entries are followed by the global one for `puts` at `0x2223c`; lld relaxed the local calls
 through the GOT to `bal`. In `mips_nopic.elf` `_gp` is `0x2a0e0`, and `counter` and the string
 are reached as `-0x7fe0(gp)` and `gp - 0x7fe8`.
+
+The MSP430 executable was built with clang and lld (21.1.8) for the 16-bit core, compiled to
+an object and linked directly — clang's MSP430 target is experimental and has no driver of
+its own for the link, so `ld.lld` is invoked by hand:
+
+```sh
+clang --target=msp430 -O1 -c msp430_sample.c -o msp430.o
+ld.lld-21 -e sum --gc-sections --image-base=0x4000 -z max-page-size=4096 \
+      -z noseparate-code -Ttext=0x4000 msp430.o -o msp430.elf
+```
+
+The 20-bit MSP430X is not built: the toolchain here targets the 16-bit core, and the engine
+carries only the `TI_MSP430` specification, not `TI_MSP430X`.
 
 A Thumb function's symbol has its low bit set (`add` is `0x20001` in `arm_thumb.elf`), the
 entry point's low bit says the same, and the assembler's `$t`/`$a` mapping symbols mark where

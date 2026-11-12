@@ -457,7 +457,8 @@ pub fn build(binary: &Binary, name: &str, notes: &Notes) -> Dwarf {
 
 /// The machine a language id names, as ELF numbers it: `EM_X86_64`,
 /// `EM_386`, `EM_ARM`, `EM_AARCH64`, `EM_MIPS`, `EM_PPC`, `EM_PPC64`,
-/// `EM_RISCV`; `EM_NONE` for a processor this writer has no number for.
+/// `EM_RISCV`, `EM_MSP430`; `EM_NONE` for a processor this writer has no
+/// number for.
 fn machine_of(language: &str) -> u16 {
     let processor = language
         .split(':')
@@ -486,6 +487,7 @@ fn machine_of(language: &str) -> u16 {
             }
         }
         "riscv" => 243,
+        "ti_msp430" => 105,
         _ => 0,
     }
 }

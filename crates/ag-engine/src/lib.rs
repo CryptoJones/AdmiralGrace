@@ -29,6 +29,7 @@ pub mod lift;
 pub mod liveness;
 pub mod merge;
 pub mod mips;
+pub mod msp430;
 pub mod objc;
 pub mod opaque;
 pub mod options;

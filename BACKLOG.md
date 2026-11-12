@@ -252,7 +252,7 @@ Filed 2026-10-26.
 - [ ] Decode and lift MIPS, including nanoMIPS — [#408](https://github.com/CryptoJones/AdmiralGrace/issues/408)
 - [ ] Decode and lift PowerPC, including VLE — [#409](https://github.com/CryptoJones/AdmiralGrace/issues/409)
 - [x] Decode and lift RISC-V — [#410](https://github.com/CryptoJones/AdmiralGrace/issues/410)
-- [ ] Decode and lift MSP430 — [#411](https://github.com/CryptoJones/AdmiralGrace/issues/411)
+- [x] Decode and lift MSP430 — [#411](https://github.com/CryptoJones/AdmiralGrace/issues/411)
 - [ ] Decode TriCore, Hexagon, TMS320C6x, C-SKY and NDS32 — [#412](https://github.com/CryptoJones/AdmiralGrace/issues/412)
 - [ ] Decode 6502, Z80 and SuperH — [#413](https://github.com/CryptoJones/AdmiralGrace/issues/413)
 - [ ] x86 extras: AT&T syntax, APX, MPX and the x32 ABI — [#414](https://github.com/CryptoJones/AdmiralGrace/issues/414)

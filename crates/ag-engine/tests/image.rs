@@ -41,6 +41,18 @@ fn the_loader_reads_the_sample_elf() {
 }
 
 #[test]
+fn the_loader_reads_an_msp430_elf_under_a_named_target() {
+    // The loader has no opinion for the MSP430, so the engine reads the
+    // architecture from the container and names the target itself.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-image/tests/fixtures/msp430.elf");
+    let image = Image::open(&path).expect("the MSP430 ELF loads");
+    assert_eq!(image.language(), "TI_MSP430:LE:16:default");
+    assert_eq!(image.entry(), Some(0x4010));
+    assert_eq!(image.function_name(0x4000).as_deref(), Some("add"));
+    assert_eq!(image.function_name(0x4010).as_deref(), Some("sum"));
+}
+
+#[test]
 fn the_code_section_decodes_into_a_cfg_with_named_callees() {
     let image = sample();
     let (text, bytes) = image
@@ -236,6 +248,11 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
     assert_eq!(
         ag_engine::image::raw_arch("RISCV:LE:32:default"),
         Some("riscv32")
+    );
+    assert_eq!(raw_language("msp430"), Some("TI_MSP430:LE:16:default"));
+    assert_eq!(
+        ag_engine::image::raw_arch("TI_MSP430:LE:16:default"),
+        Some("msp430")
     );
 
     // Nowhere to load: address 0, no bytes, or past a 32-bit program's space.
