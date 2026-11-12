@@ -9,6 +9,7 @@ use ag_corpus::{BodyRange, Corpus};
 mod archive;
 mod catalog;
 mod debug;
+mod diff;
 mod docs;
 mod export;
 mod funcid;
@@ -218,6 +219,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: funcid::FuncidCmd,
     },
+    /// Compare two versions of a program: match their functions by hash,
+    /// name and shape, report the differences, and carry names and types
+    /// across the matches.
+    Diff(diff::DiffArgs),
 }
 
 #[derive(Subcommand)]
@@ -485,6 +490,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Archive { cmd } => archive::run(cmd),
         Cmd::Platform { cmd } => platform::run(cmd),
         Cmd::Funcid { cmd } => funcid::run(cmd),
+        Cmd::Diff(args) => diff::run(args),
     }
 }
 

@@ -31,17 +31,21 @@ pub enum ViewTab {
     /// The Objective-C header recovered from the image's metadata; offered
     /// only when the image has any.
     Header,
+    /// The version comparison: the matches between the open program and
+    /// another version of it; offered only when a comparison is open.
+    Diff,
 }
 
 impl ViewTab {
     /// Every tab, in display order.
-    pub const ALL: [ViewTab; 6] = [
+    pub const ALL: [ViewTab; 7] = [
         ViewTab::Listing,
         ViewTab::Pseudocode,
         ViewTab::Graph,
         ViewTab::Bytes,
         ViewTab::References,
         ViewTab::Header,
+        ViewTab::Diff,
     ];
 
     /// The tab label.
@@ -53,6 +57,7 @@ impl ViewTab {
             ViewTab::Bytes => "Bytes",
             ViewTab::References => "References",
             ViewTab::Header => "Header",
+            ViewTab::Diff => "Diff",
         }
     }
 }
@@ -220,6 +225,10 @@ fn view_tabs(app: &App) -> Element<'_, Message> {
         if tab == ViewTab::Header && app.work.objc_header.is_none() {
             continue;
         }
+        // The comparison is offered where one is open.
+        if tab == ViewTab::Diff && app.diff.is_none() {
+            continue;
+        }
         row = row.push(tab_button(
             tab.label(),
             app.work.tab == tab,
@@ -267,6 +276,7 @@ fn main_content(app: &App) -> Element<'_, Message> {
         ViewTab::Bytes => bytes_content(app),
         ViewTab::References => references_content(app),
         ViewTab::Header => header_content(app),
+        ViewTab::Diff => diff_content(app),
     }
 }
 
@@ -301,6 +311,325 @@ fn header_content(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// The version comparison: the matches between the open program and the
+/// version opened beside it, and the two functions of the chosen pair side
+/// by side. The other version is the old side, the open program the new;
+/// an apply carries the other version's words onto this one.
+fn diff_content(app: &App) -> Element<'_, Message> {
+    let Some(state) = app.diff.as_ref() else {
+        return empty_state(
+            "No comparison open",
+            "Use File ▸ Compare with… to open another version of this program.",
+        )
+        .into();
+    };
+    let report = &state.report;
+    let unchanged = report.matched.iter().filter(|p| !p.changed()).count();
+
+    // The summary bar: what the comparison found, and the two things the
+    // analyst can do with it.
+    let mut summary = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Text::new(format!("{:.0}% similar", report.similarity * 100.0))
+                .size(13)
+                .color(color::CYAN),
+        )
+        .push(subtle(format!(
+            "{} matched · {} unchanged · {} changed · {} removed · {} added",
+            report.matched.len(),
+            unchanged,
+            report.matched.len() - unchanged,
+            report.removed.len(),
+            report.added.len(),
+        )));
+    if let Some(project) = &state.project_path {
+        summary = summary.push(subtle(format!("words from {}", project.display())));
+    }
+    let summary = summary
+        .push(Space::new().width(Length::Fill))
+        .push(diff_action(
+            "Apply names && types",
+            Message::DiffApply,
+            color::GREEN,
+        ))
+        .push(diff_action("Close", Message::DiffClose, color::MUTED));
+
+    // The match list on the left, the chosen pair side by side on the right.
+    let mut matches = Column::new().spacing(3).width(Length::Fill);
+    for (index, pair) in report.matched.iter().enumerate() {
+        matches = matches.push(diff_match_row(state, index, pair));
+    }
+    if report.matched.is_empty() {
+        matches = matches.push(subtle("No functions matched between the versions."));
+    }
+    for function in &report.removed {
+        matches = matches.push(diff_one_sided("− removed", function.address, &function.name, color::RED));
+    }
+    for function in &report.added {
+        matches = matches.push(diff_one_sided("+ added", function.address, &function.name, color::GREEN));
+    }
+    let match_list = scrollable(Container::new(matches).padding([0, 8]))
+        .height(Length::Fill)
+        .width(Length::Fixed(360.0));
+
+    let body = Row::new()
+        .spacing(8)
+        .push(match_list)
+        .push(diff_side_by_side(app, state));
+
+    Column::new()
+        .spacing(8)
+        .push(Container::new(summary).padding([0, 12]))
+        .push(body)
+        .into()
+}
+
+/// A button of the comparison's summary bar.
+fn diff_action(label: &str, message: Message, tint: iced::Color) -> Element<'_, Message> {
+    button::Button::new(Text::new(label.to_string()).size(12).color(tint))
+        .on_press(message)
+        .padding([6, 12])
+        .style(move |_, status| button::Style {
+            background: match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Some(Background::Color(color::PANEL_ALT))
+                }
+                _ => Some(Background::Color(color::CARD)),
+            },
+            text_color: tint,
+            border: Border {
+                color: tint.scale_alpha(0.5),
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            ..button::Style::default()
+        })
+        .into()
+}
+
+/// The name a comparison spells for a function: its own when it has one,
+/// the placeholder the analysis gives otherwise.
+fn diff_name(name: &Option<String>, address: u64) -> String {
+    name.clone()
+        .unwrap_or_else(|| format!("sub_{address:x}"))
+}
+
+/// One matched pair in the list: the two functions, their similarity and
+/// how the match was drawn. Clicking it chooses it for the side-by-side.
+fn diff_match_row<'a>(
+    state: &crate::diff::DiffState,
+    index: usize,
+    pair: &ag_image::diff::FunctionMatch,
+) -> Element<'a, Message> {
+    let active = state.selected == Some(index);
+    let kind_color = match pair.kind {
+        ag_image::diff::MatchKind::Hash => color::GREEN,
+        ag_image::diff::MatchKind::Name => color::CYAN,
+        ag_image::diff::MatchKind::Structure => color::AMBER,
+    };
+    let text = Column::new()
+        .spacing(2)
+        .width(Length::Fill)
+        .push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(
+                    Text::new(format!("{:.2}", pair.similarity))
+                        .size(11)
+                        .font(MONO)
+                        .color(kind_color),
+                )
+                .push(pill(pair.kind.label(), kind_color)),
+        )
+        .push(
+            Text::new(format!(
+                "{:#x} {}  →  {:#x} {}",
+                pair.old.address,
+                diff_name(&pair.old.name, pair.old.address),
+                pair.new.address,
+                diff_name(&pair.new.name, pair.new.address),
+            ))
+            .size(11)
+            .font(MONO)
+            .color(if active { color::TEXT } else { color::MUTED }),
+        );
+    let surface = Container::new(text)
+        .padding([5, 7])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if active {
+                color::FOCUS_BG
+            } else {
+                color::CARD
+            })),
+            border: Border {
+                color: if active { color::CYAN } else { color::LINE },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        });
+    mouse_area(surface)
+        .on_press(Message::DiffPairSelected(index))
+        .into()
+}
+
+/// A function only one version holds, in the match list.
+fn diff_one_sided<'a>(
+    label: &str,
+    address: u64,
+    name: &Option<String>,
+    tint: iced::Color,
+) -> Element<'a, Message> {
+    Container::new(
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(Text::new(label.to_string()).size(11).color(tint))
+            .push(
+                Text::new(format!("{:#x} {}", address, diff_name(name, address)))
+                    .size(11)
+                    .font(MONO)
+                    .color(color::MUTED),
+            ),
+    )
+    .padding([5, 7])
+    .width(Length::Fill)
+    .into()
+}
+
+/// The two functions of the chosen pair, side by side: the other version
+/// on the left, the open program on the right.
+fn diff_side_by_side<'a>(
+    app: &App,
+    state: &crate::diff::DiffState,
+) -> Element<'a, Message> {
+    let Some(index) = state.selected else {
+        return Container::new(empty_state(
+            "Choose a matched pair",
+            "Click a match on the left to see the two functions side by side.",
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding([10, 12])
+        .into();
+    };
+    let Some(pair) = state.report.matched.get(index) else {
+        return Space::new().into();
+    };
+
+    // The other version's instructions, read off its image.
+    let old_lines: Vec<(u64, String, String)> = state
+        .binary
+        .disassembly(pair.old.address)
+        .map(|disassembly| {
+            disassembly
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions.iter())
+                .map(|i| (i.address, i.mnemonic.clone(), i.operands.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // The open program's instructions, through its provider.
+    let new_lines: Vec<(u64, String, String)> = app
+        .provider
+        .listing(pair.new.address)
+        .map(|lines| {
+            lines
+                .into_iter()
+                .map(|l| (l.address, l.mnemonic, l.operands))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let old_side = diff_side(
+        &format!(
+            "{}  {:#x} {}",
+            state.path.display(),
+            pair.old.address,
+            diff_name(&pair.old.name, pair.old.address)
+        ),
+        &old_lines,
+    );
+    let new_side = diff_side(
+        &format!(
+            "this program  {:#x} {}",
+            pair.new.address,
+            diff_name(&pair.new.name, pair.new.address)
+        ),
+        &new_lines,
+    );
+    Row::new()
+        .spacing(8)
+        .push(old_side)
+        .push(new_side)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// One column of the side-by-side: a heading and the function's
+/// instructions, each address, mnemonic and operands.
+fn diff_side<'a>(heading: &str, lines: &[(u64, String, String)]) -> Element<'a, Message> {
+    let mut column = Column::new().spacing(0).width(Length::Fill);
+    for (address, mnemonic, operands) in lines {
+        column = column.push(
+            Container::new(
+                Row::new()
+                    .spacing(8)
+                    .push(
+                        Text::new(format!("{address:#x}"))
+                            .size(11)
+                            .font(MONO)
+                            .color(color::ADDR)
+                            .width(Length::Fixed(70.0)),
+                    )
+                    .push(
+                        Text::new(mnemonic.clone())
+                            .size(12)
+                            .font(MONO)
+                            .color(color::CYAN)
+                            .width(Length::Fixed(70.0)),
+                    )
+                    .push(Text::new(operands.clone()).size(12).font(MONO).color(color::TEXT)),
+            )
+            .padding([1, 10])
+            .width(Length::Fill),
+        );
+    }
+    if lines.is_empty() {
+        column = column.push(subtle("No disassembly for this function."));
+    }
+    Container::new(
+        Column::new()
+            .spacing(4)
+            .push(
+                Text::new(heading.to_string())
+                    .size(11)
+                    .font(MONO)
+                    .color(color::MUTED),
+            )
+            .push(scrollable(column).height(Length::Fill).width(Length::Fill)),
+    )
+    .padding([6, 8])
+    .width(Length::FillPortion(1))
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(color::CARD)),
+        border: Border {
+            color: color::LINE,
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// The linear listing.

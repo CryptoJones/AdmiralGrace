@@ -340,6 +340,18 @@ pub enum Message {
     /// function: its name, prototype and comment become the annotation, the
     /// choice overwriting whatever the function had before.
     ApplyLibraryMatch(usize),
+    /// Open the prompt to compare the open program with another version of it.
+    FileCompareWith,
+    /// The other version has been read and matched against the open program.
+    DiffReady(Result<crate::diff::DiffState, String>),
+    /// A matched pair was chosen for the side-by-side view, by its place in
+    /// the report's matched list.
+    DiffPairSelected(usize),
+    /// Carry the other version's names, prototypes, comments and types onto
+    /// the open program for every matched pair.
+    DiffApply,
+    /// Close the version comparison.
+    DiffClose,
 }
 
 /// The kuna CLI a kuna project can be asked, and the answers it has given.
@@ -373,6 +385,9 @@ pub enum PromptKind {
     Kuna,
     /// A program image.
     Binary,
+    /// Another version of the open program to compare with:
+    /// `PATH [project=FILE]`.
+    CompareWith,
     /// An Objective-C method map.
     Methods,
     /// A project file to open.
@@ -1076,6 +1091,10 @@ pub struct App {
     /// analyst can skip them. Empty until the library index lands beside
     /// the call graph, and for a project that is not a program image.
     pub library: BTreeSet<u64>,
+    /// The version comparison, when one is open: another version of the
+    /// program, the matches between them, and the pair chosen for the
+    /// side-by-side view.
+    pub diff: Option<crate::diff::DiffState>,
 }
 
 /// One change to the analyst's annotations, as undo records it.
@@ -1170,6 +1189,7 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             library: BTreeSet::new(),
+            diff: None,
         };
 
         let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
@@ -1303,6 +1323,55 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Compare the open program with another version of it. The open
+    /// program is the new side: its facts are read now, its renames over
+    /// the image's names. The other version is read and matched off the UI
+    /// thread, the same whole-program work the library index is.
+    fn compare_with(&mut self, path: PathBuf, project_path: Option<PathBuf>) -> Task<Message> {
+        let mut new_facts = self.provider.diff_facts();
+        if new_facts.is_empty() {
+            self.notice = Some("The comparison needs a program image".into());
+            return Task::none();
+        }
+        ag_image::diff::rename_facts(&mut new_facts, &crate::diff::renames_of(&self.annotations));
+        let options = self.options;
+        Task::perform(
+            async move {
+                let provider = BinaryProvider::load_with(
+                    &path,
+                    options,
+                    &ag_image::Layout::default(),
+                    None,
+                    None,
+                )
+                .map_err(|error| format!("could not open {}: {error:#}", path.display()))?;
+                let binary = provider.binary();
+                let project = match &project_path {
+                    Some(file) => ag_corpus::project::ProjectFile::load(file)
+                        .map_err(|error| format!("reading {}: {error:#}", file.display()))?,
+                    None => ag_corpus::project::ProjectFile::new(
+                        ag_corpus::project::Target::default(),
+                    ),
+                };
+                let mut facts = ag_image::diff::facts_of(&binary);
+                ag_image::diff::rename_facts(&mut facts, &crate::diff::renames_of(&project));
+                let report =
+                    ag_image::diff::diff(&facts, &new_facts, &ag_image::diff::DiffOptions::default());
+                Ok(crate::diff::DiffState {
+                    binary,
+                    path,
+                    project,
+                    project_path,
+                    report,
+                    facts,
+                    new_facts,
+                    selected: None,
+                })
+            },
+            Message::DiffReady,
+        )
     }
 
     /// Load a kuna project export into the workbench.
@@ -3219,7 +3288,8 @@ impl App {
             | Message::EditOpaque
             | Message::EditDeleteType
             | Message::StackRemoveVariable(_)
-            | Message::ApplyLibraryMatch(_) => true,
+            | Message::ApplyLibraryMatch(_)
+            | Message::DiffApply => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -5112,6 +5182,14 @@ impl App {
                 });
             }
 
+            Message::FileCompareWith => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::CompareWith,
+                    title: "Compare with another version: PATH [project=FILE]",
+                    value: String::new(),
+                });
+            }
+
             Message::PromptChanged(value) => {
                 if let Some(prompt) = &mut self.prompt {
                     prompt.value = value;
@@ -5180,6 +5258,27 @@ impl App {
                             self.kuna_root = None;
                             return self.load_project();
                         }
+                    }
+                    PromptKind::CompareWith => {
+                        // The path — spaces and all — and `project=FILE`
+                        // after it for the other version's annotations.
+                        let text = prompt.value.trim();
+                        let (path, project) = match text.rsplit_once(char::is_whitespace) {
+                            Some((head, tail)) if tail.starts_with("project=") => (
+                                PathBuf::from(head.trim_end()),
+                                Some(PathBuf::from(tail["project=".len()..].trim())),
+                            ),
+                            _ => (PathBuf::from(text), None),
+                        };
+                        if project.as_deref() == Some(Path::new("")) {
+                            self.notice = Some("project= needs the project file's path".into());
+                            return Task::none();
+                        }
+                        if !path.is_file() {
+                            self.notice = Some(format!("{} is not a file", path.display()));
+                            return Task::none();
+                        }
+                        return self.compare_with(path, project);
                     }
                     PromptKind::Raw => {
                         let words: Vec<&str> = prompt.value.split_whitespace().collect();
@@ -7513,6 +7612,80 @@ impl App {
                 self.notice = Some(notice);
             }
 
+            Message::DiffReady(result) => match result {
+                Ok(state) => {
+                    let unchanged = state.report.matched.iter().filter(|p| !p.changed()).count();
+                    let notice = format!(
+                        "Compared with {}: {} matched ({} unchanged, {} changed), {} removed, {} added — {:.0}% similar",
+                        state.path.display(),
+                        state.report.matched.len(),
+                        unchanged,
+                        state.report.matched.len() - unchanged,
+                        state.report.removed.len(),
+                        state.report.added.len(),
+                        state.report.similarity * 100.0,
+                    );
+                    self.diff = Some(state);
+                    self.work.tab = ViewTab::Diff;
+                    self.notice = Some(notice);
+                }
+                Err(error) => {
+                    self.notice = Some(format!("Could not compare: {error}"));
+                }
+            },
+
+            Message::DiffPairSelected(index) => {
+                if let Some(state) = &mut self.diff {
+                    if index < state.report.matched.len() {
+                        state.selected = Some(index);
+                    }
+                }
+            }
+
+            Message::DiffApply => {
+                let Some(state) = self.diff.clone() else {
+                    return Task::none();
+                };
+                // The variables the open image declares at each function,
+                // by canonical address: a carry holds back a signature for
+                // a variable its destination does not declare.
+                let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+                for function in self.provider.functions() {
+                    let key = format!("{:#x}", function.address);
+                    for variable in self.provider.variables(function.address) {
+                        declared
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(variable.name);
+                    }
+                }
+                match crate::diff::carry(&state, &mut self.annotations, declared) {
+                    Ok(carried) => {
+                        self.refresh_functions();
+                        self.notice = Some(format!(
+                            "Carried from {}: {} named, {} prototyped, {} commented, {} types, {} signatures ({} held back)",
+                            state.path.display(),
+                            carried.named,
+                            carried.prototyped,
+                            carried.commented,
+                            carried.types_added,
+                            carried.signatures,
+                            carried.held,
+                        ));
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!("Could not carry the types: {error}"));
+                    }
+                }
+            }
+
+            Message::DiffClose => {
+                self.diff = None;
+                if self.work.tab == ViewTab::Diff {
+                    self.work.tab = ViewTab::Listing;
+                }
+            }
+
             Message::TogglePin => {
                 self.work.pinned = !self.work.pinned;
                 let state = if self.work.pinned {
@@ -9202,6 +9375,252 @@ mod tests {
         // An index no signature answers to changes nothing.
         let _ = app.update(Message::ApplyLibraryMatch(99));
         assert_eq!(app.shown_name(0x1140, "frame_dummy"), "frame_dummy");
+    }
+
+    /// A copy of the sample ELF with `add`'s `add %edx,%eax` patched to
+    /// `sub %edx,%eax` and its symbol name stripped, so the newer version's
+    /// function is a `sub_` the analysis names itself. The offsets are the
+    /// fixture's own; the bytes are asserted before they are patched.
+    fn patched_elf(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ag-ui-diff-{tag}-{}-{:?}.elf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut bytes = fs::read(sample_elf()).expect("the fixture reads");
+        assert_eq!(&bytes[0x115d..0x115f], &[0x01, 0xd0]);
+        bytes[0x115d] = 0x29;
+        let entry = 0x34e8 + 21 * 24;
+        assert_eq!(&bytes[entry..entry + 4], &[0x29, 0x01, 0x00, 0x00]);
+        bytes[entry..entry + 4].copy_from_slice(&[0, 0, 0, 0]);
+        fs::write(&path, bytes).expect("the patched version writes");
+        path
+    }
+
+    /// The comparison of the version at `old_path` (with `project`) against
+    /// the open program, read synchronously the way the off-thread task
+    /// reads it, so a test can hand it to `DiffReady` directly.
+    fn diff_state(
+        app: &App,
+        old_path: &Path,
+        project: ag_corpus::project::ProjectFile,
+        project_path: Option<PathBuf>,
+    ) -> crate::diff::DiffState {
+        let binary = Arc::new(ag_image::Binary::open(old_path).expect("the other version opens"));
+        let mut facts = ag_image::diff::facts_of(&binary);
+        ag_image::diff::rename_facts(&mut facts, &crate::diff::renames_of(&project));
+        let mut new_facts = app.provider.diff_facts();
+        ag_image::diff::rename_facts(&mut new_facts, &crate::diff::renames_of(&app.annotations));
+        let report =
+            ag_image::diff::diff(&facts, &new_facts, &ag_image::diff::DiffOptions::default());
+        crate::diff::DiffState {
+            binary,
+            path: old_path.to_path_buf(),
+            project,
+            project_path,
+            report,
+            facts,
+            new_facts,
+            selected: None,
+        }
+    }
+
+    #[test]
+    fn a_self_comparison_opens_the_diff_tab_with_every_function_matched() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        assert!(app.diff.is_none(), "no comparison is open yet");
+
+        let state = diff_state(
+            &app,
+            &sample_elf(),
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default()),
+            None,
+        );
+        let matched = state.report.matched.len();
+        let _ = app.update(Message::DiffReady(Ok(state)));
+
+        assert_eq!(app.work.tab, ViewTab::Diff, "the comparison opens its tab");
+        let state = app.diff.as_ref().expect("the comparison is open");
+        assert_eq!(state.report.similarity, 1.0);
+        assert_eq!(state.report.matched.len(), matched);
+        assert!(matched > 1, "the fixture has functions");
+        assert!(state.report.removed.is_empty());
+        assert!(state.report.added.is_empty());
+        for pair in &state.report.matched {
+            assert_eq!(pair.kind, ag_image::diff::MatchKind::Hash);
+            assert!(!pair.changed());
+        }
+        let notice = app.notice.clone().expect("a notice");
+        assert!(notice.contains("100% similar"), "{notice}");
+    }
+
+    #[test]
+    fn choosing_a_pair_selects_it_and_closing_returns_to_the_listing() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let state = diff_state(
+            &app,
+            &sample_elf(),
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default()),
+            None,
+        );
+        let _ = app.update(Message::DiffReady(Ok(state)));
+
+        let _ = app.update(Message::DiffPairSelected(0));
+        assert_eq!(app.diff.as_ref().unwrap().selected, Some(0));
+        // An index past the end selects nothing.
+        let _ = app.update(Message::DiffPairSelected(9999));
+        assert_eq!(app.diff.as_ref().unwrap().selected, Some(0));
+
+        let _ = app.update(Message::DiffClose);
+        assert!(app.diff.is_none(), "the comparison is closed");
+        assert_eq!(app.work.tab, ViewTab::Listing, "the work surface returns");
+    }
+
+    #[test]
+    fn applying_a_comparison_carries_the_other_versions_words_and_undo_restores() {
+        // The open program is the newer version: add's code changed and its
+        // name is gone, so it reads as sub_1149.
+        let newer = patched_elf("apply");
+        let config = Config {
+            binary: Some(newer.clone()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // The other version is the original, its project holding the
+        // analyst's words on add: a rename, a prototype, a comment, and a
+        // variable typed with a definition of its own.
+        let mut project =
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+        {
+            let annotation =
+                project.annotation_mut(ag_corpus::project::TargetKind::Function, "0x1149");
+            annotation.name = Some("combine".into());
+            annotation.prototype = Some("int combine(int a, int b)".into());
+            annotation.comment = Some("adds the two arguments".into());
+            annotation.set_var_type("a", "counter_t");
+        }
+        project.types.push(ag_corpus::project::TypeDefinition {
+            name: "counter_t".into(),
+            c: "typedef int counter_t;".into(),
+        });
+
+        let state = diff_state(&app, &sample_elf(), project, None);
+        // add matched by shape: the name is gone and the code changed.
+        let pair = state
+            .report
+            .matched
+            .iter()
+            .find(|p| p.old.address == 0x1149)
+            .expect("add is matched");
+        assert_eq!(pair.kind, ag_image::diff::MatchKind::Structure);
+        let _ = app.update(Message::DiffReady(Ok(state)));
+
+        // Before the carry the function reads as the analysis named it.
+        assert_eq!(app.shown_name(0x1149, "sub_1149"), "sub_1149");
+
+        let _ = app.update(Message::DiffApply);
+        let key = app.annotation_key(0x1149);
+        assert_eq!(app.shown_name(0x1149, "sub_1149"), "combine");
+        let annotation = app
+            .annotations
+            .annotation_for(&key)
+            .expect("the function is annotated");
+        assert_eq!(annotation.name.as_deref(), Some("combine"));
+        assert_eq!(
+            annotation.prototype.as_deref(),
+            Some("int combine(int a, int b)")
+        );
+        assert_eq!(annotation.comment.as_deref(), Some("adds the two arguments"));
+        assert!(
+            annotation
+                .var_types
+                .iter()
+                .any(|w| w.variable == "a" && w.ty == "counter_t"),
+            "the variable type carried: {annotation:?}"
+        );
+        assert!(
+            app.annotations.types.iter().any(|t| t.name == "counter_t"),
+            "the definition came with it"
+        );
+        let notice = app.notice.clone().expect("a notice");
+        assert!(notice.contains("1 named"), "{notice}");
+
+        // Undo takes the whole carry back.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.shown_name(0x1149, "sub_1149"), "sub_1149");
+        assert!(app
+            .annotations
+            .annotation_for(&key)
+            .and_then(|a| a.name.clone())
+            .is_none());
+
+        let _ = fs::remove_file(&newer);
+    }
+
+    #[test]
+    fn the_analysts_words_on_the_open_program_win_over_a_carry() {
+        let newer = patched_elf("analyst");
+        let config = Config {
+            binary: Some(newer.clone()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        // The analyst has already named the function on the open program.
+        let key = app.annotation_key(0x1149);
+        app.annotations
+            .annotation_mut(ag_corpus::project::TargetKind::Function, &key)
+            .name = Some("mine".into());
+
+        let mut project =
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default());
+        project
+            .annotation_mut(ag_corpus::project::TargetKind::Function, "0x1149")
+            .name = Some("combine".into());
+
+        let state = diff_state(&app, &sample_elf(), project, None);
+        let _ = app.update(Message::DiffReady(Ok(state)));
+        let _ = app.update(Message::DiffApply);
+
+        // The rename stands: the carry names nothing new.
+        assert_eq!(app.shown_name(0x1149, "sub_1149"), "mine");
+        let notice = app.notice.clone().expect("a notice");
+        assert!(notice.contains("0 named"), "{notice}");
+
+        let _ = fs::remove_file(&newer);
+    }
+
+    #[test]
+    fn the_diff_view_builds_with_a_pair_chosen_and_without_one() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let state = diff_state(
+            &app,
+            &sample_elf(),
+            ag_corpus::project::ProjectFile::new(ag_corpus::project::Target::default()),
+            None,
+        );
+        let _ = app.update(Message::DiffReady(Ok(state)));
+
+        // With no pair chosen the side-by-side says so; the view builds.
+        let _ = crate::views::work_surface::view(&app);
+        // With a pair chosen the two functions are laid out side by side.
+        let _ = app.update(Message::DiffPairSelected(0));
+        let _ = crate::views::work_surface::view(&app);
+        // And the tab strip offers the Diff tab only while a comparison is open.
+        let _ = app.update(Message::DiffClose);
+        let _ = crate::views::work_surface::view(&app);
     }
 
     #[test]

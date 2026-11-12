@@ -421,6 +421,10 @@ impl Provider for BinaryProvider {
         self.library_index().keys().copied().collect()
     }
 
+    fn diff_facts(&self) -> Vec<ag_image::diff::FunctionFacts> {
+        ag_image::diff::facts_of(&self.binary)
+    }
+
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>> {
         let disassembly = self.binary.disassembly(address)?;
         Some(
