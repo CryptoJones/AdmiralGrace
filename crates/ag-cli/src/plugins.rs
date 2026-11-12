@@ -20,8 +20,8 @@ pub fn remember(manifests: Vec<Manifest>) {
 }
 
 /// List the plugins: every loader, architecture, tool, rewriter, formatter,
-/// recognizer and renderer registered, and the manifests they were read
-/// from.
+/// recognizer, renderer and debug info parser registered, and the manifests
+/// they were read from.
 pub fn list(json: bool) -> Result<i32> {
     let manifests = remembered()
         .lock()
@@ -61,6 +61,10 @@ pub fn list(json: bool) -> Result<i32> {
         .iter()
         .map(|renderer| renderer.name().to_string())
         .collect();
+    let debug_info_parsers: Vec<String> = ag_image::plugin::debug_info_parsers()
+        .iter()
+        .map(|parser| parser.name().to_string())
+        .collect();
     if json {
         let report = json!({
             "directories": ag_image::plugin::manifest_dirs(),
@@ -74,6 +78,7 @@ pub fn list(json: bool) -> Result<i32> {
                 "formatters": manifest.formatters.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
                 "recognizers": manifest.recognizers.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
                 "renderers": manifest.renderers.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                "debuginfo": manifest.debug_info.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
             })).collect::<Vec<Value>>(),
             "loaders": loaders,
             "architectures": architectures,
@@ -82,6 +87,7 @@ pub fn list(json: bool) -> Result<i32> {
             "formatters": formatters,
             "recognizers": recognizers,
             "renderers": renderers,
+            "debug_info_parsers": debug_info_parsers,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
@@ -142,6 +148,7 @@ pub fn list(json: bool) -> Result<i32> {
     listed("formatters", formatters);
     listed("recognizers", recognizers);
     listed("renderers", renderers);
+    listed("debug info parsers", debug_info_parsers);
     Ok(0)
 }
 

@@ -34,6 +34,14 @@ pub enum ProjectCmd {
         /// without warning.
         #[arg(long)]
         force: bool,
+        /// An external debug info file to load as the project is made: a
+        /// linker map, a JSON document, or a format a plugin's parser reads.
+        #[arg(long, value_name = "FILE")]
+        debug_info: Option<PathBuf>,
+        /// The parser to read `--debug-info` with, by name; the first that
+        /// recognizes the file otherwise.
+        #[arg(long, value_name = "NAME", requires = "debug_info")]
+        debug_info_format: Option<String>,
     },
     /// Report what a project file holds.
     Show {
@@ -614,6 +622,28 @@ pub enum ProjectCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Load an external debug info file: the names, prototypes, types and
+    /// data labels another tool already knows — a linker map, a JSON
+    /// document, or a format a plugin's parser reads. Without a file, the
+    /// parsers are listed.
+    Debuginfo {
+        /// The project file to change; without one, the debug file is only
+        /// reported.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// The debug info file to read.
+        debug: Option<PathBuf>,
+        /// The parser to read it with, by name; the first that recognizes
+        /// it otherwise.
+        #[arg(long, value_name = "NAME")]
+        format: Option<String>,
+        /// Say what the file holds without writing anything.
+        #[arg(long)]
+        preview: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Report the tags the project holds, or the places carrying one tag.
     Tags {
         /// The project file to read.
@@ -691,7 +721,16 @@ pub fn run(
             out,
             options,
             force,
-        } => save(&target, &out, options, force),
+            debug_info,
+            debug_info_format,
+        } => save(
+            &target,
+            &out,
+            options,
+            force,
+            debug_info.as_deref(),
+            debug_info_format.as_deref(),
+        ),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
         ProjectCmd::Mode {
             file,
@@ -720,6 +759,20 @@ pub fn run(
             preview,
             json,
         } => svd_import(&target, &file, &map, &names, preview, json),
+        ProjectCmd::Debuginfo {
+            file,
+            debug,
+            format,
+            preview,
+            json,
+        } => debuginfo(
+            &target,
+            file.as_deref(),
+            debug.as_deref(),
+            format.as_deref(),
+            preview,
+            json,
+        ),
         ProjectCmd::WritePatched { file, out, force } => write_patched(&target, &file, &out, force),
         ProjectCmd::Opaque {
             file,
@@ -1397,12 +1450,20 @@ pub(crate) fn target_for(
     }
 }
 
-/// Create a project file for `target`, recording the option pairs.
+/// Create a project file for `target`, recording the option pairs and,
+/// with `--debug-info`, what an external debug info file already knows.
 ///
 /// A `save` onto an existing file replaces it — and with it every annotation
 /// it holds — so the file is refused unless `--force` says the analyst meant
 /// it, the way `ag image export` refuses a non-empty directory.
-fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<i32> {
+fn save(
+    target: &Path,
+    out: &Path,
+    options: Vec<String>,
+    force: bool,
+    debug_info: Option<&Path>,
+    debug_info_format: Option<&str>,
+) -> Result<i32> {
     if out.exists() && !force {
         anyhow::bail!(
             "{} exists; its annotations would be replaced. Pass --force to write it anyway.",
@@ -1450,6 +1511,10 @@ fn save(target: &Path, out: &Path, options: Vec<String>, force: bool) -> Result<
             .split_once('=')
             .with_context(|| format!("--option-pair {pair:?} is not NAME=VALUE"))?;
         project.options.insert(name.to_string(), value.to_string());
+    }
+    if let Some(debug) = debug_info {
+        let (parser, applied) = load_debug_info(target, &mut project, debug, debug_info_format)?;
+        println!("{}: {}", debug.display(), applied.summary(&parser));
     }
     project.save(out)?;
     println!(
@@ -2628,6 +2693,312 @@ fn svd_import(
         comments_added
     );
     Ok(0)
+}
+
+/// Load an external debug info file into the project of `target`, or say
+/// what it holds: without a project file, or with `--preview`, the file is
+/// only reported. Without a debug file, the parsers are listed.
+fn debuginfo(
+    target: &Path,
+    file: Option<&Path>,
+    debug: Option<&Path>,
+    format: Option<&str>,
+    preview: bool,
+    json: bool,
+) -> Result<i32> {
+    let Some(debug) = debug else {
+        return list_debug_parsers(json);
+    };
+    if preview || file.is_none() {
+        let parsed = read_debug_info(debug, format)?;
+        report_debug_info(&parsed, json)?;
+        return Ok(0);
+    }
+    let file = file.expect("a project file is named when the load is not a preview");
+    let mut project = open_project(target, file)?;
+    let (parser, applied) = load_debug_info(target, &mut project, debug, format)?;
+    project.save(file)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "project": file.display().to_string(),
+                "parser": parser,
+                "named": applied.named,
+                "prototyped": applied.prototyped,
+                "commented": applied.commented,
+                "labeled": applied.labeled,
+                "types_added": applied.types_added,
+            }))?
+        );
+    } else {
+        println!("{}: {}", file.display(), applied.summary(&parser));
+    }
+    Ok(0)
+}
+
+/// The debug info parsers there are: the ones plugins registered, then the
+/// built-in ones no registered parser shadows by name.
+fn list_debug_parsers(json: bool) -> Result<i32> {
+    let registered = ag_image::plugin::debug_info_parsers();
+    let parsers = ag_image::debuginfo::available_parsers();
+    let builtin = |name: &str| !registered.iter().any(|known| known.name() == name);
+    if json {
+        let list: Vec<serde_json::Value> = parsers
+            .iter()
+            .map(|parser| {
+                serde_json::json!({
+                    "name": parser.name(),
+                    "description": parser.description(),
+                    "builtin": builtin(parser.name()),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(0);
+    }
+    println!("debug info parsers:");
+    for parser in &parsers {
+        let kind = if builtin(parser.name()) {
+            "built-in"
+        } else {
+            "plugin"
+        };
+        println!("  {} ({kind}): {}", parser.name(), parser.description());
+    }
+    Ok(0)
+}
+
+/// Read a debug info file through the parser named, or the first that
+/// recognizes it.
+fn read_debug_info(debug: &Path, format: Option<&str>) -> Result<ag_image::debuginfo::Parsed> {
+    let bytes =
+        std::fs::read(debug).with_context(|| format!("{} cannot be read", debug.display()))?;
+    ag_image::debuginfo::parse(&debug.display().to_string(), &bytes, format)
+        .map_err(anyhow::Error::msg)
+}
+
+/// Say what a debug info file holds, without writing anything: the
+/// functions, the data and the types, as the parser read them. The JSON is
+/// the interchange document itself, so a report saved to a file is one the
+/// `json` parser reads back.
+fn report_debug_info(parsed: &ag_image::debuginfo::Parsed, json: bool) -> Result<()> {
+    let info = &parsed.info;
+    if json {
+        let functions: Vec<serde_json::Value> = info
+            .functions
+            .iter()
+            .map(|function| {
+                let mut row = serde_json::json!({
+                    "address": format!("{:#x}", function.address),
+                    "name": function.name,
+                });
+                if let Some(size) = function.size {
+                    row["size"] = serde_json::json!(size);
+                }
+                if let Some(prototype) = &function.prototype {
+                    row["prototype"] = serde_json::json!(prototype);
+                }
+                if let Some(source) = &function.source {
+                    row["source"] = serde_json::json!(source);
+                }
+                row
+            })
+            .collect();
+        let data: Vec<serde_json::Value> = info
+            .data
+            .iter()
+            .map(|symbol| {
+                let mut row = serde_json::json!({
+                    "address": format!("{:#x}", symbol.address),
+                    "name": symbol.name,
+                });
+                if let Some(size) = symbol.size {
+                    row["size"] = serde_json::json!(size);
+                }
+                if let Some(ctype) = &symbol.ctype {
+                    row["type"] = serde_json::json!(ctype);
+                }
+                row
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "parser": parsed.parser,
+                "functions": functions,
+                "data": data,
+                "types": info.types,
+                "notes": info.notes,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{}: {} functions, {} data, {} types",
+        parsed.parser,
+        info.functions.len(),
+        info.data.len(),
+        info.types.len()
+    );
+    for function in &info.functions {
+        let mut line = format!("  {:#x} {}", function.address, function.name);
+        if let Some(prototype) = &function.prototype {
+            line.push_str(&format!(": {prototype}"));
+        }
+        if let Some(source) = &function.source {
+            line.push_str(&format!(" [{source}]"));
+        }
+        println!("{line}");
+    }
+    for symbol in &info.data {
+        let mut line = format!("  {:#x} {}", symbol.address, symbol.name);
+        let mut parts = Vec::new();
+        if let Some(ctype) = &symbol.ctype {
+            parts.push(ctype.clone());
+        }
+        if let Some(size) = symbol.size {
+            parts.push(format!("{size} bytes"));
+        }
+        if !parts.is_empty() {
+            line.push_str(&format!(" ({})", parts.join(", ")));
+        }
+        println!("{line}");
+    }
+    for text in &info.types {
+        println!("  type: {text}");
+    }
+    for note in &info.notes {
+        eprintln!("note: {note}");
+    }
+    Ok(())
+}
+
+/// Read a debug info file and keep what it says in the project; the notes
+/// the read left and the ones the keeping left go to standard error.
+fn load_debug_info(
+    target: &Path,
+    project: &mut ProjectFile,
+    debug: &Path,
+    format: Option<&str>,
+) -> Result<(String, DebugInfoApplied)> {
+    let parsed = read_debug_info(debug, format)?;
+    let image = image_under(target, project)?;
+    let applied = apply_debug_info(project, &image, &parsed.info);
+    for note in parsed.info.notes.iter().chain(&applied.notes) {
+        eprintln!("note: {note}");
+    }
+    Ok((parsed.parser, applied))
+}
+
+/// What loading a debug info file kept in the project.
+#[derive(Default)]
+struct DebugInfoApplied {
+    named: usize,
+    prototyped: usize,
+    commented: usize,
+    labeled: usize,
+    types_added: usize,
+    notes: Vec<String>,
+}
+
+impl DebugInfoApplied {
+    /// The one line a load reports: what it kept, and the parser that read
+    /// the file.
+    fn summary(&self, parser: &str) -> String {
+        format!(
+            "{} named, {} prototyped, {} commented, {} data labeled, {} types added ({parser})",
+            self.named, self.prototyped, self.commented, self.labeled, self.types_added
+        )
+    }
+}
+
+/// Keep what a debug info file says as the analyst's own: the names,
+/// prototypes and source comments of its functions, the labels and type
+/// comments of its data, and its C types. What the project says already
+/// wins — a name, a prototype, a comment is only filled where there is
+/// none — and a symbol whose address another holds already is left out
+/// with a note, so loading the same file twice keeps nothing the second
+/// time.
+fn apply_debug_info(
+    project: &mut ProjectFile,
+    image: &ag_image::Binary,
+    info: &ag_image::debuginfo::DebugInfo,
+) -> DebugInfoApplied {
+    let mut applied = DebugInfoApplied::default();
+    let mut seen: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    for function in &info.functions {
+        if let Some(first) = seen.get(&function.address) {
+            applied.notes.push(format!(
+                "{:#x}: {} held back: {first} is there already",
+                function.address, function.name
+            ));
+            continue;
+        }
+        seen.insert(function.address, function.name.clone());
+        let annotation =
+            project.annotation_mut(TargetKind::Function, &format!("{:#x}", function.address));
+        if annotation.name.is_none() {
+            annotation.name = Some(function.name.clone());
+            applied.named += 1;
+        }
+        if annotation.prototype.is_none() {
+            if let Some(prototype) = &function.prototype {
+                annotation.prototype = Some(prototype.clone());
+                applied.prototyped += 1;
+            }
+        }
+        if annotation.comment.is_none() {
+            if let Some(source) = &function.source {
+                annotation.comment = Some(format!("source: {source}"));
+                applied.commented += 1;
+            }
+        }
+    }
+    for symbol in &info.data {
+        if let Some(first) = seen.get(&symbol.address) {
+            applied.notes.push(format!(
+                "{:#x}: {} held back: {first} is there already",
+                symbol.address, symbol.name
+            ));
+            continue;
+        }
+        seen.insert(symbol.address, symbol.name.clone());
+        let annotation =
+            project.annotation_mut(TargetKind::Address, &format!("{:#x}", symbol.address));
+        if annotation.name.is_none() {
+            annotation.name = Some(symbol.name.clone());
+            applied.labeled += 1;
+        }
+        if annotation.comment.is_none() {
+            let mut parts = Vec::new();
+            if let Some(ctype) = &symbol.ctype {
+                parts.push(ctype.clone());
+            }
+            if let Some(size) = symbol.size {
+                parts.push(format!("{size} bytes"));
+            }
+            if !parts.is_empty() {
+                annotation.comment = Some(parts.join(", "));
+                applied.commented += 1;
+            }
+        }
+    }
+    let model = image.data_model();
+    let mut held = crate::types::texts(project);
+    for text in &info.types {
+        match ag_image::ctype::add(model, &held, text) {
+            Ok((defined, added, said)) => {
+                held = defined;
+                applied.types_added += added.len();
+                applied.notes.extend(said);
+            }
+            Err(reason) => applied.notes.push(format!("type held back: {reason}")),
+        }
+    }
+    project.types = crate::types::definitions(&held);
+    project.prune();
+    applied
 }
 
 /// Patch the opaque predicates of the functions named, or of every one,

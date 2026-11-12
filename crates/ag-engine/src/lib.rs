@@ -10,6 +10,7 @@ pub mod cpu_context;
 pub mod ctype;
 pub mod cxx;
 pub mod dead;
+pub mod debuginfo;
 pub mod defuse;
 pub mod demangle;
 pub mod diff;

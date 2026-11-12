@@ -127,6 +127,8 @@ Every subcommand takes `--json` for the same report as JSON. `info` and `symbols
 
 For a microcontroller, `ag project ./firmware.elf svd --file fw.agproj STM32F103.svd` imports the vendor's CMSIS SVD peripheral map the other way: a segment for each address block a peripheral decodes, a C structure of its registers, a label at its base and a comment at each register saying what it is and the values its fields take — so the peripheral map a debugger or another tool already knows does not have to be typed in by hand. `--preview` says what the map holds first, names after the file pick the peripherals, and the analyst's own names and comments stand over what the map says.
 
+An external debug info file loads the other way too: `ag project ./bin/ls save --out ls.agproj --debug-info ls.map` reads a linker map, a JSON document, or a format a plugin's parser knows as the project is made, and `ag project ./bin/ls debuginfo --file ls.agproj debug.json` loads one into a project that exists — the names, prototypes, types and data labels another tool already knows, kept as the analyst's own, so work done in other tools is not recreated by hand. `--preview` says what the file holds first, `--format` names the parser, and the analyst's own names and comments stand over what the file says.
+
 ## Library identification
 
 A library function is the same code in every program that links it, so `ag funcid` names it by a hash of its whole body without lifting a line. The bytes that carry an address — a branch's relative target, a RIP-relative or absolute displacement — are masked before hashing, so the same function matches at any load address, while a stack or structure offset is kept. `create` makes a signature file (`.agsig`) from a named library, `match` reports the functions of an image a signature knows, and `apply` writes what a match knows — the name, the prototype, the comment — into a project, keeping the analyst's own words. The engine ships signatures for libc, libstdc++ and libgcc; a whole-function hash is exact, so they match the build they were taken from and `create` makes signatures for the exact libraries a target links.
@@ -224,9 +226,10 @@ itself, for an instruction set with delay slots or hardware loops, or a bytecode
 rewriter, which changes a function's medium-level graph as it is lifted, for work such as
 control-flow unflattening, a formatter, which changes the pseudocode's lines after they
 are printed, a recognizer, which decodes the strings a function's expressions build and
-shows them as comments beside the code, or a renderer, which names the constants a
-function's expressions use so the pseudocode shows the name in the constant's place, is
-added without forking: in Rust, against the traits of `ag_engine::plugin` and
+shows them as comments beside the code, a renderer, which names the constants a
+function's expressions use so the pseudocode shows the name in the constant's place, or a
+debug info parser, which reads an external debug info file into the names, prototypes and
+types a project keeps, is added without forking: in Rust, against the traits of `ag_engine::plugin` and
 `ag_image::plugin`; or in any language, as a command declared in a JSON manifest in a plugin
 directory (`AG_PLUGINS`, or `~/.config/ag/plugins`) that `ag` finds as it starts. `ag plugins`
 lists what is registered; `ag tool` runs a plugin's tool.
