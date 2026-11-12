@@ -12,6 +12,15 @@
 //! move files to and from it, and `--server` on `match`, `apply` and `list`
 //! asks it — a match sends the functions' hashes, never their bytes.
 //!
+//! A whole-function hash is exact. A **byte-pattern library** (#397,
+//! [`ag_image::funcid::pattern`]) is the classic, looser signature: a
+//! function's opening bytes with the address bytes left as wildcards, a CRC
+//! of the run that follows, and its length. `create --pattern` writes one
+//! (`.agpat`), and `match` and `apply` read it through `--sig` like any
+//! signature file. A pattern needs no name to start from, so it is tried on
+//! every function the image knows — the unwind data's as well as the
+//! symbols' — which is what names library code in a stripped program.
+//!
 //! The fingerprint and its constraints are the engine's
 //! ([`ag_image::funcid`]): the bytes that carry an address are masked before
 //! hashing, so the same function matches at any load address. `create` takes
@@ -22,6 +31,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use ag_image::funcid::pattern::{self, Pattern, PatternDb, PatternSet};
 use ag_image::funcid::{self, Signature, SignatureDb, SignatureSet};
 use ag_image::Binary;
 use anyhow::{Context, Result};
@@ -73,6 +83,11 @@ pub enum FuncidCmd {
         /// Leave the prototypes out, even where the type libraries know them.
         #[arg(long)]
         no_types: bool,
+        /// Write a byte-pattern library instead of whole-function hashes:
+        /// each function's opening bytes with the address bytes as
+        /// wildcards. Implied when the file to write ends in .agpat.
+        #[arg(long)]
+        pattern: bool,
         /// Report the summary as JSON.
         #[arg(long)]
         json: bool,
@@ -87,7 +102,8 @@ pub enum FuncidCmd {
         binary: PathBuf,
         #[command(flatten)]
         raw: RawArgs,
-        /// A signature file to match against. May be repeated.
+        /// A signature file (.agsig) or a byte-pattern library (.agpat) to
+        /// match against. May be repeated.
         #[arg(long = "sig", value_name = "FILE")]
         sig: Vec<PathBuf>,
         /// Leave the built-in databases out.
@@ -111,7 +127,8 @@ pub enum FuncidCmd {
         /// is not there yet.
         #[arg(long)]
         project: PathBuf,
-        /// A signature file to match against. May be repeated.
+        /// A signature file (.agsig) or a byte-pattern library (.agpat) to
+        /// match against. May be repeated.
         #[arg(long = "sig", value_name = "FILE")]
         sig: Vec<PathBuf>,
         /// Leave the built-in databases out.
@@ -210,8 +227,14 @@ pub fn run(cmd: FuncidCmd) -> Result<i32> {
             library,
             source,
             no_types,
+            pattern,
             json,
-        } => create(&binary, raw, &out, library, source, !no_types, json),
+        } => {
+            let pattern = pattern || out.extension().is_some_and(|e| e == "agpat");
+            create(
+                &binary, raw, &out, library, source, !no_types, pattern, json,
+            )
+        }
         FuncidCmd::Match {
             binary,
             raw,
@@ -316,32 +339,70 @@ fn is_library_name(name: &str) -> bool {
         && !name.starts_with("unknown_")
 }
 
-/// Read one signature file.
+/// Read a file's text as a signature file.
+fn read_text(file: &Path) -> Result<String> {
+    std::fs::read_to_string(file)
+        .with_context(|| format!("reading the signature file {}", file.display()))
+}
+
+/// Whether a file's JSON is a byte-pattern library rather than a file of
+/// whole-function hashes: it has `patterns` where the other has
+/// `signatures`.
+fn is_pattern_library(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .is_ok_and(|json| json.get("patterns").is_some() && json.get("signatures").is_none())
+}
+
+/// Read one file of whole-function signatures, for the server: it carries
+/// hashes, and a byte-pattern library is not one.
 fn read_sig(file: &Path) -> Result<SignatureDb> {
-    let text = std::fs::read_to_string(file)
-        .with_context(|| format!("reading the signature file {}", file.display()))?;
+    let text = read_text(file)?;
+    if is_pattern_library(&text) {
+        anyhow::bail!(
+            "{} is a byte-pattern library; a signature server holds whole-function hashes only",
+            file.display()
+        );
+    }
     SignatureDb::parse(&text)
         .map_err(|e| anyhow::anyhow!("reading the signature file {}: {e}", file.display()))
 }
 
-/// The signature set the flags name: the built-ins unless told otherwise,
-/// then each `--sig` file in order, then what each `--server` knows of the
-/// image's functions. What is on this machine is consulted first, so a
-/// server only adds to it — as the match of a function nothing local knows,
-/// or as an alternative. A server is sent the hashes of the image's named
-/// functions and nothing else.
+/// What a match is made against: the whole-function hashes and the byte
+/// patterns.
+struct Loaded {
+    set: SignatureSet,
+    patterns: PatternSet,
+}
+
+/// The signatures the flags name: the built-ins unless told otherwise, then
+/// each `--sig` file in order — a signature file's hashes or a pattern
+/// library's patterns, told apart by what the file holds — then what each
+/// `--server` knows of the image's functions. What is on this machine is
+/// consulted first, so a server only adds to it — as the match of a function
+/// nothing local knows, or as an alternative. A server is sent the hashes of
+/// the image's named functions and nothing else.
 fn load_set(
     image: &Binary,
     files: &[PathBuf],
     builtin: bool,
     server: &ServerArgs,
-) -> Result<SignatureSet> {
+) -> Result<Loaded> {
     let mut databases = Vec::new();
+    let mut patterns = Vec::new();
     if builtin {
         databases.extend(SignatureSet::builtin().databases.iter().cloned());
     }
     for file in files {
-        databases.push(read_sig(file)?);
+        let text = read_text(file)?;
+        if is_pattern_library(&text) {
+            patterns.push(PatternDb::parse(&text).map_err(|e| {
+                anyhow::anyhow!("reading the pattern library {}: {e}", file.display())
+            })?);
+        } else {
+            databases.push(SignatureDb::parse(&text).map_err(|e| {
+                anyhow::anyhow!("reading the signature file {}: {e}", file.display())
+            })?);
+        }
     }
     if !server.server.is_empty() {
         let arch = funcid::arch_of_language(image.language());
@@ -357,7 +418,10 @@ fn load_set(
             databases.extend(client.match_hashes(&arch, &hashes)?);
         }
     }
-    Ok(SignatureSet::new(databases))
+    Ok(Loaded {
+        set: SignatureSet::new(databases),
+        patterns: PatternSet::new(patterns),
+    })
 }
 
 /// The C prototype of a known function, rendered from the type libraries'
@@ -386,6 +450,7 @@ fn create(
     library: Option<String>,
     source: Option<String>,
     types: bool,
+    patterns: bool,
     json: bool,
 ) -> Result<i32> {
     let image = crate::image::open_image(
@@ -401,9 +466,13 @@ fn create(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "signatures".to_string())
     });
+    let source = source.or_else(|| Some(binary.display().to_string()));
     let model = image.data_model();
+    if patterns {
+        return create_patterns(&image, out, &library, &arch, source, types, json);
+    }
     let mut db = SignatureDb::new(&library, &arch);
-    db.source = source.or_else(|| Some(binary.display().to_string()));
+    db.source = source;
     let mut seen = BTreeSet::new();
     let mut with_prototype = 0usize;
     for body in bodies(&image) {
@@ -455,30 +524,241 @@ fn create(
     Ok(0)
 }
 
+/// Whether a value is an address of the image, for a pattern to leave an
+/// immediate that holds one variable. Only an image linked at a base of its
+/// own is asked: one that loads anywhere starts near zero, where every small
+/// constant would look like an address, and reaches its data relative to the
+/// instruction pointer instead.
+fn address_test(image: &Binary) -> impl Fn(u64) -> bool + '_ {
+    let fixed_base = image
+        .sections()
+        .iter()
+        .filter(|section| section.vma != 0)
+        .map(|section| section.vma)
+        .min()
+        .is_some_and(|lowest| lowest >= 0x1_0000);
+    move |value| fixed_base && image.section_of(value).is_some()
+}
+
+/// Write a byte-pattern library of the image's named functions (#397).
+fn create_patterns(
+    image: &Binary,
+    out: &Path,
+    library: &str,
+    arch: &str,
+    source: Option<String>,
+    types: bool,
+    json: bool,
+) -> Result<i32> {
+    let model = image.data_model();
+    let is_address = address_test(image);
+    let mut db = PatternDb::new(library, arch);
+    db.source = source;
+    let mut bodies_seen = BTreeSet::new();
+    // The patterns already made that begin with each head, to find the ones
+    // that are the same test.
+    let mut by_head: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    let mut with_prototype = 0usize;
+    let mut skipped = 0usize;
+    let mut ambiguous = 0usize;
+    for body in bodies(image) {
+        // Identical bodies — a thunk and its target, an alias — are one
+        // pattern; the first name at the first address keeps it.
+        if !bodies_seen.insert(funcid::function_hash(arch, &body.bytes, body.address)) {
+            continue;
+        }
+        let Some(mut made) = Pattern::of(arch, &body.bytes, body.address, &is_address, &body.name)
+        else {
+            // Too few fixed bytes to be told by.
+            skipped += 1;
+            continue;
+        };
+        // Two different functions the pattern cannot tell apart are both
+        // kept: a match offers them as alternatives, the first found first.
+        let alike = by_head.entry(made.head.clone()).or_default();
+        if alike.iter().any(|at| db.patterns[*at].same_test(&made)) {
+            ambiguous += 1;
+        }
+        alike.push(db.patterns.len());
+        if types {
+            made.prototype = prototype_of(&body.name, model);
+        }
+        if made.prototype.is_some() {
+            with_prototype += 1;
+        }
+        db.patterns.push(made);
+    }
+    std::fs::write(out, db.to_json())
+        .with_context(|| format!("writing the pattern library {}", out.display()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "file": out.display().to_string(),
+                "library": db.library,
+                "arch": db.arch,
+                "patterns": db.len(),
+                "with_prototype": with_prototype,
+                "skipped": skipped,
+                "ambiguous": ambiguous,
+            })
+        );
+    } else {
+        println!(
+            "{}: {} patterns ({} with a prototype), {} {}",
+            out.display(),
+            db.len(),
+            with_prototype,
+            db.library,
+            db.arch,
+        );
+        if skipped > 0 {
+            println!("  {skipped} functions left out: too few fixed bytes to be told by");
+        }
+        if ambiguous > 0 {
+            println!(
+                "  {ambiguous} patterns are the same test as an earlier one; a match offers both"
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// How a signature knew a function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum By {
+    /// Its whole-function hash.
+    Hash,
+    /// A byte pattern of its opening bytes.
+    Pattern,
+}
+
+impl By {
+    fn word(self) -> &'static str {
+        match self {
+            By::Hash => "hash",
+            By::Pattern => "pattern",
+        }
+    }
+}
+
+/// One signature that knows a function: where it came from and what it says.
+struct Known<'a> {
+    by: By,
+    library: &'a str,
+    name: &'a str,
+    prototype: Option<&'a str>,
+    comment: Option<&'a str>,
+    /// The whole-function hash, when that is how the function was known.
+    hash: Option<&'a str>,
+}
+
+impl Known<'_> {
+    /// What the JSON says of an alternative.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "library": self.library,
+            "name": self.name,
+            "prototype": self.prototype,
+            "comment": self.comment,
+            "by": self.by.word(),
+        })
+    }
+}
+
 /// One match, as the report and the JSON carry it: every signature that
 /// knows the function, the first the one applied by default and the rest
 /// the alternatives a chooser offers.
 struct Matched<'a> {
     address: u64,
-    image_name: String,
-    candidates: Vec<funcid::Candidate<'a>>,
+    /// The image's own name for the function, when a symbol gives it one.
+    image_name: Option<String>,
+    candidates: Vec<Known<'a>>,
 }
 
-/// The image's functions that a signature knows, in address order.
-fn matches<'a>(image: &Binary, set: &'a SignatureSet) -> Vec<Matched<'a>> {
+/// The image's functions that a signature knows, in address order. A hash
+/// is exact, so what the hashes know comes first; what the patterns know
+/// follows, the most specific first, a library's name for the function
+/// given once.
+fn matches<'a>(image: &Binary, loaded: &'a Loaded) -> Vec<Matched<'a>> {
     let arch = funcid::arch_of_language(image.language());
-    let mut out = Vec::new();
+    let mut found: std::collections::BTreeMap<u64, Matched<'a>> = Default::default();
     for body in bodies(image) {
-        let candidates = set.match_candidates(&arch, &body.bytes, body.address);
+        let candidates = loaded
+            .set
+            .match_candidates(&arch, &body.bytes, body.address);
         if !candidates.is_empty() {
-            out.push(Matched {
-                address: body.address,
-                image_name: body.name,
-                candidates,
-            });
+            found.insert(
+                body.address,
+                Matched {
+                    address: body.address,
+                    image_name: Some(body.name),
+                    candidates: candidates
+                        .iter()
+                        .map(|candidate| Known {
+                            by: By::Hash,
+                            library: candidate.library,
+                            name: &candidate.signature.name,
+                            prototype: candidate.signature.prototype.as_deref(),
+                            comment: candidate.signature.comment.as_deref(),
+                            hash: Some(&candidate.signature.hash),
+                        })
+                        .collect(),
+                },
+            );
         }
     }
-    out
+    if loaded.patterns.is_empty() {
+        return found.into_values().collect();
+    }
+    // A pattern needs no name to start from: every function the image knows
+    // is tried — the symbols' and the unwind data's.
+    let mut starts: std::collections::BTreeMap<u64, Option<&str>> = image
+        .function_ends()
+        .keys()
+        .map(|address| (*address, None))
+        .collect();
+    for function in image.functions() {
+        starts.insert(function.address, Some(&function.name));
+    }
+    for (address, name) in starts {
+        let Some(section) = image.section_of(address) else {
+            continue;
+        };
+        let available = section.vma.saturating_add(section.size) - address;
+        let probe = available.min(pattern::PROBE as u64) as usize;
+        let Some(bytes) = image.bytes_at(address, probe) else {
+            continue;
+        };
+        let extent = image
+            .function_end(address)
+            .map(|end| end.saturating_sub(address).min(available));
+        let fitting = loaded.patterns.candidates(&arch, &bytes, available, extent);
+        if fitting.is_empty() {
+            continue;
+        }
+        let matched = found.entry(address).or_insert_with(|| Matched {
+            address,
+            image_name: name.map(str::to_string),
+            candidates: Vec::new(),
+        });
+        for candidate in fitting {
+            let said = matched.candidates.iter().any(|known| {
+                known.library == candidate.library && known.name == candidate.pattern.name
+            });
+            if !said {
+                matched.candidates.push(Known {
+                    by: By::Pattern,
+                    library: candidate.library,
+                    name: &candidate.pattern.name,
+                    prototype: candidate.pattern.prototype.as_deref(),
+                    comment: candidate.pattern.comment.as_deref(),
+                    hash: None,
+                });
+            }
+        }
+    }
+    found.into_values().collect()
 }
 
 fn match_image(
@@ -496,26 +776,17 @@ fn match_image(
         None,
         Default::default(),
     )?;
-    let set = load_set(&image, files, builtin, server)?;
-    let found = matches(&image, &set);
+    let loaded = load_set(&image, files, builtin, server)?;
+    let found = matches(&image, &loaded);
     if json {
         let rows: Vec<serde_json::Value> = found
             .iter()
             .map(|m| {
                 // The first candidate is the match applied by default; the
                 // rest ride along as `alternatives` so a reader can choose.
-                let first = m.candidates[0].signature;
-                let alternatives: Vec<serde_json::Value> = m.candidates[1..]
-                    .iter()
-                    .map(|c| {
-                        serde_json::json!({
-                            "library": c.library,
-                            "name": c.signature.name,
-                            "prototype": c.signature.prototype,
-                            "comment": c.signature.comment,
-                        })
-                    })
-                    .collect();
+                let first = &m.candidates[0];
+                let alternatives: Vec<serde_json::Value> =
+                    m.candidates[1..].iter().map(Known::json).collect();
                 serde_json::json!({
                     "address": format!("{:#x}", m.address),
                     "image_name": m.image_name,
@@ -523,7 +794,8 @@ fn match_image(
                     "prototype": first.prototype,
                     "comment": first.comment,
                     "hash": first.hash,
-                    "library": m.candidates[0].library,
+                    "library": first.library,
+                    "by": first.by.word(),
                     "alternatives": alternatives,
                 })
             })
@@ -538,19 +810,19 @@ fn match_image(
             found.len()
         );
         for m in &found {
-            let first = m.candidates[0].signature;
+            let first = &m.candidates[0];
             print!("  {:#x}  {}", m.address, first.name);
-            if let Some(prototype) = &first.prototype {
+            if let Some(prototype) = first.prototype {
                 print!("  {prototype}");
+            }
+            if first.by == By::Pattern {
+                print!("  (pattern, {})", first.library);
             }
             println!();
             // Several signatures know this function: name the alternatives
             // so the analyst can see there is a choice to make.
             for candidate in &m.candidates[1..] {
-                println!(
-                    "          also {} ({})",
-                    candidate.signature.name, candidate.library
-                );
+                println!("          also {} ({})", candidate.name, candidate.library);
             }
         }
     }
@@ -581,8 +853,8 @@ fn apply(
         file.as_ref(),
         Default::default(),
     )?;
-    let set = load_set(&image, files, builtin, server)?;
-    let found = matches(&image, &set);
+    let loaded = load_set(&image, files, builtin, server)?;
+    let found = matches(&image, &loaded);
 
     let mut file = file.unwrap_or_else(|| {
         let sha256 = ag_corpus::project::sha256_of(binary).ok();
@@ -599,24 +871,24 @@ fn apply(
     for m in &found {
         // The first candidate is the one applied; the alternatives are the
         // workbench chooser's to offer, not the command line's to pick.
-        let signature = m.candidates[0].signature;
+        let signature = &m.candidates[0];
         let key = format!("{:#x}", m.address);
         let annotation = file.annotation_mut(TargetKind::Function, &key);
         // The analyst's own words win: a rename or a prototype already on the
         // function stands, and a match only fills what is not said.
         if annotation.name.is_none() {
-            annotation.name = Some(signature.name.clone());
+            annotation.name = Some(signature.name.to_string());
             named += 1;
         }
         if annotation.prototype.is_none() {
-            if let Some(prototype) = &signature.prototype {
-                annotation.prototype = Some(prototype.clone());
+            if let Some(prototype) = signature.prototype {
+                annotation.prototype = Some(prototype.to_string());
                 typed += 1;
             }
         }
         if annotation.comment.is_none() {
-            if let Some(comment) = &signature.comment {
-                annotation.comment = Some(comment.clone());
+            if let Some(comment) = signature.comment {
+                annotation.comment = Some(comment.to_string());
                 commented += 1;
             }
         }

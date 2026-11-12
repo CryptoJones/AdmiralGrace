@@ -501,3 +501,258 @@ fn signatures_are_pushed_to_pulled_from_and_matched_against_a_server() {
     let _ = std::fs::remove_file(&project);
     let _ = std::fs::remove_dir_all(&pulled);
 }
+
+/// Run `ag` with `args`, returning its stderr, and assert it failed.
+fn ag_fails(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .args(args)
+        .output()
+        .expect("the ag binary runs");
+    assert!(!output.status.success(), "ag {args:?} should have failed");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A copy of an ELF64 fixture with its symbol table taken away, the way
+/// `strip` leaves it: the `.symtab` section header is made a null one, so
+/// the functions keep their unwind data and lose their names.
+fn stripped(name: &str, to: &Path) {
+    let mut bytes = std::fs::read(fixture(name)).expect("the fixture");
+    let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+    let shoff = u64::from_le_bytes(bytes[0x28..0x30].try_into().unwrap()) as usize;
+    let (shentsize, shnum) = (u16_at(&bytes, 0x3A), u16_at(&bytes, 0x3C));
+    let mut found = false;
+    for index in 0..shnum {
+        let kind = shoff + index * shentsize + 4;
+        // SHT_SYMTAB becomes SHT_NULL.
+        if bytes[kind..kind + 4] == 2u32.to_le_bytes() {
+            bytes[kind..kind + 4].copy_from_slice(&0u32.to_le_bytes());
+            found = true;
+        }
+    }
+    assert!(found, "the fixture has a symbol table to take away");
+    std::fs::write(to, bytes).expect("write the stripped copy");
+}
+
+#[test]
+fn a_pattern_library_names_the_functions_of_a_stripped_image() {
+    let pat = stem("pattern").with_extension("agpat");
+    let bare = stem("pattern").with_extension("elf");
+    let binary = fixture("sample.elf");
+    let binary = binary.to_str().unwrap();
+    let pat_arg = pat.to_str().unwrap();
+
+    // A file that ends in .agpat is a pattern library without being told.
+    let report = ag(&[
+        "funcid",
+        "create",
+        binary,
+        "-o",
+        pat_arg,
+        "--library",
+        "sample",
+        "--json",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&report).expect("the report is JSON");
+    assert_eq!(report["library"], "sample");
+    let db: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pat).expect("the pattern library"))
+            .expect("the file is JSON");
+    let patterns = db["patterns"].as_array().expect("patterns");
+    assert_eq!(report["patterns"], patterns.len());
+    assert!(db.get("signatures").is_none());
+    let main = patterns
+        .iter()
+        .find(|p| p["name"] == "main")
+        .expect("main has a pattern");
+    // main calls: its head spells the code out and leaves the call's
+    // target as wildcards.
+    let head = main["head"].as_str().unwrap();
+    assert!(
+        head.contains("..") || main["crc_length"].as_u64().unwrap() > 0,
+        "{head}"
+    );
+    assert!(head.len() <= 64);
+
+    // The image matches its own patterns, and says a pattern knew it.
+    let json = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        pat_arg,
+        "--json",
+    ]);
+    let matches: serde_json::Value = serde_json::from_str(&json).expect("matches are JSON");
+    let matches = matches.as_array().unwrap();
+    for name in ["add", "sum_to", "main"] {
+        let m = matches
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is matched"));
+        assert_eq!(m["image_name"], name);
+        assert_eq!(m["by"], "pattern");
+        assert_eq!(m["library"], "sample");
+        assert!(m["hash"].is_null());
+    }
+
+    // Take the names away. The whole-function hashes have nothing to start
+    // from; the patterns still name the functions the unwind data finds.
+    stripped("sample.elf", &bare);
+    let json = ag(&[
+        "funcid",
+        "match",
+        bare.to_str().unwrap(),
+        "--no-builtin",
+        "--sig",
+        pat_arg,
+        "--json",
+    ]);
+    let matches: serde_json::Value = serde_json::from_str(&json).expect("matches are JSON");
+    let matches = matches.as_array().unwrap();
+    let original = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        pat_arg,
+        "--json",
+    ]);
+    let original: serde_json::Value = serde_json::from_str(&original).unwrap();
+    for name in ["add", "sum_to", "main"] {
+        let m = matches
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is matched in the stripped image"));
+        // The image has only a placeholder for it, or nothing at all.
+        let placeholder = m["image_name"].as_str().unwrap_or("sub_");
+        assert!(placeholder.starts_with("sub_"), "{m}");
+        let was = original
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == name)
+            .unwrap();
+        assert_eq!(m["address"], was["address"]);
+    }
+
+    // And apply writes the names into a project.
+    let project = stem("pattern").with_extension("agproj");
+    let summary = ag(&[
+        "funcid",
+        "apply",
+        bare.to_str().unwrap(),
+        "--project",
+        project.to_str().unwrap(),
+        "--no-builtin",
+        "--sig",
+        pat_arg,
+        "--json",
+    ]);
+    let summary: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["matched"], matches.len());
+    assert_eq!(summary["named"], matches.len());
+    let saved = std::fs::read_to_string(&project).expect("the project");
+    assert!(saved.contains("sum_to"), "{saved}");
+
+    for file in [&pat, &bare, &project] {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+#[test]
+fn a_hash_stands_before_a_pattern_and_a_server_takes_no_patterns() {
+    let pat = stem("both").with_extension("agpat");
+    let sig = stem("both").with_extension("agsig");
+    let binary = fixture("sample.elf");
+    let binary = binary.to_str().unwrap();
+    let (pat_arg, sig_arg) = (pat.to_str().unwrap(), sig.to_str().unwrap());
+
+    // --pattern says it, whatever the file is called; without it the file
+    // holds hashes.
+    ag(&[
+        "funcid",
+        "create",
+        binary,
+        "-o",
+        pat_arg,
+        "--library",
+        "pat",
+    ]);
+    ag(&[
+        "funcid",
+        "create",
+        binary,
+        "-o",
+        sig_arg,
+        "--library",
+        "sig",
+    ]);
+    let forced = stem("both-forced").with_extension("json");
+    ag(&[
+        "funcid",
+        "create",
+        binary,
+        "-o",
+        forced.to_str().unwrap(),
+        "--pattern",
+    ]);
+    let forced_db: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&forced).unwrap()).unwrap();
+    assert!(forced_db["patterns"].is_array());
+
+    // The pattern library is named first, and the exact hash still stands
+    // first; the pattern is the alternative.
+    let json = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        pat_arg,
+        "--sig",
+        sig_arg,
+        "--json",
+    ]);
+    let matches: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let main = matches
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "main")
+        .expect("main is matched");
+    assert_eq!(main["by"], "hash");
+    assert_eq!(main["library"], "sig");
+    assert!(main["hash"].is_string());
+    let alternatives = main["alternatives"].as_array().unwrap();
+    assert_eq!(alternatives.len(), 1);
+    assert_eq!(alternatives[0]["by"], "pattern");
+    assert_eq!(alternatives[0]["library"], "pat");
+    assert_eq!(alternatives[0]["name"], "main");
+
+    // A pattern library that does not read is refused, by name.
+    let broken = stem("both-broken").with_extension("agpat");
+    let mut db: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pat).unwrap()).unwrap();
+    db["patterns"][0]["head"] = serde_json::json!("not hex!");
+    std::fs::write(&broken, db.to_string()).unwrap();
+    let error = ag_fails(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        broken.to_str().unwrap(),
+    ]);
+    assert!(error.contains("pattern library"), "{error}");
+
+    // A server holds hashes: a pattern library is refused before anything
+    // is sent.
+    let error = ag_fails(&["funcid", "push", pat_arg, "--server", "http://127.0.0.1:9"]);
+    assert!(error.contains("byte-pattern library"), "{error}");
+
+    for file in [&pat, &sig, &forced, &broken] {
+        let _ = std::fs::remove_file(file);
+    }
+}

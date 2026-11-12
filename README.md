@@ -141,7 +141,9 @@ cargo run --bin ag -- funcid pull --server http://127.0.0.1:7395 -o sigs/
 
 A signature server (`ag funcid serve`) is one store of signatures a team pushes to, pulls from and matches against, so a library one analyst has fingerprinted is recognised in everyone's images. A match sends the server only the hashes of the image's functions, never their bytes; a push needs the server's token. The server speaks plain HTTP, so it belongs on the loopback, a private network or behind an SSH tunnel.
 
-The fingerprint, its constraints, the file format and the server are in [docs/funcid.md](docs/funcid.md), also `ag docs funcid`.
+A whole-function hash needs a name and an end to start from. The classic alternative is a byte-pattern library (`.agpat`): each function's opening bytes with the address bytes left as wildcards, a CRC of the run after them, and its length. `ag funcid create … -o lib.agpat` makes one, and `--sig lib.agpat` on `match` and `apply` tries it on every function the image knows, named or not — which names library code linked statically into a stripped program.
+
+The fingerprint, its constraints, the file formats and the server are in [docs/funcid.md](docs/funcid.md), also `ag docs funcid`.
 
 ## MCP server
 
