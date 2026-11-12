@@ -243,7 +243,7 @@ Filed 2026-10-26.
 - [x] Export the analysis as DWARF — [#402](https://github.com/CryptoJones/AdmiralGrace/issues/402)
 - [ ] Import IDA databases and type libraries — [#403](https://github.com/CryptoJones/AdmiralGrace/issues/403)
 - [ ] Import Ghidra databases and projects — [#404](https://github.com/CryptoJones/AdmiralGrace/issues/404)
-- [ ] Export to a Ghidra .gzf — [#405](https://github.com/CryptoJones/AdmiralGrace/issues/405)
+- [x] Export to a Ghidra .gzf — [#405](https://github.com/CryptoJones/AdmiralGrace/issues/405)
 - [ ] Import CMSIS SVD peripheral maps — [#406](https://github.com/CryptoJones/AdmiralGrace/issues/406)
 - [ ] Load an external debug info file, through a pluggable debug info parser API — [#407](https://github.com/CryptoJones/AdmiralGrace/issues/407)
 
