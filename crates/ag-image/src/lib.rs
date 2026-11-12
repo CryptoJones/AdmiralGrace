@@ -66,7 +66,7 @@ pub use ag_engine::defuse::{
 };
 pub use ag_engine::emulate::{self as emulate, Limits as EmulationLimits, Run as Emulation};
 pub use ag_engine::frame::{FrameRow, Region as FrameRegion, StackFrame};
-pub use ag_engine::funcid::{self as funcid, Signature, SignatureDb, SignatureSet};
+pub use ag_engine::funcid::{self as funcid, Candidate, Signature, SignatureDb, SignatureSet};
 pub use ag_engine::global_pointer::{
     GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
 };

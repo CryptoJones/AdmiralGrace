@@ -54,7 +54,9 @@ pub enum FuncidCmd {
     },
     /// Match an image's functions against signature files and report what
     /// each match knows. The built-in libc, libstdc++ and libgcc are read
-    /// unless --no-builtin; --sig adds more.
+    /// unless --no-builtin; --sig adds more. When several signatures know
+    /// one function, the first is the match and the rest are named as
+    /// alternatives.
     Match {
         /// The program image to identify.
         binary: PathBuf,
@@ -299,11 +301,13 @@ fn create(
     Ok(0)
 }
 
-/// One match, as the report and the JSON carry it.
+/// One match, as the report and the JSON carry it: every signature that
+/// knows the function, the first the one applied by default and the rest
+/// the alternatives a chooser offers.
 struct Matched<'a> {
     address: u64,
     image_name: String,
-    signature: &'a Signature,
+    candidates: Vec<funcid::Candidate<'a>>,
 }
 
 /// The image's functions that a signature knows, in address order.
@@ -311,11 +315,12 @@ fn matches<'a>(image: &Binary, set: &'a SignatureSet) -> Vec<Matched<'a>> {
     let arch = funcid::arch_of_language(image.language());
     let mut out = Vec::new();
     for body in bodies(image) {
-        if let Some(signature) = set.match_function(&arch, &body.bytes, body.address) {
+        let candidates = set.match_candidates(&arch, &body.bytes, body.address);
+        if !candidates.is_empty() {
             out.push(Matched {
                 address: body.address,
                 image_name: body.name,
-                signature,
+                candidates,
             });
         }
     }
@@ -342,13 +347,29 @@ fn match_image(
         let rows: Vec<serde_json::Value> = found
             .iter()
             .map(|m| {
+                // The first candidate is the match applied by default; the
+                // rest ride along as `alternatives` so a reader can choose.
+                let first = m.candidates[0].signature;
+                let alternatives: Vec<serde_json::Value> = m.candidates[1..]
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "library": c.library,
+                            "name": c.signature.name,
+                            "prototype": c.signature.prototype,
+                            "comment": c.signature.comment,
+                        })
+                    })
+                    .collect();
                 serde_json::json!({
                     "address": format!("{:#x}", m.address),
                     "image_name": m.image_name,
-                    "name": m.signature.name,
-                    "prototype": m.signature.prototype,
-                    "comment": m.signature.comment,
-                    "hash": m.signature.hash,
+                    "name": first.name,
+                    "prototype": first.prototype,
+                    "comment": first.comment,
+                    "hash": first.hash,
+                    "library": m.candidates[0].library,
+                    "alternatives": alternatives,
                 })
             })
             .collect();
@@ -362,11 +383,20 @@ fn match_image(
             found.len()
         );
         for m in &found {
-            print!("  {:#x}  {}", m.address, m.signature.name);
-            if let Some(prototype) = &m.signature.prototype {
+            let first = m.candidates[0].signature;
+            print!("  {:#x}  {}", m.address, first.name);
+            if let Some(prototype) = &first.prototype {
                 print!("  {prototype}");
             }
             println!();
+            // Several signatures know this function: name the alternatives
+            // so the analyst can see there is a choice to make.
+            for candidate in &m.candidates[1..] {
+                println!(
+                    "          also {} ({})",
+                    candidate.signature.name, candidate.library
+                );
+            }
         }
     }
     Ok(0)
@@ -410,22 +440,25 @@ fn apply(
     let mut typed = 0usize;
     let mut commented = 0usize;
     for m in &found {
+        // The first candidate is the one applied; the alternatives are the
+        // workbench chooser's to offer, not the command line's to pick.
+        let signature = m.candidates[0].signature;
         let key = format!("{:#x}", m.address);
         let annotation = file.annotation_mut(TargetKind::Function, &key);
         // The analyst's own words win: a rename or a prototype already on the
         // function stands, and a match only fills what is not said.
         if annotation.name.is_none() {
-            annotation.name = Some(m.signature.name.clone());
+            annotation.name = Some(signature.name.clone());
             named += 1;
         }
         if annotation.prototype.is_none() {
-            if let Some(prototype) = &m.signature.prototype {
+            if let Some(prototype) = &signature.prototype {
                 annotation.prototype = Some(prototype.clone());
                 typed += 1;
             }
         }
         if annotation.comment.is_none() {
-            if let Some(comment) = &m.signature.comment {
+            if let Some(comment) = &signature.comment {
                 annotation.comment = Some(comment.clone());
                 commented += 1;
             }

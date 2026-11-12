@@ -89,7 +89,12 @@ signature, the first name at the first address keeping it.
 - `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` — report
   the image's functions that a signature knows, in address order, each
   with its name and, when known, its prototype. The built-in databases are
-  read unless `--no-builtin`; `--sig` adds more, and may be repeated.
+  read unless `--no-builtin`; `--sig` adds more, and may be repeated. When
+  several signatures know one function, the first consulted is the match
+  and the rest are named as **alternatives** — the text report lists them
+  as `also NAME (LIBRARY)`, and the JSON carries the chosen `library`
+  beside an `alternatives` array. `apply` takes the first candidate; the
+  workbench is where the choice between them is made.
 - `ag funcid apply BINARY --project PROJECT [--sig FILE]… [--no-builtin]
   [--json]` — write what the matches know into a project: the name, the
   prototype and the comment of each matched function. A project file not
@@ -103,6 +108,28 @@ signature, the first name at the first address keeping it.
 `match` and `apply` take the same image options as the other image
 commands (`--raw`, a slice), so a signature can be matched against a
 carved region as well as a whole file.
+
+## In the workbench
+
+The workbench identifies library code as it opens a program image: every
+function's body is hashed and looked up in the built-in signatures, off
+the UI thread beside the call graph. A function a signature knows is
+**highlighted** so the analyst can skip it and read what is unique:
+
+- the navigator marks it with a `lib` pill and reads its name in green;
+- the listing washes the function's body in a faint green, beneath the
+  analyst's own highlights, which always stand over it;
+- the file bar names the library it matched.
+
+The inspector's **Library match** card says what the signatures know.
+When several know the function — a CRT stub whose bytes libc, libstdc++
+and libgcc share, say — the card is a **chooser**: one row per signature,
+each naming its library, its name, and the prototype and comment it knows.
+Clicking a row applies that signature's identity to the function as the
+analyst's annotation. An explicit choice **overwrites** whatever the
+function carried before, unlike `apply`, which only fills what is not
+said. The row the workbench already shows is marked, and the choice is
+undone and redone like any other mark.
 
 ## The built-in databases
 

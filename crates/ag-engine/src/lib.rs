@@ -62,7 +62,7 @@ pub use cfg::{
 pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
 pub use emit::{Line, Pseudocode};
 pub use frame::{FrameRow, Region, StackFrame};
-pub use funcid::{function_hash, Signature, SignatureDb, SignatureSet};
+pub use funcid::{function_hash, Candidate, Signature, SignatureDb, SignatureSet};
 pub use il::{IlBlock, IlFunction, IlItem, Level, Render};
 pub use image::{Image, Section};
 pub use lift::{

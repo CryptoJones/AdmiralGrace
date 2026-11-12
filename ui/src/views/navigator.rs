@@ -8,7 +8,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 use crate::app::{App, Message, TagCount};
 use crate::data::{DataSymbolEntry, FunctionRow, SegmentEntry};
 use crate::theme::{color, MONO};
-use crate::views::{count, count_or_indexing, section_header, subtle};
+use crate::views::{count, count_or_indexing, pill, section_header, subtle};
 
 /// The explorable sections of a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -332,23 +332,33 @@ fn function_list(app: &App) -> Column<'_, Message> {
 /// A single function row.
 fn function_row<'a>(app: &'a App, row: &'a FunctionRow) -> Element<'a, Message> {
     let selected = app.navigator.selected == Some(row.address);
-    let name_color = if row.objc { color::CYAN } else { color::TEXT };
+    // A function a library signature knows is marked so the analyst can
+    // skip it: its name reads in the library color and a `lib` pill rides
+    // beside it. An Objective-C method keeps its own color over that.
+    let library = app.library.contains(&row.address);
+    let name_color = if row.objc {
+        color::CYAN
+    } else if library {
+        color::GREEN
+    } else {
+        color::TEXT
+    };
 
-    let content = Row::new()
-        .align_y(Alignment::Center)
-        .spacing(6)
-        .push(
-            Text::new(row.name.clone())
-                .size(12)
-                .color(name_color)
-                .width(Length::Fill),
-        )
-        .push(
-            Text::new(row.display_address())
-                .size(11)
-                .color(color::MUTED)
-                .font(MONO),
-        );
+    let mut content = Row::new().align_y(Alignment::Center).spacing(6).push(
+        Text::new(row.name.clone())
+            .size(12)
+            .color(name_color)
+            .width(Length::Fill),
+    );
+    if library {
+        content = content.push(pill("lib", color::GREEN));
+    }
+    content = content.push(
+        Text::new(row.display_address())
+            .size(11)
+            .color(color::MUTED)
+            .font(MONO),
+    );
 
     let surface = Container::new(content)
         .padding([5, 7])
