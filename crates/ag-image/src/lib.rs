@@ -111,6 +111,7 @@ pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverr
 
 pub mod binexport;
 pub mod diff;
+pub mod dwarf;
 pub mod graph_export;
 pub mod plugin;
 pub mod port;

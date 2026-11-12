@@ -314,6 +314,18 @@ pub enum ImageCmd {
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// The analysis as DWARF debug information, the format debuggers read:
+    /// the functions and data at their addresses under the analyst's names,
+    /// and the types the analysis gives them. Load it beside the program
+    /// (`add-symbol-file` in gdb) to use the names and types in a debugger.
+    Dwarf {
+        /// The file to write, by convention `<name>.debug`.
+        file: PathBuf,
+        /// A project file: the image is read under its types and prototypes,
+        /// and its renames and byte types are the names and types written.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The opaque predicates of functions: the conditional branches whose
     /// condition is decided whatever the input, each with whether it is
     /// always or never taken, why, and the bytes that patch it out.
@@ -1278,6 +1290,7 @@ pub fn run(
         | ImageCmd::Defuse { project, .. }
         | ImageCmd::Emulate { project, .. }
         | ImageCmd::Binexport { project, .. }
+        | ImageCmd::Dwarf { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -1477,6 +1490,7 @@ pub fn run(
         ImageCmd::Binexport { file, .. } => {
             crate::binexport::run(&image, binary, &file, project.as_ref())
         }
+        ImageCmd::Dwarf { file, .. } => crate::dwarf::run(&image, binary, &file, project.as_ref()),
     }
 }
 

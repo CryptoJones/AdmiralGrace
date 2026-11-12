@@ -258,6 +258,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `export DIR --force` | Write into a directory that is not empty. |
 | `export DIR --option NAME VALUE` | Lift every function with an engine option set; the flag repeats. `index.json` and the `README.md` record the options that differ from the defaults. |
 | `binexport FILE [--project FILE]` | The analysis as a BinExport file, the format BinDiff compares: the call graph, every function's flow graph, the basic blocks, the instructions with their bytes, mnemonics and operands, the strings and data they refer to, and the sections. With `--project FILE` the project's renames are the functions' names and its comments are written on their instructions. One line on stdout: the functions, the flow graphs, the basic blocks, the instructions and the bytes written. |
+| `dwarf FILE [--project FILE]` | The analysis as DWARF debug information, the format debuggers read: the functions and data at their addresses under the analyst's names, and the types the analysis gives them. With `--project FILE` the project's renames, types, prototypes and byte-type marks are written. Load it beside the program (`add-symbol-file` in gdb) to use the names and types in a debugger. One line on stdout: the functions, the types, the data symbols and the bytes written. |
 
 `--json` is on every subcommand, and reports the same thing as JSON: `info` gives the
 language, the entry point and the sections; `symbols` gives the functions and the data
@@ -562,6 +563,44 @@ section's write flag, the library and module tables, and the `LIBRARY` function 
 comment on an address where no function's instruction starts has nowhere to stand and is
 left out too. The file's directory is made when it is not there, and a file already there
 is written over. An image the decoder does not read is refused, like `disasm`.
+
+## Debug information: `ag image … dwarf`
+
+`dwarf` writes the analysis as DWARF debug information — the format debuggers read — so the
+names and types worked out here can be used in a debugger without typing them in again. The
+file is an ELF sidecar holding the DWARF sections and a symbol table; load it beside the
+program and the debugger finds the names and types at the addresses they stand at:
+
+```sh
+cargo run --bin ag -- image ./program.elf dwarf program.debug
+cargo run --bin ag -- image ./program.elf dwarf program.debug --project program.agproj
+gdb ./program.elf -ex 'add-symbol-file program.debug'
+```
+
+By convention the file is named `<name>.debug`. It holds one *compile unit*, named for the
+binary, whose producer is this program, and:
+
+- the *types* the image is read with — the platform's primitives and every definition the
+  store holds, the project's among them: base types, pointers, arrays, structures, unions,
+  enumerations, typedefs and function types. Each member stands at the offset the layout
+  gives it, and a bit-field carries its width and its bit place;
+- one *subprogram* a function, at the address it stands at, under the name the analysis gives
+  it or the analyst's rename, with an extent to where it ends. The return type and the
+  parameters are the analyst's prototype when one is recorded, and the lift's own signature
+  otherwise;
+- one *variable* a data symbol, at its address, under the analyst's type for it when one is
+  marked with a byte type (`data:4[8]` is an array of eight four-byte numbers, `char[16]` an
+  array of characters, `string` a string of no fixed length);
+- a *symbol table* beside the DWARF, so a reader that reads no DWARF still finds the names,
+  and an *address range table* naming the compile unit an address belongs to.
+
+With `--project FILE` the image is read under the project's types and prototypes, and its
+renames and byte-type marks are the names and types written. What the image does not say is
+left out: there is no line table (the analysis has no source lines), no location for a
+parameter or a local, and no calling convention. A function the decoder cannot reach keeps
+its name and address with no extent. Unlike `binexport`, an image the decoder does not read
+is still written — its names and types need no disassembly. The file's directory is made
+when it is not there, and a file already there is written over.
 
 ## Assembling one instruction: `ag asm`
 
