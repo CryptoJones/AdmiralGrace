@@ -988,6 +988,28 @@ pub struct Annotation {
     /// the field reads the result in `rax` and misreads nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_location: Option<String>,
+    /// On a function's record: the engine options the analyst sets for this
+    /// function alone, by name over the run's own — `{"parameters":
+    /// "convention", "type-propagation": "off"}` — laid over the run's options
+    /// when the function is lifted, structured and emitted. `code-sections`
+    /// is a word on the whole image and is not kept here. A reader that does
+    /// not know the field, or a name or value that does not read, lifts under
+    /// the run's own options and misreads nothing, so the format version does
+    /// not change for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
+    /// On a function's record: the statements and blocks the analyst says the
+    /// emulator runs over this function and the calls it follows, over the
+    /// run's own step limit. A reader that does not know the field runs to the
+    /// run's limit and misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulation_steps: Option<usize>,
+    /// On a function's record: how many calls deep the analyst says the
+    /// emulator follows a call from this function, over the run's own depth.
+    /// A reader that does not know the field follows to the run's depth and
+    /// misreads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulation_depth: Option<usize>,
 }
 
 /// The analyst's words on one function's signature and analysis properties,
@@ -1008,6 +1030,13 @@ pub struct FunctionProperties {
     pub arguments: Vec<String>,
     /// The register the result leaves in.
     pub returns: Option<String>,
+    /// The engine options set for this function alone, by name over the
+    /// run's own.
+    pub options: BTreeMap<String, String>,
+    /// The emulator's step limit for this function, over the run's own.
+    pub emulation_steps: Option<usize>,
+    /// The emulator's call depth for this function, over the run's own.
+    pub emulation_depth: Option<usize>,
 }
 
 impl FunctionProperties {
@@ -1019,12 +1048,16 @@ impl FunctionProperties {
             && self.clobbers.is_empty()
             && self.arguments.is_empty()
             && self.returns.is_none()
+            && self.options.is_empty()
+            && self.emulation_steps.is_none()
+            && self.emulation_depth.is_none()
     }
 
     /// The properties as the function-properties prompt spells them: each
     /// part that is said, in a fixed order, `conv win64 stack 8 clobbers
-    /// rbx,r12 args rcx,rdx ret rdx proto int f(int n)`. Nothing said is the
-    /// empty string.
+    /// rbx,r12 args rcx,rdx ret rdx opt parameters convention steps 50000
+    /// depth 16 proto int f(int n)`, the options by name and `proto` last
+    /// since it takes the rest of the line. Nothing said is the empty string.
     pub fn label(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(convention) = &self.convention {
@@ -1041,6 +1074,15 @@ impl FunctionProperties {
         }
         if let Some(returns) = &self.returns {
             parts.push(format!("ret {returns}"));
+        }
+        for (name, value) in &self.options {
+            parts.push(format!("opt {name} {value}"));
+        }
+        if let Some(steps) = self.emulation_steps {
+            parts.push(format!("steps {steps}"));
+        }
+        if let Some(depth) = self.emulation_depth {
+            parts.push(format!("depth {depth}"));
         }
         if let Some(prototype) = &self.prototype {
             parts.push(format!("proto {prototype}"));
@@ -1324,6 +1366,9 @@ impl Annotation {
             clobbers: Vec::new(),
             arg_locations: Vec::new(),
             return_location: None,
+            options: BTreeMap::new(),
+            emulation_steps: None,
+            emulation_depth: None,
         }
     }
 
@@ -1369,6 +1414,9 @@ impl Annotation {
             clobbers: Vec::new(),
             arg_locations: Vec::new(),
             return_location: None,
+            options: BTreeMap::new(),
+            emulation_steps: None,
+            emulation_depth: None,
         }
     }
 
@@ -1413,6 +1461,9 @@ impl Annotation {
             clobbers: Vec::new(),
             arg_locations: Vec::new(),
             return_location: None,
+            options: BTreeMap::new(),
+            emulation_steps: None,
+            emulation_depth: None,
         }
     }
 
@@ -1673,6 +1724,9 @@ impl Annotation {
             && self.clobbers.is_empty()
             && self.arg_locations.is_empty()
             && self.return_location.is_none()
+            && self.options.is_empty()
+            && self.emulation_steps.is_none()
+            && self.emulation_depth.is_none()
     }
 
     /// Merge `gone` into `keep`: a word already on `gone` is replaced, and
@@ -2407,6 +2461,9 @@ impl ProjectFile {
                     clobbers: a.clobbers.clone(),
                     arguments: a.arg_locations.clone(),
                     returns: a.return_location.clone(),
+                    options: a.options.clone(),
+                    emulation_steps: a.emulation_steps,
+                    emulation_depth: a.emulation_depth,
                 };
                 if props.is_empty() {
                     return None;
@@ -3820,6 +3877,9 @@ mod tests {
         record.clobbers = vec!["rbx".to_string(), "r12".to_string()];
         record.arg_locations = vec!["rcx".to_string(), "rdx".to_string()];
         record.return_location = Some("rdx".to_string());
+        record.options = BTreeMap::from([("language".to_string(), "rust".to_string())]);
+        record.emulation_steps = Some(500);
+        record.emulation_depth = Some(3);
         // A word on a block, or on a variable, is not the function's.
         project
             .annotation_mut(TargetKind::Region, "0x401040")
@@ -3838,6 +3898,9 @@ mod tests {
                     clobbers: vec!["rbx".to_string(), "r12".to_string()],
                     arguments: vec!["rcx".to_string(), "rdx".to_string()],
                     returns: Some("rdx".to_string()),
+                    options: BTreeMap::from([("language".to_string(), "rust".to_string())]),
+                    emulation_steps: Some(500),
+                    emulation_depth: Some(3),
                 }
             )])
         );
@@ -3848,6 +3911,9 @@ mod tests {
             "{json}"
         );
         assert!(json.contains("\"stack_adjustment\": 8"), "{json}");
+        assert!(json.contains("\"emulation_steps\": 500"), "{json}");
+        assert!(json.contains("\"emulation_depth\": 3"), "{json}");
+        assert!(json.contains("\"language\": \"rust\""), "{json}");
         let read = ProjectFile::from_json(&json).unwrap();
         assert_eq!(read.function_properties(), props);
         assert_eq!(read.format, FORMAT_VERSION);
@@ -3858,12 +3924,30 @@ mod tests {
         )
         .unwrap();
         assert!(bare.function_properties().is_empty());
+        // Nothing said is nothing written: the new fields are left out of a
+        // record that does not set them, so an older reader is not confused.
+        let json = bare.to_json().unwrap();
+        assert!(!json.contains("emulation_steps"), "{json}");
+        assert!(!json.contains("emulation_depth"), "{json}");
+        assert!(!json.contains("\"options\""), "{json}");
 
         // The properties alone keep a record; cleared, the record goes.
         let mut record = Annotation::new(TargetKind::Function, "0x401000");
         record.calling_convention = Some("cdecl".to_string());
         assert!(!record.is_empty());
         record.calling_convention = None;
+        assert!(record.is_empty());
+        // An option or a limit alone keeps a record too.
+        record.options = BTreeMap::from([("language".to_string(), "rust".to_string())]);
+        assert!(!record.is_empty());
+        record.options.clear();
+        assert!(record.is_empty());
+        record.emulation_steps = Some(500);
+        assert!(!record.is_empty());
+        record.emulation_steps = None;
+        record.emulation_depth = Some(3);
+        assert!(!record.is_empty());
+        record.emulation_depth = None;
         assert!(record.is_empty());
     }
 
@@ -3876,10 +3960,18 @@ mod tests {
             clobbers: vec!["rbx".to_string(), "r12".to_string()],
             arguments: vec!["rcx".to_string(), "rdx".to_string()],
             returns: Some("rdx".to_string()),
+            options: BTreeMap::from([
+                ("indent".to_string(), "4".to_string()),
+                ("language".to_string(), "rust".to_string()),
+            ]),
+            emulation_steps: Some(500),
+            emulation_depth: Some(3),
         };
+        // The options read by name, in order, and `proto` stays last since it
+        // takes the rest of the line.
         assert_eq!(
             props.label(),
-            "conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto int f(int n)"
+            "conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx opt indent 4 opt language rust steps 500 depth 3 proto int f(int n)"
         );
         assert_eq!(FunctionProperties::default().label(), "");
         let only = FunctionProperties {
@@ -3887,6 +3979,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only.label(), "conv cdecl");
+        // The limits alone are said without a signature.
+        let limits = FunctionProperties {
+            emulation_steps: Some(500),
+            emulation_depth: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(limits.label(), "steps 500 depth 3");
+        assert!(!limits.is_empty());
     }
 
     #[test]

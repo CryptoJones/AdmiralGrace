@@ -1,15 +1,20 @@
 //! The analyst's words on a function's signature and its analysis
 //! properties: its prototype, its calling convention, the stack it adjusts
-//! on return, the registers it clobbers, and where its arguments and its
-//! result live.
+//! on return, the registers it clobbers, where its arguments and its result
+//! live, the engine options it is analyzed under, and the limits it is
+//! emulated within.
 //!
 //! A wrong signature misleads every caller's pseudocode, so the analyst can
 //! say what the bytes do not: that a function takes three arguments though
 //! it reads two registers, that it is `__stdcall` and cleans its own stack,
 //! that it clobbers `rbx` though the convention says it may not, that its
-//! result leaves in `rdx` rather than `rax`. Each part is optional — what is
-//! not said, the lift decides as it always did — and a name that is no
-//! register, or a convention that is none, is simply not followed.
+//! result leaves in `rdx` rather than `rax`. The analyst can also set the
+//! analysis mode for one function — its `parameters`, `return-liveness`,
+//! `type-propagation` or any other option over the run's own — and the steps
+//! and depth it is emulated within. Each part is optional — what is not said,
+//! the lift decides as it always did — and a name that is no register, a
+//! convention that is none, or an option that does not read, is simply not
+//! followed.
 
 use crate::lift::{gpr_name, Abi};
 
@@ -34,11 +39,25 @@ pub struct FunctionProperties {
     pub arguments: Vec<String>,
     /// The register the result leaves in, by name, over `rax`: `rdx`.
     pub returns: Option<String>,
+    /// The analyst's engine options for this function alone, by name over
+    /// the run's own — `parameters` → `convention`, `type-propagation` →
+    /// `off` — laid over the run's options when the function is lifted,
+    /// structured and emitted ([`crate::options::Options::overlaid`]). A name
+    /// or value that does not read is not followed; `code-sections` is a word
+    /// on the whole image and is not kept here.
+    pub options: std::collections::BTreeMap<String, String>,
+    /// The statements and blocks the emulator runs over this function and
+    /// the calls it follows, over the run's own step limit; `None` leaves the
+    /// run's. See [`crate::emulate::Limits`].
+    pub emulation_steps: Option<usize>,
+    /// How many calls deep the emulator follows a call from this function,
+    /// over the run's own depth; `None` leaves the run's.
+    pub emulation_depth: Option<usize>,
 }
 
 impl FunctionProperties {
     /// Whether nothing is said: no prototype, no convention, no adjustment,
-    /// no clobbers and no value locations.
+    /// no clobbers, no value locations, no options and no emulation limits.
     pub fn is_empty(&self) -> bool {
         self.prototype.is_none()
             && self.convention.is_none()
@@ -46,6 +65,9 @@ impl FunctionProperties {
             && self.clobbers.is_empty()
             && self.arguments.is_empty()
             && self.returns.is_none()
+            && self.options.is_empty()
+            && self.emulation_steps.is_none()
+            && self.emulation_depth.is_none()
     }
 
     /// The argument registers, as GPR indices, in order: the analyst's own

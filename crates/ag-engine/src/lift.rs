@@ -1075,6 +1075,12 @@ fn lift_inner(
     options: &Options,
     keep: bool,
 ) -> Result<Stages, NotLifted> {
+    // The analyst's options for this function alone, over the run's own: the
+    // analysis mode it is lifted and structured under. What the function says
+    // nothing of, the run decides as it always did.
+    let properties = symbols.function_properties(entry);
+    let effective = options.overlaid(&properties.options);
+    let options = &effective;
     let pass = |auto: &[crate::propagate::AutoVar], detect: bool| {
         lift_pass(
             disasm, cfg, entry, name, bitness, abi, symbols, options, keep, auto, detect,

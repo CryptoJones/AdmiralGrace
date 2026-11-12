@@ -225,15 +225,22 @@ pub enum ImageCmd {
         #[arg(long = "arg", value_name = "N", action = clap::ArgAction::Append, allow_hyphen_values = true)]
         args: Vec<String>,
         /// The statements and blocks run, over the whole run and the calls
-        /// it follows, before the run is stopped.
-        #[arg(long, default_value_t = 10_000)]
-        steps: usize,
+        /// it follows, before the run is stopped. Over the function's own
+        /// step limit when the project sets one, and 10000 otherwise.
+        #[arg(long)]
+        steps: Option<usize>,
         /// How many calls deep a call to a function of the image is followed.
-        #[arg(long, default_value_t = 8)]
-        depth: usize,
+        /// Over the function's own depth when the project sets one, and 8
+        /// otherwise.
+        #[arg(long)]
+        depth: Option<usize>,
         /// Report as JSON.
         #[arg(long)]
         json: bool,
+        /// A project file whose per-function step and depth limits the run
+        /// is bounded by, unless `--steps` or `--depth` says otherwise.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// Write the functions as C++ that compiles: the medium level of each,
     /// a label per block and a `goto` for every way out, the globals they
@@ -1246,6 +1253,7 @@ pub fn run(
         | ImageCmd::GlobalPointer { project, .. }
         | ImageCmd::Values { project, .. }
         | ImageCmd::Defuse { project, .. }
+        | ImageCmd::Emulate { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -1334,6 +1342,7 @@ pub fn run(
             steps,
             depth,
             json,
+            ..
         } => emulate(&image, &target, &args, steps, depth, json),
         ImageCmd::Transpile {
             targets,
@@ -2980,6 +2989,9 @@ pub(crate) fn function_properties(
                     clobbers: props.clobbers,
                     arguments: props.arguments,
                     returns: props.returns,
+                    options: props.options,
+                    emulation_steps: props.emulation_steps,
+                    emulation_depth: props.emulation_depth,
                 },
             )
         })
@@ -3672,8 +3684,8 @@ fn emulate(
     image: &Binary,
     target: &str,
     args: &[String],
-    steps: usize,
-    depth: usize,
+    steps: Option<usize>,
+    depth: Option<usize>,
     json: bool,
 ) -> Result<i32> {
     anyhow::ensure!(
@@ -3681,7 +3693,9 @@ fn emulate(
         "the lifter reads 64-bit x86, and this image is {}",
         image.language()
     );
-    anyhow::ensure!(steps >= 1, "--steps is a whole number from 1");
+    if let Some(steps) = steps {
+        anyhow::ensure!(steps >= 1, "--steps is a whole number from 1");
+    }
     let address = resolve(image, target)?;
     let args = args
         .iter()
@@ -3689,7 +3703,13 @@ fn emulate(
             parse_number(arg).ok_or_else(|| anyhow::anyhow!("the argument {arg:?} is a number"))
         })
         .collect::<Result<Vec<u64>>>()?;
-    let limits = ag_image::EmulationLimits { steps, depth };
+    // An explicit flag stands over the function's own limit, which stands
+    // over the run's default.
+    let stored = image.emulation_limits(address);
+    let limits = ag_image::EmulationLimits {
+        steps: steps.unwrap_or(stored.steps),
+        depth: depth.unwrap_or(stored.depth),
+    };
     match image.emulate(address, &args, &limits) {
         Ok(run) => {
             if json {

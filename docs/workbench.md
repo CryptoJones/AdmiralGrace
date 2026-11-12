@@ -298,7 +298,7 @@ the function on screen on one line, since a wrong signature misleads every calle
 pseudocode. The prompt opens on the properties the function already has, in this grammar:
 
 ```
-conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx proto int f(int n, char *s)
+conv win64 stack 8 clobbers rbx,r12 args rcx,rdx ret rdx opt language rust steps 500 depth 3 proto int f(int n, char *s)
 ```
 
 Each part is optional and the parts read in any order, `proto` taking the rest of the line:
@@ -307,15 +307,19 @@ which sets the argument registers and the caller-saved ones; `stack N` is the by
 stack on return; `clobbers R,…` names the registers clobbered beyond the convention's
 caller-saved ones, which a call to the function kills in its caller; `args R,…` names the
 registers the arguments arrive in, in order, over the convention's own; `ret R` names the
-register the result leaves in, over `rax`; and `proto SIGNATURE` is the C prototype, whose
-return type, parameter types and parameter names the lift reads over its own. The registers
+register the result leaves in, over `rax`; `opt NAME VALUE` sets an engine option for this
+function alone, over the run's own (`opt language rust`, `opt parameters convention`), and may
+be repeated — `ag catalog` lists them, and `code-sections` is a word on the whole image and is
+refused here; `steps N` and `depth N` set the emulator's step limit (from 1) and call depth for
+this function, over the run's defaults of 10000 and 8; and `proto SIGNATURE` is the C prototype,
+whose return type, parameter types and parameter names the lift reads over its own. The registers
 are general ones at any width — `rdi`, `edi`, `r9d`. The line is the whole record: a part left
-out is taken back, and an empty line takes every part back. A convention, register, byte count
-or prototype that is not one is refused, and the record is left untouched. The pseudocode is
-read again at once — the function's own signature, and its callers' reads of its arguments,
-result and clobbers — and undo covers the word like every other. The words are kept on the
-function's record in the project file; `ag project function-props` records the same for
-`ag image … --project` to read (`docs/cli.md`).
+out is taken back, and an empty line takes every part back. A convention, register, byte count,
+prototype, option name or option value that is not one is refused, and the record is left
+untouched. The pseudocode is read again at once — the function's own signature and options, and
+its callers' reads of its arguments, result and clobbers — and undo covers the word like every
+other. The words are kept on the function's record in the project file; `ag project function-props`
+records the same for `ag image … --project` to read (`docs/cli.md`).
 
 ## The variables of a function
 
