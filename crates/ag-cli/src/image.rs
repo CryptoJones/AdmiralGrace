@@ -303,6 +303,17 @@ pub enum ImageCmd {
         #[arg(long = "option", num_args = 2, value_names = ["NAME", "VALUE"], action = clap::ArgAction::Append)]
         options: Vec<String>,
     },
+    /// The analysis as a BinExport file, the format BinDiff compares: the
+    /// call graph, every function's flow graph, the instructions and their
+    /// operands, the strings and data they refer to.
+    Binexport {
+        /// The file to write, by convention `<name>.BinExport`.
+        file: PathBuf,
+        /// A project file: the image is read under its layout and patches,
+        /// and its renames are the names the functions are written with.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// The opaque predicates of functions: the conditional branches whose
     /// condition is decided whatever the input, each with whether it is
     /// always or never taken, why, and the bytes that patch it out.
@@ -1266,6 +1277,7 @@ pub fn run(
         | ImageCmd::Values { project, .. }
         | ImageCmd::Defuse { project, .. }
         | ImageCmd::Emulate { project, .. }
+        | ImageCmd::Binexport { project, .. }
         | ImageCmd::Pseudocode { project, .. } => project
             .as_deref()
             .map(ag_corpus::project::ProjectFile::load)
@@ -1462,6 +1474,9 @@ pub fn run(
             force,
             ..
         } => crate::export::run(&image, binary, &dir, functions.as_deref(), force),
+        ImageCmd::Binexport { file, .. } => {
+            crate::binexport::run(&image, binary, &file, project.as_ref())
+        }
     }
 }
 
