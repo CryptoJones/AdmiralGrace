@@ -227,6 +227,16 @@ fn raw_bytes_load_where_the_analyst_says_as_one_section_of_code() {
         Some("x86-64")
     );
     assert_eq!(ag_engine::image::raw_arch("x86:LE:64:default:clang"), None);
+    assert_eq!(raw_language("riscv64"), Some("RISCV:LE:64:default"));
+    assert_eq!(raw_language("rv32"), Some("RISCV:LE:32:default"));
+    assert_eq!(
+        ag_engine::image::raw_arch("RISCV:LE:64:default"),
+        Some("riscv64")
+    );
+    assert_eq!(
+        ag_engine::image::raw_arch("RISCV:LE:32:default"),
+        Some("riscv32")
+    );
 
     // Nowhere to load: address 0, no bytes, or past a 32-bit program's space.
     for (spec, says) in [

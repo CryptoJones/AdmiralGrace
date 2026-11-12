@@ -709,15 +709,25 @@ impl Binary {
         let arm = ArmVariant::of_language(&language);
         // So is 32-bit MIPS.
         let mips = MipsVariant::of_language(&language);
+        // So is RISC-V, of either width.
+        let riscv = ag_engine::riscv::RiscvVariant::of_language(&language);
         // AArch64 decodes with the ARM decoder and lifts itself, through
         // the architecture seam the engine built for plugins: the seam is
         // what makes its pseudocode, levels and workbench views work.
-        let built_in = arm.filter(|arm| !arm.has_modes()).map(|_| {
-            Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>
-        });
+        // RISC-V decodes and lifts itself through the same seam.
+        let built_in = arm
+            .filter(|arm| !arm.has_modes())
+            .map(|_| {
+                Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>
+            })
+            .or_else(|| {
+                riscv.map(|_| {
+                    Arc::new(ag_engine::riscv::Arch) as Arc<dyn ag_engine::plugin::Architecture>
+                })
+            });
         // A language no decoder reads may be a registered plugin's.
         let plugin_arch = built_in.or_else(|| {
-            if bitness.is_none() && arm.is_none() && mips.is_none() {
+            if bitness.is_none() && arm.is_none() && mips.is_none() && riscv.is_none() {
                 ag_engine::plugin::architecture_for(&language)
             } else {
                 None

@@ -227,11 +227,13 @@ const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
     // Cortex-M: Thumb throughout, under the ARMv7 specification.
     ("thumb", "ARM:LE:32:Cortex:default"),
     ("aarch64", "AARCH64:LE:64:v8A:default"),
+    ("riscv64", "RISCV:LE:64:default"),
+    ("riscv32", "RISCV:LE:32:default"),
 ];
 
 /// The language id an architecture's name stands for, as the command line
 /// and the workbench spell it: `x86-64`, `x86`, `arm`, `thumb`, `aarch64`,
-/// and the usual other spellings of each.
+/// `riscv64`, `riscv32`, and the usual other spellings of each.
 pub fn raw_language(arch: &str) -> Option<&'static str> {
     let word = match arch.trim().to_ascii_lowercase().as_str() {
         "x86-64" | "x86_64" | "x64" | "amd64" => "x86-64",
@@ -239,6 +241,8 @@ pub fn raw_language(arch: &str) -> Option<&'static str> {
         "arm" | "arm32" | "armv7" => "arm",
         "thumb" | "cortex" | "cortex-m" => "thumb",
         "aarch64" | "arm64" => "aarch64",
+        "riscv64" | "rv64" => "riscv64",
+        "riscv32" | "rv32" => "riscv32",
         _ => return None,
     };
     RAW_ARCHITECTURE_TABLE
@@ -257,7 +261,7 @@ pub fn raw_arch(language: &str) -> Option<&'static str> {
 }
 
 /// The architecture names [`raw_language`] knows, for a message.
-pub const RAW_ARCHITECTURES: &str = "x86-64, x86, arm, thumb, aarch64";
+pub const RAW_ARCHITECTURES: &str = "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32";
 
 impl std::fmt::Debug for Image {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

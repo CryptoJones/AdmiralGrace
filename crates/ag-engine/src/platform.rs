@@ -126,6 +126,8 @@ impl Platform {
             "arm" | "arm32" | "armv7" => "arm",
             "thumb" | "cortex" => "thumb",
             "aarch64" | "arm64" => "aarch64",
+            "riscv64" | "rv64" => "riscv64",
+            "riscv32" | "rv32" => "riscv32",
             _ => return None,
         };
         Some(Platform { os, arch: word })
@@ -135,7 +137,9 @@ impl Platform {
     /// tried: the exact platform, then its OS at any architecture.
     pub fn candidates(self) -> Vec<Platform> {
         let mut out = vec![self];
-        for arch in ["x86-64", "aarch64", "x86", "arm", "thumb"] {
+        for arch in [
+            "x86-64", "aarch64", "x86", "arm", "thumb", "riscv64", "riscv32",
+        ] {
             if arch != self.arch {
                 out.push(Platform {
                     os: self.os,
@@ -191,6 +195,10 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
         "arm" => "arm",
         "aarch64" => "aarch64",
         "mips" => "mips",
+        "riscv" => match width {
+            "64" => "riscv64",
+            _ => "riscv32",
+        },
         _ => return None,
     })
 }
@@ -198,8 +206,8 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
 /// The width the architecture word names, in bits, when it names one.
 fn arch_bits(arch: &str) -> Option<u64> {
     match arch {
-        "x86-64" | "aarch64" => Some(64),
-        "x86" | "arm" | "thumb" | "mips" => Some(32),
+        "x86-64" | "aarch64" | "riscv64" => Some(64),
+        "x86" | "arm" | "thumb" | "mips" | "riscv32" => Some(32),
         _ => None,
     }
 }
