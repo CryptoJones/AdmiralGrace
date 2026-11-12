@@ -1898,6 +1898,81 @@ fn a_msp430_image_decodes_and_lifts() {
     assert!(text.contains("while") || text.contains("do"), "{text}");
 }
 
+/// The retro cores decode but are not lifted: the listing and the graph are
+/// what they open, as ARM and MIPS are. Each fixture is a leaf, a
+/// subtraction, a compare-and-branch and a loop with a call.
+fn retro_decodes_but_does_not_lift(fixture: &str, language: &str, leaf: &[&str], call: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(fixture);
+    let binary = Binary::open(&path).expect("the retro fixture loads");
+    assert!(binary.language().starts_with(language), "{}", binary.language());
+    assert!(binary.supports_disassembly());
+    assert!(!binary.supports_pseudocode(), "{} is decode-only", language);
+
+    let address_of = |name: &str| {
+        binary
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("{name} is a function"))
+            .address
+    };
+
+    // The leaf decodes to the instructions the source wrote, ending in a
+    // return.
+    let add = binary
+        .disassembly(address_of("add"))
+        .expect("add is decoded");
+    let lines: Vec<&Instruction> = add
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    let mnemonics: Vec<&str> = lines.iter().map(|line| line.mnemonic.as_str()).collect();
+    assert_eq!(mnemonics, leaf, "{fixture} add");
+
+    // The loop decodes with its call, and is more than one block. The call
+    // is direct on the 6502 and the Z80 (`JSR`, `CALL`) and indirect on
+    // SuperH (`jsr @rN`, no resolved target), so it is found by its mnemonic.
+    let sum = binary
+        .disassembly(address_of("sum"))
+        .expect("sum is decoded");
+    assert!(sum.blocks.len() > 1, "{fixture} sum loops");
+    let sum_lines: Vec<&Instruction> = sum
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    let sum_mnemonics: Vec<&str> = sum_lines.iter().map(|line| line.mnemonic.as_str()).collect();
+    assert!(
+        sum_lines
+            .iter()
+            .any(|line| line.mnemonic.eq_ignore_ascii_case(call)),
+        "{fixture} sum calls add: {sum_mnemonics:?}"
+    );
+
+    // Nothing is lifted: the pseudocode is refused with a reason.
+    assert!(binary.pseudocode(address_of("add")).is_err());
+}
+
+#[test]
+fn a_6502_image_decodes_but_does_not_lift() {
+    retro_decodes_but_does_not_lift("m6502.elf", "6502:LE:16", &["CLC", "ADC", "RTS"], "JSR");
+}
+
+#[test]
+fn a_z80_image_decodes_but_does_not_lift() {
+    retro_decodes_but_does_not_lift("z80.elf", "z80:LE:16", &["ADD", "RET"], "CALL");
+}
+
+#[test]
+fn a_superh_image_decodes_but_does_not_lift() {
+    // The return's delay slot follows it in address order: the `add` that
+    // runs before the branch takes effect is listed after the `rts`.
+    retro_decodes_but_does_not_lift("superh4.elf", "SuperH4:LE:32", &["mov", "rts", "add"], "jsr");
+}
+
 #[test]
 fn raw_bytes_are_read_as_a_program_with_the_entry_for_a_function() {
     use ag_image::{raw_language, Layout, RawSpec};

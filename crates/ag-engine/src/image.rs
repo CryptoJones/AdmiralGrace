@@ -230,6 +230,9 @@ const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
     ("riscv64", "RISCV:LE:64:default"),
     ("riscv32", "RISCV:LE:32:default"),
     ("msp430", "TI_MSP430:LE:16:default"),
+    ("6502", "6502:LE:16:default"),
+    ("z80", "z80:LE:16:default"),
+    ("superh", "SuperH4:LE:32:default"),
 ];
 
 /// The language id an architecture's name stands for, as the command line
@@ -245,6 +248,9 @@ pub fn raw_language(arch: &str) -> Option<&'static str> {
         "riscv64" | "rv64" => "riscv64",
         "riscv32" | "rv32" => "riscv32",
         "msp430" => "msp430",
+        "6502" | "m6502" | "mos6502" => "6502",
+        "z80" => "z80",
+        "superh" | "sh4" | "sh" => "superh",
         _ => return None,
     };
     RAW_ARCHITECTURE_TABLE
@@ -263,16 +269,57 @@ pub fn raw_arch(language: &str) -> Option<&'static str> {
 }
 
 /// The architecture names [`raw_language`] knows, for a message.
-pub const RAW_ARCHITECTURES: &str = "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32, msp430";
+pub const RAW_ARCHITECTURES: &str =
+    "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32, msp430, 6502, z80, superh";
 
-/// The language an `EM_MSP430` ELF decodes under, when the bytes are one.
-/// The loader has no opinion for the MSP430, so the engine reads the
-/// architecture from the container and names the target itself: the 16-bit
-/// core, little-endian, the only MSP430 specification carried here.
-fn msp430_target(bytes: &[u8]) -> Option<&'static str> {
+/// The language a retro- or embedded-architecture ELF decodes under, when
+/// the bytes are one. The loader has no opinion for these, so the engine
+/// reads the architecture from the container and names the target itself:
+/// the MSP430's 16-bit core, the SH4 little-endian, the Z80 and the 6502,
+/// each the only specification of its processor carried here.
+fn retro_target(bytes: &[u8]) -> Option<&'static str> {
     use object::Object as _;
     let file = object::File::parse(bytes).ok()?;
-    (file.architecture() == object::Architecture::Msp430).then_some("TI_MSP430:LE:16:default")
+    match file.architecture() {
+        object::Architecture::Msp430 => return Some("TI_MSP430:LE:16:default"),
+        // The SH4 little-endian is the only SuperH carried; a big-endian
+        // SH4, or an SH-1/SH-2/SH-2A core, names none.
+        object::Architecture::SuperH => {
+            return (file.endianness() == object::Endianness::Little)
+                .then_some("SuperH4:LE:32:default");
+        }
+        _ => {}
+    }
+    // The Z80 and the 6502 have no architecture of their own in the reader,
+    // so the ELF machine word is read straight from the header.
+    match elf_machine(bytes)? {
+        // EM_Z80.
+        220 => Some("z80:LE:16:default"),
+        // EM_65816, the registered number of the 6502 family: the 6502 has
+        // no machine word of its own, and the 8-bit core is the only 6502
+        // specification carried here.
+        255 => Some("6502:LE:16:default"),
+        _ => None,
+    }
+}
+
+/// The ELF machine word (`e_machine`) of `bytes`, read from the header in
+/// the byte order the header declares, when the bytes are an ELF.
+fn elf_machine(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 20 || &bytes[0..4] != b"\x7fELF" {
+        return None;
+    }
+    let little = match bytes[5] {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    let word = [bytes[18], bytes[19]];
+    Some(if little {
+        u16::from_le_bytes(word)
+    } else {
+        u16::from_be_bytes(word)
+    })
 }
 
 impl std::fmt::Debug for Image {
@@ -393,10 +440,11 @@ impl Image {
         let inner = match ObjectLoadImage::from_bytes(name, &bytes) {
             Ok(inner) => inner,
             Err(error) => {
-                // The MSP430: the loader has no opinion for it, so the
+                // The retro and embedded cores — the MSP430, the SH4, the
+                // Z80, the 6502: the loader has no opinion for them, so the
                 // engine names the target itself and reads the file under
                 // that, the way a raw image is read under a named language.
-                match msp430_target(&bytes) {
+                match retro_target(&bytes) {
                     Some(target) => ObjectLoadImage::from_bytes_with_target(name, &bytes, target)
                         .map_err(|error| anyhow::anyhow!("loading {name}: {error}"))?,
                     None => return Err(anyhow::anyhow!("loading {name}: {error}")),
