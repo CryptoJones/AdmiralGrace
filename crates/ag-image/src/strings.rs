@@ -332,7 +332,7 @@ fn text_unit(bytes: &[u8], at: usize, page: &'static encoding_rs::Encoding) -> O
 }
 
 /// Whether a byte is part of the text of a string.
-fn is_text(byte: u8) -> bool {
+pub(crate) fn is_text(byte: u8) -> bool {
     byte.is_ascii_graphic() || matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 

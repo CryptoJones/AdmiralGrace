@@ -347,7 +347,13 @@ write, whatever reads it. A width is a type: 32 bits is `int`, 64 is `long`. A p
 through `lea` is asked of the image: one that lands on a string
 prints as the string's literal, one that lands on named data as `&name`, and one on a
 function as its name; a load through a pointer is `*(int *)p`, and one from an address the
-image does not name is `*(int *)0x…`. A `jmp` out of the function is a tail call: a node that
+image does not name is `*(int *)0x…`. A string passed with its length reads as the string
+clamped to that length: Go holds a string as a pointer and a length, `{ptr, len}`, with no
+NUL to end the text, so where a call passes a constant address and the next argument is a
+constant length, and the image holds text at the address, the address prints as the string
+of that many bytes — `g("hello", 5)` — the run clamped to the length the code uses rather
+than read to a terminator that is not there, and the length standing as the code passes it.
+A `jmp` out of the function is a tail call: a node that
 ends in a `jmp` to another function — direct, or through a GOT slot the image's dynamic
 relocations name as an import, or through a register that holds one — with the stack back
 where it was at entry is lifted as the `call` and the `ret` it stands for, `return callee(args);`,
