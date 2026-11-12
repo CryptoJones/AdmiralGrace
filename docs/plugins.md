@@ -10,7 +10,10 @@ through the MCP server beside the image's own tools. A **recognizer** finds the 
 that build strings — a stack string written a character at a time, a buffer XORed with a key —
 and decodes them, so the pseudocode shows the clear text as a comment beside the code that
 builds it. A **renderer** names the constants a function's expressions use — an error code, a
-flag, a magic number — so the pseudocode shows the name in the constant's place.
+flag, a magic number — so the pseudocode shows the name in the constant's place. A **debug info
+parser** reads an external debug info file — a linker map, a JSON document, a format of another
+tool's making — into the names, prototypes, types and data labels a project keeps, so work done
+in other tools is not recreated by hand.
 
 A plugin is written one of two ways: in Rust, against the traits of `ag_engine::plugin` and
 `ag_image::plugin`, by a crate that builds on the engine; or in any language, as a command
@@ -54,6 +57,9 @@ registered, as text or with `--json`.
   ],
   "renderers": [
     { "name": "hresults", "command": ["python3", "/opt/toy/names.py"], "functions": ["entry_0x1000"] }
+  ],
+  "debuginfo": [
+    { "name": "pdb", "magic": "4d6963726f736f667420432f432b2b20", "command": ["python3", "/opt/toy/pdb.py"] }
   ]
 }
 ```
@@ -72,7 +78,11 @@ through it after the engine has printed it. A recognizer needs only its command:
 lifted passes through it after the rewriters, and it may name the `functions` it runs for as a
 rewriter does. A renderer needs only its command too: every function lifted passes through it
 after the rewriters, beside the recognizers, and it may name the `functions` it runs for as a
-rewriter does. An entry without a `name` is named for the manifest,
+rewriter does. A debug info parser needs only its command: it is given a debug info file's bytes
+and answers with the functions, data and types the file names. It may name the `magic` of its
+format, as a loader does; without one it is offered every file no earlier parser recognized. The
+registered parsers are offered before the engine's own (`map` and `json`), and one registered
+under a built-in's name replaces it. An entry without a `name` is named for the manifest,
 the second and later with their place (`toy-1`); a name declared twice is reported, and the
 later declaration replaces the earlier. Every command is a list: the program and its
 arguments. A bare program name is found on `PATH`, as a shell finds it; a program that names
@@ -81,7 +91,7 @@ relative; the arguments are passed as they are, with `${dir}` in any element sta
 the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
 not answered by then is ended and its answer is an error.
 
-## The seven conversations
+## The eight conversations
 
 Each command is given its input on standard input and answers on standard output, in one
 go; its standard error is the terminal's. Numbers may be JSON numbers or hex text such as
@@ -339,6 +349,42 @@ reported on standard error with its name and the function is lifted with the nam
 renderers gave: a name is not the analysis, and one renderer's failure does not refuse the
 lift, as a rewriter's or a formatter's does.
 
+**A debug info parser** is given the debug info file's bytes, as a loader is given the image's,
+and answers with what the file says about the program — the functions and data at their
+addresses, the C types they use, and any notes. It is run when a debug info file is loaded
+(`ag project … save --debug-info FILE`, or `ag project … debuginfo --file PROJECT FILE`), not
+per function. The answer is the interchange document:
+
+```json
+{
+  "functions": [
+    { "address": "0x1198", "name": "main", "size": 52,
+      "prototype": "int main(int argc, char **argv)", "source": "main.c:10" }
+  ],
+  "data": [ { "address": "0x4008", "name": "__dso_handle", "size": 8, "type": "void *" } ],
+  "types": [ "struct point { int x; int y; };" ],
+  "notes": [ "a symbol held back" ]
+}
+```
+
+Each function and each datum names its `address` (a number or hex text) and a non-empty `name`;
+`size`, and a function's `prototype` and `source` or a datum's `type`, are optional. `types` is an
+array of C definitions, read in order; `notes` is an array of strings reported on standard error.
+A row without an address or a name is refused, named by its place. Mangled names are demangled as
+the listing reads them.
+
+Two parsers are built in: `map` reads a linker map file (GNU ld's `Linker script and memory map`,
+or MSVC's `Publics by Value`), and `json` reads a document of the shape above — the interchange a
+tool of another kind exports to. Without `--format`, the file is offered to every parser that
+recognizes it, the registered ones first: the first that reads it wins, and one that recognizes
+but fails is reported on standard error and the next is tried. With `--format NAME`, that parser
+reads it and its failure is the read's failure. A file no parser recognizes, or none reads, is an
+error naming the parsers there are. `ag project … debuginfo` without a file lists them.
+
+What the file says is kept as the analyst's own: a name, prototype or comment is filled only where
+the project has none, so the analyst's words win and loading the same file twice keeps nothing the
+second time. A symbol whose address another holds already is left out with a note.
+
 ## In Rust
 
 A crate that builds on the engine implements the traits and registers before an image is
@@ -415,6 +461,14 @@ plugin::register_loader(Arc::new(Toy));
   renderer's name, not a refused lift. Registered with `register_renderer`; `renderers()`
   lists them in the order they run and `unregister_renderer(name)` takes one off; run for
   every function lifted, after the rewriters, in order.
+- `ag_engine::plugin::DebugInfoParser` — `name`, `description` (empty unless said),
+  `recognizes(bytes)` and `parse(name, bytes) -> DebugInfo`: the functions, data, C types and
+  notes a debug info file names (`ag_engine::debuginfo`). Registered with
+  `register_debug_info_parser`; `debug_info_parsers()` lists them and
+  `unregister_debug_info_parser(name)` takes one off. `ag_engine::debuginfo::parse(name, bytes,
+  format)` offers a file to the registered parsers first, then the built-in `map` and `json`, and
+  `available_parsers()` lists what a file is offered to. `ExternalDebugInfoParser` is the command
+  conversation above; `debug_info_of(answer)` reads its JSON answer.
 
 The registry is one for the process, and a plugin registered under a name already taken
 replaces it. `ag_image::plugin::load_all` reads the manifests of the plugin directories and

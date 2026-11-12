@@ -14,7 +14,10 @@
 //! character at a time, a buffer XORed with a key — and decodes them, for
 //! the pseudocode to show beside the lines that build them. A **renderer**
 //! names the constants a function's expressions use — an error code, a
-//! flag, a magic number — for the pseudocode to show in their place.
+//! flag, a magic number — for the pseudocode to show in their place. A
+//! **debug info parser** reads a debug file the engine does not — what
+//! another tool already knows about the program — into the names,
+//! prototypes and types a project keeps (`ag_engine::debuginfo`).
 //!
 //! A plugin is written one of two ways. In Rust, a crate that builds on
 //! the engine implements [`Loader`] or [`Architecture`] and registers it
@@ -1148,6 +1151,160 @@ pub fn renderings_of(answer: &serde_json::Value) -> Result<Vec<RenderedConstant>
     Ok(rendered)
 }
 
+/// A reader of a debug info file the engine does not read itself: what
+/// another tool already knows about a program — the names of its functions
+/// and data, their types and prototypes, the source they came from — kept
+/// beside the image rather than in it. A file is offered to every
+/// registered parser that recognizes it, in the order they were registered
+/// and before the engine's own (`ag_engine::debuginfo`); the first that
+/// reads it wins, and one that recognizes but fails is reported and the
+/// next is tried.
+pub trait DebugInfoParser: Send + Sync {
+    /// The parser's name, as `ag plugins` lists it and `--format` takes it.
+    fn name(&self) -> &str;
+    /// What the parser reads, for the one choosing a format; empty when
+    /// there is nothing to say.
+    fn description(&self) -> &str {
+        ""
+    }
+    /// Whether these are the parser's bytes: a check of the magic, cheap,
+    /// asked of every parser for every debug file offered.
+    fn recognizes(&self, bytes: &[u8]) -> bool;
+    /// Read the debug info file, named `name` for the errors.
+    fn parse(&self, name: &str, bytes: &[u8]) -> Result<crate::debuginfo::DebugInfo, String>;
+}
+
+/// A debug info parser that is a command: given the file's bytes on its
+/// standard input, as a loader is, it prints what the file says as JSON —
+/// `{"functions": […], "data": […], "types": […], "notes": […]}`, the shape
+/// [`debug_info_of`] reads and the built-in `json` parser reads a file of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDebugInfoParser {
+    pub name: String,
+    /// The hex of the bytes a file of the format starts with, when it has
+    /// a magic; `None` offers the parser every file no earlier parser
+    /// recognized.
+    pub magic: Option<Vec<u8>>,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+}
+
+impl DebugInfoParser for ExternalDebugInfoParser {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn recognizes(&self, bytes: &[u8]) -> bool {
+        match &self.magic {
+            Some(magic) => bytes.starts_with(magic),
+            None => true,
+        }
+    }
+
+    fn parse(&self, name: &str, bytes: &[u8]) -> Result<crate::debuginfo::DebugInfo, String> {
+        let answer = answer_json(&self.command, bytes, self.timeout)?;
+        debug_info_of(&answer).map_err(|error| format!("{name}: {error}"))
+    }
+}
+
+/// What a debug info parser's answer holds: `{"functions": [{"address": …,
+/// "name": …, "size": …, "prototype": …, "source": …}, …], "data":
+/// [{"address": …, "name": …, "size": …, "type": …}, …], "types": […],
+/// "notes": […]}`. Each address and size a number or hex text; a function
+/// or datum without one, or without a non-empty name, is refused, named by
+/// its place. The optional fields are left out when the file does not say;
+/// `types` are C definitions in the order C reads them. An answer without
+/// any of the keys says nothing.
+pub fn debug_info_of(answer: &serde_json::Value) -> Result<crate::debuginfo::DebugInfo, String> {
+    use crate::debuginfo::{DebugData, DebugFunction, DebugInfo};
+
+    let object = answer.as_object().ok_or_else(|| {
+        "the answer is a JSON object, `{\"functions\": […], …}` or `{}`".to_string()
+    })?;
+    let rows = |key: &str| -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(value) => value
+                .as_array()
+                .ok_or_else(|| format!("{key:?} is a JSON array"))?
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    row.as_object()
+                        .cloned()
+                        .ok_or_else(|| format!("{key} {index} is a JSON object"))
+                })
+                .collect(),
+        }
+    };
+    let size_of = |row: &serde_json::Map<String, serde_json::Value>,
+                   what: &str,
+                   index: usize|
+     -> Result<Option<u64>, String> {
+        match row.get("size") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(value) => number(value)
+                .map(Some)
+                .ok_or_else(|| format!("{what} {index}'s size is a number or hex text")),
+        }
+    };
+    let text_of = |row: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<String> {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let mut info = DebugInfo::default();
+    for (index, row) in rows("functions")?.iter().enumerate() {
+        let address = row.get("address").and_then(number).ok_or_else(|| {
+            format!("function {index} names its address, as a number or hex text")
+        })?;
+        let name = row
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("function {index} has a non-empty \"name\""))?;
+        info.functions.push(DebugFunction {
+            address,
+            name: name.to_string(),
+            size: size_of(row, "function", index)?,
+            prototype: text_of(row, "prototype"),
+            source: text_of(row, "source"),
+        });
+    }
+    for (index, row) in rows("data")?.iter().enumerate() {
+        let address = row
+            .get("address")
+            .and_then(number)
+            .ok_or_else(|| format!("data {index} names its address, as a number or hex text"))?;
+        let name = row
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("data {index} has a non-empty \"name\""))?;
+        info.data.push(DebugData {
+            address,
+            name: name.to_string(),
+            size: size_of(row, "data", index)?,
+            ctype: text_of(row, "type"),
+        });
+    }
+    if let Some(types) = object.get("types") {
+        let types = types
+            .as_array()
+            .ok_or_else(|| "\"types\" is a JSON array".to_string())?;
+        for (index, row) in types.iter().enumerate() {
+            let text = row
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| format!("type {index} is a non-empty string of C"))?;
+            info.types.push(text.to_string());
+        }
+    }
+    info.notes = strings(object.get("notes"));
+    Ok(info)
+}
+
 /// A formatter changes the pseudocode's lines after they are printed —
 /// their text, their order, their number — for a house style the options
 /// do not cover: every function's pseudocode passes through every
@@ -1315,6 +1472,7 @@ struct Registry {
     formatters: Vec<Arc<dyn Formatter>>,
     recognizers: Vec<Arc<dyn Recognizer>>,
     renderers: Vec<Arc<dyn ConstantRenderer>>,
+    debug_info_parsers: Vec<Arc<dyn DebugInfoParser>>,
 }
 
 fn registry() -> &'static RwLock<Registry> {
@@ -1504,6 +1662,36 @@ pub fn renderers() -> Vec<Arc<dyn ConstantRenderer>> {
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .renderers
+        .clone()
+}
+
+/// Add a debug info parser: every debug file opened after is offered to
+/// it, after the ones registered before and before the engine's own. One
+/// of the same name is replaced, and takes its turn at the end.
+pub fn register_debug_info_parser(parser: Arc<dyn DebugInfoParser>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = parser.name().to_string();
+    registry
+        .debug_info_parsers
+        .retain(|known| known.name() != name);
+    registry.debug_info_parsers.push(parser);
+}
+
+/// Take a debug info parser off, by name; for a test that registered one.
+pub fn unregister_debug_info_parser(name: &str) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    registry
+        .debug_info_parsers
+        .retain(|known| known.name() != name);
+}
+
+/// The debug info parsers registered, in the order they are offered a
+/// file.
+pub fn debug_info_parsers() -> Vec<Arc<dyn DebugInfoParser>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .debug_info_parsers
         .clone()
 }
 
@@ -2051,7 +2239,7 @@ pub struct ExternalTool {
 }
 
 /// One manifest: a JSON file declaring loaders, architectures, tools,
-/// rewriters, formatters, recognizers and renderers.
+/// rewriters, formatters, recognizers, renderers and debug info parsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// Where the manifest was read from.
@@ -2065,6 +2253,7 @@ pub struct Manifest {
     pub formatters: Vec<ExternalFormatter>,
     pub recognizers: Vec<ExternalRecognizer>,
     pub renderers: Vec<ExternalRenderer>,
+    pub debug_info: Vec<ExternalDebugInfoParser>,
 }
 
 /// The directories manifests are read from: the ones `AG_PLUGINS` names,
@@ -2339,6 +2528,28 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             functions: strings(entry.get("functions")),
         });
     }
+    let mut debug_info = Vec::new();
+    for (index, entry) in entries("debuginfo")?.iter().enumerate() {
+        // A debug file's format may have no magic — a text one — so the
+        // parser is offered every file no earlier parser recognized.
+        let magic = match entry.get("magic") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| "a debug info parser's magic is hex text".to_string())?;
+                Some(hex_bytes(text).ok_or_else(|| {
+                    format!("the magic {text:?} is not hex, in pairs, of at least one byte")
+                })?)
+            }
+        };
+        debug_info.push(ExternalDebugInfoParser {
+            name: entry_name(entry, index),
+            magic,
+            command: command_of(entry, "debug info parser")?,
+            timeout: timeout_of(entry)?,
+        });
+    }
     Ok(Manifest {
         path: path.to_path_buf(),
         name,
@@ -2349,6 +2560,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         formatters,
         recognizers,
         renderers,
+        debug_info,
     })
 }
 
@@ -2465,6 +2677,19 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                             ));
                         }
                         register_renderer(Arc::new(renderer.clone()));
+                    }
+                    for parser in &manifest.debug_info {
+                        if manifests
+                            .iter()
+                            .any(|known| known.debug_info.iter().any(|p| p.name == parser.name))
+                        {
+                            problems.push(format!(
+                                "{}: the debug info parser {:?} is declared again, and replaces the first",
+                                path.display(),
+                                parser.name
+                            ));
+                        }
+                        register_debug_info_parser(Arc::new(parser.clone()));
                     }
                     manifests.push(manifest);
                 }
@@ -4132,5 +4357,119 @@ mod tests {
         // registry is the whole process's.
         unregister_renderer("hresults");
         unregister_renderer("na-1");
+    }
+
+    #[test]
+    fn a_manifest_declares_debug_info_parsers_and_a_duplicate_is_reported() {
+        let _guard = crate::debuginfo::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = Dir::new("debuginfo");
+        std::fs::write(
+            dir.0.join("a.json"),
+            r#"{
+                "name": "da",
+                "debuginfo": [
+                    { "name": "pdbish", "magic": "4d5a", "command": ["sh", "-c", "cat"], "timeout": 7 },
+                    { "command": ["cat"] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = read_manifest(&dir.0.join("a.json")).expect("reads");
+        assert_eq!(manifest.debug_info[0].name, "pdbish");
+        assert_eq!(manifest.debug_info[0].magic, Some(vec![0x4d, 0x5a]));
+        assert_eq!(manifest.debug_info[0].timeout, Duration::from_secs(7));
+        // An unnamed entry is named for the manifest, the second with its
+        // place; no magic offers it every file; the timeout defaults.
+        assert_eq!(manifest.debug_info[1].name, "da-1");
+        assert_eq!(manifest.debug_info[1].magic, None);
+        assert_eq!(manifest.debug_info[1].timeout, DEFAULT_TIMEOUT);
+        // A parser without a command is refused, named.
+        std::fs::write(
+            dir.0.join("bad.json"),
+            r#"{ "debuginfo": [{ "name": "x" }] }"#,
+        )
+        .unwrap();
+        let error = read_manifest(&dir.0.join("bad.json")).unwrap_err();
+        assert!(error.contains("debug info parser"), "{error}");
+        assert!(error.contains("names no command"), "{error}");
+        // A magic that is not hex is refused.
+        std::fs::write(
+            dir.0.join("magic.json"),
+            r#"{ "debuginfo": [{ "name": "x", "magic": "zz", "command": ["cat"] }] }"#,
+        )
+        .unwrap();
+        let error = read_manifest(&dir.0.join("magic.json")).unwrap_err();
+        assert!(error.contains("not hex"), "{error}");
+        std::fs::remove_file(dir.0.join("bad.json")).unwrap();
+        std::fs::remove_file(dir.0.join("magic.json")).unwrap();
+        // The same name in two manifests: the later replaces the first,
+        // and the clash is reported.
+        std::fs::write(
+            dir.0.join("b.json"),
+            r#"{ "name": "db", "debuginfo": [{ "name": "pdbish", "command": ["cat"] }] }"#,
+        )
+        .unwrap();
+        let (manifests, problems) = load_manifests(std::slice::from_ref(&dir.0));
+        assert_eq!(manifests.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("the debug info parser \"pdbish\" is declared again"),
+            "{problems:?}"
+        );
+        assert!(debug_info_parsers().iter().any(|p| p.name() == "pdbish"));
+        assert!(debug_info_parsers().iter().any(|p| p.name() == "da-1"));
+        // Taken off after: the registry is the whole process's.
+        unregister_debug_info_parser("pdbish");
+        unregister_debug_info_parser("da-1");
+    }
+
+    #[test]
+    fn debug_info_of_reads_the_answer_and_refuses_a_bad_row() {
+        let info = debug_info_of(&serde_json::json!({
+            "functions": [ { "address": "0x1000", "name": "f", "size": 4,
+                             "prototype": "int f(void)", "source": "f.c:1" } ],
+            "data": [ { "address": 8192, "name": "g", "type": "int" } ],
+            "types": [ "struct s { int x; };" ],
+            "notes": [ "a note" ]
+        }))
+        .expect("reads");
+        assert_eq!(info.functions[0].address, 0x1000);
+        assert_eq!(info.functions[0].size, Some(4));
+        assert_eq!(info.functions[0].prototype.as_deref(), Some("int f(void)"));
+        assert_eq!(info.functions[0].source.as_deref(), Some("f.c:1"));
+        assert_eq!(info.data[0].address, 0x2000);
+        assert_eq!(info.data[0].ctype.as_deref(), Some("int"));
+        assert_eq!(info.types, vec!["struct s { int x; };"]);
+        assert_eq!(info.notes, vec!["a note"]);
+        // An empty object is an answer that says nothing.
+        assert_eq!(
+            debug_info_of(&serde_json::json!({})).unwrap(),
+            crate::debuginfo::DebugInfo::default()
+        );
+
+        // A row without an address or a name is refused with its place.
+        let error =
+            debug_info_of(&serde_json::json!({ "functions": [ { "name": "f" } ] })).unwrap_err();
+        assert!(error.contains("function 0 names its address"), "{error}");
+        let error =
+            debug_info_of(&serde_json::json!({ "functions": [ { "address": 1 } ] })).unwrap_err();
+        assert!(
+            error.contains("function 0 has a non-empty \"name\""),
+            "{error}"
+        );
+        let error = debug_info_of(
+            &serde_json::json!({ "data": [ { "address": 1, "name": "g", "size": "big" } ] }),
+        )
+        .unwrap_err();
+        assert!(error.contains("data 0's size is a number"), "{error}");
+        let error = debug_info_of(&serde_json::json!({ "types": [ "" ] })).unwrap_err();
+        assert!(
+            error.contains("type 0 is a non-empty string of C"),
+            "{error}"
+        );
+        let error = debug_info_of(&serde_json::json!([1, 2])).unwrap_err();
+        assert!(error.contains("the answer is a JSON object"), "{error}");
     }
 }

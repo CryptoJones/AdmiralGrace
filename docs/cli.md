@@ -712,6 +712,12 @@ ag image ./bin/ls info --project ls.agproj
 # Import a microcontroller's peripheral map: segments, register structs, comments
 ag project ./firmware.elf svd --file fw.agproj STM32F103.svd --preview
 ag project ./firmware.elf svd --file fw.agproj STM32F103.svd GPIOA USART1
+
+# Load an external debug info file: a linker map, a JSON document, a plugin's format
+ag project ./bin/ls save --out ls.agproj --debug-info ls.map
+ag project ./bin/ls debuginfo --file ls.agproj debug.json --format json
+ag project ./bin/ls debuginfo ls.map --preview
+ag project ./bin/ls debuginfo
 ag asm "jmp 0x401010" --at 0x401000
 ag image ./bin/ls cfg 0x1200 --project ls.agproj
 
@@ -733,7 +739,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 
 | Command | What it does |
 |---|---|
-| `ag project TARGET save --out FILE` | Creates a project file for `TARGET`, hashing it; `--option-pair NAME=VALUE` records an option (repeatable). Refuses an existing `FILE` without `--force`. |
+| `ag project TARGET save --out FILE [--debug-info FILE] [--debug-info-format NAME]` | Creates a project file for `TARGET`, hashing it; `--option-pair NAME=VALUE` records an option (repeatable). `--debug-info FILE` loads an external debug info file as the project is made, and `--debug-info-format NAME` names the parser to read it with (see `debuginfo` below). Refuses an existing `FILE` without `--force`. |
 | `ag project TARGET show FILE` | Prints what the project holds; `--json` prints the file itself. |
 | `ag project TARGET rename --file FILE ADDRESS NAME` | Records a name for the function at `ADDRESS`. |
 | `ag project TARGET label --file FILE ADDRESS NAME` | Records a name for the label at `ADDRESS`. The entry label of a function and the function's name are the same record. |
@@ -781,6 +787,7 @@ edit to a project file that does not exist yet creates it from the target. A fil
 | `ag project TARGET segment --file FILE remove NAME` | Takes the segment out of the image, and the functions, data and import slots that lay in it with it. Removing a segment the layout added drops the addition. |
 | `ag project TARGET segment --file FILE rename NAME NEW` | Calls the segment `NEW`. Renaming one the layout added or renamed folds into that edit. |
 | `ag project TARGET svd --file FILE MAP [NAME…] [--preview] [--json]` | Imports a CMSIS SVD peripheral map: for each peripheral — or only the `NAME`s given — a segment for each address block it decodes, a C structure of its registers (`struct GPIOA`: each register a member of its width at its offset, the gaps reserved bytes, a packed `dim` array one C array), a label at its base, and a comment at the base and at each register's address saying what it is, its access and reset value, and its fields with their bits and the values they take. `derivedFrom` inheritance, peripheral and register arrays and clusters are resolved; a peripheral with no base address is skipped with its reason, a register C cannot hold is left out with a note. What the analyst recorded stands: a name or comment in place is kept, a struct defined already and a segment that would overlap the image are held back with a note, so importing the same map twice changes nothing. `--preview` says what the map holds and writes nothing; `--json` reports the preview as JSON. |
+| `ag project TARGET debuginfo [--file FILE] [DEBUG] [--format NAME] [--preview] [--json]` | Loads an external debug info file — a linker map, a JSON document, or a format a plugin's parser reads — and keeps what it says as the analyst's own: the names, prototypes and source comments of its functions, the labels and type comments of its data, and its C types. What the project recorded stands: a name, prototype or comment is filled only where there is none, and a symbol whose address another holds already is left out with a note, so loading the same file twice keeps nothing the second time. Without `--file`, or with `--preview`, it reports what the file holds and writes nothing; `--json` reports as JSON — the interchange document itself, which the `json` parser reads back. Without a `DEBUG` file it lists the parsers. `--format NAME` forces the parser; otherwise the first that recognizes the file reads it, the registered parsers offered before the built-in `map` and `json`. `docs/plugins.md` tells how a parser is added. |
 | `ag project TARGET patch --file FILE ADDRESS BYTES` | Records the hex pairs `BYTES` as a patch at `ADDRESS`; `none` takes the patch off. The file on disk is never changed: `ag image … --project FILE` reads the image with the patches on. |
 | `ag project TARGET color --file FILE ADDRESS COLOR` | Sets a highlight color on the address: a name — `red`, `orange`, `amber`, `yellow`, `green`, `cyan`, `blue`, `purple`, `pink`, `gray` — or `#rrggbb`; `none` clears it. A color on a function's entry is the function's, and the workbench tints the whole function with it. `--on function` or `--on block` puts it on the function entered there or the block of bytes starting there, which the workbench tints as a whole. |
 

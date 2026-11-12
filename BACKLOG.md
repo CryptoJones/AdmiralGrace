@@ -245,7 +245,7 @@ Filed 2026-10-26.
 - [ ] Import Ghidra databases and projects — [#404](https://github.com/CryptoJones/AdmiralGrace/issues/404)
 - [x] Export to a Ghidra .gzf — [#405](https://github.com/CryptoJones/AdmiralGrace/issues/405)
 - [x] Import CMSIS SVD peripheral maps — [#406](https://github.com/CryptoJones/AdmiralGrace/issues/406)
-- [ ] Load an external debug info file, through a pluggable debug info parser API — [#407](https://github.com/CryptoJones/AdmiralGrace/issues/407)
+- [x] Load an external debug info file, through a pluggable debug info parser API — [#407](https://github.com/CryptoJones/AdmiralGrace/issues/407)
 
 ### Architectures
 

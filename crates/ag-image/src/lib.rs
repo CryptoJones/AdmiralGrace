@@ -61,6 +61,7 @@ pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::{Halt, HaltReason, JumpTable};
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::ctype::{self as ctype, CError, TypeText};
+pub use ag_engine::debuginfo;
 pub use ag_engine::defuse::{
     DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
 };
