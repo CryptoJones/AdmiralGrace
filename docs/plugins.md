@@ -6,7 +6,10 @@ into the sections, symbols and entry point everything else works from. An **arch
 decodes the code of a language the engine does not, into the instructions and the flow
 between them that the control-flow walk, the listing and the graph work from. A **tool** is
 an analysis of its own over an open image, run with `ag tool` or called by a language model
-through the MCP server beside the image's own tools.
+through the MCP server beside the image's own tools. A **recognizer** finds the expressions
+that build strings — a stack string written a character at a time, a buffer XORed with a key —
+and decodes them, so the pseudocode shows the clear text as a comment beside the code that
+builds it.
 
 A plugin is written one of two ways: in Rust, against the traits of `ag_engine::plugin` and
 `ag_image::plugin`, by a crate that builds on the engine; or in any language, as a command
@@ -44,6 +47,9 @@ registered, as text or with `--json`.
   ],
   "formatters": [
     { "name": "house-style", "command": ["python3", "/opt/toy/format.py"] }
+  ],
+  "recognizers": [
+    { "name": "xor-strings", "command": ["python3", "/opt/toy/xor.py"], "functions": ["entry_0x1000"] }
   ]
 }
 ```
@@ -58,7 +64,9 @@ and `lift`, which lifts a whole function at once (below).
 A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
 Schema of its arguments (an object). A rewriter needs only its command: every function lifted
 passes through it. A formatter needs only its command too: every function's pseudocode passes
-through it after the engine has printed it. An entry without a `name` is named for the manifest,
+through it after the engine has printed it. A recognizer needs only its command: every function
+lifted passes through it after the rewriters, and it may name the `functions` it runs for as a
+rewriter does. An entry without a `name` is named for the manifest,
 the second and later with their place (`toy-1`); a name declared twice is reported, and the
 later declaration replaces the earlier. Every command is a list: the program and its
 arguments. A bare program name is found on `PATH`, as a shell finds it; a program that names
@@ -67,7 +75,7 @@ relative; the arguments are passed as they are, with `${dir}` in any element sta
 the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
 not answered by then is ended and its answer is an error.
 
-## The five conversations
+## The six conversations
 
 Each command is given its input on standard input and answers on standard output, in one
 go; its standard error is the terminal's. Numbers may be JSON numbers or hex text such as
@@ -262,6 +270,29 @@ under `functions`, and keep the command quick. Control-flow unflattening is the 
 a rewriter is for: find the dispatcher's switch, point each block at the block the state
 variable would have led to next, and remove the dispatcher.
 
+**A recognizer** is given a function's medium-level graph as the rewriters left it — the same
+shape a rewriter is given, read-only — and answers with the strings the function's expressions
+build. It is run for every function lifted, after the rewriters, in the order the recognizers
+were registered — or for the ones its manifest entry names under `functions`, by name or
+address, which spares the process for the rest. The lifter already folds a run of printable
+constant stores into a `__builtin_strcpy` or `__builtin_memcpy`; a recognizer is for what that
+leaves alone — a stack string whose bytes are not printable until they are decoded, a buffer
+XORed with a key, characters gathered a piece at a time. The answer is `{"strings": […]}` — or
+nothing, or `{}`, for a function that builds none — each string its `text` (the decoded
+characters, unescaped) and the `addresses` of the instructions that build it, as numbers or hex
+text:
+
+```json
+{ "strings": [ { "text": "hello", "addresses": ["0x1004", "0x1008", "0x100d"] } ] }
+```
+
+The pseudocode shows each string as a comment at the end of every statement line one of its
+addresses went into — `local_10 = -24;  // string: "hi"` — in every form the engine prints. A
+string without a `text` or without an address is refused, named by its place. A recognizer that
+fails, or answers with something that is not strings, is reported on standard error with its
+name and the function is lifted without its strings: a note is not the analysis, and one
+recognizer's failure does not refuse the lift, as a rewriter's or a formatter's does.
+
 ## In Rust
 
 A crate that builds on the engine implements the traits and registers before an image is
@@ -319,6 +350,15 @@ plugin::register_loader(Arc::new(Toy));
   analyzed again after every rewriter that ran. `Rewrite::statement(node, addresses)` makes a plain statement of an
   expression the rewriter builds. An `Err` refuses the function with the rewriter's name.
   Registered with `register_rewriter`; run for every function lifted, in order.
+- `ag_engine::plugin::Recognizer` — `name`, `wants(address, name)` (every function unless
+  said) and `recognize(&Recognition) -> Vec<DecodedString>`, over a function's medium-level
+  graph as the rewriters left it, read-only: `Recognition` holds the `function`, its `name`,
+  the `entry` and the `nodes`, and offers `to_json`, the shape the command conversation uses.
+  Each `DecodedString` is its `text` and the `addresses` that build it, shown as a comment in
+  the pseudocode. An `Err` is a warning with the recognizer's name, not a refused lift.
+  Registered with `register_recognizer`; `recognizers()` lists them in the order they run and
+  `unregister_recognizer(name)` takes one off; run for every function lifted, after the
+  rewriters, in order.
 
 The registry is one for the process, and a plugin registered under a name already taken
 replaces it. `ag_image::plugin::load_all` reads the manifests of the plugin directories and

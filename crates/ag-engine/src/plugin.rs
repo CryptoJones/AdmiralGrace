@@ -9,7 +9,10 @@
 //! the control-flow walk, the listing and the graph work from. A **tool**
 //! is an analysis of its own over an open image, run from the command line
 //! (`ag tool`) or by a language model through the MCP server; its trait
-//! lives in `ag_image::plugin`, beside the image it reads.
+//! lives in `ag_image::plugin`, beside the image it reads. A **recognizer**
+//! finds the expressions that build strings — a stack string written a
+//! character at a time, a buffer XORed with a key — and decodes them, for
+//! the pseudocode to show beside the lines that build them.
 //!
 //! A plugin is written one of two ways. In Rust, a crate that builds on
 //! the engine implements [`Loader`] or [`Architecture`] and registers it
@@ -557,41 +560,7 @@ impl Rewrite {
     /// The graph as JSON for a rewriter that is a command: the blocks with
     /// their statements as text and their terminators.
     pub fn to_json(&self) -> serde_json::Value {
-        let text = |node: &AstNode| {
-            crate::emit::emit_node(node)
-                .trim_end()
-                .trim_end_matches(';')
-                .to_string()
-        };
-        serde_json::json!({
-            "function": self.function,
-            "function_hex": format!("{:#x}", self.function),
-            "name": self.name,
-            "entry": self.entry,
-            "blocks": self.nodes.iter().enumerate().map(|(id, node)| serde_json::json!({
-                "id": id,
-                "address": node.address,
-                "address_hex": format!("{:#x}", node.address),
-                "statements": node.statements.iter().enumerate().map(|(index, statement)| serde_json::json!({
-                    "index": index,
-                    "text": text(&statement.node),
-                    "addresses": statement.addresses,
-                })).collect::<Vec<_>>(),
-                "terminator": match &node.terminator {
-                    Terminator::Return => serde_json::json!({ "kind": "return" }),
-                    Terminator::Goto { target, .. } => serde_json::json!({ "kind": "goto", "target": target }),
-                    Terminator::Branch { cond, taken, next, .. } => serde_json::json!({
-                        "kind": "branch", "cond": text(cond), "taken": taken, "next": next,
-                    }),
-                    Terminator::Switch { index, cases, .. } => serde_json::json!({
-                        "kind": "switch", "index": text(index),
-                        "cases": cases.iter().map(|(values, target)| serde_json::json!({
-                            "values": values, "target": target,
-                        })).collect::<Vec<_>>(),
-                    }),
-                },
-            })).collect::<Vec<_>>(),
-        })
+        graph_json(self.function, &self.name, self.entry, &self.nodes)
     }
 
     /// Apply a command's edits, in order, each naming blocks and statements
@@ -790,6 +759,47 @@ impl Rewrite {
     }
 }
 
+/// The graph as JSON for a plugin that is a command — a rewriter or a
+/// recognizer: the blocks with their statements as text and their
+/// terminators.
+fn graph_json(function: u64, name: &str, entry: usize, nodes: &[Node]) -> serde_json::Value {
+    let text = |node: &AstNode| {
+        crate::emit::emit_node(node)
+            .trim_end()
+            .trim_end_matches(';')
+            .to_string()
+    };
+    serde_json::json!({
+        "function": function,
+        "function_hex": format!("{function:#x}"),
+        "name": name,
+        "entry": entry,
+        "blocks": nodes.iter().enumerate().map(|(id, node)| serde_json::json!({
+            "id": id,
+            "address": node.address,
+            "address_hex": format!("{:#x}", node.address),
+            "statements": node.statements.iter().enumerate().map(|(index, statement)| serde_json::json!({
+                "index": index,
+                "text": text(&statement.node),
+                "addresses": statement.addresses,
+            })).collect::<Vec<_>>(),
+            "terminator": match &node.terminator {
+                Terminator::Return => serde_json::json!({ "kind": "return" }),
+                Terminator::Goto { target, .. } => serde_json::json!({ "kind": "goto", "target": target }),
+                Terminator::Branch { cond, taken, next, .. } => serde_json::json!({
+                    "kind": "branch", "cond": text(cond), "taken": taken, "next": next,
+                }),
+                Terminator::Switch { index, cases, .. } => serde_json::json!({
+                    "kind": "switch", "index": text(index),
+                    "cases": cases.iter().map(|(values, target)| serde_json::json!({
+                        "values": values, "target": target,
+                    })).collect::<Vec<_>>(),
+                }),
+            },
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// The addresses a terminator came from, kept when it is replaced so the
 /// new one still maps onto the listing.
 fn terminator_addresses(terminator: &Terminator) -> Vec<u64> {
@@ -819,15 +829,7 @@ impl Rewriter for ExternalRewriter {
     }
 
     fn wants(&self, address: u64, name: &str) -> bool {
-        self.functions.is_empty()
-            || self.functions.iter().any(|wanted| {
-                wanted == name
-                    || wanted
-                        .strip_prefix("0x")
-                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-                        .is_some_and(|wanted| wanted == address)
-                    || wanted.parse::<u64>().is_ok_and(|wanted| wanted == address)
-            })
+        wants_function(&self.functions, address, name)
     }
 
     fn rewrite(&self, rewrite: &mut Rewrite) -> Result<(), String> {
@@ -840,6 +842,148 @@ impl Rewriter for ExternalRewriter {
             .map_err(|error| format!("the answer is not JSON: {error}"))?;
         rewrite.apply_edits(&edits)
     }
+}
+
+/// Whether a command that names the functions it runs for wants this one:
+/// every function when it names none, else the ones named by name or by
+/// address, as a number or as hex text.
+fn wants_function(functions: &[String], address: u64, name: &str) -> bool {
+    functions.is_empty()
+        || functions.iter().any(|wanted| {
+            wanted == name
+                || wanted
+                    .strip_prefix("0x")
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                    .is_some_and(|wanted| wanted == address)
+                || wanted.parse::<u64>().is_ok_and(|wanted| wanted == address)
+        })
+}
+
+/// A string a recognizer decoded from the expressions that build it: a
+/// stack string's characters, an XOR loop's clear text. The pseudocode
+/// shows it as a comment at the end of the lines that build it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedString {
+    /// The decoded text, unescaped: the characters themselves, as the
+    /// string literal the pseudocode spells them into.
+    pub text: String,
+    /// The addresses of the instructions that build the string: the note
+    /// is shown at the end of every statement line one of them went into.
+    pub addresses: Vec<u64>,
+}
+
+/// What a recognizer is handed: a function's medium-level graph as the
+/// rewriters left it, read-only — the expressions a string may be built
+/// from.
+#[derive(Debug, Clone, Copy)]
+pub struct Recognition<'a> {
+    /// The function's address.
+    pub function: u64,
+    /// The function's name.
+    pub name: &'a str,
+    /// The index of the node the function is entered at.
+    pub entry: usize,
+    /// The nodes: each with the address that labels it, its statements and
+    /// how it leaves.
+    pub nodes: &'a [Node],
+}
+
+impl Recognition<'_> {
+    /// The graph as JSON for a recognizer that is a command: the same
+    /// shape a rewriter is given ([`Rewrite::to_json`]).
+    pub fn to_json(&self) -> serde_json::Value {
+        graph_json(self.function, self.name, self.entry, self.nodes)
+    }
+}
+
+/// A recognizer finds the expressions that build strings — a stack string
+/// written a character at a time, a buffer XORed with a key — and decodes
+/// them. Every function lifted passes through every registered recognizer
+/// in order, after the rewriters; what one decodes is shown as a comment
+/// at the end of the lines that build it. A recognizer that fails is
+/// reported on standard error with its name, and the function is lifted
+/// without its strings: a note is not the analysis, and one recognizer's
+/// failure does not refuse the lift.
+pub trait Recognizer: Send + Sync {
+    /// The recognizer's name.
+    fn name(&self) -> &str;
+    /// Whether the recognizer wants the function at `address` named `name`;
+    /// every function, unless said. A recognizer that is a command is not
+    /// started for a function it does not want.
+    fn wants(&self, _address: u64, _name: &str) -> bool {
+        true
+    }
+    /// The strings the function's expressions build, or fail with a reason.
+    fn recognize(&self, recognition: &Recognition) -> Result<Vec<DecodedString>, String>;
+}
+
+/// A recognizer that is a command: given the function's medium-level graph
+/// as JSON on its standard input — the same shape a rewriter is given — it
+/// prints the strings it decodes as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRecognizer {
+    pub name: String,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+    /// The functions the command is run for, by name or address; every
+    /// function when empty.
+    pub functions: Vec<String>,
+}
+
+impl Recognizer for ExternalRecognizer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn wants(&self, address: u64, name: &str) -> bool {
+        wants_function(&self.functions, address, name)
+    }
+
+    fn recognize(&self, recognition: &Recognition) -> Result<Vec<DecodedString>, String> {
+        let input =
+            serde_json::to_vec(&recognition.to_json()).map_err(|error| error.to_string())?;
+        let output = run_command(&self.command, &input, self.timeout)?;
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Vec::new());
+        }
+        let answer: serde_json::Value = serde_json::from_slice(&output)
+            .map_err(|error| format!("the answer is not JSON: {error}"))?;
+        strings_of(&answer)
+    }
+}
+
+/// The strings a recognizer's answer holds: `{"strings": [{"text": …,
+/// "addresses": […]}, …]}`, each string's `addresses` the instructions that
+/// build it, as numbers or hex text. An answer without `strings` holds
+/// none; a string without a text or without an address is refused, named
+/// by its place.
+pub fn strings_of(answer: &serde_json::Value) -> Result<Vec<DecodedString>, String> {
+    if !answer.is_object() {
+        return Err("the answer is a JSON object, `{\"strings\": […]}` or `{}`".to_string());
+    }
+    let Some(strings) = answer.get("strings") else {
+        return Ok(Vec::new());
+    };
+    let strings = strings
+        .as_array()
+        .ok_or_else(|| "\"strings\" is a JSON array".to_string())?;
+    let mut decoded = Vec::with_capacity(strings.len());
+    for (index, row) in strings.iter().enumerate() {
+        let text = row
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| format!("string {index} has a non-empty \"text\""))?;
+        let addresses = numbers(row.get("addresses"));
+        if addresses.is_empty() {
+            return Err(format!("string {index} names the addresses that build it"));
+        }
+        decoded.push(DecodedString {
+            text: text.to_string(),
+            addresses,
+        });
+    }
+    Ok(decoded)
 }
 
 /// A formatter changes the pseudocode's lines after they are printed —
@@ -1007,6 +1151,7 @@ struct Registry {
     architectures: Vec<Arc<dyn Architecture>>,
     rewriters: Vec<Arc<dyn Rewriter>>,
     formatters: Vec<Arc<dyn Formatter>>,
+    recognizers: Vec<Arc<dyn Recognizer>>,
 }
 
 fn registry() -> &'static RwLock<Registry> {
@@ -1113,6 +1258,65 @@ pub(crate) fn rewrite_nodes(
     // Analyzed again whenever one ran: a rewriter may edit the nodes
     // directly without marking them changed.
     Ok((rewrite.nodes, ran))
+}
+
+/// Add a recognizer: every function lifted after passes through it, after
+/// the rewriters and the ones registered before. One of the same name is
+/// replaced.
+pub fn register_recognizer(recognizer: Arc<dyn Recognizer>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = recognizer.name().to_string();
+    registry.recognizers.retain(|known| known.name() != name);
+    registry.recognizers.push(recognizer);
+}
+
+/// Take a recognizer off, by name; for a test that registered one.
+pub fn unregister_recognizer(name: &str) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    registry.recognizers.retain(|known| known.name() != name);
+}
+
+/// The recognizers registered, in the order they run.
+pub fn recognizers() -> Vec<Arc<dyn Recognizer>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .recognizers
+        .clone()
+}
+
+/// Run every registered recognizer that wants the function over its
+/// medium-level graph, in order, after the rewriters: the strings they
+/// decoded. A recognizer's failure is reported on standard error with its
+/// name, and the function is lifted without its strings — a note is not
+/// the analysis, and one recognizer's failure does not refuse the lift.
+pub(crate) fn recognize_strings(
+    function: u64,
+    name: &str,
+    entry: usize,
+    nodes: &[Node],
+) -> Vec<DecodedString> {
+    let recognizers = recognizers();
+    if recognizers.is_empty() {
+        return Vec::new();
+    }
+    let recognition = Recognition {
+        function,
+        name,
+        entry,
+        nodes,
+    };
+    let mut decoded = Vec::new();
+    for recognizer in recognizers {
+        if !recognizer.wants(function, name) {
+            continue;
+        }
+        match recognizer.recognize(&recognition) {
+            Ok(strings) => decoded.extend(strings),
+            Err(error) => eprintln!("warning: the recognizer {}: {error}", recognizer.name()),
+        }
+    }
+    decoded
 }
 
 /// The loaders registered, in the order they were.
@@ -1589,7 +1793,7 @@ pub struct ExternalTool {
 }
 
 /// One manifest: a JSON file declaring loaders, architectures, tools,
-/// rewriters and formatters.
+/// rewriters, formatters and recognizers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// Where the manifest was read from.
@@ -1601,6 +1805,7 @@ pub struct Manifest {
     pub tools: Vec<ExternalTool>,
     pub rewriters: Vec<ExternalRewriter>,
     pub formatters: Vec<ExternalFormatter>,
+    pub recognizers: Vec<ExternalRecognizer>,
 }
 
 /// The directories manifests are read from: the ones `AG_PLUGINS` names,
@@ -1857,6 +2062,15 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             timeout: timeout_of(entry)?,
         });
     }
+    let mut recognizers = Vec::new();
+    for (index, entry) in entries("recognizers")?.iter().enumerate() {
+        recognizers.push(ExternalRecognizer {
+            name: entry_name(entry, index),
+            command: command_of(entry, "recognizer")?,
+            timeout: timeout_of(entry)?,
+            functions: strings(entry.get("functions")),
+        });
+    }
     Ok(Manifest {
         path: path.to_path_buf(),
         name,
@@ -1865,6 +2079,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         tools,
         rewriters,
         formatters,
+        recognizers,
     })
 }
 
@@ -1956,6 +2171,18 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                             ));
                         }
                         register_formatter(Arc::new(formatter.clone()));
+                    }
+                    for recognizer in &manifest.recognizers {
+                        if manifests.iter().any(|known| {
+                            known.recognizers.iter().any(|r| r.name == recognizer.name)
+                        }) {
+                            problems.push(format!(
+                                "{}: the recognizer {:?} is declared again, and replaces the first",
+                                path.display(),
+                                recognizer.name
+                            ));
+                        }
+                        register_recognizer(Arc::new(recognizer.clone()));
                     }
                     manifests.push(manifest);
                 }
@@ -2964,5 +3191,278 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("within 1 seconds"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// A recognizer that decodes one fixed string, for the function it wants.
+    struct FixedStrings;
+
+    impl Recognizer for FixedStrings {
+        fn name(&self) -> &str {
+            "fixed-strings-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "wanted"
+        }
+        fn recognize(&self, recognition: &Recognition) -> Result<Vec<DecodedString>, String> {
+            assert_eq!(recognition.function, 0x7000);
+            Ok(vec![DecodedString {
+                text: "hello".to_string(),
+                addresses: vec![0x10],
+            }])
+        }
+    }
+
+    /// A recognizer that fails: its failure is a warning, not the lift's.
+    struct FailingStrings;
+
+    impl Recognizer for FailingStrings {
+        fn name(&self) -> &str {
+            "failing-strings-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "wanted"
+        }
+        fn recognize(&self, _recognition: &Recognition) -> Result<Vec<DecodedString>, String> {
+            Err("no key".to_string())
+        }
+    }
+
+    #[test]
+    fn recognizers_run_for_the_functions_they_want_and_a_failure_is_a_warning() {
+        let rewrite = two_blocks();
+        // A recognizer is handed the same graph a rewriter is.
+        let recognition = Recognition {
+            function: rewrite.function,
+            name: &rewrite.name,
+            entry: rewrite.entry,
+            nodes: &rewrite.nodes,
+        };
+        assert_eq!(recognition.to_json(), rewrite.to_json());
+
+        register_recognizer(Arc::new(FailingStrings));
+        register_recognizer(Arc::new(FixedStrings));
+        assert!(recognizers()
+            .iter()
+            .any(|recognizer| recognizer.name() == "fixed-strings-test"));
+        // The failing one warns and the other's strings come through; a
+        // function neither wants is not recognized at all.
+        let decoded = recognize_strings(0x7000, "wanted", 0, &rewrite.nodes);
+        assert_eq!(
+            decoded,
+            vec![DecodedString {
+                text: "hello".to_string(),
+                addresses: vec![0x10],
+            }]
+        );
+        assert!(recognize_strings(0x7000, "other", 0, &rewrite.nodes).is_empty());
+        // One of the same name is replaced, not run twice.
+        register_recognizer(Arc::new(FixedStrings));
+        assert_eq!(
+            recognize_strings(0x7000, "wanted", 0, &rewrite.nodes).len(),
+            1
+        );
+        unregister_recognizer("fixed-strings-test");
+        unregister_recognizer("failing-strings-test");
+        assert!(recognize_strings(0x7000, "wanted", 0, &rewrite.nodes).is_empty());
+    }
+
+    #[test]
+    fn an_external_recognizer_answers_with_strings_or_nothing_and_a_bad_answer_is_named() {
+        // `sh -c` answers with fixed JSON whatever it is asked: one string,
+        // its addresses as hex text and as a number.
+        let recognizer = ExternalRecognizer {
+            name: "fixed".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                concat!(
+                    "cat >/dev/null; printf '%s' ",
+                    "'{\"strings\":[{\"text\":\"hello\",\"addresses\":[\"0x100\",258]}]}'"
+                )
+                .to_string(),
+            ],
+            timeout: DEFAULT_TIMEOUT,
+            functions: Vec::new(),
+        };
+        let recognition = Recognition {
+            function: 0x100,
+            name: "f",
+            entry: 0,
+            nodes: &[],
+        };
+        assert_eq!(
+            recognizer.recognize(&recognition).unwrap(),
+            vec![DecodedString {
+                text: "hello".to_string(),
+                addresses: vec![0x100, 0x102],
+            }]
+        );
+        // Nothing, or an answer without strings, decodes none.
+        let quiet = ExternalRecognizer {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null".to_string(),
+            ],
+            ..recognizer.clone()
+        };
+        assert!(quiet.recognize(&recognition).unwrap().is_empty());
+        let none = ExternalRecognizer {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null; echo '{}'".to_string(),
+            ],
+            ..recognizer.clone()
+        };
+        assert!(none.recognize(&recognition).unwrap().is_empty());
+        // A bad answer is named: not JSON, not an object, "strings" not an
+        // array, a row without a text or without addresses.
+        for (answer, wanted) in [
+            ("hello", "not JSON"),
+            ("[1]", "JSON object"),
+            ("{\"strings\":\"x\"}", "JSON array"),
+            ("{\"strings\":[{\"addresses\":[1]}]}", "string 0"),
+            (
+                "{\"strings\":[{\"text\":\"x\"}]}",
+                "string 0 names the addresses",
+            ),
+        ] {
+            let bad = ExternalRecognizer {
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("cat >/dev/null; printf '%s' '{answer}'"),
+                ],
+                ..recognizer.clone()
+            };
+            let error = bad.recognize(&recognition).unwrap_err();
+            assert!(error.contains(wanted), "{error}");
+        }
+        // A command that fails, or goes on past its time, is ended.
+        let failing = ExternalRecognizer {
+            command: vec!["sh".to_string(), "-c".to_string(), "exit 2".to_string()],
+            ..recognizer.clone()
+        };
+        assert!(failing
+            .recognize(&recognition)
+            .unwrap_err()
+            .contains("ended with"));
+        let slow = ExternalRecognizer {
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 5".to_string()],
+            timeout: Duration::from_secs(1),
+            ..recognizer.clone()
+        };
+        let started = Instant::now();
+        assert!(slow
+            .recognize(&recognition)
+            .unwrap_err()
+            .contains("within 1 seconds"));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        // The functions it runs for, by name or address; every function
+        // when it names none.
+        assert!(recognizer.wants(0x999, "anything"));
+        let scoped = ExternalRecognizer {
+            functions: vec!["wanted".to_string(), "0x7000".to_string()],
+            ..recognizer
+        };
+        assert!(scoped.wants(0x1, "wanted"));
+        assert!(scoped.wants(0x7000, "other"));
+        assert!(!scoped.wants(0x7001, "other"));
+    }
+
+    #[test]
+    fn strings_of_reads_the_answer_and_names_a_bad_row_by_its_place() {
+        let answer = serde_json::json!({
+            "strings": [
+                { "text": "hi", "addresses": ["0x10", 17] },
+                { "text": "bye", "addresses": [18] },
+            ]
+        });
+        assert_eq!(
+            strings_of(&answer).unwrap(),
+            vec![
+                DecodedString {
+                    text: "hi".to_string(),
+                    addresses: vec![16, 17],
+                },
+                DecodedString {
+                    text: "bye".to_string(),
+                    addresses: vec![18],
+                },
+            ]
+        );
+        assert!(strings_of(&serde_json::json!({})).unwrap().is_empty());
+        assert!(strings_of(&serde_json::json!({ "strings": [] }))
+            .unwrap()
+            .is_empty());
+        let error = strings_of(&serde_json::json!({
+            "strings": [{ "text": "ok", "addresses": [1] }, { "text": "", "addresses": [2] }]
+        }))
+        .unwrap_err();
+        assert!(error.contains("string 1"), "{error}");
+        // Addresses that are not numbers are left out; none left is refused.
+        let error = strings_of(&serde_json::json!({
+            "strings": [{ "text": "x", "addresses": ["nope"] }]
+        }))
+        .unwrap_err();
+        assert!(error.contains("names the addresses"), "{error}");
+    }
+
+    #[test]
+    fn a_manifest_declares_recognizers_and_a_duplicate_is_reported() {
+        let dir = Dir::new("recognizers");
+        std::fs::write(
+            dir.0.join("a.json"),
+            r#"{
+                "name": "ra",
+                "recognizers": [
+                    { "name": "xor", "command": ["sh", "-c", "cat"], "timeout": 7, "functions": ["nowhere"] },
+                    { "command": ["cat"], "functions": ["nowhere"] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = read_manifest(&dir.0.join("a.json")).expect("reads");
+        assert_eq!(manifest.recognizers[0].name, "xor");
+        assert_eq!(manifest.recognizers[0].timeout, Duration::from_secs(7));
+        assert_eq!(
+            manifest.recognizers[0].functions,
+            vec!["nowhere".to_string()]
+        );
+        // An unnamed entry is named for the manifest, the second with its
+        // place; the timeout defaults.
+        assert_eq!(manifest.recognizers[1].name, "ra-1");
+        assert_eq!(manifest.recognizers[1].timeout, DEFAULT_TIMEOUT);
+        // A recognizer without a command is refused, named.
+        std::fs::write(
+            dir.0.join("bad.json"),
+            r#"{ "recognizers": [{ "name": "x" }] }"#,
+        )
+        .unwrap();
+        let error = read_manifest(&dir.0.join("bad.json")).unwrap_err();
+        assert!(error.contains("recognizer"), "{error}");
+        assert!(error.contains("names no command"), "{error}");
+        std::fs::remove_file(dir.0.join("bad.json")).unwrap();
+        // The same name in two manifests: the later replaces the first,
+        // and the clash is reported.
+        std::fs::write(
+            dir.0.join("b.json"),
+            r#"{ "name": "rb", "recognizers": [{ "name": "xor", "command": ["cat"], "functions": ["nowhere"] }] }"#,
+        )
+        .unwrap();
+        let (manifests, problems) = load_manifests(std::slice::from_ref(&dir.0));
+        assert_eq!(manifests.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("the recognizer \"xor\" is declared again"),
+            "{problems:?}"
+        );
+        assert!(recognizers().iter().any(|r| r.name() == "xor"));
+        assert!(recognizers().iter().any(|r| r.name() == "ra-1"));
+        // Scoped to a function no test lifts, and taken off after: the
+        // registry is the whole process's.
+        unregister_recognizer("xor");
+        unregister_recognizer("ra-1");
     }
 }

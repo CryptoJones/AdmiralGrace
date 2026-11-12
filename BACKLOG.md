@@ -220,7 +220,7 @@ Filed 2026-10-26.
 ### Strings and constants
 
 - [x] Strings: UTF-32, big-endian wide strings and code pages — [#390](https://github.com/CryptoJones/AdmiralGrace/issues/390)
-- [ ] String recognizer API for decoding obfuscated strings — [#391](https://github.com/CryptoJones/AdmiralGrace/issues/391)
+- [x] String recognizer API for decoding obfuscated strings — [#391](https://github.com/CryptoJones/AdmiralGrace/issues/391)
 - [ ] Constant renderer API — [#392](https://github.com/CryptoJones/AdmiralGrace/issues/392)
 - [ ] Strings that are not NUL-terminated (Go) — [#393](https://github.com/CryptoJones/AdmiralGrace/issues/393)
 

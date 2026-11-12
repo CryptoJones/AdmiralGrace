@@ -779,6 +779,12 @@ pub struct LiftedFunction {
     /// address: that the callee does not return when the arguments are
     /// such — printed as a comment at the end of the call's line.
     pub call_notes: Vec<CallNote>,
+    /// The strings a plugin's recognizer decoded from the expressions that
+    /// build them — a stack string written a character at a time, a buffer
+    /// XORed with a key — each with the addresses of the instructions that
+    /// build it: printed as a comment at the end of the lines they went
+    /// into. Empty when no recognizer is registered.
+    pub decoded_strings: Vec<crate::plugin::DecodedString>,
     /// The conditions under which the function does not return, over its
     /// parameters: an `if` whose one arm ends in a call that never returns
     /// while the other goes on. For its callers to say of their arguments.
@@ -1018,6 +1024,9 @@ pub fn lift_graph(
         .collect();
     let analysis = structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?;
     let (nodes, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
+    // The plugins' recognizers have the graph the rewriters left, for the
+    // strings its expressions build.
+    let decoded_strings = crate::plugin::recognize_strings(address, name, entry, &nodes);
     let medium_analysis = if rewritten {
         structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?
     } else {
@@ -1039,6 +1048,7 @@ pub fn lift_graph(
         thunk: None,
         notes: Vec::new(),
         call_notes: Vec::new(),
+        decoded_strings,
         noreturn_when: Vec::new(),
         return_reason: None,
     };
@@ -1200,6 +1210,7 @@ fn lift_pass(
             thunk: Some(callee),
             notes: Vec::new(),
             call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -1261,6 +1272,9 @@ fn lift_pass(
     // edit the nodes directly — while the chains keep their own analysis
     // for the lifted and low levels.
     let (nodes, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
+    // The plugins' recognizers have the graph the rewriters left, for the
+    // strings its expressions build.
+    let decoded_strings = crate::plugin::recognize_strings(entry, name, 0, &nodes);
     let medium_analysis = if rewritten {
         let successors: Vec<Vec<usize>> = nodes
             .iter()
@@ -1306,6 +1320,7 @@ fn lift_pass(
     let mut slots = std::mem::take(&mut lifter.slot_facts);
     slots.address_taken = lifter.address_taken.clone();
     let mut function = lifter.finish(name, entry, &chains, body)?;
+    function.decoded_strings = decoded_strings;
     // The analyst's variables in the frame, read over the lift's locals
     // inside them before anything keys on their names.
     function.notes.extend(refused);
@@ -5943,6 +5958,7 @@ impl<'a> Lifter<'a> {
                     callee,
                 })
                 .collect(),
+            decoded_strings: Vec::new(),
             noreturn_when,
             thunk: None,
             return_reason: Some(self.return_reason),
@@ -8937,6 +8953,137 @@ mod tests {
             0x83, 0xc4, 0x20, 0xc3,
         ]);
         assert_eq!(straddle, "not lifted yet: a partial write to local_20");
+    }
+
+    /// A recognizer that reads the byte stores into one stack variable and
+    /// XORs them with 0x80 — an obfuscated stack string, which the lifter's
+    /// own string merge leaves as stores because the bytes are not printable
+    /// until they are decoded.
+    struct XorStackStrings;
+
+    impl crate::plugin::Recognizer for XorStackStrings {
+        fn name(&self) -> &str {
+            "xor-stack-strings-test"
+        }
+        fn wants(&self, _address: u64, name: &str) -> bool {
+            name == "recognizer_fixture"
+        }
+        fn recognize(
+            &self,
+            recognition: &crate::plugin::Recognition,
+        ) -> Result<Vec<crate::plugin::DecodedString>, String> {
+            // The byte stores into each variable, by offset, with the
+            // addresses of the instructions that wrote them.
+            let mut stores: BTreeMap<String, BTreeMap<i64, (u8, Vec<u64>)>> = BTreeMap::new();
+            for node in recognition.nodes {
+                for statement in &node.statements {
+                    let AstNode::Assign { lhs, rhs } = &statement.node else {
+                        continue;
+                    };
+                    let AstNode::Constant { value, width_bytes } = rhs.as_ref() else {
+                        continue;
+                    };
+                    if *width_bytes != 1 {
+                        continue;
+                    }
+                    let (variable, offset) = match lhs.as_ref() {
+                        AstNode::Var { name } => (name.clone(), 0i64),
+                        AstNode::Deref { target } => {
+                            let AstNode::Cast { target, .. } = target.as_ref() else {
+                                continue;
+                            };
+                            let AstNode::Binary {
+                                lhs,
+                                op: BinaryOp::Add,
+                                rhs,
+                            } = target.as_ref()
+                            else {
+                                continue;
+                            };
+                            let AstNode::Constant { value: past, .. } = rhs.as_ref() else {
+                                continue;
+                            };
+                            let AstNode::Cast { target, .. } = lhs.as_ref() else {
+                                continue;
+                            };
+                            let AstNode::AddressOf { target } = target.as_ref() else {
+                                continue;
+                            };
+                            let AstNode::Var { name } = target.as_ref() else {
+                                continue;
+                            };
+                            (name.clone(), *past as i64)
+                        }
+                        _ => continue,
+                    };
+                    let entry = stores
+                        .entry(variable)
+                        .or_default()
+                        .entry(offset)
+                        .or_insert((0, Vec::new()));
+                    entry.0 = (*value & 0xff) as u8;
+                    entry.1.extend(statement.addresses.iter().copied());
+                }
+            }
+            let mut decoded = Vec::new();
+            for bytes in stores.into_values() {
+                let mut text = String::new();
+                let mut addresses = Vec::new();
+                for (byte, ats) in bytes.into_values() {
+                    let clear = byte ^ 0x80;
+                    if clear == 0 {
+                        break;
+                    }
+                    if !(0x20..=0x7e).contains(&clear) {
+                        text.clear();
+                        break;
+                    }
+                    text.push(clear as char);
+                    addresses.extend(ats);
+                }
+                if text.len() >= 2 {
+                    decoded.push(crate::plugin::DecodedString { text, addresses });
+                }
+            }
+            Ok(decoded)
+        }
+    }
+
+    #[test]
+    fn a_recognizer_decodes_an_obfuscated_stack_string_into_a_comment() {
+        // sub rsp, 16; mov byte [rsp], 0xe8; mov byte [rsp+1], 0xe9; mov
+        // byte [rsp+2], 0x80; lea rax, [rsp]; add rsp, 16; ret — "hi\0"
+        // XORed with 0x80, which the lifter's own merge leaves as stores
+        // (the bytes are not printable), and the recognizer reads back.
+        let bytes = [
+            0x48, 0x83, 0xec, 0x10, 0xc6, 0x04, 0x24, 0xe8, 0xc6, 0x44, 0x24, 0x01, 0xe9, 0xc6,
+            0x44, 0x24, 0x02, 0x80, 0x48, 0x8d, 0x04, 0x24, 0x48, 0x83, 0xc4, 0x10, 0xc3,
+        ];
+        crate::plugin::register_recognizer(std::sync::Arc::new(XorStackStrings));
+        let function = lift_block(
+            &decode(&bytes),
+            BASE,
+            "recognizer_fixture",
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        )
+        .expect("the function lifts");
+        crate::plugin::unregister_recognizer("xor-stack-strings-test");
+        // The decoded string rides on the function, naming the stores.
+        assert_eq!(
+            function.decoded_strings.len(),
+            1,
+            "{:?}",
+            function.decoded_strings
+        );
+        assert_eq!(function.decoded_strings[0].text, "hi");
+        assert!(!function.decoded_strings[0].addresses.is_empty());
+        // And the pseudocode shows it as a comment at the end of a line
+        // that builds it; the lifter did not merge the stores into a strcpy.
+        let text = without_reason(&emit_function(&function, &Options::default()));
+        assert!(text.contains("// string: \"hi\""), "{text}");
+        assert!(!text.contains("__builtin_strcpy"), "{text}");
     }
 
     #[test]
