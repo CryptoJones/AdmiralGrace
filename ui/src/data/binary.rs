@@ -11,17 +11,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use ag_image::funcid::SignatureSet;
 use ag_image::{Binary, Options};
 use anyhow::Result;
 
 use crate::data::{
     AnalysisState, ByteLine, DataSymbolEntry, FunctionDetail, FunctionRow, Graph, GraphBlock,
-    HitKind, ListingLine, Problem, Provider, Reference, ReferenceKind, SearchHit, SectionCounts,
-    SegmentEntry, StringEntry,
+    HitKind, LibraryMatch, ListingLine, Problem, Provider, Reference, ReferenceKind, SearchHit,
+    SectionCounts, SegmentEntry, StringEntry,
 };
 use crate::model::{Capabilities, Project, ProjectKind};
+
+/// The library matches of an image, keyed by function entry.
+pub type LibraryIndex = BTreeMap<u64, Vec<LibraryMatch>>;
 
 /// Reads a program image the engine loaded.
 pub struct BinaryProvider {
@@ -36,6 +40,12 @@ pub struct BinaryProvider {
     /// The callers of a function are only known once the whole program has
     /// been read, so they arrive after the project opens.
     indexed: AtomicBool,
+    /// The library signatures each function matched, worked out once.
+    ///
+    /// Hashing every function's body is the whole program's work, so the
+    /// opener does it off the UI thread beside the call graph; a view that
+    /// asks before it lands waits for it rather than racing it.
+    library: Arc<OnceLock<LibraryIndex>>,
 }
 
 impl BinaryProvider {
@@ -97,6 +107,7 @@ impl BinaryProvider {
             project,
             warnings,
             indexed: AtomicBool::new(false),
+            library: Arc::new(OnceLock::new()),
         })
     }
 
@@ -104,6 +115,71 @@ impl BinaryProvider {
     /// thread.
     pub fn binary(&self) -> Arc<Binary> {
         Arc::clone(&self.binary)
+    }
+
+    /// The cache the library matches land in, so the opener can fill it off
+    /// the UI thread: [`BinaryProvider::identify`] against the built-in
+    /// databases, beside the call graph.
+    pub fn library_cache(&self) -> Arc<OnceLock<LibraryIndex>> {
+        Arc::clone(&self.library)
+    }
+
+    /// The library matches, worked out against the built-in databases when
+    /// they are not in yet.
+    fn library_index(&self) -> &LibraryIndex {
+        self.library
+            .get_or_init(|| Self::identify(&self.binary, &SignatureSet::builtin()))
+    }
+
+    /// The library signatures each of the image's functions matches, by
+    /// whole-function hash, in the order the databases are consulted.
+    ///
+    /// Every function is tried, named or not: naming the unnamed is the
+    /// point — a `sub_…` whose body a signature knows is library code the
+    /// analyst can skip. A function runs to where the unwind data says it
+    /// ends, or to the next function, or to the end of its section — the
+    /// same extent the listing reads, and the one `ag funcid` hashes.
+    pub fn identify(binary: &Binary, set: &SignatureSet) -> LibraryIndex {
+        let arch = ag_image::funcid::arch_of_language(binary.language());
+        let mut functions: Vec<&ag_image::Function> = binary.functions().iter().collect();
+        functions.sort_by_key(|function| function.address);
+        functions.dedup_by_key(|function| function.address);
+        let mut out = LibraryIndex::new();
+        for (index, function) in functions.iter().enumerate() {
+            let next = functions.get(index + 1).map(|f| f.address);
+            let mut end = binary.function_end(function.address).unwrap_or(u64::MAX);
+            if let Some(next) = next {
+                end = end.min(next);
+            }
+            if let Some(section) = binary.section_of(function.address) {
+                end = end.min(section.vma.saturating_add(section.size));
+            }
+            let length = end.saturating_sub(function.address) as usize;
+            if length == 0 {
+                continue;
+            }
+            let Some(bytes) = binary.bytes_at(function.address, length) else {
+                continue;
+            };
+            let candidates = set.match_candidates(&arch, &bytes, function.address);
+            if candidates.is_empty() {
+                continue;
+            }
+            out.insert(
+                function.address,
+                candidates
+                    .iter()
+                    .map(|candidate| LibraryMatch {
+                        library: candidate.library.to_string(),
+                        name: candidate.signature.name.clone(),
+                        prototype: candidate.signature.prototype.clone(),
+                        comment: candidate.signature.comment.clone(),
+                        hash: candidate.signature.hash.clone(),
+                    })
+                    .collect(),
+            );
+        }
+        out
     }
 
     /// Whether the calls between the functions have been worked out.
@@ -332,6 +408,17 @@ impl Provider for BinaryProvider {
             mangled: self.binary.mangled_name(address).map(str::to_string),
             summary,
         })
+    }
+
+    fn library_matches(&self, address: u64) -> Vec<LibraryMatch> {
+        self.library_index()
+            .get(&address)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn library_functions(&self) -> BTreeSet<u64> {
+        self.library_index().keys().copied().collect()
     }
 
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>> {
@@ -897,6 +984,7 @@ mod tests {
     use super::*;
     use crate::data::ReferenceKind;
     use crate::model::ProjectKind;
+    use ag_image::funcid::SignatureDb;
     use std::path::PathBuf;
 
     /// The address of `main` in the sample.
@@ -910,6 +998,10 @@ mod tests {
 
     /// The address of the `printf` PLT stub in the sample: a thunk.
     const PRINTF: u64 = 0x1050;
+
+    /// `frame_dummy`: a small CRT stub whose constrained bytes several of
+    /// the built-in libraries share, so they know it under several names.
+    const FRAME_DUMMY: u64 = 0x1140;
 
     /// The sample ELF the engine's own tests read.
     fn sample_path() -> PathBuf {
@@ -932,6 +1024,105 @@ mod tests {
             project.architecture.as_deref(),
             Some("x86:LE:64:default:gcc"),
             "the language id is the project's architecture"
+        );
+    }
+
+    /// The body of one function, the extent the fingerprint reads: to where
+    /// the unwind data says it ends, or the next function, or the section's
+    /// end.
+    fn body(binary: &Binary, address: u64) -> Vec<u8> {
+        let mut entries: Vec<u64> = binary.functions().iter().map(|f| f.address).collect();
+        entries.sort_unstable();
+        let next = entries.iter().find(|&&entry| entry > address).copied();
+        let mut end = binary.function_end(address).unwrap_or(u64::MAX);
+        if let Some(next) = next {
+            end = end.min(next);
+        }
+        if let Some(section) = binary.section_of(address) {
+            end = end.min(section.vma.saturating_add(section.size));
+        }
+        binary
+            .bytes_at(address, end.saturating_sub(address) as usize)
+            .expect("the body is in the file")
+    }
+
+    /// A signature database naming the sample's `main`, under `library`.
+    fn main_signature(binary: &Binary, library: &str, name: &str) -> SignatureDb {
+        let bytes = body(binary, MAIN);
+        let mut db = SignatureDb::new(library, "x86-64");
+        db.signatures.push(ag_image::funcid::Signature {
+            hash: ag_image::funcid::function_hash("x86-64", &bytes, MAIN),
+            length: bytes.len() as u64,
+            name: name.to_string(),
+            prototype: Some("int main(int argc, char **argv)".to_string()),
+            comment: Some("the program entry point".to_string()),
+        });
+        db
+    }
+
+    #[test]
+    fn a_function_whose_body_a_signature_knows_is_a_library_match() {
+        let provider = sample();
+        let binary = provider.binary();
+        let set = SignatureSet::new(vec![main_signature(&binary, "sample", "main")]);
+
+        let index = BinaryProvider::identify(&binary, &set);
+        assert!(index.contains_key(&MAIN), "main's body is known");
+        assert!(!index.contains_key(&SUM_TO), "sum_to's body is not");
+
+        // The cache the opener fills off the UI thread is the one the
+        // provider answers from.
+        provider.library_cache().get_or_init(|| index);
+        let matches = provider.library_matches(MAIN);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].library, "sample");
+        assert_eq!(matches[0].name, "main");
+        assert_eq!(
+            matches[0].prototype.as_deref(),
+            Some("int main(int argc, char **argv)")
+        );
+        assert_eq!(matches[0].hash.len(), 64);
+        assert!(provider.library_functions().contains(&MAIN));
+        assert!(provider.library_matches(SUM_TO).is_empty());
+    }
+
+    #[test]
+    fn several_databases_that_know_one_function_are_all_offered_in_order() {
+        let provider = sample();
+        let binary = provider.binary();
+        let set = SignatureSet::new(vec![
+            main_signature(&binary, "alpha", "main_alpha"),
+            main_signature(&binary, "beta", "main_beta"),
+        ]);
+
+        provider
+            .library_cache()
+            .get_or_init(|| BinaryProvider::identify(&binary, &set));
+        let matches = provider.library_matches(MAIN);
+        let named: Vec<(&str, &str)> = matches
+            .iter()
+            .map(|m| (m.library.as_str(), m.name.as_str()))
+            .collect();
+        assert_eq!(named, [("alpha", "main_alpha"), ("beta", "main_beta")]);
+    }
+
+    #[test]
+    fn the_builtin_databases_know_the_samples_stub_but_not_its_own_code() {
+        let provider = sample();
+        // main is the fixture's own code: no built-in knows it, so it is
+        // not highlighted.
+        assert!(provider.library_matches(MAIN).is_empty());
+        assert!(!provider.library_functions().contains(&MAIN));
+        // frame_dummy is a small CRT stub whose constrained bytes several
+        // libraries share, so the built-ins know it under several names —
+        // the ambiguity the chooser offers, in consultation order.
+        let stub = provider.library_matches(FRAME_DUMMY);
+        assert!(stub.len() >= 2, "several databases know the stub: {stub:?}");
+        assert!(provider.library_functions().contains(&FRAME_DUMMY));
+        let libraries: BTreeSet<&str> = stub.iter().map(|m| m.library.as_str()).collect();
+        assert!(
+            libraries.len() >= 2,
+            "the candidates span libraries: {stub:?}"
         );
     }
 

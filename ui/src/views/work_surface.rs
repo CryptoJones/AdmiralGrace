@@ -145,6 +145,24 @@ fn file_bar(app: &App) -> Element<'_, Message> {
         .map(|(end, start)| format!("size {:#x}", end - start));
     let status = detail.map(|d| d.status.clone()).unwrap_or_default();
 
+    // The function on screen, when a library signature knows it: the bar
+    // names the library so the analyst sees at a glance that this is code
+    // they can skip. The first match is the one applied by default.
+    let library_label = app
+        .work
+        .listing_of
+        .filter(|function| app.library.contains(function))
+        .and_then(|function| {
+            app.provider
+                .library_matches(function)
+                .first()
+                .map(|m| format!("lib · {}", m.library))
+        });
+    let library_pill: Element<'_, Message> = match library_label {
+        Some(label) => pill(label, color::GREEN).into(),
+        None => Text::new("").into(),
+    };
+
     Container::new(
         Row::new()
             .align_y(Alignment::Center)
@@ -165,6 +183,7 @@ fn file_bar(app: &App) -> Element<'_, Message> {
                     .unwrap_or(Text::new("")),
             )
             .push(pill(status.clone(), color::GREEN))
+            .push(library_pill)
             .push(Space::new().width(Length::Fill))
             .push(history_button(
                 "← Back",
@@ -439,6 +458,13 @@ fn listing_row<'a>(
     // The analyst's highlight: the line's own, its block's, or its
     // function's, mixed into the row's surface so the text stays legible.
     let tint = renamed.line_color(line.address, app.block_of(line.address));
+    // A function a library signature knows reads as known code: a faint
+    // wash under every line of it, so the analyst can skip the body. The
+    // analyst's own marks stand over it, as do focus and a register value.
+    let library = app
+        .work
+        .listing_of
+        .is_some_and(|function| app.library.contains(&function));
 
     // The address, then the stack-offset column when the view shows it.
     let mut cells = Row::new().align_y(Alignment::Center).spacing(10).push(
@@ -507,6 +533,7 @@ fn listing_row<'a>(
             (Some(role), _, _) => tinted(color::PANEL, web_tint(role), 0.28),
             (None, true, _) => color::FOCUS_BG,
             (None, false, Some(tint)) => tinted(color::PANEL, tint, 0.28),
+            (None, false, None) if library => tinted(color::PANEL, color::GREEN, 0.10),
             (None, false, None) => color::PANEL,
         };
         container::Style {

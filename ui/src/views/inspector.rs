@@ -1,10 +1,10 @@
 //! The right inspector: contextual details for the shared selection.
 
-use iced::widget::{button, mouse_area, scrollable, Column, Row, Text};
+use iced::widget::{button, container, mouse_area, scrollable, Column, Container, Row, Text};
 use iced::{Alignment, Background, Border, Element, Length};
 
 use crate::app::{App, Message};
-use crate::data::{Reference, ReferenceKind};
+use crate::data::{LibraryMatch, Reference, ReferenceKind};
 use crate::theme::{color, MONO};
 use crate::views::{count_or_indexing, kv, pill, recessed, section_header, subtle};
 
@@ -19,6 +19,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(subtle(selection.describe()));
 
     column = column.push(selection_card(app));
+
+    // A function a library signature knows: what it matched, and a choice
+    // between the signatures when several know it.
+    if let Some(function) = app
+        .work
+        .listing_of
+        .filter(|function| app.library.contains(function))
+    {
+        let matches = app.provider.library_matches(function);
+        if !matches.is_empty() {
+            column = column.push(section_header("Library match"));
+            column = column.push(library_card(app, function, &matches));
+        }
+    }
 
     // The analysis's references, and the ones the analyst recorded that
     // the analysis could not see.
@@ -171,6 +185,88 @@ fn selection_card(app: &App) -> Element<'_, Message> {
     }
 
     recessed(rows.padding(10)).into()
+}
+
+/// What the library signatures know about the function on screen, and the
+/// choice between them: each match a row the analyst can click to apply
+/// its name, prototype and comment. The match the workbench already shows
+/// is marked, so the choice made is visible.
+fn library_card<'a>(app: &'a App, function: u64, matches: &[LibraryMatch]) -> Element<'a, Message> {
+    let fallback = app
+        .work
+        .detail
+        .as_ref()
+        .map(|detail| detail.name.clone())
+        .unwrap_or_default();
+    let shown = app.shown_name(function, &fallback);
+
+    let mut rows = Column::new().spacing(5).width(Length::Fill);
+    rows = rows.push(subtle(if matches.len() == 1 {
+        "Recognised as library code — click to apply its identity.".to_string()
+    } else {
+        format!(
+            "{} signatures know this function — pick the one to apply.",
+            matches.len()
+        )
+    }));
+    for (index, m) in matches.iter().enumerate() {
+        rows = rows.push(library_choice(index, m, m.name == shown));
+    }
+    recessed(rows.padding(10)).into()
+}
+
+/// One signature's row in the library chooser: its library and name, the
+/// prototype and comment it knows, and whether it is the one applied.
+fn library_choice<'a>(index: usize, m: &LibraryMatch, active: bool) -> Element<'a, Message> {
+    let marker = if active { "●" } else { "○" };
+    let marker_color = if active { color::GREEN } else { color::DIM };
+    let name_color = if active { color::GREEN } else { color::TEXT };
+
+    let mut text = Column::new().spacing(2).width(Length::Fill).push(
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(Text::new(marker).size(11).color(marker_color))
+            .push(Text::new(m.library.clone()).size(11).color(color::MUTED))
+            .push(
+                Text::new(m.name.clone())
+                    .size(12)
+                    .color(name_color)
+                    .font(MONO),
+            ),
+    );
+    if let Some(prototype) = &m.prototype {
+        text = text.push(
+            Text::new(prototype.clone())
+                .size(11)
+                .color(color::DIM)
+                .font(MONO),
+        );
+    }
+    if let Some(comment) = &m.comment {
+        text = text.push(Text::new(comment.clone()).size(11).color(color::DIM));
+    }
+
+    let surface = Container::new(text)
+        .padding([5, 7])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if active {
+                color::FOCUS_BG
+            } else {
+                color::CARD
+            })),
+            border: Border {
+                color: if active { color::GREEN } else { color::LINE },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        });
+
+    mouse_area(surface)
+        .on_press(Message::ApplyLibraryMatch(index))
+        .into()
 }
 
 /// Cards of cross references, grouped by kind.

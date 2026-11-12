@@ -73,6 +73,27 @@ impl FunctionRow {
     }
 }
 
+/// One library signature a function matched, as the workbench shows it.
+///
+/// A function whose whole-body fingerprint a signature database knows is
+/// library code — the same code in every program that links it — and the
+/// workbench highlights it so the analyst can skip it. Several databases
+/// can know one function; the matches come in consultation order, the
+/// first the one applied by default and the rest the chooser's to offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryMatch {
+    /// The library the signature came from: `libc`, `libstdc++`.
+    pub library: String,
+    /// The name the match gives the function.
+    pub name: String,
+    /// The C prototype the match knows, when it knows one.
+    pub prototype: Option<String>,
+    /// The comment the match leaves, when it knows one.
+    pub comment: Option<String>,
+    /// The whole-function hash that matched.
+    pub hash: String,
+}
+
 /// Details about a single function, shown in the inspector.
 #[derive(Debug, Clone, Default)]
 pub struct FunctionDetail {
@@ -446,6 +467,23 @@ pub trait Provider: Send + Sync {
 
     /// Details for one function.
     fn function_detail(&self, address: u64) -> Option<FunctionDetail>;
+
+    /// The library signatures the function at `address` matched, in the
+    /// order the databases are consulted: the first is the one applied by
+    /// default, the rest the alternatives a chooser offers. Empty when no
+    /// signature knows the function, and from a provider that does not
+    /// identify library code.
+    fn library_matches(&self, _address: u64) -> Vec<LibraryMatch> {
+        Vec::new()
+    }
+
+    /// The entry addresses of the functions that matched a library
+    /// signature: the ones the navigator and the listing highlight so the
+    /// analyst can skip them. Empty from a provider that does not identify
+    /// library code.
+    fn library_functions(&self) -> BTreeSet<u64> {
+        BTreeSet::new()
+    }
 
     /// Linear disassembly for a function, when available.
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>>;

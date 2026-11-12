@@ -183,6 +183,111 @@ fn apply_writes_what_a_match_knows_and_keeps_the_analysts_words() {
 }
 
 #[test]
+fn several_signatures_for_one_function_are_reported_as_alternatives() {
+    let alpha = stem("alt-alpha").with_extension("agsig");
+    let beta = stem("alt-beta").with_extension("agsig");
+    let binary = fixture("sample.elf");
+    let binary = binary.to_str().unwrap();
+
+    // Two databases that carry the same whole-function hash for main under
+    // different names and library labels: the ambiguity a chooser resolves.
+    for (file, library) in [(&alpha, "alpha"), (&beta, "beta")] {
+        ag(&[
+            "funcid",
+            "create",
+            binary,
+            "-o",
+            file.to_str().unwrap(),
+            "--library",
+            library,
+        ]);
+    }
+    let mut db: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&beta).expect("the beta file"))
+            .expect("the file is JSON");
+    for s in db["signatures"].as_array_mut().unwrap() {
+        if s["name"] == "main" {
+            s["name"] = serde_json::json!("main_beta");
+        }
+    }
+    std::fs::write(&beta, serde_json::to_string_pretty(&db).unwrap()).expect("write beta");
+
+    // Match against both, alpha consulted first: main matches alpha's name,
+    // and beta's is named as an alternative.
+    let json = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        alpha.to_str().unwrap(),
+        "--sig",
+        beta.to_str().unwrap(),
+        "--json",
+    ]);
+    let matches: serde_json::Value = serde_json::from_str(&json).expect("matches are JSON");
+    let main = matches
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["image_name"] == "main")
+        .unwrap_or_else(|| panic!("main matched: {json}"));
+    assert_eq!(main["name"], "main", "the first database wins: {json}");
+    assert_eq!(main["library"], "alpha", "{json}");
+    let alternatives = main["alternatives"].as_array().expect("alternatives");
+    assert!(
+        alternatives
+            .iter()
+            .any(|a| a["name"] == "main_beta" && a["library"] == "beta"),
+        "beta's name is an alternative: {json}"
+    );
+
+    // The text report names the alternative too.
+    let text = ag(&[
+        "funcid",
+        "match",
+        binary,
+        "--no-builtin",
+        "--sig",
+        alpha.to_str().unwrap(),
+        "--sig",
+        beta.to_str().unwrap(),
+    ]);
+    assert!(text.contains("also main_beta (beta)"), "{text}");
+
+    // Apply takes the first candidate, as before.
+    let project = stem("alt-apply").with_extension("agproj");
+    ag(&[
+        "funcid",
+        "apply",
+        binary,
+        "--project",
+        project.to_str().unwrap(),
+        "--no-builtin",
+        "--sig",
+        alpha.to_str().unwrap(),
+        "--sig",
+        beta.to_str().unwrap(),
+    ]);
+    let proj: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&project).expect("the project"))
+            .expect("the project is JSON");
+    let named = proj["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "function" && a["name"] == "main");
+    assert!(
+        named.is_some(),
+        "the first candidate's name is applied: {proj}"
+    );
+
+    let _ = std::fs::remove_file(&alpha);
+    let _ = std::fs::remove_file(&beta);
+    let _ = std::fs::remove_file(&project);
+}
+
+#[test]
 fn the_builtin_databases_are_listed_with_their_counts() {
     let json = ag(&["funcid", "list", "--json"]);
     let rows: serde_json::Value = serde_json::from_str(&json).expect("list is JSON");

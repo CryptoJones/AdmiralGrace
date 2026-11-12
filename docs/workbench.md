@@ -193,6 +193,23 @@ The decoder is x86, and reads the width of the code — 32-bit or 64-bit — fro
 language. An image of another architecture opens with its symbols and its sections, but
 with the listing off, and the Problems panel says why.
 
+## Library code, highlighted
+
+As a program image opens, the workbench hashes every function's body and looks it up in the
+built-in signature databases (libc, libstdc++, libgcc), off the UI thread beside the call
+graph. A function a signature knows is library code — the same code in every program that
+links it — and the workbench marks it so the analyst can skip it and read what is unique:
+the navigator gives it a `lib` pill and a green name, the listing washes its body in a faint
+green beneath the analyst's own highlights, and the file bar names the library it matched.
+
+The inspector's **Library match** card says what the signatures know. When several know the
+function — a CRT stub whose bytes libc, libstdc++ and libgcc share, say — the card is a
+chooser: one row per signature, each naming its library, its name, and the prototype and
+comment it knows. Clicking a row applies that signature's identity as the analyst's
+annotation, overwriting whatever the function carried before; the row already shown is
+marked, and the choice undoes and redoes like any other mark. The fingerprint and the
+signature files are described in `docs/funcid.md`.
+
 ## The lift's levels in the panes
 
 The Listing and Graph tabs show the disassembly, or any level of the lift. **View ▸ Cycle the

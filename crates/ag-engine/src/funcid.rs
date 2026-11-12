@@ -45,9 +45,11 @@
 //! where it came from, and one [`Signature`] a function — the hash, the byte
 //! length, the name, and, when they are known, the C prototype and a comment.
 //! [`SignatureDb`] reads and writes it; [`SignatureSet`] holds several and
-//! answers a hash. The engine ships three built-ins ([`SignatureSet::builtin`]):
-//! libc, libstdc++ and libgcc, generated from the reference builds named in
-//! each file's `source`. `ag funcid create` makes a new one from any image
+//! answers a hash — the first carrier wins, and every carrier is offered as
+//! a [`Candidate`] so a chooser can pick between them. The engine ships
+//! three built-ins ([`SignatureSet::builtin`]): libc, libstdc++ and libgcc,
+//! generated from the reference builds named in each file's `source`.
+//! `ag funcid create` makes a new one from any image
 //! whose functions are named; `ag funcid match` and `ag funcid apply` read
 //! them back onto an image. See `docs/funcid.md`.
 
@@ -287,24 +289,40 @@ impl SignatureDb {
     }
 }
 
+/// One signature a hash names, with the library that carries it. Several
+/// databases can carry the same hash — two builds of one library, a thunk
+/// and its target under different names — and the analyst chooses between
+/// them ([`SignatureSet::candidates`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Candidate<'a> {
+    /// The library the signature came from: `libc`, `libstdc++`.
+    pub library: &'a str,
+    /// The signature itself.
+    pub signature: &'a Signature,
+}
+
 /// Several signature databases, indexed by hash so a match is one lookup. The
 /// first database to carry a hash wins, the way the type libraries answer in
-/// order.
+/// order; every carrier of the hash is kept, so a chooser can offer them all.
 #[derive(Debug, Clone)]
 pub struct SignatureSet {
     /// The databases, in the order they are consulted.
     pub databases: Vec<SignatureDb>,
-    /// Each hash to the database and signature that carry it.
-    by_hash: BTreeMap<String, (usize, usize)>,
+    /// Each hash to every database and signature that carry it, in the
+    /// order the databases are consulted.
+    by_hash: BTreeMap<String, Vec<(usize, usize)>>,
 }
 
 impl SignatureSet {
     /// Index `databases` by hash.
     pub fn new(databases: Vec<SignatureDb>) -> SignatureSet {
-        let mut by_hash = BTreeMap::new();
+        let mut by_hash: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
         for (db, database) in databases.iter().enumerate() {
             for (sig, signature) in database.signatures.iter().enumerate() {
-                by_hash.entry(signature.hash.clone()).or_insert((db, sig));
+                by_hash
+                    .entry(signature.hash.clone())
+                    .or_default()
+                    .push((db, sig));
             }
         }
         SignatureSet { databases, by_hash }
@@ -322,10 +340,32 @@ impl SignatureSet {
         }))
     }
 
-    /// The signature a hash names, when any database carries it.
+    /// The signature a hash names, when any database carries it: the first
+    /// carrier's, the way the type libraries answer in order. Every carrier
+    /// is offered by [`SignatureSet::candidates`].
     pub fn by_hash(&self, hash: &str) -> Option<&Signature> {
-        let &(db, sig) = self.by_hash.get(hash)?;
+        let &(db, sig) = self.by_hash.get(hash)?.first()?;
         self.databases.get(db)?.signatures.get(sig)
+    }
+
+    /// Every signature a hash names, each with its library, in the order the
+    /// databases are consulted. The first is what [`SignatureSet::by_hash`]
+    /// names; the rest are the alternatives a chooser offers. Empty when no
+    /// database carries the hash.
+    pub fn candidates(&self, hash: &str) -> Vec<Candidate<'_>> {
+        let Some(carriers) = self.by_hash.get(hash) else {
+            return Vec::new();
+        };
+        carriers
+            .iter()
+            .filter_map(|&(db, sig)| {
+                let database = self.databases.get(db)?;
+                Some(Candidate {
+                    library: &database.library,
+                    signature: database.signatures.get(sig)?,
+                })
+            })
+            .collect()
     }
 
     /// The signature the function `bytes` under `arch` at `base` matches, by
@@ -333,6 +373,15 @@ impl SignatureSet {
     pub fn match_function(&self, arch: &str, bytes: &[u8], base: u64) -> Option<&Signature> {
         let hash = function_hash(arch, bytes, base);
         self.by_hash(&hash)
+    }
+
+    /// Every signature the function `bytes` under `arch` at `base` matches,
+    /// each with its library, in the order the databases are consulted. The
+    /// first is what [`SignatureSet::match_function`] names. Empty when no
+    /// database knows the function.
+    pub fn match_candidates(&self, arch: &str, bytes: &[u8], base: u64) -> Vec<Candidate<'_>> {
+        let hash = function_hash(arch, bytes, base);
+        self.candidates(&hash)
     }
 
     /// How many signatures the set holds across its databases.
@@ -506,6 +555,57 @@ mod tests {
         assert!(set.match_function("x86-64", &other, 0x100).is_none());
         assert_eq!(set.len(), 1);
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn every_carrier_of_a_hash_is_a_candidate_in_consultation_order() {
+        let bytes = asm("xor eax, eax\nret", 0x100);
+        let hash = function_hash("x86-64", &bytes, 0x100);
+        let signature = |name: &str| Signature {
+            hash: hash.clone(),
+            length: bytes.len() as u64,
+            name: name.to_string(),
+            prototype: None,
+            comment: None,
+        };
+        let mut first = SignatureDb::new("libc", "x86-64");
+        first.signatures.push(signature("zero"));
+        let mut second = SignatureDb::new("aliases", "x86-64");
+        second.signatures.push(signature("nullsub"));
+        // A database that knows other code, consulted between the two, does
+        // not disturb their order.
+        let mut other = SignatureDb::new("libgcc", "x86-64");
+        other.signatures.push(Signature {
+            hash: function_hash("x86-64", &asm("mov eax, 1\nret", 0x100), 0x100),
+            length: 6,
+            name: "one".to_string(),
+            prototype: None,
+            comment: None,
+        });
+        let set = SignatureSet::new(vec![first, other, second]);
+
+        // The first carrier still wins the single-answer lookups.
+        assert_eq!(set.by_hash(&hash).expect("matches").name, "zero");
+        assert_eq!(
+            set.match_function("x86-64", &bytes, 0x100)
+                .expect("matches")
+                .name,
+            "zero"
+        );
+
+        // Every carrier is offered, with its library, in consultation order.
+        let candidates = set.match_candidates("x86-64", &bytes, 0x100);
+        let named: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|c| (c.library, c.signature.name.as_str()))
+            .collect();
+        assert_eq!(named, [("libc", "zero"), ("aliases", "nullsub")]);
+        assert_eq!(set.candidates(&hash), candidates);
+
+        // Code no database knows has no candidates.
+        let unknown = asm("mov eax, 2\nret", 0x100);
+        assert!(set.match_candidates("x86-64", &unknown, 0x100).is_empty());
+        assert!(set.candidates("not a hash").is_empty());
     }
 
     #[test]

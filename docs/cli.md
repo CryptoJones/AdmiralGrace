@@ -693,7 +693,7 @@ ag funcid apply ./program --project program.agproj --sig libc.agsig
 | Command | What it does |
 |---|---|
 | `ag funcid create BINARY -o FILE [--library NAME] [--source TEXT] [--no-types] [--json]` | Fingerprints every named function of an image; a function the type libraries know carries its prototype unless `--no-types`. |
-| `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more. |
+| `ag funcid match BINARY [--sig FILE]… [--no-builtin] [--json]` | Reports the image's functions a signature knows, in address order. The built-ins are read unless `--no-builtin`; `--sig` adds more. When several signatures know one function, the first is the match and the rest are named as alternatives (`also NAME (LIBRARY)`; an `alternatives` array in JSON). |
 | `ag funcid apply BINARY --project PROJECT [--sig FILE]… [--no-builtin] [--json]` | Writes each match's name, prototype and comment into a project, made from the image when not there yet. A rename or type already on a function stands. |
 | `ag funcid list [--json]` | The signature databases the engine ships, with their counts and provenance. |
 

@@ -336,6 +336,10 @@ pub enum Message {
     KunaXrefsReady(u64, Direction, Result<Vec<XrefJson>, String>),
     /// The calls between the functions of a program image have been worked out.
     BinaryIndexReady,
+    /// The analyst picked one of the library signatures that know the selected
+    /// function: its name, prototype and comment become the annotation, the
+    /// choice overwriting whatever the function had before.
+    ApplyLibraryMatch(usize),
 }
 
 /// The kuna CLI a kuna project can be asked, and the answers it has given.
@@ -1067,6 +1071,11 @@ pub struct App {
     /// The changes taken back, most recently taken back last, until a new
     /// change makes them unreachable.
     pub redo: Vec<Change>,
+    /// The entry addresses of the functions that matched a library
+    /// signature: the ones the navigator and the listing highlight so the
+    /// analyst can skip them. Empty until the library index lands beside
+    /// the call graph, and for a project that is not a program image.
+    pub library: BTreeSet<u64>,
 }
 
 /// One change to the analyst's annotations, as undo records it.
@@ -1160,6 +1169,7 @@ impl App {
             annotations_root: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            library: BTreeSet::new(),
         };
 
         let task = if config.corpus.is_some() || config.kuna.is_some() || config.binary.is_some() {
@@ -1251,6 +1261,7 @@ impl App {
         match loaded {
             Ok(provider) => {
                 let binary = provider.binary();
+                let library = provider.library_cache();
                 self.provider = Box::new(provider);
                 self.notice = Some(match &self.layout_failed {
                     Some(reason) => format!(
@@ -1272,6 +1283,14 @@ impl App {
                         let _ = binary.string_users();
                         // And so is the data each function uses.
                         let _ = binary.data_users();
+                        // Library identification hashes every function's body
+                        // and looks it up in the built-in signatures — the
+                        // same whole-program work, done off the UI thread.
+                        let index = BinaryProvider::identify(
+                            &binary,
+                            &ag_image::funcid::SignatureSet::builtin(),
+                        );
+                        let _ = library.set(index);
                     },
                     |_| Message::BinaryIndexReady,
                 );
@@ -1353,6 +1372,10 @@ impl App {
         self.selection = Selection::None;
         self.work = WorkSurface::default();
         self.work.objc_header = self.provider.objc_header();
+        // The library highlight waits for the index: a program image fills
+        // it when the off-thread identification lands (BinaryIndexReady),
+        // and a corpus or sample has no library matches to show.
+        self.library = BTreeSet::new();
         // Annotations belong to the analysis they were made against. Opening
         // a different binary or corpus drops them — a rename of `0x1198`
         // means that address in the other file, not this one — while a
@@ -3195,7 +3218,8 @@ impl App {
             | Message::EditNop
             | Message::EditOpaque
             | Message::EditDeleteType
-            | Message::StackRemoveVariable(_) => true,
+            | Message::StackRemoveVariable(_)
+            | Message::ApplyLibraryMatch(_) => true,
             Message::PromptSubmit => self.prompt.as_ref().is_some_and(|prompt| {
                 matches!(
                     prompt.kind,
@@ -7449,6 +7473,44 @@ impl App {
                 // filled in again.
                 self.provider.mark_references_ready();
                 self.refresh_references();
+                // And the library matches are known: the navigator and the
+                // listing highlight the functions a signature recognises.
+                self.library = self.provider.library_functions();
+            }
+
+            Message::ApplyLibraryMatch(index) => {
+                let Some(function) = self.work.listing_of else {
+                    return Task::none();
+                };
+                let matches = self.provider.library_matches(function);
+                let Some(choice) = matches.get(index) else {
+                    return Task::none();
+                };
+                let key = self.annotation_key(function);
+                // The analysis's own name for the function: a match that
+                // agrees with it needs no rename, as a hand rename does not.
+                let original = self
+                    .provider
+                    .functions()
+                    .into_iter()
+                    .find(|row| row.address == function)
+                    .map(|row| row.name);
+                let name = choice.name.clone();
+                let notice = format!("{key}: {name} ({})", choice.library);
+                {
+                    let annotation = self
+                        .annotations
+                        .annotation_mut(ag_corpus::project::TargetKind::Function, &key);
+                    // An explicit choice overwrites: the analyst is saying
+                    // which signature is right, so its name, type and comment
+                    // replace whatever the function carried before.
+                    annotation.name = (Some(&name) != original.as_ref()).then_some(name);
+                    annotation.prototype = choice.prototype.clone();
+                    annotation.comment = choice.comment.clone();
+                }
+                self.annotations.prune();
+                self.refresh_functions();
+                self.notice = Some(notice);
             }
 
             Message::TogglePin => {
@@ -9056,6 +9118,90 @@ mod tests {
             .map(|reference| reference.label.as_str())
             .collect();
         assert_eq!(callers, expected, "the pane holds the callers");
+    }
+
+    #[test]
+    fn the_library_index_highlights_the_functions_a_signature_knows() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+
+        // The index has not landed, so nothing is highlighted yet.
+        assert!(app.library.is_empty(), "the highlight waits for the index");
+
+        let _ = app.update(Message::BinaryIndexReady);
+
+        // frame_dummy is a CRT stub several built-ins know; main is the
+        // fixture's own code and no signature recognises it.
+        assert!(app.library.contains(&0x1140), "the stub is highlighted");
+        assert!(!app.library.contains(&0x1198), "main is not library code");
+        let matches = app.provider.library_matches(0x1140);
+        assert!(
+            matches.len() >= 2,
+            "several signatures know the stub: {matches:?}"
+        );
+        let libraries: BTreeSet<&str> = matches.iter().map(|m| m.library.as_str()).collect();
+        assert!(
+            libraries.len() >= 2,
+            "the candidates span libraries: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn choosing_a_library_match_names_the_function_and_undo_restores_it() {
+        let config = Config {
+            binary: Some(sample_elf()),
+            ..Config::default()
+        };
+        let mut app = App::boot(config).0;
+        let _ = app.update(Message::FunctionSelected(0x1140));
+        let _ = app.update(Message::BinaryIndexReady);
+
+        let matches = app.provider.library_matches(0x1140);
+        assert!(matches.len() >= 2, "the stub has a choice to make");
+        let first = matches[0].clone();
+        let second = matches[1].clone();
+        let key = app.annotation_key(0x1140);
+
+        // Before any choice the function reads as the analysis named it.
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), "frame_dummy");
+
+        // The first choice applies its name and says so.
+        let _ = app.update(Message::ApplyLibraryMatch(0));
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), first.name);
+        assert_eq!(
+            app.annotations
+                .annotation_for(&key)
+                .and_then(|a| a.name.clone()),
+            Some(first.name.clone()),
+        );
+        let notice = app.notice.clone().expect("a notice");
+        assert!(
+            notice.contains(&first.name) && notice.contains(&first.library),
+            "{notice}"
+        );
+
+        // A second choice overwrites the first: the analyst is picking which
+        // signature is right, not filling a gap.
+        let _ = app.update(Message::ApplyLibraryMatch(1));
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), second.name);
+
+        // Undo takes the choices back in order, to the analysis's own name.
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), first.name);
+        let _ = app.update(Message::EditUndo);
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), "frame_dummy");
+        assert!(app
+            .annotations
+            .annotation_for(&key)
+            .and_then(|a| a.name.clone())
+            .is_none());
+
+        // An index no signature answers to changes nothing.
+        let _ = app.update(Message::ApplyLibraryMatch(99));
+        assert_eq!(app.shown_name(0x1140, "frame_dummy"), "frame_dummy");
     }
 
     #[test]
