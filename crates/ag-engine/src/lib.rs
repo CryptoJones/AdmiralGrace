@@ -46,6 +46,7 @@ pub mod stack_vars;
 pub mod structure;
 pub mod swift;
 pub mod swift_demangle;
+pub mod svd;
 pub mod transpile;
 pub mod typed;
 pub mod typelib;
