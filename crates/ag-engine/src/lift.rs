@@ -263,6 +263,16 @@ pub trait Symbols {
         None
     }
 
+    /// The string of `length` bytes at `address`, when the image holds text
+    /// there: a length-delimited string, the way Go holds one — no NUL to
+    /// end it, the length the code uses saying where it stops. The run is
+    /// clamped to `length` rather than read to a terminator. `None` unless
+    /// the image knows, the bytes are text, and the length is one a string
+    /// may have.
+    fn string_at(&self, _address: u64, _length: u64) -> Option<String> {
+        None
+    }
+
     /// What the callers of the function at `address` do with the value it
     /// leaves in `rax`: one entry per call site the image knows, decided by
     /// [`crate::liveness::result_use_after`] over the caller's code. Empty
@@ -5501,6 +5511,9 @@ impl<'a> Lifter<'a> {
             }
         }
         let callee_name = name;
+        // A string passed with its length — Go's `{ptr, len}` — reads as the
+        // string clamped to that length, though the bytes carry no NUL.
+        clamp_length_strings(&mut args, self.symbols);
         let node = AstNode::Call {
             callee: Box::new(callee),
             args,
@@ -6724,6 +6737,33 @@ fn canonical_key(node: &AstNode) -> (u8, String) {
         | AstNode::AddressOf { target } => canonical_key(target),
         AstNode::Constant { .. } => (2, String::new()),
         _ => (1, String::new()),
+    }
+}
+
+/// A string passed with its length reads as the string clamped to that
+/// length: Go holds a string as a pointer and a length, `{ptr, len}`, with
+/// no NUL to end the text. Where a call passes a constant address and the
+/// next argument is a constant length, and the image holds text at the
+/// address, the address reads as the string of that many bytes — the run
+/// clamped to the length the code uses rather than read to a terminator
+/// that is not there. The length argument stands as it was: it is what the
+/// code passes.
+fn clamp_length_strings(args: &mut [AstNode], symbols: &dyn Symbols) {
+    for index in 0..args.len().saturating_sub(1) {
+        let length = match &args[index + 1] {
+            AstNode::Constant { value, .. } => *value,
+            _ => continue,
+        };
+        let address = match &args[index] {
+            AstNode::Constant { value, .. } if *value >= 0x1000 => *value,
+            _ => continue,
+        };
+        if length == 0 {
+            continue;
+        }
+        if let Some(text) = symbols.string_at(address, length) {
+            args[index] = AstNode::StringLiteral { text };
+        }
     }
 }
 
@@ -8280,6 +8320,87 @@ mod tests {
         assert_eq!(
             c_with_image(&code),
             "void f(void)\n{\n  f(\"%ld\\n\");\n  return;\n}"
+        );
+    }
+
+    /// An image that holds a length-delimited string at `0x4000`: the bytes
+    /// `hello world`, with no NUL to end them, so `pointee` knows nothing of
+    /// it and only a length the code uses can say where the string stops.
+    struct GoImage;
+
+    impl Symbols for GoImage {
+        fn function_name(&self, address: u64) -> Option<String> {
+            (address == 0x3000).then(|| "g".to_string())
+        }
+
+        fn string_at(&self, address: u64, length: u64) -> Option<String> {
+            if address != 0x4000 {
+                return None;
+            }
+            let data = b"hello world";
+            let length = usize::try_from(length).ok()?;
+            if length == 0 || length > data.len() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&data[..length]).into_owned())
+        }
+    }
+
+    /// The C of `bytes` lifted against [`GoImage`] under Go's register ABI,
+    /// the reason comment left out.
+    fn go_c(bytes: &[u8]) -> String {
+        let options = Options::default();
+        match lift_block(&decode(bytes), BASE, "f", Abi::Go, &GoImage, &options) {
+            Ok(function) => without_reason(&emit_function(&function, &options)),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_string_passed_with_its_length_is_clamped_to_that_length() {
+        // lea rax, [rip+0x2ff9] (0x4000); mov ebx, 5; call g; ret. Go passes
+        // the string as {ptr, len} in rax and rbx: the pointer is the data
+        // at 0x4000, which the image holds no NUL-terminated string at, and
+        // the length 5 clamps the run `hello world` to `hello`.
+        let code = [
+            0x48, 0x8d, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xbb, 0x05, 0x00, 0x00, 0x00, 0xe8, 0xef,
+            0x1f, 0x00, 0x00, 0xc3,
+        ];
+        let pseudocode = go_c(&code);
+        assert!(
+            pseudocode.contains("g(\"hello\", 5)"),
+            "the string is clamped to the length the code uses: {pseudocode}"
+        );
+    }
+
+    #[test]
+    fn a_length_delimited_string_reads_the_whole_run_when_the_length_says_so() {
+        // The same pointer with the length 11 reads the whole run.
+        // lea rax, [rip+0x2ff9]; mov ebx, 11; call g; ret.
+        let code = [
+            0x48, 0x8d, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xbb, 0x0b, 0x00, 0x00, 0x00, 0xe8, 0xef,
+            0x1f, 0x00, 0x00, 0xc3,
+        ];
+        let pseudocode = go_c(&code);
+        assert!(
+            pseudocode.contains("g(\"hello world\", 0xb)"),
+            "the length the code uses bounds the string: {pseudocode}"
+        );
+    }
+
+    #[test]
+    fn a_pair_of_constants_that_is_no_string_stays_constants() {
+        // lea rax, [rip+0x2ff9] (0x4000); mov ebx, 99; call g; ret. The
+        // length 99 is beyond the run, so the image holds no string of that
+        // length and the pointer stays the address it is.
+        let code = [
+            0x48, 0x8d, 0x05, 0xf9, 0x2f, 0x00, 0x00, 0xbb, 0x63, 0x00, 0x00, 0x00, 0xe8, 0xef,
+            0x1f, 0x00, 0x00, 0xc3,
+        ];
+        let pseudocode = go_c(&code);
+        assert!(
+            pseudocode.contains("g(0x4000, 0x63)"),
+            "a length that is no string's clamps nothing: {pseudocode}"
         );
     }
 

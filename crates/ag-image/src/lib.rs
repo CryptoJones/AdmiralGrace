@@ -4565,6 +4565,29 @@ impl Symbols for ImageSymbols<'_> {
             .function_name(address)
             .map(|name| Pointee::Function(name.to_string()))
     }
+
+    /// A length-delimited string: the `length` bytes at `address`, read as
+    /// text and clamped to that length, the way Go holds a string — no NUL
+    /// to end it, the length the code uses saying where it stops. The bytes
+    /// must lie in a section that holds no code, all be text, and be there
+    /// in full; a length beyond what the image holds, or beyond a string's
+    /// reach, is no string.
+    fn string_at(&self, address: u64, length: u64) -> Option<String> {
+        /// The longest length-delimited string read: a guard against a
+        /// length that is no string's, not a limit the image imposes.
+        const MAX_LENGTH_STRING: u64 = 0x10000;
+
+        if length == 0 || length > MAX_LENGTH_STRING {
+            return None;
+        }
+        self.0.data_section_of(address)?;
+        let length = usize::try_from(length).ok()?;
+        let bytes = self.0.bytes_at(address, length)?;
+        if bytes.len() != length || !bytes.iter().all(|byte| strings::is_text(*byte)) {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 /// The layout the analyst reads an image under, correcting the loader's:
@@ -5403,6 +5426,33 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/sample.elf");
         Binary::open(&path).expect("the sample ELF loads")
+    }
+
+    #[test]
+    fn a_length_delimited_string_is_the_bytes_clamped_to_the_length() {
+        // The sample's .rodata holds `%ld\n\0` at 0x2004. A length-delimited
+        // read takes the length the code uses, with no NUL needed: four
+        // bytes are `%ld\n`, three are `%ld`.
+        let binary = sample();
+        let symbols = ImageSymbols(&binary);
+        assert_eq!(symbols.string_at(0x2004, 4).as_deref(), Some("%ld\n"));
+        assert_eq!(symbols.string_at(0x2004, 3).as_deref(), Some("%ld"));
+    }
+
+    #[test]
+    fn a_length_delimited_read_refuses_what_is_no_string() {
+        let binary = sample();
+        let symbols = ImageSymbols(&binary);
+        // The NUL that ends the C string is not text: a length that reaches
+        // it is no length-delimited string.
+        assert_eq!(symbols.string_at(0x2004, 5), None);
+        // Bytes that are not text are no string.
+        assert_eq!(symbols.string_at(0x2000, 4), None);
+        // A zero length, and one beyond what the section holds, are none.
+        assert_eq!(symbols.string_at(0x2004, 0), None);
+        assert_eq!(symbols.string_at(0x2004, 100), None);
+        // An address in code is no string's home.
+        assert_eq!(symbols.string_at(0x1000, 4), None);
     }
 
     #[test]
