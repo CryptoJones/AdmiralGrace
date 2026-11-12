@@ -12,6 +12,7 @@ pub mod cxx;
 pub mod dead;
 pub mod defuse;
 pub mod demangle;
+pub mod diff;
 pub mod emit;
 pub mod emulate;
 pub mod fragments;
@@ -60,6 +61,7 @@ pub use cfg::{
     TailCall,
 };
 pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
+pub use diff::{diff, DiffOptions, DiffReport, FunctionFacts, FunctionMatch, FunctionRef, MatchKind};
 pub use emit::{Line, Pseudocode};
 pub use frame::{FrameRow, Region, StackFrame};
 pub use funcid::{function_hash, Candidate, Signature, SignatureDb, SignatureSet};

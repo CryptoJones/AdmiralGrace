@@ -485,6 +485,13 @@ pub trait Provider: Send + Sync {
         BTreeSet::new()
     }
 
+    /// The whole-function facts a version comparison matches on: every
+    /// function's hash, size and shape. Empty from a provider that is not
+    /// a program image.
+    fn diff_facts(&self) -> Vec<ag_image::diff::FunctionFacts> {
+        Vec::new()
+    }
+
     /// Linear disassembly for a function, when available.
     fn listing(&self, address: u64) -> Option<Vec<ListingLine>>;
 

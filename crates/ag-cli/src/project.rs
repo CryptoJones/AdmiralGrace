@@ -2190,17 +2190,7 @@ fn port_inputs(
     let mut dest = crate::port::held_of_project(&project);
     // The variables the destination's image declares at each matched
     // function: a port holds back a signature for one it does not.
-    for fun in dest_image.functions() {
-        let key = format!("{:#x}", fun.address);
-        if let Ok(declared) = dest_image.variables(fun.address) {
-            for variable in declared {
-                dest.declared
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(variable.name);
-            }
-        }
-    }
+    dest.declared = crate::port::declared_of(&dest_image);
     let _ = &mut project;
     Ok((source, source_image, dest, dest_image_held))
 }
