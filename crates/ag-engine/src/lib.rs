@@ -40,6 +40,7 @@ pub mod propagate;
 pub mod properties;
 pub mod pvs;
 pub mod register;
+pub mod riscv;
 pub mod slice;
 pub mod smart_struct;
 pub mod stack_offsets;

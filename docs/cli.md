@@ -88,7 +88,7 @@ corpus-format` describes both layouts.
 own loader rather than read out of a corpus — or raw bytes, with `--raw ARCH --base ADDRESS`
 before the subcommand: firmware, shellcode, a dump, a file with no container to say where
 it loads. `ARCH` is `x86-64`, `x86`, `arm`, `thumb` (Cortex-M: Thumb throughout, under the ARMv7
-specification) or `aarch64`; the base cannot be 0, where nothing is mapped;
+specification), `aarch64`, `riscv64` or `riscv32`; the base cannot be 0, where nothing is mapped;
 `--entry`, `--offset` into the file and `--length` apply when they are not the start and the
 rest of the file. The bytes are one section of code, and the entry, when named, is a
 function. `ag project TARGET --raw … save` records the same in the project file, and every
@@ -279,12 +279,17 @@ the function it calls, when that function has one.
 little-endian ARM: 32-bit (`ARM:LE:32:...`) in both its instruction sets, ARM and Thumb — the
 mode of each address comes from the image's symbols (a Thumb function's symbol has its low
 bit set), from the analyst's `mode` marks in a project file, and from the instructions
-themselves — AArch64 (`AARCH64:LE:64:...`), which has one instruction set, and 32-bit MIPS of
-either byte order (`MIPS:LE:32:default`, `MIPS:BE:32:default`); so it refuses an image of
-another architecture rather than printing nonsense. AArch64 is lifted to pseudocode: the
-arguments come in `x0`–`x7` and the result goes out in `x0`, as AAPCS64 says, and a function
-with an instruction the lift does not read is refused by name. ARM and MIPS are decoded,
-walked and listed; they are not lifted to pseudocode yet.
+themselves — AArch64 (`AARCH64:LE:64:...`), which has one instruction set, 32-bit MIPS of
+either byte order (`MIPS:LE:32:default`, `MIPS:BE:32:default`), and little-endian RISC-V of
+either width (`RISCV:LE:32:...`, `RISCV:LE:64:...`); so it refuses an image of another
+architecture rather than printing nonsense. AArch64 is lifted to pseudocode: the arguments
+come in `x0`–`x7` and the result goes out in `x0`, as AAPCS64 says, and a function with an
+instruction the lift does not read is refused by name. RISC-V is lifted too: the arguments
+come in `a0`–`a7` and the result goes out in `a0`, and the compressed extension's two-byte
+instructions are read as readily as the four-byte ones; the bit-manipulation extension
+disassembles — `clz`, `cpop`, `andn` and the rest — but its p-code is unimplemented in the
+specification, so a function that holds one is refused by name rather than mis-lifted. ARM
+and MIPS are decoded, walked and listed; they are not lifted to pseudocode yet.
 
 A MIPS branch has a delay slot — the instruction after it runs before the branch goes
 anywhere — so the branch's block ends after its slot, and the fall-through, a call's return
@@ -537,7 +542,8 @@ bindiff old.BinExport new.BinExport
 wants BinDiff's matching, or its interface.) The file holds:
 
 - the *meta*: the executable's file name, its SHA-256, the architecture as BinExport names
-  it (`x86-64`, `x86-32`, `ARM-32`, `ARM-64`, `MIPS-32`) and the time it was written;
+  it (`x86-64`, `x86-32`, `ARM-32`, `ARM-64`, `MIPS-32`, `RISCV-32`, `RISCV-64`) and the time
+  it was written;
 - the *call graph*: one vertex a function, in address order, and one edge a call site. A
   function with a real name carries it — the mangled name, and the demangled one beside it
   when they differ — and one the analysis named itself (`sub_…`) carries none, which is how

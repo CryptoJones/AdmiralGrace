@@ -760,8 +760,12 @@ and from the analyst:
 
 AArch64 is lifted to pseudocode — the arguments come in `x0`–`x7` and the result goes out in
 `x0`, as AAPCS64 says — and a function with an instruction the lift does not read is refused
-by name. ARM and MIPS are decoded, walked and listed; they are not lifted to pseudocode yet,
-and the assembler and the no-op fill are x86's. The ARM decode reads each section once from its start, so a `blx` that
+by name. So is RISC-V, of either width: the arguments come in `a0`–`a7` and the result goes
+out in `a0`, and the compressed extension's two-byte instructions are read as readily as the
+four-byte ones. The bit-manipulation extension disassembles — `clz`, `cpop`, `andn` and the
+rest are listed — but its p-code is unimplemented in the specification, so a function that
+holds one is refused by name rather than mis-lifted. ARM and MIPS are decoded, walked and
+listed; they are not lifted to pseudocode yet, and the assembler and the no-op fill are x86's. The ARM decode reads each section once from its start, so a `blx` that
 reaches backwards, or into another section, does not switch what was already read; the
 prompt offers the mode the marks and symbols give an address, not one a `blx` set; a `tbb`/
 `tbh` table branch is an indirect branch whose table is not read yet, so the cases after it
@@ -811,7 +815,7 @@ A file with no container — firmware, shellcode, a dump — is opened as raw by
 
 - **Open raw bytes…** (File menu) takes `PATH ARCH BASE`, with `entry=ADDRESS`, `offset=N` and
   `length=N` after when they apply: `firmware.bin thumb 0x8000000 entry=0x8000101`. `ARCH` is
-  `x86-64`, `x86`, `arm`, `thumb` or `aarch64`. The bytes are one section of code at the base,
+  `x86-64`, `x86`, `arm`, `thumb`, `aarch64`, `riscv64` or `riscv32`. The bytes are one section of code at the base,
   the entry a function; the project file remembers how the bytes load, so opening the project
   opens them the same way.
 

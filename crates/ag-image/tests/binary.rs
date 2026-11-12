@@ -1783,6 +1783,67 @@ fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
 }
 
 #[test]
+fn a_riscv_image_decodes_and_lifts_at_each_width() {
+    for (file, prefix, add_mnemonic) in [
+        ("riscv32.elf", "RISCV:LE:32", "c.add"),
+        ("riscv64.elf", "RISCV:LE:64", "c.addw"),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
+        let binary = Binary::open(&path).expect("the RISC-V fixture loads");
+        assert!(binary.language().starts_with(prefix), "{}", binary.language());
+        assert!(binary.supports_disassembly(), "{file}");
+        assert!(binary.supports_pseudocode(), "{file}");
+
+        let address_of = |name: &str| {
+            binary
+                .functions()
+                .iter()
+                .find(|function| function.name == name)
+                .unwrap_or_else(|| panic!("{file}: {name} is a function"))
+                .address
+        };
+
+        // The leaf decodes to a compressed add and a return.
+        let add = binary.disassembly(address_of("add")).expect("add is decoded");
+        let lines: Vec<&Instruction> = add
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .collect();
+        assert_eq!(lines[0].mnemonic, add_mnemonic, "{file}");
+        assert_eq!(lines[1].mnemonic, "ret", "{file}");
+
+        // The loop decodes with its call, and lifts to a loop with the call.
+        let sum = binary.disassembly(address_of("sum")).expect("sum is decoded");
+        assert!(sum.blocks.len() > 1, "{file}: sum loops");
+        assert!(sum
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|line| line.mnemonic.ends_with("jal") && line.call.is_some()), "{file}");
+        let add = binary.pseudocode(address_of("add")).expect("add is lifted");
+        assert!(add.text().contains("int add("), "{file}: {}", add.text());
+        let sum = binary.pseudocode(address_of("sum")).expect("sum is lifted");
+        let text = sum.text();
+        // The call resolves to its symbol: the image names the functions.
+        assert!(text.contains("add("), "{file}: {text}");
+        assert!(text.contains("while") || text.contains("do"), "{file}: {text}");
+
+        // The bit-manipulation function disassembles, but the specification
+        // leaves its p-code unimplemented, so the lift refuses it.
+        let bits = binary.disassembly(address_of("bits")).expect("bits is decoded");
+        let mnemonics: Vec<&str> = bits
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|line| line.mnemonic.as_str())
+            .collect();
+        assert!(mnemonics.contains(&"andn"), "{file}: {mnemonics:?}");
+        assert!(binary.pseudocode(address_of("bits")).is_err(), "{file}: bits is refused");
+    }
+}
+
+#[test]
 fn raw_bytes_are_read_as_a_program_with_the_entry_for_a_function() {
     use ag_image::{raw_language, Layout, RawSpec};
 
