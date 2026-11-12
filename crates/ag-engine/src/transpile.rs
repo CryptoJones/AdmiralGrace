@@ -952,6 +952,7 @@ mod tests {
                 notes: Vec::new(),
                 call_notes: Vec::new(),
                 decoded_strings: Vec::new(),
+                rendered_constants: Vec::new(),
                 noreturn_when: Vec::new(),
                 return_reason: None,
             },

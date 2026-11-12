@@ -785,6 +785,11 @@ pub struct LiftedFunction {
     /// build it: printed as a comment at the end of the lines they went
     /// into. Empty when no recognizer is registered.
     pub decoded_strings: Vec<crate::plugin::DecodedString>,
+    /// The names a plugin's renderer gives the constants the function's
+    /// expressions use — an error code, a flag, a magic number — each for
+    /// a value and, when it says, one width: printed in the constants'
+    /// place. Empty when no renderer is registered.
+    pub rendered_constants: Vec<crate::plugin::RenderedConstant>,
     /// The conditions under which the function does not return, over its
     /// parameters: an `if` whose one arm ends in a call that never returns
     /// while the other goes on. For its callers to say of their arguments.
@@ -1025,8 +1030,10 @@ pub fn lift_graph(
     let analysis = structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?;
     let (nodes, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
     // The plugins' recognizers have the graph the rewriters left, for the
-    // strings its expressions build.
+    // strings its expressions build; the renderers, for the names of its
+    // constants.
     let decoded_strings = crate::plugin::recognize_strings(address, name, entry, &nodes);
+    let rendered_constants = crate::plugin::render_constants(address, name, &nodes);
     let medium_analysis = if rewritten {
         structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?
     } else {
@@ -1049,6 +1056,7 @@ pub fn lift_graph(
         notes: Vec::new(),
         call_notes: Vec::new(),
         decoded_strings,
+        rendered_constants,
         noreturn_when: Vec::new(),
         return_reason: None,
     };
@@ -1211,6 +1219,7 @@ fn lift_pass(
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -1273,8 +1282,10 @@ fn lift_pass(
     // for the lifted and low levels.
     let (nodes, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
     // The plugins' recognizers have the graph the rewriters left, for the
-    // strings its expressions build.
+    // strings its expressions build; the renderers, for the names of its
+    // constants.
     let decoded_strings = crate::plugin::recognize_strings(entry, name, 0, &nodes);
+    let rendered_constants = crate::plugin::render_constants(entry, name, &nodes);
     let medium_analysis = if rewritten {
         let successors: Vec<Vec<usize>> = nodes
             .iter()
@@ -1321,6 +1332,7 @@ fn lift_pass(
     slots.address_taken = lifter.address_taken.clone();
     let mut function = lifter.finish(name, entry, &chains, body)?;
     function.decoded_strings = decoded_strings;
+    function.rendered_constants = rendered_constants;
     // The analyst's variables in the frame, read over the lift's locals
     // inside them before anything keys on their names.
     function.notes.extend(refused);
@@ -5959,6 +5971,7 @@ impl<'a> Lifter<'a> {
                 })
                 .collect(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when,
             thunk: None,
             return_reason: Some(self.return_reason),
@@ -9084,6 +9097,78 @@ mod tests {
         let text = without_reason(&emit_function(&function, &Options::default()));
         assert!(text.contains("// string: \"hi\""), "{text}");
         assert!(!text.contains("__builtin_strcpy"), "{text}");
+    }
+
+    /// A renderer that names one HRESULT, at the width it is used at.
+    struct HresultNames;
+
+    impl crate::plugin::ConstantRenderer for HresultNames {
+        fn name(&self) -> &str {
+            "hresults-test"
+        }
+        fn render(
+            &self,
+            rendering: &crate::plugin::Rendering,
+        ) -> Result<Vec<crate::plugin::RenderedConstant>, String> {
+            Ok(rendering
+                .constants
+                .iter()
+                .filter(|constant| constant.value == 0xc000_0005)
+                .map(|constant| crate::plugin::RenderedConstant {
+                    value: constant.value,
+                    width_bytes: Some(constant.width_bytes),
+                    text: "STATUS_ACCESS_VIOLATION".to_string(),
+                })
+                .collect())
+        }
+    }
+
+    /// A renderer that fails: its failure is a warning, not the lift's.
+    struct FailingNames;
+
+    impl crate::plugin::ConstantRenderer for FailingNames {
+        fn name(&self) -> &str {
+            "failing-names-test"
+        }
+        fn render(
+            &self,
+            _rendering: &crate::plugin::Rendering,
+        ) -> Result<Vec<crate::plugin::RenderedConstant>, String> {
+            Err("no table".to_string())
+        }
+    }
+
+    #[test]
+    fn a_renderer_names_a_constant_in_the_pseudocode_and_a_failure_is_a_warning() {
+        // mov eax, 0xc0000005; ret — an HRESULT the renderer names in the
+        // constant's place; a failing renderer beside it warns and does
+        // not refuse the lift.
+        let bytes = [0xb8, 0x05, 0x00, 0x00, 0xc0, 0xc3];
+        crate::plugin::register_renderer(std::sync::Arc::new(FailingNames));
+        crate::plugin::register_renderer(std::sync::Arc::new(HresultNames));
+        let function = lift_block(
+            &decode(&bytes),
+            BASE,
+            "renderer_fixture",
+            Abi::SystemV,
+            &names,
+            &Options::default(),
+        )
+        .expect("the function lifts");
+        crate::plugin::unregister_renderer("hresults-test");
+        crate::plugin::unregister_renderer("failing-names-test");
+        // The name rides on the function, for the value and its width.
+        assert_eq!(
+            function.rendered_constants,
+            vec![crate::plugin::RenderedConstant {
+                value: 0xc000_0005,
+                width_bytes: Some(4),
+                text: "STATUS_ACCESS_VIOLATION".to_string(),
+            }]
+        );
+        // And the pseudocode shows it where the constant would be printed.
+        let text = without_reason(&emit_function(&function, &Options::default()));
+        assert!(text.contains("return STATUS_ACCESS_VIOLATION;"), "{text}");
     }
 
     #[test]

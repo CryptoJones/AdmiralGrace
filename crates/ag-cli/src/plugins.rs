@@ -19,8 +19,9 @@ pub fn remember(manifests: Vec<Manifest>) {
     *remembered().lock().unwrap_or_else(PoisonError::into_inner) = manifests;
 }
 
-/// List the plugins: every loader, architecture, tool, rewriter, formatter
-/// and recognizer registered, and the manifests they were read from.
+/// List the plugins: every loader, architecture, tool, rewriter, formatter,
+/// recognizer and renderer registered, and the manifests they were read
+/// from.
 pub fn list(json: bool) -> Result<i32> {
     let manifests = remembered()
         .lock()
@@ -56,6 +57,10 @@ pub fn list(json: bool) -> Result<i32> {
         .iter()
         .map(|recognizer| recognizer.name().to_string())
         .collect();
+    let renderers: Vec<String> = ag_image::plugin::renderers()
+        .iter()
+        .map(|renderer| renderer.name().to_string())
+        .collect();
     if json {
         let report = json!({
             "directories": ag_image::plugin::manifest_dirs(),
@@ -68,6 +73,7 @@ pub fn list(json: bool) -> Result<i32> {
                 "rewriters": manifest.rewriters.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
                 "formatters": manifest.formatters.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
                 "recognizers": manifest.recognizers.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                "renderers": manifest.renderers.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
             })).collect::<Vec<Value>>(),
             "loaders": loaders,
             "architectures": architectures,
@@ -75,6 +81,7 @@ pub fn list(json: bool) -> Result<i32> {
             "rewriters": rewriters,
             "formatters": formatters,
             "recognizers": recognizers,
+            "renderers": renderers,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
@@ -134,6 +141,7 @@ pub fn list(json: bool) -> Result<i32> {
     listed("rewriters", rewriters);
     listed("formatters", formatters);
     listed("recognizers", recognizers);
+    listed("renderers", renderers);
     Ok(0)
 }
 

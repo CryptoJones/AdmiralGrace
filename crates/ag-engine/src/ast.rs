@@ -205,6 +205,83 @@ impl AstNode {
         }
     }
 
+    /// The constants the expression uses, each as its value and its width
+    /// in bytes, into `out`: what a renderer is offered to name.
+    pub fn constants(&self, out: &mut std::collections::BTreeSet<(u64, u32)>) {
+        match self {
+            Self::Constant { value, width_bytes } => {
+                out.insert((*value, *width_bytes));
+            }
+            Self::Binary { lhs, rhs, .. } | Self::Assign { lhs, rhs } => {
+                lhs.constants(out);
+                rhs.constants(out);
+            }
+            Self::Deref { target } | Self::AddressOf { target } | Self::Cast { target, .. } => {
+                target.constants(out);
+            }
+            Self::Call { callee, args } => {
+                callee.constants(out);
+                for arg in args {
+                    arg.constants(out);
+                }
+            }
+            Self::Intrinsic { args, .. } => {
+                for arg in args {
+                    arg.constants(out);
+                }
+            }
+            Self::StructInit { fields } => {
+                for field in fields {
+                    field.value.constants(out);
+                }
+            }
+            Self::Return { value } => {
+                if let Some(value) = value {
+                    value.constants(out);
+                }
+            }
+            Self::If {
+                cond,
+                then_part,
+                else_part,
+                ..
+            } => {
+                cond.constants(out);
+                then_part.constants(out);
+                if let Some(otherwise) = else_part {
+                    otherwise.constants(out);
+                }
+            }
+            Self::IfGoto { cond, .. } => cond.constants(out),
+            Self::Loop { cond, body, .. } => {
+                if let Some(cond) = cond {
+                    cond.constants(out);
+                }
+                body.constants(out);
+            }
+            Self::ConstantCondition { compared, .. } => compared.constants(out),
+            Self::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => {
+                cond.constants(out);
+                then.constants(out);
+                otherwise.constants(out);
+            }
+            Self::Label { .. }
+            | Self::Goto { .. }
+            | Self::Register { .. }
+            | Self::Var { .. }
+            | Self::FunctionName { .. }
+            | Self::StringLiteral { .. }
+            | Self::ConditionTrue
+            | Self::ConditionFalse
+            | Self::Break
+            | Self::Continue => {}
+        }
+    }
+
     /// Whether `name` is a variable the expression reads.
     pub fn reads_var(&self, name: &str) -> bool {
         match self {

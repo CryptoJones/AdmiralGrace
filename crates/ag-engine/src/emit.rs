@@ -110,6 +110,9 @@ struct Style {
     /// The strings a recognizer decoded, for the end of the lines that
     /// build them: `string: "hello"`.
     decoded_strings: Vec<crate::plugin::DecodedString>,
+    /// The names a renderer gives the constants, by value and width
+    /// (`None` for every width): the text shown in the constant's place.
+    rendered: BTreeMap<(u64, Option<u32>), String>,
     /// The possible values of what each statement reads, `a: 0..=9`, by
     /// its index in the walk, for the end of its line, when the
     /// pseudocode is printed with them.
@@ -130,8 +133,23 @@ impl Style {
             hints: BTreeMap::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered: BTreeMap::new(),
             values: BTreeMap::new(),
         }
+    }
+
+    /// A constant as it is printed: a renderer's name for it when one is
+    /// registered — a name for its width before a name for every width —
+    /// and the style's spelling otherwise.
+    fn constant(&self, value: u64, width_bytes: u32) -> String {
+        if let Some(text) = self
+            .rendered
+            .get(&(value, Some(width_bytes)))
+            .or_else(|| self.rendered.get(&(value, None)))
+        {
+            return text.clone();
+        }
+        constant_text(value, width_bytes, self.constants)
     }
 
     /// What ends a statement.
@@ -376,6 +394,11 @@ fn emit_marked(
     }
     style.call_notes = function.call_notes.clone();
     style.decoded_strings = function.decoded_strings.clone();
+    style.rendered = function
+        .rendered_constants
+        .iter()
+        .map(|named| ((named.value, named.width_bytes), named.text.clone()))
+        .collect();
     if let Some(words) = words {
         style.values = crate::pvs::possible_values(function, words)
             .into_iter()
@@ -1146,7 +1169,7 @@ fn emit_statements(
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
-                        for value in arm.spelled() {
+                        for value in case_labels(arm, style) {
                             lines.push(Line {
                                 text: format!("{pad}case {value}:"),
                                 addresses: Vec::new(),
@@ -1166,7 +1189,7 @@ fn emit_statements(
                         addresses: statement.addresses.clone(),
                     });
                     for arm in arms {
-                        let values: Vec<String> = arm.spelled();
+                        let values = case_labels(arm, style);
                         let inner = without_trailing_break(&arm.body);
                         if inner.is_empty() {
                             lines.push(Line {
@@ -1201,7 +1224,7 @@ fn emit_statements(
                 Language::Python => {
                     let index = expression(&statement.node, style);
                     for (which, arm) in arms.iter().enumerate() {
-                        let test = match arm.spelled().as_slice() {
+                        let test = match case_labels(arm, style).as_slice() {
                             [value] => format!("{index} == {value}"),
                             values => format!("{index} in ({})", values.join(", ")),
                         };
@@ -1580,7 +1603,7 @@ fn expr(n: &AstNode, out: &mut String, nested: bool, style: &Style) {
         }
         AstNode::Var { name } => out.push_str(name),
         AstNode::Constant { value, width_bytes } => {
-            out.push_str(&constant_text(*value, *width_bytes, style.constants))
+            out.push_str(&style.constant(*value, *width_bytes))
         }
         AstNode::Assign { lhs, rhs } => {
             expr(lhs, out, false, style);
@@ -2015,6 +2038,27 @@ fn arguments_named(args: &[AstNode], names: Option<&[String]>, out: &mut String,
     out.push(')');
 }
 
+/// The case values of a switch arm as the pseudocode spells them: the
+/// enumerator labels when there is one a value, a renderer's name for the
+/// value when one is registered — a case value is eight bytes wide — and
+/// the number otherwise.
+fn case_labels(arm: &crate::lift::SwitchArm, style: &Style) -> Vec<String> {
+    if arm.labels.len() == arm.values.len() {
+        return arm.labels.clone();
+    }
+    arm.values
+        .iter()
+        .map(|value| {
+            style
+                .rendered
+                .get(&(*value as u64, Some(8)))
+                .or_else(|| style.rendered.get(&(*value as u64, None)))
+                .cloned()
+                .unwrap_or_else(|| value.to_string())
+        })
+        .collect()
+}
+
 /// A constant as C spells it.
 ///
 /// A constant whose sign bit is set at its width is negative, and printed so.
@@ -2272,6 +2316,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: Some("main reads rax after the call".to_string()),
         }
@@ -2367,6 +2412,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         }
@@ -2579,6 +2625,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2636,6 +2683,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2780,6 +2828,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -2900,6 +2949,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -3246,6 +3296,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         };
@@ -3385,6 +3436,7 @@ mod tests {
             notes: Vec::new(),
             call_notes: Vec::new(),
             decoded_strings: Vec::new(),
+            rendered_constants: Vec::new(),
             noreturn_when: Vec::new(),
             return_reason: None,
         }
@@ -3451,5 +3503,112 @@ mod tests {
             Direction::Backward,
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_renderers_name_stands_in_the_constants_place_in_every_language() {
+        use crate::lift::{Statement, StatementKind, SwitchArm};
+        use crate::plugin::RenderedConstant;
+        let named = |value: u64, width_bytes: Option<u32>, text: &str| RenderedConstant {
+            value,
+            width_bytes,
+            text: text.to_string(),
+        };
+        let mut function = LiftedFunction {
+            name: "f".into(),
+            address: 0x1000,
+            return_type: "long".into(),
+            params: Vec::new(),
+            locals: vec![Variable {
+                ty: "int".into(),
+                name: "x".into(),
+                placements: Vec::new(),
+                fragment: None,
+            }],
+            body: vec![
+                Statement::plain(
+                    AstNode::Assign {
+                        lhs: Box::new(AstNode::var("x")),
+                        rhs: Box::new(AstNode::constant(0xc000_0005, 4)),
+                    },
+                    vec![0x1000],
+                ),
+                Statement::plain(
+                    AstNode::Assign {
+                        lhs: Box::new(AstNode::var("x")),
+                        rhs: Box::new(AstNode::constant(5, 4)),
+                    },
+                    vec![0x1004],
+                ),
+                Statement {
+                    node: AstNode::var("x"),
+                    addresses: vec![0x1008],
+                    kind: StatementKind::Switch {
+                        arms: vec![
+                            SwitchArm {
+                                values: vec![7],
+                                body: vec![Statement::plain(
+                                    AstNode::Return {
+                                        value: Some(Box::new(AstNode::constant(5, 8))),
+                                    },
+                                    vec![0x100c],
+                                )],
+                                labels: Vec::new(),
+                            },
+                            // An enumerator's label is the analyst's word,
+                            // and stands over a renderer's name.
+                            SwitchArm {
+                                values: vec![9],
+                                body: vec![Statement::plain(AstNode::Break, vec![0x1010])],
+                                labels: vec!["NINE".to_string()],
+                            },
+                        ],
+                    },
+                },
+                Statement::plain(
+                    AstNode::Return {
+                        value: Some(Box::new(AstNode::constant(0, 8))),
+                    },
+                    vec![0x1014],
+                ),
+            ],
+            frame: Vec::new(),
+            thunk: None,
+            notes: Vec::new(),
+            call_notes: Vec::new(),
+            decoded_strings: Vec::new(),
+            rendered_constants: vec![
+                named(0xc000_0005, None, "STATUS_ACCESS_VIOLATION"),
+                named(5, None, "ANY_FIVE"),
+                named(5, Some(4), "FOUR_FIVE"),
+                named(7, Some(8), "SEVEN"),
+                named(9, None, "NOT_NINE"),
+            ],
+            noreturn_when: Vec::new(),
+            return_reason: None,
+        };
+        // A name for the width before a name for every width; the switch's
+        // case values are named too, an enumerator's label standing over a
+        // renderer's.
+        assert_eq!(
+            emit_function(&function, &Options::default()).text(),
+            "long f(void)\n{\n  int x;\n\n  x = STATUS_ACCESS_VIOLATION;\n  x = FOUR_FIVE;\n  switch (x) {\n  case SEVEN:\n    return ANY_FIVE;\n  case NINE:\n    break;\n  }\n  return 0;\n}"
+        );
+        let rust = Options::from_pairs([("language", "rust")]).unwrap();
+        let text = emit_function(&function, &rust).text();
+        assert!(text.contains("SEVEN =>"), "{text}");
+        assert!(text.contains("NINE =>"), "{text}");
+        assert!(text.contains("ANY_FIVE"), "{text}");
+        let python = Options::from_pairs([("language", "python")]).unwrap();
+        let text = emit_function(&function, &python).text();
+        assert!(text.contains("x == SEVEN"), "{text}");
+        assert!(text.contains("x == NINE"), "{text}");
+        assert!(text.contains("ANY_FIVE"), "{text}");
+        // Without the names, the constants are spelled as the style says.
+        function.rendered_constants = Vec::new();
+        let text = emit_function(&function, &Options::default()).text();
+        assert!(text.contains("case 7:"), "{text}");
+        assert!(text.contains("case NINE:"), "{text}");
+        assert!(!text.contains("SEVEN"), "{text}");
     }
 }
