@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="228" viewBox="0 0 960 228" role="img" aria-label="AdmiralGrace, a disassembler and decompiler written in Rust">
+  <rect width="960" height="228" fill="#0c2340"/>
+  <rect width="960" height="8" fill="#c4a15a"/>
+  <rect y="220" width="960" height="8" fill="#d4564e"/>
+  <rect x="36" y="28" width="4" height="172" fill="#c4a15a"/>
+  <text x="60" y="78" fill="#f3ead7" font-family="Georgia, 'Times New Roman', serif" font-size="54" font-weight="700" letter-spacing="3">ADMIRAL GRACE</text>
+  <text x="62" y="112" fill="#e7c98a" font-family="Georgia, 'Times New Roman', serif" font-size="18" font-style="italic">disassembler and decompiler</text>
+  <text x="62" y="148" fill="#d5deea" font-family="Georgia, 'Times New Roman', serif" font-size="16">A function of machine code, printed as C.</text>
+  <text x="62" y="176" fill="#d5deea" font-family="Georgia, 'Times New Roman', serif" font-size="16">Named for Admiral Grace Hopper.</text>
+  <circle cx="860" cy="114" r="46" fill="none" stroke="#e7c98a" stroke-width="3"/>
+  <circle cx="860" cy="114" r="8" fill="#d4564e"/>
+  <path d="M860 78 v18 M860 132 v18 M824 114 h18 M878 114 h18" stroke="#f3ead7" stroke-width="3"/>
+  <path d="M834 88 l12 12 M886 140 l-12 -12 M886 88 l-12 12 M834 140 l12 -12" stroke="#c4a15a" stroke-width="2"/>
+</svg>
