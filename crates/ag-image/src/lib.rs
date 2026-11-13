@@ -5562,6 +5562,42 @@ mod tests {
     }
 
     #[test]
+    fn audit_register_def_use_honors_a_per_function_abi_option() {
+        // main (0x1198) calls add at 0x11b5. System V passes the first
+        // argument in rdi, so the call implicitly reads rdi; Win64 passes it
+        // in rcx and rdi is the callee's to keep. A per-function abi=win64
+        // must reach the def-use webs, not just the lift.
+        let rdi = DefUseLocation::Register(7);
+
+        // Control: under the program's System V ABI the call does read rdi.
+        let plain = sample();
+        let plain_webs = plain.register_def_use(0x1198).expect("main has webs");
+        assert!(
+            plain_webs
+                .touches(0x11b5)
+                .iter()
+                .any(|touch| touch.location == rdi && touch.reads),
+            "control: a System V call reads rdi as the first argument"
+        );
+
+        // The same function with a per-function abi=win64 option.
+        let binary = sample();
+        let mut props = FunctionProperties::default();
+        props.options.insert("abi".to_string(), "win64".to_string());
+        assert!(binary.set_function_properties(BTreeMap::from([(0x1198u64, props)])));
+        let webs = binary.register_def_use(0x1198).expect("main has webs");
+        let call_reads_rdi = webs
+            .touches(0x11b5)
+            .iter()
+            .any(|touch| touch.location == rdi && touch.reads);
+        assert!(
+            !call_reads_rdi,
+            "per-function abi=win64 must make the call read rcx, not rdi; \
+             register_def_use used the program ABI (self.abi()) instead of abi_for(address)"
+        );
+    }
+
+    #[test]
     fn a_length_delimited_string_is_the_bytes_clamped_to_the_length() {
         // The sample's .rodata holds `%ld\n\0` at 0x2004. A length-delimited
         // read takes the length the code uses, with no NUL needed: four
