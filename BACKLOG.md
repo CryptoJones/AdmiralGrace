@@ -249,7 +249,7 @@ Filed 2026-10-26.
 
 ### Architectures
 
-- [ ] Decode and lift MIPS, including nanoMIPS — [#408](https://github.com/CryptoJones/AdmiralGrace/issues/408)
+- [ ] Decode and lift MIPS, including nanoMIPS — [#408](https://github.com/CryptoJones/AdmiralGrace/issues/408) — MIPS32 LE/BE now lifts; MIPS64, R6, MIPS3, R5900, Octeon and nanoMIPS still open
 - [ ] Decode and lift PowerPC, including VLE — [#409](https://github.com/CryptoJones/AdmiralGrace/issues/409)
 - [x] Decode and lift RISC-V — [#410](https://github.com/CryptoJones/AdmiralGrace/issues/410)
 - [x] Decode and lift MSP430 — [#411](https://github.com/CryptoJones/AdmiralGrace/issues/411)

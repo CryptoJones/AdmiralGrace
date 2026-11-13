@@ -1736,7 +1736,11 @@ fn an_aarch64_image_decodes_and_has_no_modes_to_mark() {
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/arm64.elf");
     let binary = Binary::open(&path).expect("the AArch64 fixture loads");
-    assert!(binary.language().starts_with("AARCH64:LE:64"), "{}", binary.language());
+    assert!(
+        binary.language().starts_with("AARCH64:LE:64"),
+        "{}",
+        binary.language()
+    );
     assert!(binary.supports_disassembly());
     assert!(binary.supports_pseudocode());
     assert!(!binary.is_arm(), "one instruction set: nothing to mark");
@@ -1788,9 +1792,15 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
         ("riscv32.elf", "RISCV:LE:32", "c.add"),
         ("riscv64.elf", "RISCV:LE:64", "c.addw"),
     ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(file);
         let binary = Binary::open(&path).expect("the RISC-V fixture loads");
-        assert!(binary.language().starts_with(prefix), "{}", binary.language());
+        assert!(
+            binary.language().starts_with(prefix),
+            "{}",
+            binary.language()
+        );
         assert!(binary.supports_disassembly(), "{file}");
         assert!(binary.supports_pseudocode(), "{file}");
 
@@ -1804,7 +1814,9 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
         };
 
         // The leaf decodes to a compressed add and a return.
-        let add = binary.disassembly(address_of("add")).expect("add is decoded");
+        let add = binary
+            .disassembly(address_of("add"))
+            .expect("add is decoded");
         let lines: Vec<&Instruction> = add
             .blocks
             .iter()
@@ -1814,24 +1826,33 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
         assert_eq!(lines[1].mnemonic, "ret", "{file}");
 
         // The loop decodes with its call, and lifts to a loop with the call.
-        let sum = binary.disassembly(address_of("sum")).expect("sum is decoded");
+        let sum = binary
+            .disassembly(address_of("sum"))
+            .expect("sum is decoded");
         assert!(sum.blocks.len() > 1, "{file}: sum loops");
-        assert!(sum
-            .blocks
-            .iter()
-            .flat_map(|block| &block.instructions)
-            .any(|line| line.mnemonic.ends_with("jal") && line.call.is_some()), "{file}");
+        assert!(
+            sum.blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|line| line.mnemonic.ends_with("jal") && line.call.is_some()),
+            "{file}"
+        );
         let add = binary.pseudocode(address_of("add")).expect("add is lifted");
         assert!(add.text().contains("int add("), "{file}: {}", add.text());
         let sum = binary.pseudocode(address_of("sum")).expect("sum is lifted");
         let text = sum.text();
         // The call resolves to its symbol: the image names the functions.
         assert!(text.contains("add("), "{file}: {text}");
-        assert!(text.contains("while") || text.contains("do"), "{file}: {text}");
+        assert!(
+            text.contains("while") || text.contains("do"),
+            "{file}: {text}"
+        );
 
         // The bit-manipulation function disassembles, but the specification
         // leaves its p-code unimplemented, so the lift refuses it.
-        let bits = binary.disassembly(address_of("bits")).expect("bits is decoded");
+        let bits = binary
+            .disassembly(address_of("bits"))
+            .expect("bits is decoded");
         let mnemonics: Vec<&str> = bits
             .blocks
             .iter()
@@ -1839,7 +1860,10 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
             .map(|line| line.mnemonic.as_str())
             .collect();
         assert!(mnemonics.contains(&"andn"), "{file}: {mnemonics:?}");
-        assert!(binary.pseudocode(address_of("bits")).is_err(), "{file}: bits is refused");
+        assert!(
+            binary.pseudocode(address_of("bits")).is_err(),
+            "{file}: bits is refused"
+        );
     }
 }
 
@@ -1906,7 +1930,11 @@ fn retro_decodes_but_does_not_lift(fixture: &str, language: &str, leaf: &[&str],
         .join("tests/fixtures")
         .join(fixture);
     let binary = Binary::open(&path).expect("the retro fixture loads");
-    assert!(binary.language().starts_with(language), "{}", binary.language());
+    assert!(
+        binary.language().starts_with(language),
+        "{}",
+        binary.language()
+    );
     assert!(binary.supports_disassembly());
     assert!(!binary.supports_pseudocode(), "{} is decode-only", language);
 
@@ -1944,7 +1972,10 @@ fn retro_decodes_but_does_not_lift(fixture: &str, language: &str, leaf: &[&str],
         .iter()
         .flat_map(|block| &block.instructions)
         .collect();
-    let sum_mnemonics: Vec<&str> = sum_lines.iter().map(|line| line.mnemonic.as_str()).collect();
+    let sum_mnemonics: Vec<&str> = sum_lines
+        .iter()
+        .map(|line| line.mnemonic.as_str())
+        .collect();
     assert!(
         sum_lines
             .iter()
@@ -1970,7 +2001,12 @@ fn a_z80_image_decodes_but_does_not_lift() {
 fn a_superh_image_decodes_but_does_not_lift() {
     // The return's delay slot follows it in address order: the `add` that
     // runs before the branch takes effect is listed after the `rts`.
-    retro_decodes_but_does_not_lift("superh4.elf", "SuperH4:LE:32", &["mov", "rts", "add"], "jsr");
+    retro_decodes_but_does_not_lift(
+        "superh4.elf",
+        "SuperH4:LE:32",
+        &["mov", "rts", "add"],
+        "jsr",
+    );
 }
 
 #[test]
@@ -2111,7 +2147,11 @@ fn a_stripped_images_functions_come_from_its_unwind_data_with_their_ends() {
         let functions = binary.functions();
         for pair in functions.windows(2) {
             if let Some(end) = binary.function_end(pair[0].address) {
-                assert!(end <= pair[1].address, "{:#x} ends at {end:#x}", pair[0].address);
+                assert!(
+                    end <= pair[1].address,
+                    "{:#x} ends at {end:#x}",
+                    pair[0].address
+                );
             }
         }
     }
@@ -2260,7 +2300,10 @@ fn objective_c_message_sends_read_as_message_sends() {
         let binary = Binary::open(&fixtures.join(file)).expect(file);
         // The dispatcher is an import, through its slot.
         assert!(
-            binary.imports().values().any(|name| name == "_objc_msgSend"),
+            binary
+                .imports()
+                .values()
+                .any(|name| name == "_objc_msgSend"),
             "{file}: {:?}",
             binary.imports()
         );
@@ -2275,7 +2318,10 @@ fn objective_c_message_sends_read_as_message_sends() {
             text.contains("v2 = [0 greet:[Base answer]];\n"),
             "{file}:\n{text}"
         );
-        assert!(text.contains("return [0 thrice:2] + v2;\n"), "{file}:\n{text}");
+        assert!(
+            text.contains("return [0 thrice:2] + v2;\n"),
+            "{file}:\n{text}"
+        );
         // A method that sends itself a message: its own parameters pass on.
         let greet = binary
             .functions()
@@ -2284,7 +2330,10 @@ fn objective_c_message_sends_read_as_message_sends() {
             .expect("greet")
             .address;
         let text = binary.pseudocode(greet).expect("greet lifts").text();
-        assert!(text.contains("return [a twice:c] + 1;\n"), "{file}:\n{text}");
+        assert!(
+            text.contains("return [a twice:c] + 1;\n"),
+            "{file}:\n{text}"
+        );
     }
 }
 
@@ -2387,7 +2436,7 @@ fn a_mips_image_is_decoded_walked_and_its_global_pointer_found_by_symbol_and_pro
         binary.language()
     );
     assert!(binary.supports_disassembly());
-    assert!(!binary.supports_pseudocode());
+    assert!(binary.supports_pseudocode());
     assert_eq!(
         binary.global_pointer_convention().map(|conv| conv.name),
         Some("gp")
@@ -2551,6 +2600,20 @@ fn a_mips_image_without_its_symbol_reads_the_pointer_past_the_got_and_big_endian
 }
 
 #[test]
+fn a_mips_leaf_lifts_to_an_add() {
+    let binary = mips("mips_nopic.elf");
+    assert!(binary.supports_pseudocode());
+    let add = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "add")
+        .expect("add")
+        .address;
+    let text = binary.pseudocode(add).expect("add lifts").text();
+    assert!(text.contains('+'), "{text}");
+}
+
+#[test]
 fn the_analysts_global_pointer_stands_over_the_images_and_changes_what_the_operands_name() {
     use ag_image::{GlobalPointerSource, GlobalPointerWords};
 
@@ -2612,8 +2675,7 @@ fn an_image_without_jni_functions_reports_none() {
 
 #[test]
 fn a_jni_image_types_its_jni_functions_from_their_names() {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/jni.elf");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/jni.elf");
     let binary = Binary::open(&path).expect("the JNI ELF loads");
     let functions = binary.jni_functions();
     let add = functions
