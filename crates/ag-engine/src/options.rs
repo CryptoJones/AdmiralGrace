@@ -165,12 +165,30 @@ pub const OPTIONS: &[OptionSpec] = &[
         ],
     },
     OptionSpec {
+        name: "asm-syntax",
+        phase: Phase::Decode,
+        tier: Tier::Rendering,
+        kind: Kind::Choice(&["intel", "att"]),
+        default: "intel",
+        description: "The syntax an x86 listing is printed in: Intel, destination first (`mov eax, [rbp-8]`), or AT&T as GAS writes it, source first with `%` registers, `$` constants and a width suffix (`movl -8(%rbp), %eax`). The bytes, the flow and the lift are the same either way; only the spelling changes.",
+        symptoms: &[
+            symptom(
+                "a listing in Intel syntax beside AT&T assembly you are comparing it against, so every operand reads backwards",
+                "att",
+            ),
+            symptom(
+                "`%rax` and `movl` where you want the `rax` and `mov` of an Intel listing",
+                "intel",
+            ),
+        ],
+    },
+    OptionSpec {
         name: "abi",
         phase: Phase::Lift,
         tier: Tier::Analysis,
-        kind: Kind::Choice(&["auto", "sysv", "win64", "go", "pascal"]),
+        kind: Kind::Choice(&["auto", "sysv", "win64", "go", "pascal", "x32"]),
         default: "auto",
-        description: "The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`) or the Borland Pascal register convention (`rax, rdx, rcx`) whatever the image says.",
+        description: "The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`), the Borland Pascal register convention (`rax, rdx, rcx`) or x32 — System V registers with 32-bit `long` and pointers — whatever the image says.",
         symptoms: &[
             symptom(
                 "`not lifted yet: rcx is read before it is written` on an ELF built for the Microsoft convention",
@@ -187,6 +205,10 @@ pub const OPTIONS: &[OptionSpec] = &[
             symptom(
                 "a Delphi routine's first arguments read as none, though they arrive in eax, edx and ecx",
                 "pascal",
+            ),
+            symptom(
+                "an x32 binary's pointers and `long` read as 8 bytes, though the ABI makes them 4",
+                "x32",
             ),
         ],
     },
@@ -666,6 +688,9 @@ pub enum AbiChoice {
     Go,
     /// The Borland Pascal register convention, whatever the image says.
     Pascal,
+    /// The x32 ABI — System V registers, 32-bit pointers — whatever the
+    /// image says.
+    X32,
 }
 
 /// Which argument registers are parameters.
@@ -813,6 +838,16 @@ pub enum CodeSections {
     Procedures,
 }
 
+/// The syntax an x86 listing is printed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum X86Syntax {
+    /// Intel syntax, destination first: `mov eax, [rbp-8]`.
+    #[default]
+    Intel,
+    /// AT&T (GAS) syntax, source first: `movl -8(%rbp), %eax`.
+    Att,
+}
+
 /// What becomes of a `jmp` to another function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TailCalls {
@@ -871,6 +906,7 @@ pub enum ConstantStyle {
 pub struct Options {
     pub branches_end_procedures: BranchesEndProcedures,
     pub code_sections: CodeSections,
+    pub x86_syntax: X86Syntax,
     pub abi: AbiChoice,
     pub parameters: Parameters,
     pub merged_register_names: MergedNames,
@@ -1077,6 +1113,7 @@ impl Default for Options {
         Self {
             branches_end_procedures: BranchesEndProcedures::default(),
             code_sections: CodeSections::default(),
+            x86_syntax: X86Syntax::default(),
             abi: AbiChoice::default(),
             parameters: Parameters::default(),
             merged_register_names: MergedNames::default(),
@@ -1187,6 +1224,7 @@ impl Options {
                         ("win64", AbiChoice::Win64),
                         ("go", AbiChoice::Go),
                         ("pascal", AbiChoice::Pascal),
+                        ("x32", AbiChoice::X32),
                     ],
                 )?
             }
@@ -1310,6 +1348,13 @@ impl Options {
                         ("mixed", CodeSections::Mixed),
                         ("procedures", CodeSections::Procedures),
                     ],
+                )?
+            }
+            "asm-syntax" => {
+                self.x86_syntax = choose(
+                    spec,
+                    value,
+                    &[("intel", X86Syntax::Intel), ("att", X86Syntax::Att)],
                 )?
             }
             "return-liveness" => {
@@ -1437,6 +1482,7 @@ impl Options {
                     AbiChoice::Win64 => "win64",
                     AbiChoice::Go => "go",
                     AbiChoice::Pascal => "pascal",
+                    AbiChoice::X32 => "x32",
                 },
                 "parameters" => match self.parameters {
                     Parameters::LastRead => "last-read",
@@ -1493,6 +1539,10 @@ impl Options {
                 "code-sections" => match self.code_sections {
                     CodeSections::Mixed => "mixed",
                     CodeSections::Procedures => "procedures",
+                },
+                "asm-syntax" => match self.x86_syntax {
+                    X86Syntax::Intel => "intel",
+                    X86Syntax::Att => "att",
                 },
                 "return-liveness" => match self.return_liveness {
                     ReturnLiveness::Callers => "callers",
@@ -1569,6 +1619,7 @@ impl Options {
             AbiChoice::Win64 => Abi::Win64,
             AbiChoice::Go => Abi::Go,
             AbiChoice::Pascal => Abi::Pascal,
+            AbiChoice::X32 => Abi::X32,
         }
     }
 }

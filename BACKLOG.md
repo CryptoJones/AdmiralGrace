@@ -255,7 +255,7 @@ Filed 2026-10-26.
 - [x] Decode and lift MSP430 — [#411](https://github.com/CryptoJones/AdmiralGrace/issues/411)
 - [ ] Decode TriCore, Hexagon, TMS320C6x, C-SKY and NDS32 — [#412](https://github.com/CryptoJones/AdmiralGrace/issues/412)
 - [x] Decode 6502, Z80 and SuperH — [#413](https://github.com/CryptoJones/AdmiralGrace/issues/413)
-- [ ] x86 extras: AT&T syntax, APX, MPX and the x32 ABI — [#414](https://github.com/CryptoJones/AdmiralGrace/issues/414)
+- [x] x86 extras: AT&T syntax, APX, MPX and the x32 ABI — [#414](https://github.com/CryptoJones/AdmiralGrace/issues/414)
 - [ ] Architecture hook API: patch an architecture's lifting from a plugin — [#415](https://github.com/CryptoJones/AdmiralGrace/issues/415)
 
 ### Formats and loaders

@@ -4873,7 +4873,7 @@ mod tests {
             error
                 .to_string()
                 .starts_with(
-                    "no option named \"loop-shape\"; the options are branches-end-procedures, code-sections, abi, "
+                    "no option named \"loop-shape\"; the options are branches-end-procedures, code-sections, asm-syntax, abi, "
                 ),
             "{error}"
         );
