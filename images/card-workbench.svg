@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="108" viewBox="0 0 280 108">
+  <rect width="280" height="108" rx="8" fill="#0c2340"/>
+  <rect width="8" height="108" fill="#c4a15a"/>
+  <text x="24" y="40" fill="#e7c98a" font-family="Georgia, serif" font-size="13" letter-spacing="1.5">WORKBENCH</text>
+  <text x="24" y="70" fill="#f3ead7" font-family="Georgia, serif" font-size="18">ag-ui</text>
+  <text x="24" y="90" fill="#d5deea" font-family="Georgia, serif" font-size="12">listing, graph, pseudocode</text>
+</svg>

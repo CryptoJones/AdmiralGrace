@@ -1,12 +1,35 @@
-# AdmiralGrace
+<div align="center">
 
-> **Part of the [Reverse Engineering Armada](https://github.com/CryptoJones/RE-Armada):** [GayHydra](https://github.com/CryptoJones/GayHydra) — security-hardened Ghidra fork · [Scylla](https://github.com/CryptoJones/Scylla) — RE platform with a Rust core over GayHydra's engine · **AdmiralGrace** (this repo) — disassembler and decompiler written in Rust
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="images/banner-light.svg">
+  <img src="images/banner-light.svg" alt="AdmiralGrace. A disassembler and decompiler, written in Rust, named for Admiral Grace Hopper." width="960">
+</picture>
 
-<img src="images/headshot.jpg" alt="Admiral Grace Hopper" width="220">
+<br>
 
-AdmiralGrace is an open-source disassembler and decompiler utility written in Rust. It is named in honor of Admiral Grace Hopper, a pioneer of computer programming and compiler development.
+<a href="https://github.com/CryptoJones/AdmiralGrace/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8B1E3F?style=for-the-badge&logoColor=white"></a>
+<a href="https://www.rust-lang.org/"><img alt="Written in Rust" src="https://img.shields.io/badge/Rust-0C2340?style=for-the-badge&logo=rust&logoColor=E7C98A"></a>
+<a href="https://github.com/CryptoJones/AdmiralGrace/releases"><img alt="Releases" src="https://img.shields.io/badge/releases-0C2340?style=for-the-badge&logo=github&logoColor=E7C98A"></a>
+<a href="docs/workbench.md"><img alt="Desktop workbench" src="https://img.shields.io/badge/workbench-ag--ui-1D4E46?style=for-the-badge"></a>
 
-The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool, and a native disassembly and decompilation engine. The workbench and the CLI read an indexed decompilation corpus, a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler, or a program image the engine loads itself. A function of x86-64 code — its calls, branches and loops — is lifted and printed as C, with `if`/`else`, `while`, `for` and early `return`.
+<br><br>
+
+<img src="images/headshot.jpg" alt="Admiral Grace Hopper" width="148">
+
+Part of the [Reverse Engineering Armada](https://github.com/CryptoJones/RE-Armada): [GayHydra](https://github.com/CryptoJones/GayHydra) · [Scylla](https://github.com/CryptoJones/Scylla) · **AdmiralGrace**
+
+</div>
+
+An early disassembler and decompiler. The workbench and the CLI read a corpus, a [kuna](https://github.com/Noelo-Lab/kuna) export, or a program image. A function of x86-64 — its calls, branches and loops — is printed as C, with `if`/`else`, `while`, `for` and early `return`.
+
+<div align="center">
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="images/card-workbench.svg" alt="Workbench: ag-ui. Listing, graph, pseudocode." width="260"> | <img src="images/card-cli.svg" alt="Command line: ag. Image, corpus, export." width="260"> | <img src="images/card-engine.svg" alt="Engine, in Rust. Decode, lift, emit C." width="260"> |
+
+</div>
 
 | If you want to… | Start here |
 | --- | --- |
@@ -16,7 +39,7 @@ The project is in an early, actively developing stage. The workspace holds a des
 | Look up a flag by the symptom it fixes | [`docs/options.md`](docs/options.md) |
 | Read one topic from the binary itself | `ag docs` |
 
-<p align="center"><img src="images/navy/flags.jpg" alt="A row of signal flags, in the style of a 1950s Navy pamphlet" width="520"></p>
+<p align="center"><img src="images/navy/flags.jpg" alt="A row of signal flags, in the style of a 1950s Navy pamphlet" width="420"></p>
 
 ## Screenshots
 
