@@ -2146,6 +2146,59 @@ mod tests {
     use super::*;
     use crate::lift::Variable;
 
+    /// Decode a C string literal the way a C compiler reads it, including
+    /// greedy hex escapes, so a round-trip check is honest about meaning.
+    fn c_unescape_bytes(lit: &str) -> Vec<u8> {
+        let b = lit.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 1; // opening quote
+        while i < b.len() - 1 {
+            if b[i] != b'\\' {
+                out.push(b[i]);
+                i += 1;
+                continue;
+            }
+            i += 1;
+            match b[i] {
+                b'n' => { out.push(b'\n'); i += 1; }
+                b't' => { out.push(b'\t'); i += 1; }
+                b'r' => { out.push(b'\r'); i += 1; }
+                b'\\' => { out.push(b'\\'); i += 1; }
+                b'"' => { out.push(b'"'); i += 1; }
+                b'x' => {
+                    i += 1;
+                    let mut v: u32 = 0;
+                    while i < b.len() - 1 && (b[i] as char).is_ascii_hexdigit() {
+                        v = v * 16 + (b[i] as char).to_digit(16).unwrap();
+                        i += 1;
+                    }
+                    out.push(v as u8);
+                }
+                d @ b'0'..=b'7' => {
+                    let mut v: u32 = (d - b'0') as u32;
+                    i += 1;
+                    let mut n = 1;
+                    while i < b.len() - 1 && n < 3 && (b'0'..=b'7').contains(&b[i]) {
+                        v = v * 8 + (b[i] - b'0') as u32;
+                        i += 1;
+                        n += 1;
+                    }
+                    out.push(v as u8);
+                }
+                other => { out.push(other); i += 1; }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn audit_string_literal_round_trips_through_c() {
+        for text in ["\u{1}a", "\u{1}2", "\u{7f}b", "\u{e9}", "\0c"] {
+            let lit = string_literal(text);
+            assert_eq!(c_unescape_bytes(&lit), text.as_bytes(), "literal {lit} changes meaning");
+        }
+    }
+
     /// A function with every control statement, lifted as C would print it.
     fn every_statement() -> LiftedFunction {
         use crate::lift::{Statement, StatementKind, SwitchArm};

@@ -469,6 +469,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn audit_candidates_panics_when_databases_shrunk() {
+        let pattern = Pattern::of("x86-64", &body(0, 7), 0, NOTHING, "f").unwrap();
+        let mut set = PatternSet::new(vec![db(vec![pattern])]);
+        set.databases.clear(); // allowed: the field is pub
+        let _ = set.candidates("x86-64", &body(0, 7), 64, Some(16));
+    }
+
+    #[test]
     fn the_crc_is_the_ieee_crc32() {
         assert_eq!(crc32(b""), 0);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);

@@ -1653,4 +1653,100 @@ mod tests {
         assert_eq!(merged.fold, None);
         assert_eq!(().over(&[1, 2, 3]), SiteOverride::default());
     }
+
+    #[test]
+    fn audit_lc2_continues_inside_a_switch_arm_is_not_seen_so_fold_for_misfires() {
+        // BUG: continues() ignores StatementKind::Switch, so a C continue
+        // inside a switch arm (which still targets the enclosing loop) is
+        // not detected. is_counted then accepts the loop, and fold_for
+        // moves the step into a `for` header, so the continue now runs a
+        // step the original edge skipped.
+        //
+        // Structure:
+        //   0: i = 0 -> 1
+        //   1: if (i < 3) goto 2 else 6
+        //   2: switch (a) { 0 -> 3, 1 -> 4 }
+        //   3: if (x == 7) goto 1 else 5  // arm 0: continue path via branch
+        //   4: x = 1 -> 5                // arm 1
+        //   5: i = i + 1 -> 1            // step (latch)
+        //   6: return x
+        let step_stmt = stmt(
+            AstNode::Assign {
+                lhs: Box::new(AstNode::var("i")),
+                rhs: Box::new(AstNode::binary(
+                    AstNode::var("i"),
+                    BinaryOp::Add,
+                    AstNode::constant(1, 4),
+                )),
+            },
+            0x1050,
+        );
+        let nodes = [
+            node(
+                0x1000,
+                vec![assign("i", 0, 0x1000)],
+                Terminator::Goto {
+                    target: 1,
+                    addresses: vec![],
+                },
+            ),
+            node(
+                0x1010,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("i", BinaryOp::Less, 3),
+                    taken: 2,
+                    next: 6,
+                    addresses: vec![0x1010],
+                },
+            ),
+            node(
+                0x1020,
+                vec![],
+                Terminator::Switch {
+                    index: AstNode::var("a"),
+                    cases: vec![(vec![0], 3), (vec![1], 4)],
+                    addresses: vec![0x1020],
+                },
+            ),
+            node(
+                0x1030,
+                vec![],
+                Terminator::Branch {
+                    cond: cond("x", BinaryOp::Equal, 7),
+                    taken: 1, // back to header = continue
+                    next: 5,
+                    addresses: vec![0x1030],
+                },
+            ),
+            node(
+                0x1040,
+                vec![assign("x", 1, 0x1040)],
+                Terminator::Goto {
+                    target: 5,
+                    addresses: vec![],
+                },
+            ),
+            node(
+                0x1050,
+                vec![step_stmt],
+                Terminator::Goto {
+                    target: 1,
+                    addresses: vec![0x1054],
+                },
+            ),
+            node(
+                0x1060,
+                vec![ret("x", 0x1060)],
+                Terminator::Return,
+            ),
+        ];
+        let text = c(&nodes).unwrap();
+        // The loop must remain a `while`, because a `continue` in a switch
+        // arm would skip the step if folded into a `for` header.
+        assert!(
+            !text.contains("for ("),
+            "fold_for moved the step past a continue inside a switch: {text}"
+        );
+    }
 }
