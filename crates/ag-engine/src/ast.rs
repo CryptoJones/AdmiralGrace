@@ -1,3 +1,11 @@
+//! The high-level syntax tree the lifter builds and the C emitter prints.
+//!
+//! A node is a statement or an expression: control (`If`, `Loop`, `Goto`,
+//! `Return`), values (`Binary`, `Constant`, `Var`, `Register`, `Call`),
+//! and the forms the lifter recovers from machine code (`Cast`, `Ternary`,
+//! `StringLiteral`, struct initializers). [`BinaryOp::negated`] is the
+//! relation used when a branch is printed on its other side.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfType {
     If,
@@ -562,5 +570,38 @@ impl BinaryOp {
             Self::LessEqual => Self::Greater,
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relations_negate_in_pairs() {
+        for op in [
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::Less,
+            BinaryOp::LessEqual,
+            BinaryOp::Greater,
+            BinaryOp::GreaterEqual,
+        ] {
+            assert_eq!(op.negated().and_then(BinaryOp::negated), Some(op));
+        }
+        assert!(BinaryOp::Add.negated().is_none());
+    }
+
+    #[test]
+    fn struct_field_names_carry_the_offset() {
+        let field = StructField {
+            ty: "int".into(),
+            offset: 8,
+            value: AstNode::Constant {
+                value: 1,
+                width_bytes: 4,
+            },
+        };
+        assert_eq!(field.name(), "at_8");
     }
 }

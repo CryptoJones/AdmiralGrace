@@ -37,6 +37,38 @@ pub fn real_name(name: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn a_placeholder_is_not_a_name_to_match_on() {
+        assert_eq!(real_name("main").as_deref(), Some("main"));
+        assert_eq!(real_name("  "), None);
+        assert_eq!(real_name("sub_401000"), None);
+        assert_eq!(real_name("nullsub_1"), None);
+        assert_eq!(real_name("loc_10"), None);
+        assert_eq!(real_name("unknown_4"), None);
+    }
+
+    #[test]
+    fn a_rename_replaces_the_image_name() {
+        let mut facts = vec![FunctionFacts {
+            address: 0x1000,
+            name: Some("old".into()),
+            hash: String::new(),
+            length: 0,
+            blocks: 0,
+            edges: 0,
+            instructions: 0,
+            calls: 0,
+            mnemonics: Vec::new(),
+        }];
+        rename_facts(&mut facts, &BTreeMap::from([(0x1000, "renamed".into())]));
+        assert_eq!(facts[0].name.as_deref(), Some("renamed"));
+    }
+}
+
 /// The facts of every function of the image, in address order: its
 /// whole-function hash, its byte length, and the shape and mnemonics of
 /// its disassembly. A function runs to where the unwind data says it ends,

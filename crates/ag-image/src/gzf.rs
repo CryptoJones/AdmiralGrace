@@ -1220,3 +1220,54 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section(name: &str, vma: u64, executable: bool) -> SectionInfo {
+        SectionInfo {
+            name: name.into(),
+            vma,
+            size: 16,
+            executable,
+            file_offset: None,
+            file_size: None,
+        }
+    }
+
+    #[test]
+    fn markup_in_a_name_is_escaped_and_a_quote_only_in_an_attribute() {
+        let name = "std::vector<int>&";
+        assert_eq!(escape_text(name), "std::vector&lt;int&gt;&amp;");
+        assert_eq!(escape_attr("say \"hi\""), "say &quot;hi&quot;");
+        assert_eq!(escape_text("\u{1}ok"), "ok");
+        assert_eq!(addr(0x401000), "401000");
+    }
+
+    #[test]
+    fn the_epoch_is_the_thursday_ghidra_parses() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(
+            format_timestamp(0),
+            "Thu Jan 01 00:00:00 +0000 1970"
+        );
+        // 2024-02-29 23:59:59 UTC.
+        assert_eq!(civil_from_days(19782), (2024, 2, 29));
+        assert_eq!(
+            format_timestamp(1_709_251_199),
+            "Thu Feb 29 23:59:59 +0000 2024"
+        );
+    }
+
+    #[test]
+    fn only_loaded_sections_are_mapped_and_named_for_their_permissions() {
+        assert!(!maps_into_memory(&section(".debug", 0, false), true));
+        assert!(maps_into_memory(&section(".text", 0, true), true));
+        assert!(maps_into_memory(&section(".text", 0x1000, true), true));
+        assert_eq!(permissions_of(&section(".text", 0x1000, true)), "rx");
+        assert_eq!(permissions_of(&section(".rodata", 0x2000, false)), "r");
+        assert_eq!(permissions_of(&section(".bss", 0x3000, false)), "rw");
+        assert_eq!(permissions_of(&section(".got.plt", 0x4000, false)), "rw");
+    }
+}

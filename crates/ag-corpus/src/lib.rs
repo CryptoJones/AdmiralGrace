@@ -1,3 +1,12 @@
+//! Indexed decompilation corpora and the project records laid over them.
+//!
+//! A corpus is a directory whose `decompile-index.json` lists functions.
+//! [`Provider`] loads that index; [`Function`] is one record, with an
+//! optional address space (`EXTERNAL:0x1`) kept on [`Function::space`].
+//! [`kuna`] reads a kuna project export, [`objc`] overlays method names,
+//! [`project`] is the editable project file, and [`archive`] is the shared
+//! type archive.
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::btree_map::Entry;

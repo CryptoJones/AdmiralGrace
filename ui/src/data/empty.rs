@@ -83,3 +83,19 @@ impl Provider for EmptyProvider {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_project_has_nothing_to_show() {
+        let empty = EmptyProvider::new();
+        assert_eq!(empty.project().name, "No project");
+        assert_eq!(empty.capabilities(), Capabilities::NONE);
+        assert!(empty.functions().is_empty());
+        assert!(empty.function_detail(0).is_none());
+        assert!(empty.problems().is_empty());
+        assert!(empty.search("main", true).is_empty());
+    }
+}

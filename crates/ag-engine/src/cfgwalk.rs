@@ -1,3 +1,12 @@
+//! The control-flow walk that builds a [`ProcedureCfg`].
+//!
+//! The walk is given the decoded instructions and an [`Entries`] view of
+//! the other functions and import slots in the image. It splits blocks on
+//! branch targets, records calls without entering them, stops a tail `jmp`
+//! at another function, and recovers or accepts a jump table on an
+//! indirect jump. A side the analyst turned off, or whose target does not
+//! decode, is a [`crate::cfg::Halt`] and is left out of the successors.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced_x86::Mnemonic;

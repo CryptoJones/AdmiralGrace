@@ -1,3 +1,11 @@
+//! The native analysis engine: load an image, decode it, build a
+//! control-flow graph, lift a function to an AST, and emit C.
+//!
+//! Callers usually start from [`Image`] and the re-exports below. The
+//! architecture modules ([`aarch64`] through [`z80`]) decode and, where the
+//! lifter supports them, lift. [`pipeline`] is the older segment-wide
+//! decode path; the function walk lives in [`cfgwalk`].
+
 pub mod aarch64;
 pub mod apx;
 pub mod arch;

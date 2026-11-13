@@ -99,3 +99,36 @@ impl Transport for Scripted {
             .and_then(|mut script| script.pending.pop_front()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_record_keeps_the_command_token() {
+        let mut dbg = Scripted::new();
+        dbg.answer("-exec-continue", &["^running"]);
+        // The constructor already queued the startup lines.
+        assert!(dbg.next_line(Duration::ZERO).unwrap().is_some());
+        assert_eq!(
+            dbg.next_line(Duration::ZERO).unwrap().as_deref(),
+            Some("(gdb) ")
+        );
+        dbg.send_line("7-exec-continue").unwrap();
+        assert_eq!(
+            dbg.next_line(Duration::ZERO).unwrap().as_deref(),
+            Some("7^running")
+        );
+    }
+
+    #[test]
+    fn an_unknown_command_is_an_error_result() {
+        let mut dbg = Scripted::new();
+        let _ = dbg.next_line(Duration::ZERO).unwrap();
+        let _ = dbg.next_line(Duration::ZERO).unwrap();
+        dbg.send_line("-unknown").unwrap();
+        let line = dbg.next_line(Duration::ZERO).unwrap().unwrap();
+        assert!(line.contains("^error"));
+        assert!(line.contains("-unknown"));
+    }
+}

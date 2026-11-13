@@ -69,3 +69,39 @@ impl<T: Clone + PartialEq> History<T> {
         self.cursor.is_some_and(|c| c + 1 < self.entries.len())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_push_drops_the_forward_entries() {
+        let mut history = History::new(8);
+        history.push("a");
+        history.push("b");
+        history.push("c");
+        assert_eq!(history.back(), Some(&"b"));
+        history.push("d");
+        assert!(!history.can_go_forward());
+        assert_eq!(history.back(), Some(&"b"));
+        assert_eq!(history.forward(), Some(&"d"));
+    }
+
+    #[test]
+    fn the_same_entry_is_not_pushed_twice() {
+        let mut history = History::new(8);
+        history.push(1);
+        history.push(1);
+        assert!(!history.can_go_back());
+    }
+
+    #[test]
+    fn the_oldest_entry_falls_off_at_capacity() {
+        let mut history = History::new(2);
+        history.push("a");
+        history.push("b");
+        history.push("c");
+        assert_eq!(history.back(), Some(&"b"));
+        assert!(history.back().is_none());
+    }
+}

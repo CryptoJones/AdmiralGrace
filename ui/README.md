@@ -27,9 +27,18 @@ cargo run --bin ag-ui -- --binary ./sample.elf
 cargo run --bin ag-ui -- --binary ./sample.elf --option loop-form while
 ```
 
-The corpus directory must contain a `decompile-index.json`. Opened from the File menu, the workbench prompts for a path and refuses a directory without that index. With no corpus on the command line the workbench opens a bundled sample project so the interface can be explored.
+A corpus directory must contain a `decompile-index.json`. From the File menu the workbench asks for a path and refuses a directory without that index. With no corpus on the command line it opens a bundled sample so the interface can be explored. A path that is not a file is refused the same way.
 
-A program image is parsed by the engine's own loader: the navigator lists its symbols, the inspector shows its sections and entry point, and the Listing tab holds the native x86 disassembly, 32-bit or 64-bit as the image's language says. The Graph tab draws the control-flow graph of the selected function: a box for every block, an arrow for every way the code goes on, and the branch that is taken told from the fall-through. The kind of an arrow comes from the same rule the `ag image cfg` command reports by, so the workbench and the command line name an edge the same way. An arrow that skips a row goes around the blocks in between, along a lane to the side of them, so it crosses no box it does not join. The Bytes tab and the lower Bytes panel show the bytes of the file around the selection, sixteen to a row, with the bytes of the selected instruction marked. The Strings tab holds the text the image carries, with the functions that use it; it filters as you type, and picking a string moves the selection to it and names the functions that use it in the inspector. Opened from the File menu, the workbench prompts for a path and refuses a path that is not a file.
+| Tab | What you see |
+| --- | --- |
+| Listing | Native x86 disassembly, 32-bit or 64-bit as the image's language says. |
+| Graph | One box per block, one arrow per way the code goes on. A taken branch is told from the fall-through by the same rule as `ag image cfg`. An arrow that skips a row runs in a lane beside the blocks. |
+| Bytes | Sixteen bytes a row: address, hex, ASCII. The selected instruction is marked. |
+| Strings | The text the image carries, and the functions that use it. The list filters as you type. |
+
+The navigator lists the symbols. The inspector shows the sections, the entry point, and, for a picked string, the functions that use it. The full pane guide is [docs/workbench.md](../docs/workbench.md).
+
+<p align="center"><img src="../images/navy/helmet.jpg" alt="A diving helmet and a coil of rope, drawn as 1950s Navy clipart" width="180"></p>
 
 ## Shape of the code
 

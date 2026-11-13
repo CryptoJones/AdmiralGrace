@@ -1,3 +1,5 @@
+<p align="center"><img src="../images/navy/ship.jpg" alt="A destroyer in profile, drawn as 1950s Navy clipart" width="480"></p>
+
 # Library identification by whole-function hash
 
 A library function is the same code in every program that links it.

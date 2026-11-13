@@ -1,3 +1,5 @@
+<p align="center"><img src="../images/navy/flags.jpg" alt="A row of signal flags, in the style of a 1950s Navy pamphlet" width="480"></p>
+
 # Plugins
 
 A loader, an architecture or a tool is added without forking. A **loader** reads a container

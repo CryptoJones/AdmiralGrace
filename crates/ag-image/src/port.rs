@@ -289,6 +289,18 @@ fn is_platform(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+mod platform_tests {
+    use super::is_platform;
+
+    #[test]
+    fn a_platform_name_needs_no_definition_and_a_struct_does() {
+        assert!(is_platform("size_t"));
+        assert!(is_platform("uint32_t"));
+        assert!(!is_platform("conn"));
+    }
+}
+
 /// The one `parse_into` reads of a definition against `store`.
 fn parse_definition(
     store: &mut TypeStore,

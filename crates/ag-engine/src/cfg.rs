@@ -1,3 +1,10 @@
+//! Control-flow types the walk and the lifter share.
+//!
+//! [`ProcedureCfg`] is the low graph: half-open basic blocks keyed by
+//! start address, plus the calls, tail calls, jump tables and halted
+//! branch sides the walk recorded. [`HighLevelProcedure`] is the graph
+//! after structuring, with AST nodes on the blocks.
+
 use crate::ast::AstNode;
 use crate::register::{RegisterId, RegisterSet};
 use std::collections::BTreeMap;
@@ -196,4 +203,57 @@ pub struct CfgLoop {
     pub internal_blocks: Vec<u32>,
     pub nested_loops: Vec<u32>,
     pub parent_loop: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(from: u64, to: u64) -> BasicBlock {
+        BasicBlock {
+            from,
+            to,
+            ..BasicBlock::default()
+        }
+    }
+
+    #[test]
+    fn block_is_half_open() {
+        let block = block(0x1000, 0x1005);
+        assert!(block.contains(0x1000));
+        assert!(block.contains(0x1004));
+        assert!(!block.contains(0x1005));
+    }
+
+    #[test]
+    fn lookup_uses_the_start_index() {
+        let mut cfg = ProcedureCfg::default();
+        cfg.blocks.push(block(0x1000, 0x1004));
+        cfg.blocks.push(block(0x1008, 0x100c));
+        cfg.index_by_address.insert(0x1000, 0);
+        cfg.index_by_address.insert(0x1008, 1);
+        assert_eq!(cfg.block_containing(0x1002).map(|b| b.from), Some(0x1000));
+        assert!(cfg.block_containing(0x1004).is_none());
+        assert!(cfg.block_containing(0x0fff).is_none());
+    }
+
+    #[test]
+    fn jump_table_cases_group_shared_targets() {
+        let table = JumpTable {
+            site: 0x2000,
+            table: 0x3000,
+            width: 8,
+            relative: false,
+            base: 2,
+            index: None,
+            targets: vec![0x10, 0x20, 0x10],
+        };
+        assert_eq!(table.cases(), vec![(vec![2, 4], 0x10), (vec![3], 0x20)]);
+    }
+
+    #[test]
+    fn halt_reasons_match_the_listing_words() {
+        assert_eq!(HaltReason::Said.text(), "told to");
+        assert_eq!(HaltReason::Invalid.text(), "the target does not decode");
+    }
 }

@@ -56,3 +56,32 @@ impl Project {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_are_the_navigator_words() {
+        assert_eq!(ProjectKind::Corpus.label(), "Corpus");
+        assert_eq!(ProjectKind::Kuna.label(), "Kuna");
+        assert_eq!(ProjectKind::Binary.label(), "Binary");
+        assert_eq!(ProjectKind::Sample.label(), "Sample");
+    }
+
+    #[test]
+    fn the_subtitle_adds_the_architecture_when_it_is_known() {
+        let mut project = Project {
+            name: "sample".into(),
+            kind: ProjectKind::Sample,
+            root: None,
+            target_sha256: None,
+            provider: "sample".into(),
+            architecture: None,
+            format: None,
+        };
+        assert_eq!(project.subtitle(), "sample");
+        project.architecture = Some("AARCH64".into());
+        assert_eq!(project.subtitle(), "sample · AARCH64");
+    }
+}
