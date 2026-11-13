@@ -3106,14 +3106,17 @@ impl Binary {
 
     /// Whether this image's functions are lifted: by the engine's lifter,
     /// which reads 64-bit x86 and nothing else yet — a 32-bit image is
-    /// disassembled, but no function of it is lifted — or by a plugin
-    /// architecture that lifts its own language.
+    /// disassembled, but no function of it is lifted — by a plugin
+    /// architecture that lifts its own language, or by a lift hook that
+    /// patches the language's lifting.
     pub fn supports_pseudocode(&self) -> bool {
         self.bitness == Some(Bitness::Bits64)
             || self
                 .plugin_arch
                 .as_ref()
                 .is_some_and(|arch| arch.lifts(&self.language))
+            || (self.plugin_arch.is_some()
+                && !ag_engine::plugin::lift_hooks_for(&self.language).is_empty())
     }
 
     /// The calling convention the functions are lifted with: the one the
@@ -4021,7 +4024,13 @@ impl Binary {
         name: &str,
     ) -> Option<Result<Arc<ag_engine::lift::Stages>, NotLifted>> {
         let arch = self.plugin_arch.as_ref()?;
-        if !arch.lifts(&self.language) {
+        // A lift hook may patch the architecture's lift, or lift a function
+        // the architecture refuses or does not lift at all, so an image
+        // with a hook for its language is lifted here even when the
+        // architecture itself does not lift it.
+        if !arch.lifts(&self.language)
+            && ag_engine::plugin::lift_hooks_for(&self.language).is_empty()
+        {
             return None;
         }
         if let Some(found) = self
@@ -4047,9 +4056,12 @@ impl Binary {
             base: decoded.base,
             names: &names,
         };
+        // The architecture's lift, patched by the registered lift hooks.
         // An architecture that lifts the language and not this function
-        // refuses it: the engine's lifter reads x86-64 alone.
-        let built = match arch.lift(&code) {
+        // refuses it — the engine's lifter reads x86-64 alone — and a hook
+        // may lift it after all; a refusal names the architecture or the
+        // hook that gave it.
+        let built = match ag_engine::plugin::lift_with_hooks(arch.as_ref(), &code) {
             Some(Ok(graph)) => ag_engine::lift::lift_graph(
                 graph,
                 &decoded.disasm,
@@ -4059,9 +4071,7 @@ impl Binary {
                 &self.options_for(address),
             )
             .map(Arc::new),
-            Some(Err(error)) => Err(NotLifted {
-                reason: format!("{}: {error}", arch.name()),
-            }),
+            Some(Err(reason)) => Err(NotLifted { reason }),
             None => Err(NotLifted {
                 reason: format!("{} does not lift this function", arch.name()),
             }),

@@ -6,7 +6,11 @@
 //! packed format — into the sections, symbols and entry point every other
 //! part works from. An **architecture** decodes the code of a language the
 //! engine does not, into the instructions and the flow between them that
-//! the control-flow walk, the listing and the graph work from. A **tool**
+//! the control-flow walk, the listing and the graph work from. A **lift
+//! hook** patches an architecture's lifting without forking it — a graph
+//! the built-in lifter built is edited, a function it refuses is lifted,
+//! a language it only decodes is given pseudocode — without registering
+//! an architecture in its place ([`LiftHook`]). A **tool**
 //! is an analysis of its own over an open image, run from the command line
 //! (`ag tool`) or by a language model through the MCP server; its trait
 //! lives in `ag_image::plugin`, beside the image it reads. A **recognizer**
@@ -204,6 +208,48 @@ pub struct FunctionCode<'a> {
     /// The names the image knows, by address: what a call names its
     /// callee by, when the image has a name for the target.
     pub names: &'a std::collections::BTreeMap<u64, String>,
+}
+
+/// A hook patches an architecture's lifting without forking it: it is
+/// given the function the architecture was asked to lift and what the
+/// architecture made of it, and may leave the lift as it stands, replace
+/// it with a graph of its own, or refuse the function. This is how an
+/// existing architecture is extended — an instruction the built-in lifter
+/// reads wrong is patched, a function it refuses is lifted after all, a
+/// language the architecture only decodes is given pseudocode — without
+/// registering a whole architecture in its place.
+///
+/// A hook names the [`languages`](LiftHook::languages) whose lifting it
+/// patches, and is run only for an image whose language is one of them.
+/// Every function of those languages passes through every registered hook
+/// that wants it, in the order the hooks were registered, each seeing the
+/// lift as the hooks before left it; what the last leaves is what the
+/// engine structures into pseudocode and gives its levels, after the
+/// registered rewriters. A hook is run whether the architecture lifted the
+/// function, refused it, or does not lift the language at all.
+pub trait LiftHook: Send + Sync {
+    /// The hook's name, as `ag plugins` lists it.
+    fn name(&self) -> &str;
+    /// The language ids whose lifting the hook patches.
+    fn languages(&self) -> Vec<String>;
+    /// Whether the hook wants the function at `address` named `name`;
+    /// every function of its languages, unless said. A hook that is a
+    /// command is not started for a function it does not want.
+    fn wants(&self, _address: u64, _name: &str) -> bool {
+        true
+    }
+    /// Patch the architecture's lift of the function. `lifted` is the
+    /// architecture's own, as the hooks before left it: `Some(Ok(graph))`
+    /// when the function was lifted, `Some(Err(reason))` when the
+    /// architecture refused it, `None` when the architecture does not lift
+    /// the language. `None` leaves the lift as it stands; `Some(Ok(graph))`
+    /// replaces it with the graph; `Some(Err(reason))` refuses the function
+    /// with the reason, told with the hook's name.
+    fn patch(
+        &self,
+        function: &FunctionCode,
+        lifted: Option<&Result<LiftedGraph, String>>,
+    ) -> Option<Result<LiftedGraph, String>>;
 }
 
 /// A rewriter changes a function's medium-level graph — the blocks of
@@ -1468,6 +1514,7 @@ pub fn format_pseudocode(
 struct Registry {
     loaders: Vec<Arc<dyn Loader>>,
     architectures: Vec<Arc<dyn Architecture>>,
+    lift_hooks: Vec<Arc<dyn LiftHook>>,
     rewriters: Vec<Arc<dyn Rewriter>>,
     formatters: Vec<Arc<dyn Formatter>>,
     recognizers: Vec<Arc<dyn Recognizer>>,
@@ -1496,6 +1543,68 @@ pub fn register_architecture(architecture: Arc<dyn Architecture>) {
     let name = architecture.name().to_string();
     registry.architectures.retain(|known| known.name() != name);
     registry.architectures.push(architecture);
+}
+
+/// Add a lift hook: every function of one of its languages lifted after
+/// passes through it, after the ones registered before. One of the same
+/// name is replaced.
+pub fn register_lift_hook(hook: Arc<dyn LiftHook>) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    let name = hook.name().to_string();
+    registry.lift_hooks.retain(|known| known.name() != name);
+    registry.lift_hooks.push(hook);
+}
+
+/// Take a lift hook off, by name; for a test that registered one.
+pub fn unregister_lift_hook(name: &str) {
+    let mut registry = registry().write().unwrap_or_else(PoisonError::into_inner);
+    registry.lift_hooks.retain(|known| known.name() != name);
+}
+
+/// The lift hooks registered, in the order they run.
+pub fn lift_hooks() -> Vec<Arc<dyn LiftHook>> {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .lift_hooks
+        .clone()
+}
+
+/// The lift hooks registered that patch `language`, in the order they run.
+pub fn lift_hooks_for(language: &str) -> Vec<Arc<dyn LiftHook>> {
+    lift_hooks()
+        .into_iter()
+        .filter(|hook| hook.languages().iter().any(|known| known == language))
+        .collect()
+}
+
+/// The architecture's lift of the function, patched by every registered
+/// lift hook that names the language and wants the function, in order: the
+/// lift as the last hook left it. The architecture's own refusal is told
+/// with its name, a hook's with the hook's; `None` when neither the
+/// architecture nor any hook lifted the function.
+pub fn lift_with_hooks(
+    architecture: &dyn Architecture,
+    function: &FunctionCode,
+) -> Option<Result<LiftedGraph, String>> {
+    let hooks = lift_hooks_for(function.language);
+    let mut lifted = if architecture.lifts(function.language) {
+        architecture
+            .lift(function)
+            .map(|result| result.map_err(|error| format!("{}: {error}", architecture.name())))
+    } else {
+        None
+    };
+    for hook in hooks {
+        if !hook.wants(function.address, function.name) {
+            continue;
+        }
+        if let Some(patched) = hook.patch(function, lifted.as_ref()) {
+            lifted =
+                Some(patched.map_err(|error| format!("the lift hook {}: {error}", hook.name())));
+        }
+    }
+    lifted
 }
 
 /// Add a rewriter: every function lifted after passes through it, after
@@ -1877,6 +1986,58 @@ fn instructions_json(disasm: &Disasm) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// A function as JSON for a command that lifts it or patches its lift: the
+/// language, the function and its name, the section's bytes from `base`,
+/// the decoded instructions and the blocks of the control-flow graph.
+fn function_code_json(function: &FunctionCode) -> serde_json::Value {
+    serde_json::json!({
+        "language": function.language,
+        "function": function.address,
+        "function_hex": format!("{:#x}", function.address),
+        "name": function.name,
+        "base": function.base,
+        "base_hex": format!("{:#x}", function.base),
+        "bytes": hex_text(function.bytes),
+        "instructions": instructions_json(function.disasm),
+        "blocks": function.cfg.blocks.iter().map(|block| serde_json::json!({
+            "from": block.from,
+            "from_hex": format!("{:#x}", block.from),
+            "to": block.to,
+            "to_hex": format!("{:#x}", block.to),
+            "successors": block.successor_addresses,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// A lifted graph as JSON for a lift hook that is a command: the read-only
+/// text shape a rewriter is given ([`Rewrite::to_json`]), with the return
+/// type, the parameters, the locals and the frame beside it, so the hook
+/// can rebuild the graph it patches as a graph of its own.
+fn lifted_graph_json(function: &FunctionCode, graph: &LiftedGraph) -> serde_json::Value {
+    let mut json = graph_json(function.address, function.name, graph.entry, &graph.nodes);
+    if let Some(object) = json.as_object_mut() {
+        let variables = |vars: &[Variable]| -> Vec<serde_json::Value> {
+            vars.iter()
+                .map(|var| serde_json::json!({ "name": var.name, "type": var.ty }))
+                .collect()
+        };
+        object.insert(
+            "return_type".to_string(),
+            serde_json::json!(graph.return_type),
+        );
+        object.insert(
+            "params".to_string(),
+            serde_json::json!(variables(&graph.params)),
+        );
+        object.insert(
+            "locals".to_string(),
+            serde_json::json!(variables(&graph.locals)),
+        );
+        object.insert("frame".to_string(), serde_json::json!(graph.frame));
+    }
+    json
+}
+
 /// A flow by the name the architecture conversation spells it, and the
 /// target it names.
 fn flow_name(flow: &Flow) -> (&'static str, Option<u64>) {
@@ -2238,8 +2399,9 @@ pub struct ExternalTool {
     pub input_schema: Option<serde_json::Value>,
 }
 
-/// One manifest: a JSON file declaring loaders, architectures, tools,
-/// rewriters, formatters, recognizers, renderers and debug info parsers.
+/// One manifest: a JSON file declaring loaders, architectures, lift hooks,
+/// tools, rewriters, formatters, recognizers, renderers and debug info
+/// parsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// Where the manifest was read from.
@@ -2248,6 +2410,7 @@ pub struct Manifest {
     pub name: String,
     pub loaders: Vec<ExternalLoader>,
     pub architectures: Vec<ExternalArchitecture>,
+    pub lift_hooks: Vec<ExternalLiftHook>,
     pub tools: Vec<ExternalTool>,
     pub rewriters: Vec<ExternalRewriter>,
     pub formatters: Vec<ExternalFormatter>,
@@ -2461,6 +2624,20 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             lift: optional_command("lift"),
         });
     }
+    let mut lift_hooks = Vec::new();
+    for (index, entry) in entries("lifthooks")?.iter().enumerate() {
+        let languages = strings(entry.get("languages"));
+        if languages.is_empty() {
+            return Err("a lift hook names the languages whose lifting it patches".to_string());
+        }
+        lift_hooks.push(ExternalLiftHook {
+            name: entry_name(entry, index),
+            languages,
+            command: command_of(entry, "lift hook")?,
+            timeout: timeout_of(entry)?,
+            functions: strings(entry.get("functions")),
+        });
+    }
     let mut tools = Vec::new();
     for entry in entries("tools")? {
         let tool_name = entry
@@ -2555,6 +2732,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         name,
         loaders,
         architectures,
+        lift_hooks,
         tools,
         rewriters,
         formatters,
@@ -2614,6 +2792,19 @@ pub fn load_manifests(dirs: &[PathBuf]) -> (Vec<Manifest>, Vec<String>) {
                             ));
                         }
                         register_architecture(Arc::new(architecture.clone()));
+                    }
+                    for hook in &manifest.lift_hooks {
+                        if manifests
+                            .iter()
+                            .any(|known| known.lift_hooks.iter().any(|h| h.name == hook.name))
+                        {
+                            problems.push(format!(
+                                "{}: the lift hook {:?} is declared again, and replaces the first",
+                                path.display(),
+                                hook.name
+                            ));
+                        }
+                        register_lift_hook(Arc::new(hook.clone()));
                     }
                     for tool in &manifest.tools {
                         if manifests
@@ -2972,23 +3163,7 @@ impl Architecture for ExternalArchitecture {
 
     fn lift(&self, function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
         let command = self.lift.as_ref()?;
-        let request = serde_json::json!({
-            "language": function.language,
-            "function": function.address,
-            "function_hex": format!("{:#x}", function.address),
-            "name": function.name,
-            "base": function.base,
-            "base_hex": format!("{:#x}", function.base),
-            "bytes": hex_text(function.bytes),
-            "instructions": instructions_json(function.disasm),
-            "blocks": function.cfg.blocks.iter().map(|block| serde_json::json!({
-                "from": block.from,
-                "from_hex": format!("{:#x}", block.from),
-                "to": block.to,
-                "to_hex": format!("{:#x}", block.to),
-                "successors": block.successor_addresses,
-            })).collect::<Vec<_>>(),
-        });
+        let request = function_code_json(function);
         Some(
             self.ask(command, &request)
                 .and_then(|answer| graph_of(&answer)),
@@ -3114,6 +3289,79 @@ impl Architecture for ExternalArchitecture {
             .instructions
             .sort_by_key(|instruction| instruction.address);
         Ok(decoded)
+    }
+}
+
+/// A lift hook that is a command: given the function and the architecture's
+/// lift of it as JSON on its standard input, it prints a graph to replace
+/// the lift, a refusal, or nothing to leave it as it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLiftHook {
+    pub name: String,
+    /// The language ids whose lifting the hook patches.
+    pub languages: Vec<String>,
+    pub command: Vec<String>,
+    pub timeout: Duration,
+    /// The functions the command is run for, by name or address; every
+    /// function of its languages when empty.
+    pub functions: Vec<String>,
+}
+
+impl LiftHook for ExternalLiftHook {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn languages(&self) -> Vec<String> {
+        self.languages.clone()
+    }
+
+    fn wants(&self, address: u64, name: &str) -> bool {
+        wants_function(&self.functions, address, name)
+    }
+
+    fn patch(
+        &self,
+        function: &FunctionCode,
+        lifted: Option<&Result<LiftedGraph, String>>,
+    ) -> Option<Result<LiftedGraph, String>> {
+        let mut request = function_code_json(function);
+        if let Some(object) = request.as_object_mut() {
+            match lifted {
+                Some(Ok(graph)) => {
+                    object.insert("lifted".to_string(), lifted_graph_json(function, graph));
+                }
+                Some(Err(reason)) => {
+                    object.insert("refusal".to_string(), serde_json::json!(reason));
+                }
+                None => {}
+            }
+        }
+        let input = match serde_json::to_vec(&request) {
+            Ok(input) => input,
+            Err(error) => return Some(Err(error.to_string())),
+        };
+        let output = match run_command(&self.command, &input, self.timeout) {
+            Ok(output) => output,
+            Err(error) => return Some(Err(error)),
+        };
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return None;
+        }
+        let answer: serde_json::Value = match serde_json::from_slice(&output) {
+            Ok(answer) => answer,
+            Err(error) => return Some(Err(format!("the answer is not JSON: {error}"))),
+        };
+        if let Some(reason) = answer.get("refuse") {
+            return Some(match reason.as_str() {
+                Some(reason) => Err(reason.to_string()),
+                None => Err("the `refuse` is a reason string".to_string()),
+            });
+        }
+        // An answer that names no blocks leaves the lift as it stands, as
+        // an empty one does; a graph replaces it.
+        answer.get("blocks")?;
+        Some(graph_of(&answer))
     }
 }
 
@@ -4471,5 +4719,485 @@ mod tests {
         );
         let error = debug_info_of(&serde_json::json!([1, 2])).unwrap_err();
         assert!(error.contains("the answer is a JSON object"), "{error}");
+    }
+
+    // ---- Lift hooks: patching an architecture's lifting. ----
+
+    /// A one-block graph the hook tests lift to: a single `x` statement
+    /// and a return.
+    fn hook_graph() -> LiftedGraph {
+        LiftedGraph {
+            return_type: "void".to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            entry: 0,
+            nodes: vec![Node {
+                address: 0x100,
+                statements: vec![Rewrite::statement(AstNode::var("x"), vec![0x100])],
+                terminator: Terminator::Return,
+            }],
+            frame: Vec::new(),
+        }
+    }
+
+    /// An architecture for the hook tests: it lifts the function to
+    /// [`hook_graph`], refuses it, or does not lift the language, as it is
+    /// told. Each test names a language of its own, so a hook left
+    /// registered by one test cannot reach into another.
+    struct HookArch {
+        language: &'static str,
+        lifts: bool,
+        refuses: bool,
+    }
+
+    impl Architecture for HookArch {
+        fn name(&self) -> &str {
+            "hook-arch"
+        }
+        fn languages(&self) -> Vec<String> {
+            vec![self.language.to_string()]
+        }
+        fn bitness(&self, _language: &str) -> Bitness {
+            Bitness::Bits64
+        }
+        fn decode_section(
+            &self,
+            _language: &str,
+            _bytes: &[u8],
+            _base: u64,
+        ) -> Result<DecodedSection, String> {
+            Ok(DecodedSection::default())
+        }
+        fn lifts(&self, _language: &str) -> bool {
+            self.lifts
+        }
+        fn lift(&self, _function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
+            if !self.lifts {
+                return None;
+            }
+            if self.refuses {
+                return Some(Err("the instruction is not read".to_string()));
+            }
+            Some(Ok(hook_graph()))
+        }
+    }
+
+    /// What a [`FnHook`] does: the signature of [`LiftHook::patch`].
+    type PatchFn = fn(
+        &FunctionCode,
+        Option<&Result<LiftedGraph, String>>,
+    ) -> Option<Result<LiftedGraph, String>>;
+
+    /// A hook that does what its function pointer says, for the languages
+    /// it names.
+    struct FnHook {
+        name: &'static str,
+        languages: Vec<String>,
+        patch: PatchFn,
+    }
+
+    impl LiftHook for FnHook {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn languages(&self) -> Vec<String> {
+            self.languages.clone()
+        }
+        fn patch(
+            &self,
+            function: &FunctionCode,
+            lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            (self.patch)(function, lifted)
+        }
+    }
+
+    /// Run `f` with a minimal function code of `language`.
+    fn with_code<R>(language: &str, f: impl FnOnce(&FunctionCode) -> R) -> R {
+        let disasm = Disasm::default();
+        let cfg = ProcedureCfg::default();
+        let names = std::collections::BTreeMap::new();
+        let code = FunctionCode {
+            language,
+            address: 0x100,
+            name: "f",
+            disasm: &disasm,
+            cfg: &cfg,
+            bytes: &[],
+            base: 0x100,
+            names: &names,
+        };
+        f(&code)
+    }
+
+    /// Replace the lifted graph's one statement with `patched`.
+    fn patch_statement(
+        _function: &FunctionCode,
+        lifted: Option<&Result<LiftedGraph, String>>,
+    ) -> Option<Result<LiftedGraph, String>> {
+        let mut graph = match lifted {
+            Some(Ok(graph)) => graph.clone(),
+            _ => return None,
+        };
+        graph.nodes[0].statements[0].node = AstNode::var("patched");
+        Some(Ok(graph))
+    }
+
+    #[test]
+    fn a_lift_hook_patches_the_graph_the_architecture_lifted() {
+        let language = "HOOK-PATCH:LE:64:default";
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-patch",
+            languages: vec![language.to_string()],
+            patch: patch_statement,
+        }));
+        let arch = HookArch {
+            language,
+            lifts: true,
+            refuses: false,
+        };
+        let graph = with_code(language, |code| lift_with_hooks(&arch, code))
+            .expect("the architecture lifts")
+            .expect("the hook keeps the lift");
+        assert_eq!(graph.nodes[0].statements[0].node, AstNode::var("patched"));
+        unregister_lift_hook("hook-patch");
+        // Without the hook the architecture's own graph stands.
+        let graph = with_code(language, |code| lift_with_hooks(&arch, code))
+            .unwrap()
+            .unwrap();
+        assert_eq!(graph.nodes[0].statements[0].node, AstNode::var("x"));
+    }
+
+    #[test]
+    fn a_lift_hook_lifts_a_function_the_architecture_refuses() {
+        let language = "HOOK-REFUSE:LE:64:default";
+        // A hook that lifts whatever it is given, refusal or no lift.
+        fn lift_any(
+            _function: &FunctionCode,
+            _lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            Some(Ok(hook_graph()))
+        }
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-refuse",
+            languages: vec![language.to_string()],
+            patch: lift_any,
+        }));
+        let arch = HookArch {
+            language,
+            lifts: true,
+            refuses: true,
+        };
+        // The hook sees the architecture's refusal and lifts after all.
+        let graph = with_code(language, |code| lift_with_hooks(&arch, code))
+            .expect("the hook lifts")
+            .expect("the hook's graph");
+        assert_eq!(graph.nodes[0].statements[0].node, AstNode::var("x"));
+        unregister_lift_hook("hook-refuse");
+        // Without the hook the refusal stands, named with the architecture.
+        let error = with_code(language, |code| lift_with_hooks(&arch, code))
+            .expect("the architecture refuses")
+            .unwrap_err();
+        assert!(error.contains("hook-arch"), "{error}");
+        assert!(error.contains("the instruction is not read"), "{error}");
+    }
+
+    #[test]
+    fn a_lift_hook_lifts_a_language_the_architecture_only_decodes() {
+        let language = "HOOK-DECODE:LE:64:default";
+        fn lift_any(
+            _function: &FunctionCode,
+            lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            // The architecture does not lift the language: no lift at all.
+            assert!(lifted.is_none());
+            Some(Ok(hook_graph()))
+        }
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-decode",
+            languages: vec![language.to_string()],
+            patch: lift_any,
+        }));
+        let arch = HookArch {
+            language,
+            lifts: false,
+            refuses: false,
+        };
+        let graph = with_code(language, |code| lift_with_hooks(&arch, code))
+            .expect("the hook lifts")
+            .expect("the hook's graph");
+        assert_eq!(graph.nodes.len(), 1);
+        unregister_lift_hook("hook-decode");
+        // Without the hook there is no lift: the architecture does not lift.
+        assert!(with_code(language, |code| lift_with_hooks(&arch, code)).is_none());
+    }
+
+    #[test]
+    fn lift_hooks_run_in_order_for_their_language_and_the_functions_they_want() {
+        let language = "HOOK-ORDER:LE:64:default";
+        // The first hook appends a statement; the second sees the first's
+        // work and appends another, so the order shows in the graph.
+        fn first(
+            _function: &FunctionCode,
+            lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            let mut graph = match lifted {
+                Some(Ok(graph)) => graph.clone(),
+                _ => return None,
+            };
+            graph.nodes[0]
+                .statements
+                .push(Rewrite::statement(AstNode::var("first"), vec![0x100]));
+            Some(Ok(graph))
+        }
+        fn second(
+            _function: &FunctionCode,
+            lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            let mut graph = match lifted {
+                Some(Ok(graph)) => graph.clone(),
+                _ => return None,
+            };
+            // The first hook's statement is there to see.
+            assert_eq!(
+                graph.nodes[0].statements.last().unwrap().node,
+                AstNode::var("first")
+            );
+            graph.nodes[0]
+                .statements
+                .push(Rewrite::statement(AstNode::var("second"), vec![0x100]));
+            Some(Ok(graph))
+        }
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-order-1",
+            languages: vec![language.to_string()],
+            patch: first,
+        }));
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-order-2",
+            languages: vec![language.to_string()],
+            patch: second,
+        }));
+        // A hook for another language does not run.
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-order-other",
+            languages: vec!["HOOK-ELSEWHERE:LE:64:default".to_string()],
+            patch: second,
+        }));
+        let arch = HookArch {
+            language,
+            lifts: true,
+            refuses: false,
+        };
+        let graph = with_code(language, |code| lift_with_hooks(&arch, code))
+            .unwrap()
+            .unwrap();
+        let names: Vec<&AstNode> = graph.nodes[0].statements.iter().map(|s| &s.node).collect();
+        assert_eq!(
+            names,
+            [
+                &AstNode::var("x"),
+                &AstNode::var("first"),
+                &AstNode::var("second")
+            ]
+        );
+        unregister_lift_hook("hook-order-1");
+        unregister_lift_hook("hook-order-2");
+        unregister_lift_hook("hook-order-other");
+    }
+
+    #[test]
+    fn a_lift_hooks_refusal_names_the_hook() {
+        let language = "HOOK-FAIL:LE:64:default";
+        fn refuse(
+            _function: &FunctionCode,
+            _lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            Some(Err("not this one".to_string()))
+        }
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-fail",
+            languages: vec![language.to_string()],
+            patch: refuse,
+        }));
+        let arch = HookArch {
+            language,
+            lifts: true,
+            refuses: false,
+        };
+        let error = with_code(language, |code| lift_with_hooks(&arch, code))
+            .expect("the hook refuses")
+            .unwrap_err();
+        assert!(error.contains("the lift hook hook-fail"), "{error}");
+        assert!(error.contains("not this one"), "{error}");
+        unregister_lift_hook("hook-fail");
+    }
+
+    #[test]
+    fn a_lift_hook_is_registered_listed_and_replaced_by_name() {
+        let language = "HOOK-REG:LE:64:default";
+        fn pass(
+            _function: &FunctionCode,
+            _lifted: Option<&Result<LiftedGraph, String>>,
+        ) -> Option<Result<LiftedGraph, String>> {
+            None
+        }
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-reg",
+            languages: vec![language.to_string()],
+            patch: pass,
+        }));
+        assert!(lift_hooks().iter().any(|hook| hook.name() == "hook-reg"));
+        assert_eq!(lift_hooks_for(language).len(), 1);
+        assert!(lift_hooks_for("HOOK-NONE:LE:64:default").is_empty());
+        // One of the same name replaces it, not doubles it.
+        register_lift_hook(Arc::new(FnHook {
+            name: "hook-reg",
+            languages: vec![language.to_string()],
+            patch: pass,
+        }));
+        assert_eq!(lift_hooks_for(language).len(), 1);
+        unregister_lift_hook("hook-reg");
+        assert!(lift_hooks_for(language).is_empty());
+    }
+
+    #[test]
+    fn a_lift_hook_command_replaces_refuses_or_leaves_the_lift() {
+        let language = "HOOK-CMD:LE:64:default";
+        let dir = Dir::new("lift-hook");
+        let seen = dir.0.join("request.json");
+        // The command keeps the request it was given and prints the answer
+        // the test names, so the request's shape is checked too.
+        let hook = |answer: &str| ExternalLiftHook {
+            name: "hook-cmd".to_string(),
+            languages: vec![language.to_string()],
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat > \"$0\"; printf '%s' \"$1\"".to_string(),
+                seen.display().to_string(),
+                answer.to_string(),
+            ],
+            timeout: Duration::from_secs(10),
+            functions: Vec::new(),
+        };
+        let graph_answer = serde_json::json!({
+            "return_type": "void", "entry": 0,
+            "blocks": [{ "address": 256, "statements": [
+                { "addresses": [256], "expr": { "var": "patched" } } ],
+                "terminator": { "kind": "return" } }]
+        });
+        // A graph replaces the lift; the request carried the architecture's
+        // own graph, its instructions and its bytes.
+        let patched = with_code(language, |code| {
+            hook(&graph_answer.to_string()).patch(code, Some(&Ok(hook_graph())))
+        })
+        .expect("the command answers")
+        .expect("a graph");
+        assert_eq!(patched.nodes[0].statements[0].node, AstNode::var("patched"));
+        let request: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(request["language"], language);
+        assert_eq!(request["function"], 0x100);
+        assert!(request["instructions"].is_array());
+        assert_eq!(request["lifted"]["blocks"][0]["statements"][0]["text"], "x");
+        assert_eq!(request["lifted"]["return_type"], "void");
+        assert!(request.get("refusal").is_none());
+        // A refusal refuses the function, and the request carried the
+        // architecture's reason.
+        let error = with_code(language, |code| {
+            hook(r#"{ "refuse": "the hook says no" }"#)
+                .patch(code, Some(&Err("the arch refused".to_string())))
+        })
+        .expect("the command answers")
+        .unwrap_err();
+        assert_eq!(error, "the hook says no");
+        let request: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(request["refusal"], "the arch refused");
+        assert!(request.get("lifted").is_none());
+        // Nothing, an empty object, or an answer with no blocks leaves the
+        // lift as it stands.
+        for answer in ["", "{}", r#"{ "note": "left alone" }"#] {
+            assert!(with_code(language, |code| {
+                hook(answer).patch(code, Some(&Ok(hook_graph())))
+            })
+            .is_none());
+        }
+        // A command that fails refuses the lift with its error.
+        let failing = ExternalLiftHook {
+            command: vec!["sh".to_string(), "-c".to_string(), "exit 2".to_string()],
+            ..hook("{}")
+        };
+        let error = with_code(language, |code| failing.patch(code, None))
+            .expect("a failing command refuses")
+            .unwrap_err();
+        assert!(error.contains("ended with"), "{error}");
+        // The functions filter spares the command for a function not named.
+        let picky = ExternalLiftHook {
+            functions: vec!["elsewhere".to_string()],
+            ..hook(&graph_answer.to_string())
+        };
+        assert!(!picky.wants(0x100, "f"));
+        assert!(picky.wants(0x100, "elsewhere"));
+    }
+
+    #[test]
+    fn a_manifest_declares_lift_hooks_and_a_bad_one_says_what_is_wrong() {
+        let dir = Dir::new("lift-hook-manifest");
+        let path = dir.0.join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{ "name": "hooked", "lifthooks": [
+                { "languages": ["TOY:LE:8:default"], "command": ["sh", "-c", "cat"],
+                  "timeout": 7, "functions": ["start"] },
+                { "name": "second", "languages": ["TOY:LE:8:default", "TOY:BE:8:default"],
+                  "command": ["${dir}/patch.py"] }
+            ] }"#,
+        )
+        .unwrap();
+        let manifest = read_manifest(&path).unwrap();
+        assert_eq!(manifest.lift_hooks.len(), 2);
+        assert_eq!(manifest.lift_hooks[0].name, "hooked");
+        assert_eq!(manifest.lift_hooks[0].languages, ["TOY:LE:8:default"]);
+        assert_eq!(manifest.lift_hooks[0].timeout, Duration::from_secs(7));
+        assert_eq!(manifest.lift_hooks[0].functions, ["start"]);
+        assert_eq!(manifest.lift_hooks[1].name, "second");
+        assert_eq!(manifest.lift_hooks[1].languages.len(), 2);
+        assert_eq!(
+            manifest.lift_hooks[1].command[0],
+            dir.0.join("patch.py").display().to_string()
+        );
+        // A lift hook names its languages and its command.
+        let bad = dir.0.join("bad.json");
+        std::fs::write(&bad, r#"{ "lifthooks": [ { "command": ["cat"] } ] }"#).unwrap();
+        assert!(read_manifest(&bad).unwrap_err().contains("languages"));
+        std::fs::write(
+            &bad,
+            r#"{ "lifthooks": [ { "languages": ["TOY:LE:8:default"] } ] }"#,
+        )
+        .unwrap();
+        assert!(read_manifest(&bad).unwrap_err().contains("command"));
+        // load_manifests registers them, and a name declared twice is told.
+        let (manifests, _) = load_manifests(std::slice::from_ref(&dir.0));
+        assert!(manifests.iter().any(|m| m.name == "hooked"));
+        assert!(lift_hooks().iter().any(|hook| hook.name() == "hooked"));
+        assert!(lift_hooks().iter().any(|hook| hook.name() == "second"));
+        let again = dir.0.join("again.json");
+        std::fs::write(
+            &again,
+            r#"{ "name": "hooked", "lifthooks": [
+                { "languages": ["TOY:LE:8:default"], "command": ["cat"] } ] }"#,
+        )
+        .unwrap();
+        let (_, problems) = load_manifests(std::slice::from_ref(&dir.0));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("lift hook") && p.contains("hooked")),
+            "{problems:?}"
+        );
+        unregister_lift_hook("hooked");
+        unregister_lift_hook("second");
     }
 }

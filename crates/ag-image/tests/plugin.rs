@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ag_engine::cpu_context::{DecodedInsn, Flow};
 use ag_engine::plugin::{
-    self, Architecture, DecodedSection, FunctionCode, LiftedGraph, LoadedImage, Loader,
+    self, Architecture, DecodedSection, FunctionCode, LiftHook, LiftedGraph, LoadedImage, Loader,
     RecoveredBlock, Rewrite,
 };
 use ag_engine::{AstNode, Bitness, Node, Terminator};
@@ -434,4 +434,132 @@ fn a_plugins_image_is_listed_graphed_and_reported_like_any_other() {
         ]
     );
     assert!(image.pseudocode(0x100).is_err());
+}
+
+/// The toy container again, with a third magic, for a language the
+/// architecture below only decodes — and a lift hook gives pseudocode.
+struct ToyHookLoader;
+
+impl Loader for ToyHookLoader {
+    fn name(&self) -> &str {
+        "toy-hook-loader"
+    }
+    fn recognizes(&self, bytes: &[u8]) -> bool {
+        bytes.starts_with(b"TOY3")
+    }
+    fn load(&self, name: &str, bytes: &[u8]) -> Result<LoadedImage, String> {
+        let mut image = ToyLoader.load(name, bytes)?;
+        image.language = "TOYHOOK:LE:32:default".to_string();
+        Ok(image)
+    }
+}
+
+/// The toy instruction set, decoding only: it does not lift, so without a
+/// hook its image has no pseudocode.
+struct ToyHookCpu;
+
+impl Architecture for ToyHookCpu {
+    fn name(&self) -> &str {
+        "toy-hook-cpu"
+    }
+    fn languages(&self) -> Vec<String> {
+        vec!["TOYHOOK:LE:32:default".to_string()]
+    }
+    fn bitness(&self, _language: &str) -> Bitness {
+        Bitness::Bits32
+    }
+    fn decode_section(
+        &self,
+        language: &str,
+        bytes: &[u8],
+        base: u64,
+    ) -> Result<DecodedSection, String> {
+        ToyCpu.decode_section(language, bytes, base)
+    }
+}
+
+/// A hook that lifts the toy function the architecture only decodes: one
+/// call to `hooked`, then a return. It patches the language's lifting
+/// without registering an architecture in the decoder's place.
+struct ToyLiftHook;
+
+impl LiftHook for ToyLiftHook {
+    fn name(&self) -> &str {
+        "toy-lift-hook"
+    }
+    fn languages(&self) -> Vec<String> {
+        vec!["TOYHOOK:LE:32:default".to_string()]
+    }
+    fn patch(
+        &self,
+        function: &FunctionCode,
+        lifted: Option<&Result<LiftedGraph, String>>,
+    ) -> Option<Result<LiftedGraph, String>> {
+        // The architecture does not lift the language: there is no lift.
+        assert!(lifted.is_none());
+        assert_eq!(function.language, "TOYHOOK:LE:32:default");
+        assert_eq!(function.address, 0x100);
+        Some(Ok(LiftedGraph {
+            return_type: "void".to_string(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            entry: 0,
+            nodes: vec![Node {
+                address: 0x100,
+                statements: vec![Rewrite::statement(
+                    AstNode::Call {
+                        callee: Box::new(AstNode::FunctionName {
+                            name: "hooked".to_string(),
+                            address: 0,
+                        }),
+                        args: Vec::new(),
+                    },
+                    vec![0x100],
+                )],
+                terminator: Terminator::Return,
+            }],
+            frame: Vec::new(),
+        }))
+    }
+}
+
+#[test]
+fn a_lift_hook_gives_pseudocode_to_an_architecture_that_only_decodes() {
+    plugin::register_loader(Arc::new(ToyHookLoader));
+    plugin::register_architecture(Arc::new(ToyHookCpu));
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = Scratch(std::env::temp_dir().join(format!(
+        "ag-image-hook-{}-{:?}.toy",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    // 0x100: nop; 0x101: ret.
+    std::fs::write(&path.0, b"TOY3\x02\x00\x01").unwrap();
+
+    // Without the hook the architecture decodes but does not lift.
+    let image = Binary::open(&path.0).expect("the third toy loader reads the file");
+    assert_eq!(image.language(), "TOYHOOK:LE:32:default");
+    assert_eq!(image.plugin_architecture().as_deref(), Some("toy-hook-cpu"));
+    assert!(image.supports_disassembly());
+    assert!(!image.supports_pseudocode());
+    assert!(image.pseudocode(0x100).is_err());
+
+    // The hook patches the language's lifting: the image has pseudocode
+    // now, and it is the hook's, structured by the engine.
+    plugin::register_lift_hook(Arc::new(ToyLiftHook));
+    let image = Binary::open(&path.0).expect("the third toy loader reads the file");
+    assert!(image.supports_pseudocode());
+    let pseudocode = image.pseudocode(0x100).expect("lifted by the hook");
+    let text = pseudocode.text();
+    assert!(text.contains("void start("), "{text}");
+    assert!(text.contains("hooked()"), "{text}");
+    // The medium level is the hook's graph.
+    let medium = image.il(0x100, Level::Medium, false).expect("medium");
+    assert!(medium.text().contains("hooked()"), "{}", medium.text());
+    plugin::unregister_lift_hook("toy-lift-hook");
 }
