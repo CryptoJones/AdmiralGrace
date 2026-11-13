@@ -4,8 +4,11 @@ A loader, an architecture or a tool is added without forking. A **loader** reads
 the engine does not — a firmware image with its own header, a packed format, an archive —
 into the sections, symbols and entry point everything else works from. An **architecture**
 decodes the code of a language the engine does not, into the instructions and the flow
-between them that the control-flow walk, the listing and the graph work from. A **tool** is
-an analysis of its own over an open image, run with `ag tool` or called by a language model
+between them that the control-flow walk, the listing and the graph work from. A **lift hook**
+patches an architecture's lifting without forking it — an instruction the built-in lifter reads
+wrong is patched, a function it refuses is lifted after all, a language the architecture only
+decodes is given pseudocode — without registering a whole architecture in its place. A **tool**
+is an analysis of its own over an open image, run with `ag tool` or called by a language model
 through the MCP server beside the image's own tools. A **recognizer** finds the expressions
 that build strings — a stack string written a character at a time, a buffer XORed with a key —
 and decodes them, so the pseudocode shows the clear text as a comment beside the code that
@@ -42,6 +45,9 @@ registered, as text or with `--json`.
     { "name": "toycpu", "languages": ["TOY:LE:8:default"], "bitness": 32, "command": ["python3", "/opt/toy/decode.py"],
       "blocks": ["python3", "/opt/toy/blocks.py"], "lift": ["python3", "/opt/toy/lift.py"] }
   ],
+  "lifthooks": [
+    { "name": "toy-fix", "languages": ["TOY:LE:8:default"], "command": ["python3", "/opt/toy/patch.py"], "functions": ["start"] }
+  ],
   "tools": [
     { "name": "count_strings", "description": "How many strings match a pattern.", "command": ["python3", "/opt/toy/count.py"],
       "inputSchema": { "type": "object", "properties": { "pattern": { "type": "string" } } } }
@@ -70,7 +76,10 @@ is reported on standard error and the engine's own loaders read the file after a
 loader with a common magic cannot keep a program from opening. An architecture names the
 `languages` it decodes (the language ids a loader reports) and its `bitness` (16, 32 or 64),
 and may give two more commands: `blocks`, which recovers a function's basic blocks itself,
-and `lift`, which lifts a whole function at once (below).
+and `lift`, which lifts a whole function at once (below). A lift hook names the `languages`
+whose lifting it patches and its command: every function of those languages lifted passes
+through it, and it may name the `functions` it runs for as a rewriter does. It patches an
+architecture already there — a built-in one or a registered one — rather than replacing it.
 A tool names itself (letters, digits, `_` and `-`), says what it does, and may give the JSON
 Schema of its arguments (an object). A rewriter needs only its command: every function lifted
 passes through it. A formatter needs only its command too: every function's pseudocode passes
@@ -91,7 +100,7 @@ relative; the arguments are passed as they are, with `${dir}` in any element sta
 the manifest's directory, so a manifest and its scripts move together. Every entry may give a `timeout` in seconds (60 unless said): a command that has
 not answered by then is ended and its answer is an error.
 
-## The eight conversations
+## The nine conversations
 
 Each command is given its input on standard input and answers on standard output, in one
 go; its standard error is the terminal's. Numbers may be JSON numbers or hex text such as
@@ -196,6 +205,29 @@ outside the function, a command that fails or runs out of time, refuses the func
 architecture's name; so does an architecture that lifts the language and answers nothing for
 a function, since the engine's lifter reads x86-64 alone. The `blocks` and `lift` commands
 are each run once per function and remembered with the image.
+
+**A lift hook** patches an architecture's lifting without forking it. It is given the function
+— the same request an architecture's `lift` command is given (`language`, `function`, `name`,
+`base`, `bytes`, `instructions`, `blocks`) — with the architecture's own lift beside it: a
+`lifted` field holding the graph the architecture lifted (the read-only text shape a rewriter
+is given, with its `return_type`, `params`, `locals` and `frame`), or a `refusal` field holding
+the reason the architecture refused the function, or neither when the architecture does not
+lift the language at all. It is run for every function of the `languages` its manifest entry
+names — or the ones it names under `functions`, by name or address — in the order the hooks
+were registered, each seeing the lift as the hooks before left it. The answer is one of:
+
+- a graph, the shape an architecture's `lift` command answers with (above), which replaces the
+  lift — so a hook lifts a function the architecture refused, or gives pseudocode to a language
+  the architecture only decodes;
+- `{"refuse": "a reason"}`, which refuses the function with the reason, told with the hook's name;
+- nothing, or `{}`, or an answer with no `blocks`, which leaves the lift as it stands.
+
+The engine structures the graph the last hook leaves into pseudocode and gives it its levels,
+after the registered rewriters, as it does an architecture's own lift. A hook that fails, or
+answers with something that is not a graph or a refusal, refuses the function with the hook's
+name. A hook in Rust is handed the `LiftedGraph` itself and may edit it in place (below); a
+command reads the graph as text and answers a whole graph, as an architecture's `lift` command
+does. The hook is run once per function and remembered with the image, as the `lift` command is.
 
 **A tool** is given `{"tool": "…", "image": "<path>", "project": "<path or null>",
 "arguments": {…}}` — the image's path and the project file's, so it can open them itself
@@ -421,6 +453,18 @@ plugin::register_loader(Arc::new(Toy));
   `Node`s over `AstNode`s, with its `params`, `locals`, `return_type`, `entry` and
   `frame`; `None` from an architecture that `lifts` refuses the function). `Rewrite::statement(node, addresses)`
   makes a statement; the engine structures the graph and gives it its levels.
+- `ag_engine::plugin::LiftHook` — `name`, `languages`, `wants(address, name)` (every function
+  of its languages unless said) and `patch(&FunctionCode, Option<&Result<LiftedGraph>>) ->
+  Option<Result<LiftedGraph>>`: the architecture's lift of the function — `Some(Ok(graph))`
+  when it lifted, `Some(Err(reason))` when it refused, `None` when it does not lift the
+  language — which the hook may leave (`None`), replace with a graph of its own
+  (`Some(Ok(graph))`, editing the `LiftedGraph` it was handed), or refuse (`Some(Err(reason))`,
+  told with the hook's name). Registered with `register_lift_hook`; `lift_hooks()` lists them
+  in the order they run, `lift_hooks_for(language)` the ones that patch a language, and
+  `unregister_lift_hook(name)` takes one off. `lift_with_hooks(architecture, function)` is the
+  architecture's lift patched by them all, as the image runs it. An architecture is extended
+  without registering one in its place: a built-in lifter's graph is patched, a function it
+  refuses is lifted, a language it only decodes is given pseudocode.
 - `ag_image::plugin::Tool` — `name`, `description`, `input_schema` and
   `run(image, context, arguments)` over the open `Binary`, with the image's and the
   project's paths in the `ToolContext`. Registered with `register_tool`.

@@ -84,8 +84,8 @@ pub use lift::{
 pub use options::{OptionError, Options, SiteOverride, Sites};
 pub use pipeline::{DecompilerOptions, Disasm};
 pub use plugin::{
-    Architecture, DecodedSection, Formatter, Formatting, FunctionCode, LiftedGraph, LoadedImage,
-    Loader, Manifest, RecoveredBlock, Rewrite, Rewriter,
+    Architecture, DecodedSection, ExternalLiftHook, Formatter, Formatting, FunctionCode, LiftHook,
+    LiftedGraph, LoadedImage, Loader, Manifest, RecoveredBlock, Rewrite, Rewriter,
 };
 pub use procedure::FunctionSignature;
 pub use properties::FunctionProperties;

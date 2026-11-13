@@ -19,9 +19,9 @@ pub fn remember(manifests: Vec<Manifest>) {
     *remembered().lock().unwrap_or_else(PoisonError::into_inner) = manifests;
 }
 
-/// List the plugins: every loader, architecture, tool, rewriter, formatter,
-/// recognizer, renderer and debug info parser registered, and the manifests
-/// they were read from.
+/// List the plugins: every loader, architecture, lift hook, tool, rewriter,
+/// formatter, recognizer, renderer and debug info parser registered, and
+/// the manifests they were read from.
 pub fn list(json: bool) -> Result<i32> {
     let manifests = remembered()
         .lock()
@@ -40,6 +40,10 @@ pub fn list(json: bool) -> Result<i32> {
                 "lifts": arch.languages().iter().any(|language| arch.lifts(language)),
             })
         })
+        .collect();
+    let lift_hooks: Vec<Value> = ag_image::plugin::lift_hooks()
+        .iter()
+        .map(|hook| json!({ "name": hook.name(), "languages": hook.languages() }))
         .collect();
     let tools: Vec<Value> = ag_image::plugin::tools()
         .iter()
@@ -73,6 +77,7 @@ pub fn list(json: bool) -> Result<i32> {
                 "path": manifest.path,
                 "loaders": manifest.loaders.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
                 "architectures": manifest.architectures.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                "lift_hooks": manifest.lift_hooks.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
                 "tools": manifest.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 "rewriters": manifest.rewriters.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
                 "formatters": manifest.formatters.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
@@ -82,6 +87,7 @@ pub fn list(json: bool) -> Result<i32> {
             })).collect::<Vec<Value>>(),
             "loaders": loaders,
             "architectures": architectures,
+            "lift_hooks": lift_hooks,
             "tools": tools,
             "rewriters": rewriters,
             "formatters": formatters,
@@ -121,6 +127,26 @@ pub fn list(json: bool) -> Result<i32> {
                     "{} ({})",
                     arch["name"].as_str().unwrap_or_default(),
                     arch["languages"]
+                        .as_array()
+                        .map(|languages| languages
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                )
+            })
+            .collect(),
+    );
+    listed(
+        "lift hooks",
+        lift_hooks
+            .iter()
+            .map(|hook| {
+                format!(
+                    "{} ({})",
+                    hook["name"].as_str().unwrap_or_default(),
+                    hook["languages"]
                         .as_array()
                         .map(|languages| languages
                             .iter()
