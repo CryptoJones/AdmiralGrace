@@ -452,6 +452,39 @@ mod tests {
     }
 
     #[test]
+    fn audit_drop_header_keeps_engine_notes_and_thunk_bodies() {
+        // P3-11e: drop_header eats every leading // and blank line, not just
+        // the provider's function header — a thunk's whole body is a // comment.
+        assert_eq!(
+            Corpus::drop_header("// Function: s @ 0x1000\n\n// thunk for puts\n"),
+            "// thunk for puts"
+        );
+        assert_eq!(
+            Corpus::drop_header(
+                "// Function: f @ 0x1000\n// returns int: x\n// does not return when a < 0\nint f(int a)\n{\n  return a;\n}\n"
+            ),
+            "// returns int: x\n// does not return when a < 0\nint f(int a)\n{\n  return a;\n}"
+        );
+    }
+
+    #[test]
+    fn audit_unknown_index_version_is_refused() {
+        // P3-11c: Index.version is deserialized but never checked; a future
+        // format would be read with today's rules.
+        let dir = TempDir::new("audit-version");
+        let json = index_with(&record("0x1", "f")).replace("\"version\":1", "\"version\":2");
+        dir.write("decompile-index.json", &json);
+        let err = Corpus::load(&dir.0)
+            .err()
+            .expect("an unknown index version must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains('2') && msg.contains('1'),
+            "the error names the found and supported versions: {msg}"
+        );
+    }
+
+    #[test]
     fn an_address_is_read_with_or_without_its_prefix() {
         assert_eq!(parse_addr("0x1000").expect("an address"), 0x1000);
         assert_eq!(parse_addr("0X1000").expect("an address"), 0x1000);

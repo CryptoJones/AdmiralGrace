@@ -10260,4 +10260,59 @@ mod tests {
         assert!(text.contains("first"), "{text}");
         assert!(!text.contains("dead"), "{text}");
     }
+
+    #[test]
+    fn audit_cdecl_on_a_win64_image_uses_the_microsoft_registers() {
+        // P3-05: mov eax, ecx; ret — rcx is Win64's first argument. A cdecl
+        // function on a Win64 image is Microsoft x64, not System V, but
+        // convention_abi maps cdecl to System V unconditionally.
+        let code = [0x89, 0xc8, 0xc3];
+        let symbols = props(&[(
+            BASE,
+            crate::properties::FunctionProperties {
+                convention: Some("cdecl".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let options = Options::default();
+        let text = match lift_block(&decode(&code), BASE, "f", Abi::Win64, &symbols, &options) {
+            Ok(f) => without_reason(&emit_function(&f, &options)),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(text, "int f(int a)\n{\n  return a;\n}");
+    }
+
+    #[test]
+    fn audit_cdecl_callee_on_win64_preserves_rsi() {
+        // P3-05: mov esi, ecx; call g; mov eax, esi; ret — Win64 preserves rsi,
+        // but a cdecl callee is treated as System V (rsi caller-saved) and killed.
+        let code = [0x89, 0xce, 0xe8, 0xf9, 0x1f, 0x00, 0x00, 0x89, 0xf0, 0xc3];
+        let symbols = props(&[(
+            0x3000,
+            crate::properties::FunctionProperties {
+                convention: Some("cdecl".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let options = Options::default();
+        let text = match lift_block(&decode(&code), BASE, "f", Abi::Win64, &symbols, &options) {
+            Ok(f) => without_reason(&emit_function(&f, &options)),
+            Err(e) => e.to_string(),
+        };
+        assert!(!text.contains("not lifted"), "{text}");
+    }
+
+    #[test]
+    fn audit_call_site_honors_a_callees_per_function_abi_option() {
+        // P3-10 probe: callee g carries only the per-function abi=win64 option.
+        // mov ecx, 1; call g; ret — Win64's first argument is rcx, so g(1).
+        // The call site uses the caller's ABI, ignoring the callee's option.
+        let mut g = crate::properties::FunctionProperties::default();
+        g.options.insert("abi".to_string(), "win64".to_string());
+        let symbols = props(&[(0x3000, g)]);
+        let code = [0xb9, 1, 0, 0, 0, 0xe8, 0xf6, 0x1f, 0, 0, 0xc3];
+        let text = c_with(&code, &symbols, &[]);
+        assert!(text.contains("g(1)"), "{text}");
+        assert!(!text.contains("g(a, b, c, 1)"), "{text}");
+    }
 }
