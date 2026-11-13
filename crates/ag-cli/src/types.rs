@@ -183,7 +183,7 @@ pub(crate) fn lift_variable(
 }
 
 /// The addresses a member was read or written at, as the reports spell
-/// them: `0x4010b4, 0x40110c in read_conn`.
+/// them: `0x4010b4, 0x40110c (through read_conn)`.
 fn member_sources(member: &ag_image::DraftMember) -> String {
     let mut out = member
         .at
@@ -195,6 +195,32 @@ fn member_sources(member: &ag_image::DraftMember) -> String {
         out.push_str(&format!(" (through {})", member.via.join(", ")));
     }
     out
+}
+
+#[cfg(test)]
+mod source_tests {
+    use ag_image::DraftMember;
+
+    use super::member_sources;
+
+    #[test]
+    fn sources_list_the_addresses_and_the_callees() {
+        let member = DraftMember {
+            offset: 8,
+            size: 4,
+            name: "field_8".into(),
+            ty: "int".into(),
+            gap: false,
+            reads: 1,
+            writes: 1,
+            at: vec![0x4010b4, 0x40110c],
+            via: vec!["read_conn".into()],
+        };
+        assert_eq!(
+            member_sources(&member),
+            "0x4010b4, 0x40110c (through read_conn)"
+        );
+    }
 }
 
 /// A drafted structure as text: its C, what sized it, each member with

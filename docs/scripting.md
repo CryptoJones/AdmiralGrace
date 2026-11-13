@@ -1,3 +1,5 @@
+<p align="center"><img src="../images/navy/helmet.jpg" alt="A diving helmet and a coil of rope, drawn as 1950s Navy clipart" width="160"></p>
+
 # Scripting
 
 Repetitive analysis is scripted, and a batch runs without the workbench. The script is in

@@ -1,4 +1,6 @@
-/// Method-signature ABI model used by the ObjC layer.
+//! A function's signature as the Objective-C layer and the unfinished
+//! procedure decompiler see it: name, return type, calling convention,
+//! and arguments that may name a register.
 use crate::ast::RegisterRef;
 
 #[derive(Debug, Clone)]

@@ -4,6 +4,21 @@
 surface with listing, pseudocode, graph, bytes and references, an inspector, and a bottom
 workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
 
+| | |
+| --- | --- |
+| [The panes](#the-panes) | [A kuna export](#a-kuna-project-export-in-the-workbench) |
+| [A program image](#a-program-image-in-the-workbench) | [Library code](#library-code-highlighted) |
+| [Lift levels](#the-lifts-levels-in-the-panes) | [One site](#overriding-the-lift-at-one-site) |
+| [Braces and guides](#rainbow-braces-and-indent-guides) | [Dead stores](#dead-stores-greyed-out-or-gone) |
+| [Slices](#slices) | [Variables](#merging-and-splitting-variables) |
+| [Signature](#a-functions-signature-and-properties) | [The variable list](#the-variables-of-a-function) |
+| [The stack frame](#the-stack-frame-of-a-function) | [Types](#types) |
+| [A register's value](#a-registers-value) | [Possible values](#possible-values) |
+| [Debugging](#debugging) | [Reading the panes](#reading-the-panes) |
+| [The project file](#the-project-file) | |
+
+<p align="center"><img src="../images/navy/compass.jpg" alt="A compass rose from a mid-century seamanship manual" width="160"></p>
+
 ```sh
 # Launch with the bundled sample project
 cargo run --bin ag-ui
@@ -64,31 +79,17 @@ The workbench opens a program image as well:
 cargo run --bin ag-ui -- --binary ./sample.elf
 ```
 
-That is the native path: the image is parsed by the engine's own loader, the navigator
-lists its symbols, the inspector shows its sections and entry point, and the Listing tab
-holds the native x86 disassembly of the selected function, 32-bit or 64-bit as the image's
-language says, with an arrow in the margin from every branch to its target — blue for a jump
-down the listing, amber (the color of the analyst's notes too) for one back up it, so a loop
-reads as a loop — the shortest arrows nearest the text, and a tail call, the jump that
-leaves the function for another, a stub off the left edge. The Pseudocode tab holds the engine's own lifting of the selected function:
-its calls, branches and loops as C, structured into `if`/`else`, `while`, `for` and early
-`return`. Each function opens with a comment that says what decided its return type —
-`// returns int: main reads eax after the call`, `// void: no caller reads the result` — since
-the type is decided from use: what the callers do with `eax`/`rax` after the call, or, with
-no caller in the image, whether the function wrote `rax` itself. The sample's `add` reads as
-C, its `main` reads as C with its three calls, the format string printed as the literal
-`"%ld\n"`, and its `sum_to` reads as a `for` loop over its counter and accumulator. The
-lines are numbered and clickable like the kuna provider's, so a click on `return b + a;`
-moves the listing to the add, a click on the `printf` line moves it to the call, and a click
-on the `for` line moves it to the compare at the loop's head; the comment came from no
-instruction. A function that ends in a `jmp` to another function reads as the call and the
-return it stands for, `return callee(args);` — or the call and a bare `return;` when nothing
-in the image reads the result — and one that is only that jump — a PLT stub such as
-the sample's `printf`, or its `frame_dummy` — is a thunk, whose whole pseudocode is the one
-line `// thunk for printf`, standing for both of its instructions. A function the lifter
-refuses — one with an instruction it does not know, a branch whose condition it cannot
-read, or a loop with two entries, such as the sample's `_init` with its indirect call —
-leaves the tab empty, and the Problems panel says why.
+That is the native path. The image is parsed by the engine's own loader. The navigator lists its symbols. The inspector shows its sections and entry point.
+
+**Listing.** Native x86 disassembly of the selected function, 32-bit or 64-bit as the image's language says. An arrow in the margin runs from every branch to its target: blue for a jump down the listing, amber (the color of the analyst's notes too) for one back up it, so a loop reads as a loop. The shortest arrows sit nearest the text. A tail call, the jump that leaves the function for another, is a stub off the left edge.
+
+**Pseudocode.** The engine's own lifting of the selected function: its calls, branches and loops as C, structured into `if`/`else`, `while`, `for` and early `return`. Each function opens with a comment that says what decided its return type — `// returns int: main reads eax after the call`, `// void: no caller reads the result` — since the type is decided from use: what the callers do with `eax`/`rax` after the call, or, with no caller in the image, whether the function wrote `rax` itself.
+
+On the sample, `add` reads as C, `main` reads as C with its three calls, the format string is the literal `"%ld\n"`, and `sum_to` reads as a `for` loop over its counter and accumulator. The lines are numbered and clickable, as they are for a kuna export. A click on `return b + a;` moves the listing to the add. A click on the `printf` line moves it to the call. A click on the `for` line moves it to the compare at the loop's head. The comment came from no instruction.
+
+A function that ends in a `jmp` to another function reads as the call and the return it stands for, `return callee(args);` — or the call and a bare `return;` when nothing in the image reads the result. One that is only that jump — a PLT stub such as the sample's `printf`, or its `frame_dummy` — is a thunk, whose whole pseudocode is the one line `// thunk for printf`, standing for both of its instructions.
+
+A function the lifter refuses — one with an instruction it does not know, a branch whose condition it cannot read, or a loop with two entries, such as the sample's `_init` with its indirect call — leaves the tab empty, and the Problems panel says why.
 
 The engine's options — the judgment calls `ag catalog` lists, such as whether a counted
 loop is a `for` or a `while` — are read from the command line, `--option NAME VALUE`,

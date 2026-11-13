@@ -4,6 +4,21 @@
 Every subcommand lives under `corpus`, because both sources are described the same way.
 `ag image` reads a program image instead, through the engine's own loader.
 
+| | |
+| --- | --- |
+| [Building and running](#building-and-running) | [A corpus](#reporting-on-a-corpus) |
+| [`ag corpus`](#ag-corpus-subcommands) | [A kuna export](#a-kuna-project-export) |
+| [A program image](#reading-a-program-image) | [`ag image`](#ag-image-subcommands) |
+| [DWARF](#debug-information-ag-image-dwarf) | [Ghidra](#ghidra-ag-image-gzf) |
+| [`ag asm`](#assembling-one-instruction-ag-asm) | [`ag project`](#the-project-file-ag-project) |
+| [`ag archive`](#type-archives-shared-across-projects-ag-archive) | [`ag funcid`](#library-identification-by-whole-function-hash-ag-funcid) |
+| [`ag platform`](#platform-types-ag-platform) | [`ag debug`](#a-program-under-the-debugger-ag-debug) |
+| [Plugins](#plugins-ag-plugins-and-ag-tool) | [`ag mcp`](#an-mcp-server-ag-mcp) |
+| [`ag catalog`](#ag-catalog-the-engines-options) | [The embedded manual](#the-embedded-manual-and-agent-skill) |
+| [Exit codes](#exit-codes) | |
+
+<p align="center"><img src="../images/navy/ship.jpg" alt="A destroyer in profile, drawn as 1950s Navy clipart" width="480"></p>
+
 ## Building and running
 
 Install the Rust toolchain, then build from the repository root:

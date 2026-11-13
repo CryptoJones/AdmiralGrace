@@ -6,7 +6,17 @@
 
 AdmiralGrace is an open-source disassembler and decompiler utility written in Rust. It is named in honor of Admiral Grace Hopper, a pioneer of computer programming and compiler development.
 
-The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool that reads decompilation output, and the beginnings of a native disassembly and decompilation engine. Today the workbench and the CLI read two kinds of analysis: an indexed decompilation corpus, and a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler. The native binary-to-pseudocode pipeline has its first slices: a function of x86-64 code — its calls, branches and loops — is lifted and printed as C, with `if`/`else`, `while`, `for` and early `return`.
+The project is in an early, actively developing stage. The workspace holds a desktop analysis workbench, a command-line tool, and a native disassembly and decompilation engine. The workbench and the CLI read an indexed decompilation corpus, a project export from the [kuna](https://github.com/Noelo-Lab/kuna) decompiler, or a program image the engine loads itself. A function of x86-64 code — its calls, branches and loops — is lifted and printed as C, with `if`/`else`, `while`, `for` and early `return`.
+
+| If you want to… | Start here |
+| --- | --- |
+| See the interface with no binary | `cargo run --bin ag-ui` |
+| Disassemble and decompile a file | [Image CLI](#image-cli) |
+| Browse functions in a corpus | [Corpus CLI](#corpus-cli) |
+| Look up a flag by the symptom it fixes | [`docs/options.md`](docs/options.md) |
+| Read one topic from the binary itself | `ag docs` |
+
+<p align="center"><img src="images/navy/flags.jpg" alt="A row of signal flags, in the style of a 1950s Navy pamphlet" width="520"></p>
 
 ## Screenshots
 
@@ -72,6 +82,8 @@ cargo run --bin ag -- corpus --root ./corpus grep 'memcpy|malloc'
 
 Objective-C method names can be overlaid from a method map with `--methods PATH`. See `cargo run --bin ag -- corpus --help` and `cargo run --bin ag -- corpus --root ./corpus list --help` for all options.
 
+<p align="center"><img src="images/navy/ship.jpg" alt="A destroyer in profile, drawn as 1950s Navy clipart" width="520"></p>
+
 ## Image CLI
 
 The CLI reads a program image as well: an ELF, PE, COFF or Mach-O file, parsed by the engine's own loader.
@@ -105,11 +117,52 @@ cargo run --bin ag -- image ./sample.elf data
 cargo run --bin ag -- image ./sample.elf export ./sample.ag
 ```
 
-Every subcommand takes `--json` for the same report as JSON. `info` and `symbols` read any format the loader reads; `disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`), and through SLEIGH 32-bit ARM and Thumb, AArch64, 32-bit MIPS of either byte order, little-endian RISC-V of either width, the 16-bit MSP430, and the retro and embedded cores — the 6502, the Z80 and the little-endian SH4 — ARM, Thumb, MIPS, the 6502, the Z80 and SuperH decoded, walked and listed, not yet lifted to pseudocode (MIPS with its operands read through the global pointer, `global-pointer` says where its value came from; SuperH with its branch delay slots folded into the branch), AArch64, RISC-V and the MSP430 lifted to pseudocode too, RISC-V's bit-manipulation extension disassembled but not lifted — so it refuses an image of another architecture rather than printing nonsense.
+| Command | Report |
+| --- | --- |
+| `info` | Language, entry point, sections |
+| `symbols` | Function and data symbols |
+| `disasm` | One function, one instruction a line |
+| `pseudocode` | That function as C |
+| `cfg` | Blocks and the edges between them |
+| `calls` | Who calls whom |
+| `strings` / `data` | Text and data, and the functions that use them |
+| `export` | The same reports as a directory |
+
+Every subcommand takes `--json` for the same report as JSON.
+
+`info` and `symbols` read any format the loader reads.
+
+`disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`). Through SLEIGH it also decodes 32-bit ARM and Thumb, AArch64, 32-bit MIPS of either byte order, little-endian RISC-V of either width, the 16-bit MSP430, and the retro and embedded cores: the 6502, the Z80, and the little-endian SH4.
+
+| Architecture | What you get today |
+| --- | --- |
+| ARM, Thumb, MIPS, 6502, Z80, SuperH | Decoded, walked, and listed. Not yet lifted. |
+| MIPS | Operands read through the global pointer. `global-pointer` says where its value came from. |
+| SuperH | Branch delay slots folded into the branch. |
+| AArch64, RISC-V, MSP430 | Lifted to pseudocode. RISC-V's bit-manipulation extension is disassembled but not lifted. |
+
+An image of another architecture is refused rather than printed as nonsense.
 
 `strings` reads the sections that are not code and reports the text that ends in a NUL, with the functions that use it. `--filter` keeps only the strings whose text matches a regular expression, `--utf16` reports the strings that are held as UTF-16LE, and `--encoding NAME` reports the strings held in one encoding: `ascii`, `utf16le`, `utf16be`, `utf32le`, `utf32be`, `cp932`, `gbk` or `euc-kr`.
 
-`pseudocode` lifts one function to C through its whole control-flow graph: blocks joined by fall-through are one node, and the graph is structured with its dominators and back edges into `if`/`else`, `while`, `do`/`while`, `for`, `break`, `continue` and early `return`, with `goto` only where nothing fits. The symbolic state is split at a branch and merged at a join — a slot or register that differs between the paths becomes a declared variable assigned on each — and a condition comes from the `cmp` or `test` that set the flags the branch reads. The return type is decided from use, not presence — a caller that reads `eax`/`rax` after the call, or, with no caller in the image, a value the function wrote itself rather than a callee's leftover — and the function opens with a comment that says what decided it. The sample's `add` reads `int add(int a, int b) { return b + a; }` under `// returns int: main reads eax after the call`, with the parameters named by position; its `main` reads as C with its three calls — `add`, `sum_to` and `printf` — the pointer to the format string printed as the literal `"%ld\n"`, the string the image knows there; and its `sum_to` reads as `for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) { local_10 = local_10 + (long)local_14; }` with its accumulator returned. A function that ends in a `jmp` to another function — direct, or through a GOT slot the image resolves to an import — reads as the tail call it is, `return callee(args);` — or `callee(args); return;` when nothing in the image reads the result, as in the sample's `deregister_tm_clones`, which is `// void: no caller reads the result` — and a function that is only that jump, such as the sample's `printf` stub, is a thunk whose pseudocode is the one line `// thunk for printf`. The start-up glue `__do_global_dtors_aux`, which leaves a callee's result in `rax` on one path and nothing on the other, is `void` rather than refused. A function the lifter refuses — one with an instruction it does not know yet, a branch whose flags it did not see set, or a loop with two entries — prints `not lifted yet` and the reason, with exit code 1.
+`pseudocode` lifts one function to C through its whole control-flow graph.
+
+- Blocks joined by fall-through are one node. Dominators and back edges become `if`/`else`, `while`, `do`/`while`, `for`, `break`, `continue`, and early `return`. `goto` is used only where nothing else fits.
+- The symbolic state is split at a branch and merged at a join. A slot or register that differs between the paths becomes a declared variable assigned on each path.
+- A condition comes from the `cmp` or `test` that set the flags the branch reads.
+- The return type is decided from use, not presence. A caller that reads `eax`/`rax` after the call decides it. With no caller in the image, a value the function wrote itself decides it, rather than a callee's leftover. The function opens with a comment that says which.
+
+On the sample:
+
+| Function | Pseudocode |
+| --- | --- |
+| `add` | `int add(int a, int b) { return b + a; }` under `// returns int: main reads eax after the call`. Parameters are named by position. |
+| `main` | C with its three calls — `add`, `sum_to`, and `printf`. The format-string pointer is the literal `"%ld\n"`. |
+| `sum_to` | `for (local_14 = 1; local_14 <= a; local_14 = local_14 + 1) { local_10 = local_10 + (long)local_14; }` and the accumulator is returned. |
+| a tail `jmp` | `return callee(args);`, or `callee(args); return;` when nothing in the image reads the result. Direct, or through a GOT slot the image resolves to an import. `deregister_tm_clones` is `// void: no caller reads the result`. |
+| `printf` stub | A thunk. The whole body is `// thunk for printf`. |
+| `__do_global_dtors_aux` | `void`. One path leaves a callee's result in `rax` and the other leaves nothing. |
+| refused | `not lifted yet` and the reason, exit code 1. An unknown instruction, flags the lifter did not see set, or a loop with two entries. |
 
 `pseudocode` and `export` take the engine's options, `--option NAME VALUE` (such as `--option loop-form while`, repeated as needed), and `ag catalog` prints every option with its symptoms; the generated `docs/options.md` opens with the index of *if the output shows X, try Y*.
 
@@ -197,25 +250,22 @@ cargo run --bin ag -- image ./sample.elf il sum_to --level medium --ssa
 cargo run --bin ag -- image ./sample.elf emulate sum_to --arg 5
 ```
 
-The medium level also runs: `emulate` executes a function's statements against the image's
-memory, following calls into the image, and reports what it returned and why it stopped; and
-it compiles: `transpile` writes the functions as C++, a label per block and a `goto` for every
-way out, with a `main` to run one against the program it came from. The pseudocode itself
-reads as C, Rust, Objective-C or Python (`--option language rust`): the same lift, spelled
-each language's way; and the analyst has the last word at any one site — a guard, a folded
-condition, a turned-round branch, a switch — recorded in the project file. Dead code the
-lift keeps is greyed out, and one variable's unused stores can be dropped on their own.
-`rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset`, and a string put
-on the stack word by word, or byte by byte, as one `__builtin_strcpy`
-(`--option builtins keep` for the stores); a struct filled field by field through a pointer
-reads as one initializer (`--option struct-initializers keep` for the stores); a call through
-a pointer the lift knows is the call through it (`--option indirect-calls refuse` to refuse
-it), and a Windows control-flow guard's dispatch is the call it guards. A call to `exit` or
-its kind ends its path, a function whose every path ends so never returns, and an exit-on-error
-helper is noted with the condition it does not return under, at its own head and at each call. The text's
-layout is the analyst's too — `--option brace-style broken`, `ternaries expand`,
-`wrap 80`, `call-hints names` — with rainbow braces and indent guides in the workbench, and a
-formatter plugin has the last word on the lines.
+The medium level also runs, and it compiles.
+
+| | |
+| --- | --- |
+| `emulate` | Runs a function's statements against the image's memory, follows calls into the image, and reports what it returned and why it stopped. |
+| `transpile` | Writes the functions as C++, a label per block and a `goto` for every way out, with a `main` to run one against the program it came from. |
+
+The pseudocode itself reads as C, Rust, Objective-C, or Python (`--option language rust`): the same lift, spelled each language's way. The analyst has the last word at any one site — a guard, a folded condition, a turned-round branch, a switch — recorded in the project file.
+
+- Dead code the lift keeps is greyed out. One variable's unused stores can be dropped on their own.
+- `rep movs` and `rep stos` read as `__builtin_memcpy` and `__builtin_memset`. A string put on the stack word by word, or byte by byte, reads as one `__builtin_strcpy` (`--option builtins keep` for the stores).
+- A struct filled field by field through a pointer reads as one initializer (`--option struct-initializers keep` for the stores).
+- A call through a pointer the lift knows is the call through it (`--option indirect-calls refuse` to refuse it). A Windows control-flow guard's dispatch is the call it guards.
+- A call to `exit` or its kind ends its path. A function whose every path ends so never returns. An exit-on-error helper is noted with the condition it does not return under, at its own head and at each call.
+
+The text's layout is the analyst's too: `--option brace-style broken`, `ternaries expand`, `wrap 80`, `call-hints names`. The workbench draws rainbow braces and indent guides. A formatter plugin has the last word on the lines.
 
 See [docs/il.md](docs/il.md).
 
@@ -267,6 +317,8 @@ ag install-skill --agent claude
 
 `ag install-skill` writes the skill offline, into `$CLAUDE_CONFIG_DIR/skills`, `$CODEX_HOME/skills` or `$OPENCODE_CONFIG_DIR/skills` (or the project directory with `--project`). `ag docs` prints the manual: the command reference, the corpus format, the project file, the options, the intermediate languages, plugins, scripting and the workbench.
 
+<p align="center"><img src="images/navy/compass.jpg" alt="A compass rose from a mid-century seamanship manual" width="180"></p>
+
 ## Desktop workbench
 
 `ag-ui` is the desktop analysis workbench: a menu bar, a function navigator, a work surface with listing, pseudocode, graph, bytes and references, an inspector, and a bottom workspace for search results and problems. The layout follows `ui/UI_PLAN.md`.
@@ -312,7 +364,17 @@ The Graph tab draws the control-flow graph of the selected function: one box for
 
 ## Development status
 
-The engine is under active development. The x86 decoder (32-bit and 64-bit) and the control-flow graph builder are in place with tests; the lifter and the C emitter have their first three slices — one block of straight-line x86-64 code, the chain of blocks a function that calls is cut into, and the structuring of branches and loops into `if`/`else`, `while` and `for` with the state merged at every join — and what the lifter cannot read it refuses with a reason rather than guessing. The judgment calls the lifter, the structurer and the emitter make are named in one option registry, set per run with `--option` and documented by symptom in the generated `docs/options.md`. The engine's loader is kuna-analysis, adopted as a pinned git dependency; the evaluation and the decision are in `docs/KUNA_CRATES_EVALUATION.md`. Open work is tracked in `BACKLOG.md`, which mirrors the GitHub Issues tab. At this stage, AdmiralGrace should be treated as an experimental project rather than a production-grade tool.
+The engine is under active development. Treat it as an experiment, not a production tool.
+
+| In place | Still early |
+| --- | --- |
+| x86 decoder, 32-bit and 64-bit, with tests | Architectures that list but do not lift yet |
+| Control-flow graph builder | |
+| Lifter and C emitter: straight-line code, calls, and `if`/`else`, `while`, `for` with state merged at each join | What the lifter cannot read is refused with a reason |
+
+The judgment calls are one option registry, set per run with `--option` and indexed by symptom in [`docs/options.md`](docs/options.md). The loader is kuna-analysis, a pinned git dependency. The evaluation is in [`docs/KUNA_CRATES_EVALUATION.md`](docs/KUNA_CRATES_EVALUATION.md). Open work is [`BACKLOG.md`](BACKLOG.md), which mirrors the GitHub Issues tab.
+
+<p align="center"><img src="images/navy/anchor.jpg" alt="A fouled anchor used as a chapter divider" width="420"></p>
 
 ## Releases
 

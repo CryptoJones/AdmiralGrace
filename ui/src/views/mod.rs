@@ -157,3 +157,18 @@ pub fn count(value: usize) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{count, count_or_indexing};
+
+    #[test]
+    fn counts_group_thousands_and_an_unknown_count_says_so() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1000), "1,000");
+        assert_eq!(count(1_234_567), "1,234,567");
+        assert_eq!(count_or_indexing(Some(12)), "12");
+        assert_eq!(count_or_indexing(None), "indexing…");
+    }
+}

@@ -1,3 +1,11 @@
+//! Register identity for data flow.
+//!
+//! A [`RegisterId`] names a whole register or a slice of one. `AH` and
+//! `RAX` share a register and differ as slices, so they are not equal and
+//! do not collide with `RSP`. A [`RegisterSet`] stores full registers, and
+//! [`RegisterSet::mask_for_class`] refuses an index that would not fit in
+//! 64 bits rather than aliasing it onto bit 0.
+
 use std::collections::BTreeSet;
 use std::fmt;
 

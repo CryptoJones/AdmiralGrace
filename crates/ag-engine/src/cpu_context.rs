@@ -1,3 +1,12 @@
+//! One decoded instruction, independent of which decoder produced it.
+//!
+//! [`CpuContext::decode`] fills a [`DecodedInsn`]: its length, its
+//! [`Flow`] (where control goes next), and each [`RegisterUse`].
+//! [`X86IcedContext`] is the x86 decoder. Invalid bytes are one
+//! [`Flow::Invalid`] instruction of a single byte, so a later decode of
+//! the same segment can continue. [`Access::reads`] and [`Access::kills`]
+//! say whether the old value of a register is used or replaced.
+
 use crate::arch::Bitness;
 use crate::register::RegisterId;
 
@@ -78,6 +87,20 @@ impl Access {
     /// Whether the register's old value is certainly gone.
     pub fn kills(self) -> bool {
         matches!(self, Access::Write | Access::ReadWrite)
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::Access;
+
+    #[test]
+    fn a_conditional_write_neither_reads_nor_kills() {
+        assert!(!Access::CondWrite.reads());
+        assert!(!Access::CondWrite.kills());
+        assert!(Access::Read.reads() && !Access::Read.kills());
+        assert!(Access::Write.kills() && !Access::Write.reads());
+        assert!(Access::ReadWrite.reads() && Access::ReadWrite.kills());
     }
 }
 

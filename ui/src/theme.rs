@@ -39,6 +39,31 @@ pub fn tinted(base: Color, tint: Color, strength: f32) -> Color {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_color_reads_six_digits() {
+        let color = hex_color("#68c5d2").unwrap();
+        assert_eq!(color, Color::from_rgb8(0x68, 0xc5, 0xd2));
+        assert!(hex_color("68c5d2").is_none());
+        assert!(hex_color("#68c5").is_none());
+        assert!(hex_color("#68c5dz").is_none());
+    }
+
+    #[test]
+    fn tint_stays_between_the_surface_and_the_accent() {
+        let base = Color::from_rgb8(0, 0, 0);
+        let tint = Color::from_rgb8(100, 0, 0);
+        assert_eq!(tinted(base, tint, 0.0).r, 0.0);
+        assert_eq!(tinted(base, tint, 1.0).r, tint.r);
+        let mid = tinted(base, tint, 0.5);
+        assert!(mid.r > 0.0 && mid.r < tint.r);
+        assert_eq!(tinted(base, tint, 2.0).r, tint.r);
+    }
+}
+
 /// The workbench palette.
 pub mod color {
     use super::Color;

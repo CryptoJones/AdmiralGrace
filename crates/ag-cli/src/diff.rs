@@ -310,6 +310,33 @@ fn spelled(facts: &[FunctionFacts], address: u64) -> String {
         .unwrap_or_else(|| format!("sub_{address:x}"))
 }
 
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    fn facts(address: u64, name: Option<&str>) -> FunctionFacts {
+        FunctionFacts {
+            address,
+            name: name.map(str::to_string),
+            hash: String::new(),
+            length: 0,
+            blocks: 0,
+            edges: 0,
+            instructions: 0,
+            calls: 0,
+            mnemonics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_report_uses_the_name_or_the_placeholder() {
+        let rows = vec![facts(0x401000, Some("main")), facts(0x401100, None)];
+        assert_eq!(spelled(&rows, 0x401000), "main");
+        assert_eq!(spelled(&rows, 0x401100), "sub_401100");
+        assert!(facts_at(&rows, 0x10).is_none());
+    }
+}
+
 fn print_text(
     args: &DiffArgs,
     report: &DiffReport,

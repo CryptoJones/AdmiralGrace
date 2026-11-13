@@ -1,3 +1,11 @@
+//! The `ag` command-line tool.
+//!
+//! `corpus` reports on an indexed decompilation corpus or a kuna export.
+//! `image` reads an ELF, PE, COFF or Mach-O through the engine: info,
+//! disassembly, pseudocode, the call graph, and the export formats. The
+//! other commands (`mcp`, `run`, `project`, `debug`, `catalog`) sit on
+//! the same image. Each submodule is one command group.
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use regex::Regex;

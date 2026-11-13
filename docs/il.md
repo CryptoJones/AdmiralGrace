@@ -1,3 +1,5 @@
+<p align="center"><img src="../images/navy/anchor.jpg" alt="A fouled anchor used as a chapter divider" width="420"></p>
+
 # Intermediate languages
 
 The lifter goes from the machine's instructions to a C-like tree in stages, and each stage

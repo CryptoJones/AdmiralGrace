@@ -96,6 +96,32 @@ pub fn annotation_of(node: &AstNode) -> Option<(&AstNode, &str)> {
     }
 }
 
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+    use crate::ast::AstNode;
+
+    #[test]
+    fn an_annotation_round_trips_the_value_and_the_members() {
+        let value = AstNode::Var {
+            name: "p".into(),
+        };
+        let node = annotated(value, "p.x, p.y");
+        let (inner, members) = annotation_of(&node).unwrap();
+        assert_eq!(members, "p.x, p.y");
+        assert!(matches!(inner, AstNode::Var { name } if name == "p"));
+    }
+
+    #[test]
+    fn a_plain_node_is_not_a_fragment() {
+        let node = AstNode::Constant {
+            value: 1,
+            width_bytes: 4,
+        };
+        assert!(annotation_of(&node).is_none());
+    }
+}
+
 /// The System V argument registers, in order.
 const SYSV_ARGUMENTS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
