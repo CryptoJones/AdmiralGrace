@@ -393,6 +393,65 @@ mod tests {
     }
 
     #[test]
+    fn audit_spaced_and_plain_same_value_do_not_clash() {
+        let dir = TempDir::new("audit-space-clash");
+        dir.write(
+            "decompile-index.json",
+            &index_with(&format!(
+                "{},{}",
+                record("EXTERNAL:0x1", "<EXTERNAL>::qsort"),
+                record("0x1", "local")
+            )),
+        );
+        let corpus = Corpus::load(&dir.0).expect("a corpus");
+        assert!(
+            corpus.warnings.is_empty(),
+            "a spaced and a plain address falsely clashed: {:?}",
+            corpus.warnings
+        );
+    }
+
+    #[test]
+    fn audit_relative_path_cannot_escape_root() {
+        let dir = TempDir::new("audit-escape");
+        dir.write(
+            "decompile-index.json",
+            &index_with(
+                "{\"address\":\"0x1\",\"name\":\"f\",\"status\":\"written\",\"relative_path\":\"/tmp/ag-audit-outside.txt\",\"body\":{\"available\":false,\"non_contiguous\":false,\"ranges\":[]}}",
+            ),
+        );
+        let corpus = Corpus::load(&dir.0).expect("a corpus");
+        assert!(
+            corpus.functions.iter().all(|f| f.path.starts_with(&dir.0)),
+            "a relative_path escaped the corpus root: {:?}",
+            corpus.functions.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn audit_external_space_is_counted_even_without_the_name_prefix() {
+        // P3-11b: stats() decides "external" from the name prefix alone and
+        // never reads f.space, so an EXTERNAL-spaced function whose name lacks
+        // the <EXTERNAL> prefix is not counted.
+        let dir = TempDir::new("audit-external-stats");
+        dir.write(
+            "decompile-index.json",
+            &index_with(&record("EXTERNAL:0x2", "qsort")),
+        );
+        let corpus = Corpus::load(&dir.0).expect("a corpus");
+        assert_eq!(
+            stats(&corpus).external,
+            1,
+            "an EXTERNAL-spaced function is external whatever its name: {:?}",
+            corpus
+                .functions
+                .iter()
+                .map(|f| (&f.space, &f.name))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn an_address_is_read_with_or_without_its_prefix() {
         assert_eq!(parse_addr("0x1000").expect("an address"), 0x1000);
         assert_eq!(parse_addr("0X1000").expect("an address"), 0x1000);

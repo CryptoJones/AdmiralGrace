@@ -7490,6 +7490,49 @@ mod tests {
     }
 
     #[test]
+    fn audit_call_result_read_only_by_a_branch_is_declared_or_inlined() {
+        // call f; test eax, eax; je .two; mov eax, 1; ret; .two: mov eax, 2; ret
+        let code = [
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x85, 0xc0, 0x74, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8,
+            2, 0, 0, 0, 0xc3,
+        ];
+        let text = c(&code);
+        let inlined = text.contains("f() == 0") || text.contains("f() != 0");
+        let declared = text.contains("v1 = f();");
+        assert!(inlined || declared, "call result lost to the branch: {text}");
+        assert!(!text.contains("  f();\n"), "bare call with undeclared v1: {text}");
+    }
+
+    #[test]
+    fn audit_call_result_read_only_by_an_intrinsic_keeps_its_call() {
+        // call f; mov rdi, rax; mov ecx, 8; xor eax, eax; rep stosq; ret
+        let fill = c(&[
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x48, 0x89, 0xc7, 0xb9, 8, 0, 0, 0, 0x31, 0xc0, 0xf3,
+            0x48, 0xab, 0xc3,
+        ]);
+        assert!(fill.contains("f()"), "the call vanished: {fill}");
+
+        // call f; cmp eax, 1; mov eax, 0; ret — under dead-compares keep
+        let cmp = c_with(
+            &[0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x83, 0xf8, 0x01, 0xb8, 0, 0, 0, 0, 0xc3],
+            &names,
+            &[("dead-compares", "keep")],
+        );
+        assert!(cmp.contains("f()"), "the call vanished: {cmp}");
+    }
+
+    #[test]
+    fn audit_call_clobbers_apx_r16() {
+        // mov r16, rdi; call f; mov rax, r16; ret — r16 is caller-saved, so its
+        // pre-call value must not survive the call.
+        let code = [
+            0xd5, 0x41, 0x8b, 0xc7, 0xe8, 0xf7, 0x0f, 0x00, 0x00, 0xd5, 0x11, 0x8b, 0xc0, 0xc3,
+        ];
+        let out = c(&code);
+        assert!(!out.contains("return a;"), "r16 wrongly survived the call: {out}");
+    }
+
+    #[test]
     fn a_call_to_an_address_with_no_name_is_sub() {
         // mov edi, 1; call 0x4000; ret
         let code = [0xbf, 1, 0, 0, 0, 0xe8, 0xf6, 0x2f, 0x00, 0x00, 0xc3];
@@ -10062,5 +10105,159 @@ mod tests {
             c_with(&code, &symbols, &[]),
             "int f(int a)\n{\n  return a;\n}"
         );
+    }
+
+    // ---- audit regressions (verify/audit-regression) ----------------------
+
+    #[test]
+    fn audit_narrow_constant_write_does_not_widen_the_upper_bits() {
+        // P3-04: mov ax, 5; mov eax, eax; ret — the upper 16 bits of eax are
+        // the caller's, so the wider read must be refused, not `return 5`.
+        let text = c(&[0x66, 0xb8, 0x05, 0x00, 0x89, 0xc0, 0xc3]);
+        assert!(
+            text.contains("not lifted"),
+            "a 16-bit constant write must not make the upper bits of eax known: {text}"
+        );
+        // mov eax, 0x12340000; mov ax, 5; mov eax, eax; ret — must not be `return 5`.
+        let text = c(&[
+            0xb8, 0x00, 0x00, 0x34, 0x12, 0x66, 0xb8, 0x05, 0x00, 0x89, 0xc0, 0xc3,
+        ]);
+        assert!(!text.contains("return 5;"), "{text}");
+    }
+
+    #[test]
+    fn audit_sub_to_a_memory_local_keeps_its_own_flags_for_the_branch() {
+        // LC-1: sub dword [rsp-8], 1; jne .two; mov eax, 1; ret; .two: mov eax, 2; ret
+        // The slot is read before written, so it is a variable (local_8). The
+        // sub's own store must not drop the flags the sub just set.
+        let code = [
+            0x83, 0x6c, 0x24, 0xf8, 0x01, 0x75, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xb8, 2, 0, 0, 0,
+            0xc3,
+        ];
+        let text = c(&code);
+        assert!(!text.contains("not lifted"), "{text}");
+        assert!(
+            text.contains("local_8 != 0") || text.contains("local_8 == 0"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn audit_global_named_like_a_parameter_is_not_the_parameter() {
+        // LC-3: a global named `a` must not collide with the parameter `a`.
+        struct G;
+        impl Symbols for G {
+            fn function_name(&self, _: u64) -> Option<String> {
+                None
+            }
+            fn pointee(&self, address: u64) -> Option<Pointee> {
+                (address == 0x3007).then(|| Pointee::Data("a".into()))
+            }
+        }
+        // mov eax, [rip+0x2001] (global `a` at 0x3007); add eax, edi; ret
+        let code = [0x8b, 0x05, 0x01, 0x20, 0x00, 0x00, 0x01, 0xf8, 0xc3];
+        let text = c_with(&code, &G, &[]);
+        assert!(!text.contains("return a + a;"), "{text}");
+    }
+
+    #[test]
+    fn audit_prototype_with_a_project_enum_bound_fixes_call_arity() {
+        // P3-09: emit_call_node parses the callee prototype against a fresh
+        // TypeStore::default(), so an array bound naming a project enumerator
+        // (BUF_LEN) fails to parse, the arity is lost, and the call falls back
+        // to the positional rule — printing g(1, 2) instead of g(1).
+        struct Typed(std::sync::Arc<crate::types::TypeStore>);
+        impl Symbols for Typed {
+            fn function_name(&self, address: u64) -> Option<String> {
+                names(address)
+            }
+            fn types(&self) -> Option<std::sync::Arc<crate::types::TypeStore>> {
+                Some(self.0.clone())
+            }
+            fn function_properties(&self, address: u64) -> crate::properties::FunctionProperties {
+                if address == 0x3000 {
+                    prototype("int g(char buf[BUF_LEN])")
+                } else {
+                    Default::default()
+                }
+            }
+        }
+        let mut store =
+            crate::types::TypeStore::new(crate::types::DataModel::of_abi(Abi::SystemV));
+        crate::ctype::parse_into(&mut store, "enum sizes { BUF_LEN = 16 };")
+            .expect("the enum reads");
+        // mov edi, 1; mov esi, 2; call g; ret
+        let code = [
+            0xbf, 1, 0, 0, 0, 0xbe, 2, 0, 0, 0, 0xe8, 0xf1, 0x1f, 0, 0, 0xc3,
+        ];
+        let text = c_with(&code, &Typed(std::sync::Arc::new(store)), &[]);
+        assert!(text.contains("g(1)"), "{text}");
+        assert!(!text.contains("g(1, 2)"), "{text}");
+    }
+
+    #[test]
+    fn audit_graph_pruned_before_its_entry_is_still_entered_at_its_entry() {
+        // P3-07: a rewriter that prunes an unreachable block below the entry
+        // renumbers the entry inside Rewrite, but rewrite_nodes drops the new
+        // entry, so lift_graph structures with the stale index and loses the
+        // real first block.
+        struct Pruner;
+        impl crate::plugin::Rewriter for Pruner {
+            fn name(&self) -> &str {
+                "prune-entry-test"
+            }
+            fn wants(&self, _a: u64, name: &str) -> bool {
+                name == "prune_entry_fixture"
+            }
+            fn rewrite(&self, r: &mut crate::plugin::Rewrite) -> Result<(), String> {
+                r.prune_unreachable();
+                Ok(())
+            }
+        }
+        crate::plugin::register_rewriter(std::sync::Arc::new(Pruner));
+        let st = |n: &str, at: u64| Statement::plain(AstNode::var(n), vec![at]);
+        let graph = crate::plugin::LiftedGraph {
+            return_type: "void".into(),
+            params: vec![],
+            locals: vec![],
+            frame: vec![],
+            entry: 1,
+            nodes: vec![
+                Node {
+                    address: 0x100,
+                    statements: vec![st("dead", 0x100)],
+                    terminator: Terminator::Return,
+                },
+                Node {
+                    address: 0x110,
+                    statements: vec![st("first", 0x110)],
+                    terminator: Terminator::Goto {
+                        target: 2,
+                        addresses: vec![],
+                    },
+                },
+                Node {
+                    address: 0x120,
+                    statements: vec![st("second", 0x120)],
+                    terminator: Terminator::Return,
+                },
+            ],
+        };
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: Vec::new(),
+        };
+        let stages = lift_graph(
+            graph,
+            &disasm,
+            &ProcedureCfg::default(),
+            0x110,
+            "prune_entry_fixture",
+            &Options::default(),
+        )
+        .expect("lifts");
+        let text = emit_function(&stages.function, &Options::default()).text();
+        assert!(text.contains("first"), "{text}");
+        assert!(!text.contains("dead"), "{text}");
     }
 }

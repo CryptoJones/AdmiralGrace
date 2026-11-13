@@ -2058,4 +2058,21 @@ mod tests {
         let effective = run.overlaid(&stale);
         assert_eq!(effective.get("language").as_deref(), Some("c"));
     }
+
+    #[test]
+    fn audit_p3_06_over_picks_the_highest_address_not_the_branch() {
+        // The branch (jcc) is at 0x1010; the cmp at 0x100c is not the
+        // site. An operand produced in a cold block at 0x2000 (which
+        // jumps back to the cmp) yields a higher address than the branch.
+        // over() picks max(), so it looks up 0x2000 instead of 0x1010.
+        let word = SiteOverride {
+            invert: Some(true),
+            ..SiteOverride::default()
+        };
+        let mut sites = std::collections::BTreeMap::new();
+        sites.insert(0x1010u64, word); // the jcc, the real site
+        let looked_up = sites.over(&[0x2000, 0x100c, 0x1010]);
+        // BUG: over() returns the default (from 0x2000), missing the word.
+        assert_eq!(looked_up, word, "over should pick the branch, not the out-of-line operand");
+    }
 }

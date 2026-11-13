@@ -2711,6 +2711,28 @@ fn sort_by_address(records: &mut [&Annotation]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn audit_enum_only_annotation_is_not_empty() {
+        let mut a = Annotation::new(TargetKind::Address, "0x1000");
+        a.set_constant_enum(Some("MY_ENUM"));
+        assert!(!a.is_empty(), "an enum-only annotation is dropped by prune() on save");
+    }
+
+    #[test]
+    fn audit_loaded_address_is_found_whatever_the_spelling() {
+        let mut project = ProjectFile::new(Target::default());
+        project.annotation_mut(TargetKind::Address, "0x10").name = Some("main".into());
+        let json = project.to_json().unwrap();
+        // Another tool writes the same address with an uppercase prefix.
+        let raw = json.replace("\"0x10\"", "\"0X10\"");
+        let loaded = ProjectFile::from_json(&raw).unwrap();
+        assert_eq!(
+            loaded.annotation_for("0x10").and_then(|a| a.name.as_deref()),
+            Some("main"),
+            "a loaded 0X10 address is not found by its canonical spelling"
+        );
+    }
+
     fn temp(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!("ag-project-{name}-{}", std::process::id()));
