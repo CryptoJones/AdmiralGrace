@@ -82,7 +82,7 @@ pub use ag_engine::objc::{
 };
 pub use ag_engine::opaque::Opaque;
 pub use ag_engine::options;
-use ag_engine::options::{BranchesEndProcedures, CodeSections};
+use ag_engine::options::{BranchesEndProcedures, CodeSections, X86Syntax};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
 pub use ag_engine::propagate::{self as propagate};
 pub use ag_engine::properties::FunctionProperties;
@@ -1035,6 +1035,10 @@ impl Binary {
         // walked under the old ones is forgotten too.
         let rewalk = options.branches_end_procedures != self.options.branches_end_procedures
             || options.code_sections != self.options.code_sections;
+        // The syntax only changes the spelling of each instruction, not the
+        // bytes or the flow, so the walks stand; the cached text and the
+        // listings built from it do not.
+        let resyntax = options.x86_syntax != self.options.x86_syntax;
         self.options = options;
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
@@ -1056,6 +1060,16 @@ impl Binary {
                 cache.clear();
             }
             if let Ok(mut cache) = self.plugin_stages.lock() {
+                cache.clear();
+            }
+        }
+        if resyntax {
+            for code in &self.file {
+                if let Ok(mut cache) = code.decoded.lock() {
+                    *cache = None;
+                }
+            }
+            if let Ok(mut cache) = self.disassembly.lock() {
                 cache.clear();
             }
         }
@@ -1893,7 +1907,7 @@ impl Binary {
                     &marks,
                 )
             }
-            None => decode_section(&bytes, code.section.vma, code.bitness),
+            None => decode_section(&bytes, code.section.vma, code.bitness, self.options.x86_syntax),
         });
         if let Ok(mut held) = code.decoded.lock() {
             *held = Some(Arc::clone(&decoded));
@@ -4885,8 +4899,8 @@ impl Decoded {
 /// the control-flow walk needs; iced's own spelling gives the text the reader
 /// sees. Both read the same bytes at the same width, so they agree
 /// instruction for instruction.
-fn decode_section(bytes: &[u8], base: u64, bitness: Bitness) -> Decoded {
-    let mut context = TextContext::new(bitness);
+fn decode_section(bytes: &[u8], base: u64, bitness: Bitness, syntax: X86Syntax) -> Decoded {
+    let mut context = TextContext::new(bitness, syntax);
 
     // The engine's decoder records the bytes that do not decode as one-byte
     // invalid entries and carries on, so a section with padding or a jump
@@ -5294,15 +5308,18 @@ fn decode_plugin_section(
 struct TextContext {
     /// The engine's decoder, at the width of the program.
     inner: X86IcedContext,
+    /// The syntax the text is printed in.
+    syntax: X86Syntax,
     /// The text and named registers of every instruction decoded, by address.
     text: HashMap<u64, (String, String, Vec<String>)>,
 }
 
 impl TextContext {
-    /// A decoder for code of the given width.
-    fn new(bitness: Bitness) -> Self {
+    /// A decoder for code of the given width, printed in the given syntax.
+    fn new(bitness: Bitness, syntax: X86Syntax) -> Self {
         Self {
             inner: X86IcedContext::new(bitness),
+            syntax,
             text: HashMap::new(),
         }
     }
@@ -5316,7 +5333,7 @@ impl CpuContext for TextContext {
             // A byte that does not decode is data, not an instruction, and
             // iced has no spelling for it: it is shown as the byte it is.
             Flow::Invalid => Some(("db".to_string(), format!("0x{:02x}", bytes[0]), Vec::new())),
-            _ => iced_text(bytes, address, self.inner.bitness()),
+            _ => iced_text(bytes, address, self.inner.bitness(), self.syntax),
         };
 
         if let Some(text) = text {
@@ -5339,16 +5356,23 @@ fn iced_text(
     bytes: &[u8],
     address: u64,
     bitness: Bitness,
+    syntax: X86Syntax,
 ) -> Option<(String, String, Vec<String>)> {
     let mut decoder = iced_x86::Decoder::with_ip(
         bitness.bits(),
         bytes,
         address,
-        iced_x86::DecoderOptions::NONE,
+        iced_x86::DecoderOptions::MPX,
     );
     let instruction = decoder.decode();
     if instruction.is_invalid() {
         return None;
+    }
+
+    // AT&T spells the same decoded instruction the other way round: source
+    // first, `%` registers, `$` constants, a width suffix where it is needed.
+    if syntax == X86Syntax::Att {
+        return Some(ag_engine::att::text(&instruction, bitness.bits()));
     }
 
     let text = instruction.to_string();
@@ -5400,7 +5424,7 @@ mod tests {
     #[test]
     fn a_byte_that_does_not_decode_is_shown_as_data() {
         // A nop, a byte of data, and another nop.
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
 
         assert_eq!(
             decoded.text.get(&0x1001),
@@ -5412,7 +5436,7 @@ mod tests {
 
     #[test]
     fn the_code_after_a_byte_that_does_not_decode_is_still_decoded() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
 
         let addresses: Vec<u64> = decoded
             .disasm
@@ -5429,7 +5453,7 @@ mod tests {
 
     #[test]
     fn a_byte_that_does_not_decode_ends_the_block() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
         let cfg = resolve_branches(&decoded.disasm, 0x1000);
 
         assert_eq!(cfg.blocks.len(), 1, "the block ends at the byte: {cfg:?}");
@@ -5446,7 +5470,7 @@ mod tests {
     fn the_same_byte_is_an_instruction_in_32_bit_code() {
         // 0x06 is `push es` in 32-bit code, so the section decodes as three
         // instructions and the text is iced's, not `db`.
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits32);
+        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits32, X86Syntax::Intel);
 
         assert_eq!(
             decoded.text.get(&0x1001),
@@ -5463,7 +5487,7 @@ mod tests {
     fn the_text_of_32_bit_code_names_32_bit_registers() {
         // 55 89 e5: push ebp; mov ebp, esp. In 64-bit code the same bytes
         // spell push rbp; mov ebp, esp.
-        let decoded = decode_section(&[0x55, 0x89, 0xe5], 0x8049000, Bitness::Bits32);
+        let decoded = decode_section(&[0x55, 0x89, 0xe5], 0x8049000, Bitness::Bits32, X86Syntax::Intel);
 
         assert_eq!(
             decoded.text.get(&0x8049000),
@@ -5829,6 +5853,26 @@ mod tests {
     }
 
     #[test]
+    fn the_asm_syntax_option_changes_the_listing_and_forgets_the_old_text() {
+        let percent = |binary: &Binary| -> bool {
+            binary
+                .disassembly(0x1149)
+                .expect("add disassembles")
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|ins| ins.operands.contains('%'))
+        };
+        // Warm the cache under the default Intel spelling: no `%` anywhere.
+        let binary = sample();
+        assert!(!percent(&binary));
+        // The same image switched to AT&T forgets the Intel text it cached,
+        // so the listing comes back spelled source first with `%`.
+        let att = binary.with_options(Options::from_pairs([("asm-syntax", "att")]).unwrap());
+        assert!(percent(&att));
+    }
+
+    #[test]
     fn a_value_pinned_at_an_indirect_jump_is_one_the_walk_reads() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../ag-engine/tests/fixtures/switch.elf");
@@ -5867,13 +5911,25 @@ mod named_registers {
 
     /// The registers one instruction's operands name.
     fn named(bytes: &[u8], bitness: Bitness) -> Vec<String> {
-        let decoded = decode_section(bytes, 0x1000, bitness);
+        let decoded = decode_section(bytes, 0x1000, bitness, X86Syntax::Intel);
         decoded
             .text
             .get(&0x1000)
             .expect("the bytes decode")
             .2
             .clone()
+    }
+
+    #[test]
+    fn att_syntax_spells_the_listing_source_first() {
+        // mov rax,[rbp-0x8] : 48 8b 45 f8. AT&T reads the source first, with
+        // `%` on the registers and the displacement before the base.
+        let decoded =
+            decode_section(&[0x48, 0x8b, 0x45, 0xf8], 0x1000, Bitness::Bits64, X86Syntax::Att);
+        let (mnemonic, operands, registers) = decoded.text.get(&0x1000).expect("decoded").clone();
+        assert_eq!(mnemonic, "mov");
+        assert_eq!(operands, "-0x8(%rbp),%rax");
+        assert_eq!(registers, ["%rbp", "%rax"]);
     }
 
     #[test]
@@ -5896,6 +5952,7 @@ mod named_registers {
             &[0x48, 0x8b, 0x05, 0x34, 0x12, 0x00, 0x00],
             0x1000,
             Bitness::Bits64,
+            X86Syntax::Intel,
         );
         let (mnemonic, operands, registers) = decoded.text.get(&0x1000).expect("decoded").clone();
         assert_eq!(mnemonic, "mov");

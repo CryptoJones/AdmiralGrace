@@ -101,6 +101,19 @@ impl DataModel {
         wchar: 4,
     };
 
+    /// ILP32 as the x32 ABI lays it out: x86-64 code with 32-bit `long` and
+    /// pointers, but the 64-bit platform's alignment — the 8-byte scalars
+    /// align to 8 and `long double` is the 16-byte extended precision, not
+    /// the 12-byte i386 one.
+    pub const ILP32_X32: DataModel = DataModel {
+        name: "ILP32 (x32)",
+        pointer: 4,
+        long: 4,
+        align8: 8,
+        long_double: (16, 16),
+        wchar: 4,
+    };
+
     /// The data model of a language id, `x86:LE:64:default:windows`: its
     /// width, and Windows by the compiler field.
     pub fn of_language(language: &str) -> DataModel {
@@ -108,6 +121,7 @@ impl DataModel {
         let processor = fields.first().copied().unwrap_or("").to_ascii_lowercase();
         let width = fields.get(2).copied().unwrap_or("64");
         let windows = fields.get(4).is_some_and(|c| *c == "windows");
+        let x32 = fields.get(4).is_some_and(|c| *c == "x32");
         match (width, windows) {
             ("32" | "16", true) => DataModel {
                 wchar: 2,
@@ -116,6 +130,7 @@ impl DataModel {
             ("32" | "16", false) if processor == "x86" => DataModel::ILP32_I386,
             ("32" | "16", false) => DataModel::ILP32,
             (_, true) => DataModel::LLP64,
+            ("64", false) if processor == "x86" && x32 => DataModel::ILP32_X32,
             _ => DataModel::LP64,
         }
     }
@@ -125,6 +140,7 @@ impl DataModel {
     pub fn of_abi(abi: crate::lift::Abi) -> DataModel {
         match abi {
             crate::lift::Abi::Win64 => DataModel::LLP64,
+            crate::lift::Abi::X32 => DataModel::ILP32_X32,
             crate::lift::Abi::SystemV | crate::lift::Abi::Go | crate::lift::Abi::Pascal => {
                 DataModel::LP64
             }
@@ -2315,6 +2331,17 @@ mod tests {
         assert_eq!(DataModel::of_language("ARM:LE:32:v8").name, "ILP32");
         assert_eq!(DataModel::of_language("MIPS:BE:32:default").name, "ILP32");
         assert_eq!(DataModel::of_language("x86:LE:32:default:windows").wchar, 2);
+        // x32: 64-bit x86 code with 32-bit long and pointers, but the
+        // 64-bit platform's alignment and long double.
+        let x32 = DataModel::of_language("x86:LE:64:default:x32");
+        assert_eq!(x32.name, "ILP32 (x32)");
+        assert_eq!(x32.pointer, 4);
+        assert_eq!(x32.long, 4);
+        assert_eq!(x32.align8, 8);
+        assert_eq!(x32.long_double, (16, 16));
+        assert_eq!(DataModel::of_abi(crate::lift::Abi::X32).name, "ILP32 (x32)");
+        // Plain x86-64 stays LP64; the x32 field is what narrows it.
+        assert_eq!(DataModel::of_language("x86:LE:64:default:gcc").pointer, 8);
     }
 
     #[test]

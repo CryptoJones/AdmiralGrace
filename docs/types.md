@@ -57,6 +57,7 @@ functions are lifted with:
 | `LLP64` | 64-bit Windows, and x86-64 under `--option abi win64` | 4 | 8 | 8 | 2 | 8 |
 | `ILP32` | 32-bit ARM, MIPS and Windows (`wchar_t` 2) | 4 | 4 | 8 | 4 | 8 |
 | `ILP32 (i386)` | 32-bit x86 under System V | 4 | 4 | 12, align 4 | 4 | 4 |
+| `ILP32 (x32)` | x32: x86-64 code with 32-bit pointers and `long` (an x32 ELF, or `--option abi x32`) | 4 | 4 | 16, align 16 | 4 | 8 |
 
 `char` is 1 byte, `short` 2, `int` and `float` 4, `long long` and `double` 8 everywhere.
 

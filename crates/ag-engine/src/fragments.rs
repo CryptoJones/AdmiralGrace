@@ -177,7 +177,7 @@ pub(crate) fn pass_by_value(
 /// The argument registers of `abi`, in order.
 pub(crate) fn argument_registers(abi: crate::lift::Abi) -> &'static [&'static str] {
     match abi {
-        crate::lift::Abi::SystemV => &SYSV_ARGUMENTS,
+        crate::lift::Abi::SystemV | crate::lift::Abi::X32 => &SYSV_ARGUMENTS,
         crate::lift::Abi::Win64 => &["rcx", "rdx", "r8", "r9"],
         crate::lift::Abi::Go => &GO_ARGUMENTS,
         crate::lift::Abi::Pascal => &PASCAL_ARGUMENTS,

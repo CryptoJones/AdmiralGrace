@@ -399,6 +399,10 @@ pub enum Abi {
     /// The Borland Pascal register convention, read at 64 bits: arguments
     /// in `rax, rdx, rcx`, left to right.
     Pascal,
+    /// The x32 ABI: x86-64 code under the System V convention — arguments in
+    /// `rdi, rsi, rdx, rcx, r8, r9` — but ILP32, so `long` and pointers are
+    /// 32 bits while the registers and the stack stay 64.
+    X32,
 }
 
 impl Abi {
@@ -412,6 +416,7 @@ impl Abi {
             Some("windows") => Abi::Win64,
             Some("go" | "golang") => Abi::Go,
             Some("borlanddelphi" | "borlandcpp" | "pascal") => Abi::Pascal,
+            Some("x32") => Abi::X32,
             _ => Abi::SystemV,
         }
     }
@@ -419,7 +424,7 @@ impl Abi {
     /// The argument registers, as GPR indices, in order.
     pub fn argument_registers(self) -> &'static [u32] {
         match self {
-            Abi::SystemV => &[RDI, RSI, RDX, RCX, R8, R9],
+            Abi::SystemV | Abi::X32 => &[RDI, RSI, RDX, RCX, R8, R9],
             Abi::Win64 => &[RCX, RDX, R8, R9],
             Abi::Go => &[RAX, RBX, RCX, RDI, RSI, R8, R9, 10, 11],
             Abi::Pascal => &[RAX, RDX, RCX],
@@ -429,7 +434,7 @@ impl Abi {
     /// Whether a call leaves the register alone.
     pub fn is_callee_saved(self, index: u32) -> bool {
         match self {
-            Abi::SystemV => matches!(index, RBX | RSP | RBP | 12..=15),
+            Abi::SystemV | Abi::X32 => matches!(index, RBX | RSP | RBP | 12..=15),
             Abi::Win64 => matches!(index, RBX | RSP | RBP | RSI | RDI | 12..=15),
             // Go keeps only the stack and frame pointers and `r14`, the
             // goroutine pointer; every other register a call may clobber.
@@ -448,6 +453,7 @@ impl fmt::Display for Abi {
             Abi::Win64 => "Microsoft x64",
             Abi::Go => "Go",
             Abi::Pascal => "Pascal",
+            Abi::X32 => "x32 (System V ILP32)",
         })
     }
 }
@@ -8024,6 +8030,34 @@ mod tests {
             Abi::of_language("x86:LE:64:default:borlandcpp"),
             Abi::Pascal
         );
+        assert_eq!(Abi::of_language("x86:LE:64:default:x32"), Abi::X32);
+    }
+
+    #[test]
+    fn x32_passes_arguments_like_system_v_and_keeps_its_callee_saved() {
+        assert_eq!(Abi::X32.argument_registers(), Abi::SystemV.argument_registers());
+        // The same registers survive a call as under System V.
+        for index in 0..16 {
+            assert_eq!(
+                Abi::X32.is_callee_saved(index),
+                Abi::SystemV.is_callee_saved(index),
+                "r{index}"
+            );
+        }
+        assert_eq!(Abi::X32.to_string(), "x32 (System V ILP32)");
+    }
+
+    #[test]
+    fn apx_instructions_lift_with_the_extended_registers() {
+        // mov r16, rdi ; add r16, 1 ; mov rax, r16 ; ret — the REX2 forms
+        // reach r16, and the lifter reads them as it reads any mov and add.
+        let bytes = [
+            0xd5, 0x41, 0x8b, 0xc7, // mov r16, rdi
+            0xd5, 0x11, 0x83, 0xc0, 0x01, // add r16, 1
+            0xd5, 0x11, 0x8b, 0xc0, // mov rax, r16
+            0xc3, // ret
+        ];
+        assert!(c(&bytes).contains("return a + 1;"), "{}", c(&bytes));
     }
 
     /// Lift `bytes` as the function `f` through its control-flow graph, the

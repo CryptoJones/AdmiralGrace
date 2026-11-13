@@ -815,7 +815,7 @@ A file with no container — firmware, shellcode, a dump — is opened as raw by
 
 - **Open raw bytes…** (File menu) takes `PATH ARCH BASE`, with `entry=ADDRESS`, `offset=N` and
   `length=N` after when they apply: `firmware.bin thumb 0x8000000 entry=0x8000101`. `ARCH` is
-  `x86-64`, `x86`, `arm`, `thumb`, `aarch64`, `riscv64`, `riscv32`, `msp430`, `6502`, `z80` or `superh`. The bytes are one section of code at the base,
+  `x86-64`, `x32`, `x86`, `arm`, `thumb`, `aarch64`, `riscv64`, `riscv32`, `msp430`, `6502`, `z80` or `superh`. The bytes are one section of code at the base,
   the entry a function; the project file remembers how the bytes load, so opening the project
   opens them the same way.
 

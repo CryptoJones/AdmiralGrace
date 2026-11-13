@@ -1,8 +1,10 @@
 pub mod aarch64;
+pub mod apx;
 pub mod arch;
 pub mod arm;
 pub mod asm;
 pub mod ast;
+pub mod att;
 pub mod cfg;
 pub mod cfgwalk;
 pub mod com;

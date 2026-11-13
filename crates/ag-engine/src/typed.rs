@@ -291,7 +291,7 @@ pub(crate) fn return_type(
         ));
     }
     let size = match abi {
-        crate::lift::Abi::SystemV => store.integer_class(&ty, "System V")?,
+        crate::lift::Abi::SystemV | crate::lift::Abi::X32 => store.integer_class(&ty, "System V")?,
         crate::lift::Abi::Go => store.integer_class(&ty, "Go")?,
         crate::lift::Abi::Win64 => {
             let size = store.size_of(&ty)?;
@@ -333,7 +333,7 @@ fn by_value(
 ) -> Option<String> {
     let spelled = ty.spelled(store);
     match abi {
-        crate::lift::Abi::SystemV => {
+        crate::lift::Abi::SystemV | crate::lift::Abi::X32 => {
             if let Err(why) = store.integer_class(ty, "System V") {
                 return Some(why);
             }

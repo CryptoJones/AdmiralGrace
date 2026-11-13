@@ -222,6 +222,7 @@ pub struct RawSpec {
 /// the workbench spell each by, and the language id it stands for.
 const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
     ("x86-64", "x86:LE:64:default:gcc"),
+    ("x32", "x86:LE:64:default:x32"),
     ("x86", "x86:LE:32:default:gcc"),
     ("arm", "ARM:LE:32:v8:default"),
     // Cortex-M: Thumb throughout, under the ARMv7 specification.
@@ -241,6 +242,7 @@ const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
 pub fn raw_language(arch: &str) -> Option<&'static str> {
     let word = match arch.trim().to_ascii_lowercase().as_str() {
         "x86-64" | "x86_64" | "x64" | "amd64" => "x86-64",
+        "x32" | "x86-64-x32" | "x86_64-x32" => "x32",
         "x86" | "x86-32" | "i386" | "i686" => "x86",
         "arm" | "arm32" | "armv7" => "arm",
         "thumb" | "cortex" | "cortex-m" => "thumb",
@@ -270,7 +272,7 @@ pub fn raw_arch(language: &str) -> Option<&'static str> {
 
 /// The architecture names [`raw_language`] knows, for a message.
 pub const RAW_ARCHITECTURES: &str =
-    "x86-64, x86, arm, thumb, aarch64, riscv64, riscv32, msp430, 6502, z80, superh";
+    "x86-64, x32, x86, arm, thumb, aarch64, riscv64, riscv32, msp430, 6502, z80, superh";
 
 /// The language a retro- or embedded-architecture ELF decodes under, when
 /// the bytes are one. The loader has no opinion for these, so the engine
@@ -321,6 +323,28 @@ fn elf_machine(bytes: &[u8]) -> Option<u16> {
         u16::from_be_bytes(word)
     })
 }
+
+/// Whether `bytes` are an x32 ELF: a 64-bit x86-64 object whose `e_flags`
+/// carries `EF_X86_64_X32` (0x20), the flag the x32 ABI sets so the loader
+/// knows `long` and pointers are 32 bits though the code is 64-bit.
+fn elf_x32(bytes: &[u8]) -> bool {
+    // ELF64, little-endian, EM_X86_64, with the x32 flag in e_flags at 0x30.
+    if bytes.len() < 52 || &bytes[0..4] != b"\x7fELF" {
+        return false;
+    }
+    if bytes[4] != 2 || bytes[5] != 1 {
+        return false;
+    }
+    if u16::from_le_bytes([bytes[18], bytes[19]]) != 62 {
+        return false;
+    }
+    let e_flags = u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]);
+    e_flags & 0x20 != 0
+}
+
+/// The language id an x32 ELF decodes under: x86-64 code, the System V
+/// convention, the `x32` compiler field naming the ILP32 data model.
+const X32_LANGUAGE: &str = "x86:LE:64:default:x32";
 
 impl std::fmt::Debug for Image {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -437,7 +461,16 @@ impl Image {
                 ),
             }
         }
-        let inner = match ObjectLoadImage::from_bytes(name, &bytes) {
+        // An x32 ELF is x86-64 code the loader would read as plain LP64;
+        // name the x32 target so its `long` and pointers are read at 32 bits.
+        let load = |name: &str, bytes: &[u8]| {
+            if elf_x32(bytes) {
+                ObjectLoadImage::from_bytes_with_target(name, bytes, X32_LANGUAGE)
+            } else {
+                ObjectLoadImage::from_bytes(name, bytes)
+            }
+        };
+        let inner = match load(name, &bytes) {
             Ok(inner) => inner,
             Err(error) => {
                 // The retro and embedded cores — the MSP430, the SH4, the
@@ -1497,5 +1530,44 @@ mod tests {
         assert!(guard_pointers_in(&data).is_empty());
         assert!(guard_pointers_in(&data[..0x74]).is_empty());
         assert!(guard_pointers_in(&[]).is_empty());
+    }
+
+    /// A minimal ELF64 header with the given machine word and `e_flags`.
+    fn elf64_header(machine: u16, e_flags: u32) -> Vec<u8> {
+        let mut data = vec![0u8; 64];
+        data[0..4].copy_from_slice(b"\x7fELF");
+        data[4] = 2; // ELFCLASS64
+        data[5] = 1; // little-endian
+        data[18..20].copy_from_slice(&machine.to_le_bytes());
+        data[48..52].copy_from_slice(&e_flags.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn an_x32_elf_is_known_by_its_flag() {
+        // EM_X86_64 with EF_X86_64_X32 set is x32.
+        assert!(elf_x32(&elf64_header(62, 0x20)));
+        assert!(elf_x32(&elf64_header(62, 0x21)));
+        // The same machine without the flag is plain x86-64.
+        assert!(!elf_x32(&elf64_header(62, 0)));
+        // Another machine, or a 32-bit header, is not x32 whatever the flags.
+        assert!(!elf_x32(&elf64_header(3, 0x20)));
+        let mut header32 = elf64_header(62, 0x20);
+        header32[4] = 1; // ELFCLASS32
+        assert!(!elf_x32(&header32));
+        assert!(!elf_x32(&[]));
+        assert!(!elf_x32(b"\x7fELF"));
+    }
+
+    #[test]
+    fn x32_is_a_raw_architecture_of_its_own() {
+        assert_eq!(raw_language("x32"), Some("x86:LE:64:default:x32"));
+        assert_eq!(raw_language("x86-64-x32"), Some("x86:LE:64:default:x32"));
+        assert_eq!(raw_arch("x86:LE:64:default:x32"), Some("x32"));
+        // It decodes at 64 bits, like x86-64, not 32.
+        assert_eq!(
+            crate::arch::Bitness::of_language("x86:LE:64:default:x32"),
+            Some(crate::arch::Bitness::Bits64)
+        );
     }
 }

@@ -14,6 +14,9 @@ pub const RC_MM: u32 = 9;
 pub const RC_KMASK: u32 = 10;
 pub const RC_CR: u32 = 11;
 pub const RC_DR: u32 = 12;
+/// The MPX bound registers `bnd0`–`bnd3`: each holds a lower and an upper
+/// bound, 128 bits wide, that the `bnd…` instructions check a pointer against.
+pub const RC_BND: u32 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
@@ -211,9 +214,14 @@ impl Default for X86IcedContext {
 
 impl X86IcedContext {
     /// A decoder for a program of the given width.
+    ///
+    /// MPX is read: the `0F 1A`/`0F 1B` opcodes decode as the bound
+    /// instructions (`bndmov`, `bndmk`, `bndcl`, `bndldx`, …) rather than the
+    /// reserved no-ops they default to, so a binary compiled with bounds
+    /// checking lists and lifts its checks.
     pub fn new(bitness: Bitness) -> Self {
         Self {
-            options: iced_x86::DecoderOptions::NONE,
+            options: iced_x86::DecoderOptions::MPX,
             bitness,
         }
     }
@@ -250,7 +258,7 @@ impl X86IcedContext {
 /// of 32 bits; `ESP` is GPR 4 and `EIP` is the instruction pointer at 32 bits.
 /// A 32-bit listing and a 64-bit one therefore name a register the same way,
 /// and nothing has to be told which it is reading.
-fn reg_id(r: iced_x86::Register) -> RegisterId {
+pub(crate) fn reg_id(r: iced_x86::Register) -> RegisterId {
     use iced_x86::Register as R;
     if r == R::None {
         return RegisterId::new(RC_NONE, 0, 0);
@@ -279,6 +287,8 @@ fn reg_id(r: iced_x86::Register) -> RegisterId {
         RC_MM
     } else if r.is_st() {
         RC_FPU
+    } else if r.is_bnd() {
+        RC_BND
     } else {
         RC_NONE
     };
@@ -287,6 +297,14 @@ fn reg_id(r: iced_x86::Register) -> RegisterId {
 
 impl CpuContext for X86IcedContext {
     fn decode(&mut self, bytes: &[u8], address: u64) -> anyhow::Result<DecodedInsn> {
+        // APX's REX2 prefix is one the decoder does not read itself; the
+        // engine decodes the integer forms it promotes and names the extended
+        // registers `r16`–`r31`. What it does not read falls through to iced.
+        if self.bitness == Bitness::Bits64 {
+            if let Some(decoded) = crate::apx::decode(bytes, address, self.options) {
+                return Ok(decoded);
+            }
+        }
         let mut dec = iced_x86::Decoder::with_ip(self.bitness.bits(), bytes, address, self.options);
         let ins = dec.decode();
         if ins.is_invalid() {
@@ -310,97 +328,105 @@ impl CpuContext for X86IcedContext {
                 delay_slot: false,
             });
         }
-        let mnemonic = ins.mnemonic() as u32;
-        let flow = match ins.flow_control() {
-            _ if matches!(
-                ins.mnemonic(),
-                iced_x86::Mnemonic::Syscall | iced_x86::Mnemonic::Sysenter
-            ) =>
-            {
-                Flow::Syscall
-            }
-            // iced files `hlt` under `Next`; control does not reach the
-            // instruction after it.
-            _ if ins.mnemonic() == iced_x86::Mnemonic::Hlt => Flow::Halt,
-            iced_x86::FlowControl::Next => Flow::Next,
-            iced_x86::FlowControl::UnconditionalBranch => {
-                Flow::UnconditionalBranch(ins.near_branch_target())
-            }
-            iced_x86::FlowControl::ConditionalBranch => {
-                Flow::ConditionalBranch(ins.near_branch_target())
-            }
-            iced_x86::FlowControl::IndirectBranch => Flow::IndirectBranch,
-            iced_x86::FlowControl::Call => Flow::Call(ins.near_branch_target()),
-            iced_x86::FlowControl::IndirectCall => Flow::IndirectCall,
-            iced_x86::FlowControl::Return => Flow::Return,
-            iced_x86::FlowControl::Interrupt => Flow::Interrupt,
-            iced_x86::FlowControl::Exception => Flow::Trap,
-            iced_x86::FlowControl::XbeginXabortXend => match ins.mnemonic() {
-                iced_x86::Mnemonic::Xbegin => Flow::Xbegin(ins.near_branch_target()),
-                _ => Flow::Next,
-            },
-        };
-        let mut operands = Vec::with_capacity(4);
-        for i in 0..ins.op_count() {
-            let op = ins.op_kind(i);
-            let o = match op {
-                iced_x86::OpKind::Register => Operand::Register(reg_id(ins.op_register(i))),
-                iced_x86::OpKind::Immediate8
-                | iced_x86::OpKind::Immediate8_2nd
-                | iced_x86::OpKind::Immediate16
-                | iced_x86::OpKind::Immediate32
-                | iced_x86::OpKind::Immediate64 => Operand::Imm(ins.immediate(i) as i128),
-                iced_x86::OpKind::Immediate8to16
-                | iced_x86::OpKind::Immediate8to32
-                | iced_x86::OpKind::Immediate8to64
-                | iced_x86::OpKind::Immediate32to64 => match op {
-                    iced_x86::OpKind::Immediate8to16 => Operand::Imm(ins.immediate8to16() as i128),
-                    iced_x86::OpKind::Immediate8to32 => Operand::Imm(ins.immediate8to32() as i128),
-                    iced_x86::OpKind::Immediate8to64 => Operand::Imm(ins.immediate8to64() as i128),
-                    _ => Operand::Imm(ins.immediate32to64() as i128),
-                },
-                iced_x86::OpKind::NearBranch16
-                | iced_x86::OpKind::NearBranch32
-                | iced_x86::OpKind::NearBranch64 => Operand::Imm(ins.near_branch_target() as i128),
-                iced_x86::OpKind::FarBranch16 | iced_x86::OpKind::FarBranch32 => Operand::Imm(
-                    ((ins.far_branch_selector() as i128) << 32) | ins.far_branch32() as i128,
-                ),
-                _ => Operand::Mem {
-                    base: reg_id(ins.memory_base()),
-                    index: reg_id(ins.memory_index()),
-                    scale: ins.memory_index_scale(),
-                    disp: ins.memory_displacement64() as i64,
-                    size: ins.memory_size().size() as u32,
-                },
-            };
-            operands.push(o);
-        }
-        let rip_relative_address = if ins.is_ip_rel_memory_operand() {
-            Some(ins.ip_rel_memory_address())
-        } else {
-            None
-        };
-        let absolute_address = absolute_address(&ins);
-        Ok(DecodedInsn {
-            address,
-            length: ins.len(),
-            mnemonic,
-            flow,
-            operands,
-            register_uses: register_uses(&ins),
-            rip_relative_address,
-            absolute_address,
-            switch_indices: false,
-            opcode: ins.code() as u32,
-            flags_read: ins.rflags_read(),
-            flags_written: ins.rflags_modified(),
-            rep: ins.has_rep_prefix() || ins.has_repne_prefix(),
-            delay_slot: false,
-        })
+        Ok(decoded_from_iced(&ins, address))
     }
 
     fn byte_size(&self) -> u64 {
         self.bitness.byte_size()
+    }
+}
+
+/// A decoded instruction read off an iced instruction: its flow, its operands
+/// and the registers it touches, by the slice each names. The address is the
+/// one the instruction sits at; the length is the decoder's. The APX path
+/// builds its instruction this way too, then names the extended registers.
+pub(crate) fn decoded_from_iced(ins: &iced_x86::Instruction, address: u64) -> DecodedInsn {
+    let mnemonic = ins.mnemonic() as u32;
+    let flow = match ins.flow_control() {
+        _ if matches!(
+            ins.mnemonic(),
+            iced_x86::Mnemonic::Syscall | iced_x86::Mnemonic::Sysenter
+        ) =>
+        {
+            Flow::Syscall
+        }
+        // iced files `hlt` under `Next`; control does not reach the
+        // instruction after it.
+        _ if ins.mnemonic() == iced_x86::Mnemonic::Hlt => Flow::Halt,
+        iced_x86::FlowControl::Next => Flow::Next,
+        iced_x86::FlowControl::UnconditionalBranch => {
+            Flow::UnconditionalBranch(ins.near_branch_target())
+        }
+        iced_x86::FlowControl::ConditionalBranch => {
+            Flow::ConditionalBranch(ins.near_branch_target())
+        }
+        iced_x86::FlowControl::IndirectBranch => Flow::IndirectBranch,
+        iced_x86::FlowControl::Call => Flow::Call(ins.near_branch_target()),
+        iced_x86::FlowControl::IndirectCall => Flow::IndirectCall,
+        iced_x86::FlowControl::Return => Flow::Return,
+        iced_x86::FlowControl::Interrupt => Flow::Interrupt,
+        iced_x86::FlowControl::Exception => Flow::Trap,
+        iced_x86::FlowControl::XbeginXabortXend => match ins.mnemonic() {
+            iced_x86::Mnemonic::Xbegin => Flow::Xbegin(ins.near_branch_target()),
+            _ => Flow::Next,
+        },
+    };
+    let mut operands = Vec::with_capacity(4);
+    for i in 0..ins.op_count() {
+        let op = ins.op_kind(i);
+        let o = match op {
+            iced_x86::OpKind::Register => Operand::Register(reg_id(ins.op_register(i))),
+            iced_x86::OpKind::Immediate8
+            | iced_x86::OpKind::Immediate8_2nd
+            | iced_x86::OpKind::Immediate16
+            | iced_x86::OpKind::Immediate32
+            | iced_x86::OpKind::Immediate64 => Operand::Imm(ins.immediate(i) as i128),
+            iced_x86::OpKind::Immediate8to16
+            | iced_x86::OpKind::Immediate8to32
+            | iced_x86::OpKind::Immediate8to64
+            | iced_x86::OpKind::Immediate32to64 => match op {
+                iced_x86::OpKind::Immediate8to16 => Operand::Imm(ins.immediate8to16() as i128),
+                iced_x86::OpKind::Immediate8to32 => Operand::Imm(ins.immediate8to32() as i128),
+                iced_x86::OpKind::Immediate8to64 => Operand::Imm(ins.immediate8to64() as i128),
+                _ => Operand::Imm(ins.immediate32to64() as i128),
+            },
+            iced_x86::OpKind::NearBranch16
+            | iced_x86::OpKind::NearBranch32
+            | iced_x86::OpKind::NearBranch64 => Operand::Imm(ins.near_branch_target() as i128),
+            iced_x86::OpKind::FarBranch16 | iced_x86::OpKind::FarBranch32 => Operand::Imm(
+                ((ins.far_branch_selector() as i128) << 32) | ins.far_branch32() as i128,
+            ),
+            _ => Operand::Mem {
+                base: reg_id(ins.memory_base()),
+                index: reg_id(ins.memory_index()),
+                scale: ins.memory_index_scale(),
+                disp: ins.memory_displacement64() as i64,
+                size: ins.memory_size().size() as u32,
+            },
+        };
+        operands.push(o);
+    }
+    let rip_relative_address = if ins.is_ip_rel_memory_operand() {
+        Some(ins.ip_rel_memory_address())
+    } else {
+        None
+    };
+    let absolute_address = absolute_address(ins);
+    DecodedInsn {
+        address,
+        length: ins.len(),
+        mnemonic,
+        flow,
+        operands,
+        register_uses: register_uses(ins),
+        rip_relative_address,
+        absolute_address,
+        switch_indices: false,
+        opcode: ins.code() as u32,
+        flags_read: ins.rflags_read(),
+        flags_written: ins.rflags_modified(),
+        rep: ins.has_rep_prefix() || ins.has_repne_prefix(),
+        delay_slot: false,
     }
 }
 
@@ -409,7 +435,7 @@ impl CpuContext for X86IcedContext {
 /// instruction touches. A 32-bit write zero-extends, so iced reports
 /// `add eax, 1` as a read of `eax` and a write of `rax`, and the zeroing
 /// idioms `xor r, r` and `sub r, r` as a write alone.
-fn register_uses(ins: &iced_x86::Instruction) -> Vec<RegisterUse> {
+pub(crate) fn register_uses(ins: &iced_x86::Instruction) -> Vec<RegisterUse> {
     use iced_x86::OpAccess;
     let mut factory = iced_x86::InstructionInfoFactory::new();
     let mut uses: Vec<RegisterUse> = Vec::new();
@@ -558,4 +584,71 @@ mod tests {
         // bytes that do not decode touch nothing
         assert!(one(&[0x06]).register_uses.is_empty());
     }
+
+    /// The bound register a decoded operand names, as `(index, bits)`.
+    fn bnd_of(ins: &DecodedInsn, operand: usize) -> (u32, u32) {
+        match ins.operands[operand] {
+            Operand::Register(r) => {
+                assert_eq!(r.class, RC_BND, "operand {operand} is a bound register");
+                (r.index, r.bit_size)
+            }
+            ref other => panic!("operand {operand} is not a register: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mpx_bound_registers_are_their_own_class() {
+        // bndmov bnd0, bnd1
+        let ins = one(&[0x66, 0x0f, 0x1a, 0xc1]);
+        assert_eq!(ins.mnemonic, iced_x86::Mnemonic::Bndmov as u32);
+        assert_eq!(bnd_of(&ins, 0), (0, 128));
+        assert_eq!(bnd_of(&ins, 1), (1, 128));
+        assert_eq!(ins.flow, Flow::Next);
+        // The destination bound register is written, the source read.
+        assert!(ins
+            .register_uses
+            .iter()
+            .any(|u| u.register.class == RC_BND && u.register.index == 0 && u.access.kills()));
+        assert!(ins
+            .register_uses
+            .iter()
+            .any(|u| u.register.class == RC_BND && u.register.index == 1 && u.access.reads()));
+    }
+
+    #[test]
+    fn mpx_bounds_checks_read_the_pointer_and_the_bound() {
+        // bndmk bnd0, [rax]: make a bound from the address.
+        let ins = one(&[0xf3, 0x0f, 0x1b, 0x00]);
+        assert_eq!(ins.mnemonic, iced_x86::Mnemonic::Bndmk as u32);
+        assert_eq!(bnd_of(&ins, 0), (0, 128));
+        assert!(matches!(ins.operands[1], Operand::Mem { base, .. } if base.class == RC_GPR && base.index == 0));
+        // bndcl bnd0, [rax]: check the lower bound.
+        assert_eq!(
+            one(&[0xf3, 0x0f, 0x1a, 0x00]).mnemonic,
+            iced_x86::Mnemonic::Bndcl as u32
+        );
+        // bndcu bnd1, [rcx]: check the upper bound, one's complement.
+        assert_eq!(
+            one(&[0xf2, 0x0f, 0x1a, 0x01]).mnemonic,
+            iced_x86::Mnemonic::Bndcu as u32
+        );
+        // bndcn bnd2, [rdx]: check the upper bound, sign-extended.
+        assert_eq!(
+            one(&[0xf2, 0x0f, 0x1b, 0x02]).mnemonic,
+            iced_x86::Mnemonic::Bndcn as u32
+        );
+    }
+
+    #[test]
+    fn mpx_bound_load_and_store_through_the_bound_table() {
+        // bndldx bnd0, [rax]: load a bound through the bound table.
+        let ins = one(&[0x0f, 0x1a, 0x00]);
+        assert_eq!(ins.mnemonic, iced_x86::Mnemonic::Bndldx as u32);
+        assert_eq!(bnd_of(&ins, 0), (0, 128));
+        // bndstx [rax], bnd1: store a bound through the bound table.
+        let ins = one(&[0x0f, 0x1b, 0x08]);
+        assert_eq!(ins.mnemonic, iced_x86::Mnemonic::Bndstx as u32);
+        assert_eq!(bnd_of(&ins, 1), (1, 128));
+    }
 }
+

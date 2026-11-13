@@ -10,10 +10,13 @@ a function whose graph runs on into the next routine's blocks after a `jmp` into
 a tail call to an address inside a function where the `jmp` is a loop or a shared block of the function's own | `--option branches-end-procedures no`
 code in an executable section that no function in the list reaches: a stripped routine, hand-written glue after the last symbol | `--option code-sections procedures`
 `sub_…` functions that are really a table, a string or padding the compiler left in `.text` | `--option code-sections mixed`
+a listing in Intel syntax beside AT&T assembly you are comparing it against, so every operand reads backwards | `--option asm-syntax att`
+`%rax` and `movl` where you want the `rax` and `mov` of an Intel listing | `--option asm-syntax intel`
 `not lifted yet: rcx is read before it is written` on an ELF built for the Microsoft convention | `--option abi win64`
 `not lifted yet: rdi is read before it is written` on a PE built with a System V compiler | `--option abi sysv`
 `not lifted yet: rbx is read before it is written` on a Go binary, whose arguments arrive in rax and rbx | `--option abi go`
 a Delphi routine's first arguments read as none, though they arrive in eax, edx and ecx | `--option abi pascal`
+an x32 binary's pointers and `long` read as 8 bytes, though the ABI makes them 4 | `--option abi x32`
 a function you know takes more arguments than its signature shows, because the tail of them is only passed on | `--option parameters convention`
 `long a` in a signature where nothing reads `a` | `--option parameters last-read`
 `eax`, `eax_2` and `edi` declared as locals, reading like a listing and not like C | `--option merged-register-names numbered`
@@ -69,12 +72,13 @@ Option | Tier | Takes | Default | What it decides
 --- | --- | --- | --- | ---
 `branches-end-procedures` | analysis | `no` \| `yes` | `no` | Whether a branch out of a procedure's own range ends it: a `jmp` or `jcc` to an address before the entry, or at or past the next function the image knows, is a tail call to that address rather than more of the procedure. Hand-written and shared-tail code, where routines jump into one another, reads better that way; compiled code rarely does.
 `code-sections` | analysis | `mixed` \| `procedures` | `mixed` | What an executable section holds: code and data mixed, so the procedures are the functions the image names and its entry point; or procedures only, so every run of instructions no known procedure reaches starts one of its own, named `sub_` and its address, with padding — `nop`, `int3`, bytes that do not decode — passed over.
+`asm-syntax` | rendering | `intel` \| `att` | `intel` | The syntax an x86 listing is printed in: Intel, destination first (`mov eax, [rbp-8]`), or AT&T as GAS writes it, source first with `%` registers, `$` constants and a width suffix (`movl -8(%rbp), %eax`). The bytes, the flow and the lift are the same either way; only the spelling changes.
 
 ## Lift
 
 Option | Tier | Takes | Default | What it decides
 --- | --- | --- | --- | ---
-`abi` | analysis | `auto` \| `sysv` \| `win64` \| `go` \| `pascal` | `auto` | The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`) or the Borland Pascal register convention (`rax, rdx, rcx`) whatever the image says.
+`abi` | analysis | `auto` \| `sysv` \| `win64` \| `go` \| `pascal` \| `x32` | `auto` | The integer calling convention: read from the image's language, or System V (`rdi, rsi, rdx, rcx, r8, r9`), Microsoft x64 (`rcx, rdx, r8, r9`), Go's register ABI (`rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11`), the Borland Pascal register convention (`rax, rdx, rcx`) or x32 — System V registers with 32-bit `long` and pointers — whatever the image says.
 `parameters` | analysis | `last-read` \| `convention` | `last-read` | Which argument registers are parameters: the ones through the last one read, a gap declared `long`, or every register of the convention.
 `merged-register-names` | rendering | `register` \| `numbered` | `register` | How a register that differs where two paths join is named once it is a variable: after the register (`eax`, `eax_2`), or by number (`var_1`, `var_2`).
 `stack-slot-names` | rendering | `hex` \| `decimal` | `hex` | How a stack slot is named, by its offset from the entry stack pointer: `local_14` in hex, or `local_20` in decimal.
