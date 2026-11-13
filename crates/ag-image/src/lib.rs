@@ -60,6 +60,7 @@ pub use ag_engine::arm::Mode as ArmMode;
 pub use ag_engine::asm::{assemble, no_ops, NotAssembled};
 pub use ag_engine::cfg::{Halt, HaltReason, JumpTable};
 pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
+pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
 pub use ag_engine::ctype::{self as ctype, CError, TypeText};
 pub use ag_engine::debuginfo;
 pub use ag_engine::defuse::{
@@ -76,6 +77,7 @@ pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
+pub use ag_engine::jni::JniFunction;
 pub use ag_engine::merge::{MergeCandidate, MergeKind, VariableEdits};
 pub use ag_engine::objc::{
     ObjcCategory, ObjcClass, ObjcIvar, ObjcMetadata, ObjcMethod, ObjcProperty, ObjcProtocol,
@@ -98,17 +100,15 @@ pub use ag_engine::svd;
 pub use ag_engine::swift::{
     SwiftField, SwiftKind, SwiftMetadata, SwiftMethod, SwiftProtocol, SwiftType,
 };
+pub use ag_engine::typed::{format_type_uses, underlying_key, TypeUse};
 pub use ag_engine::types::{
     self as types, DataModel, Definition as TypeDefinition, FieldLayout, Layout as TypeLayout,
     Prim, SearchIn as TypeSearch, Step as FieldStep, Type, TypeStore,
 };
-pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
-pub use ag_engine::jni::JniFunction;
 pub use ag_engine::values::PinnedValue;
 pub use ag_engine::variables::{VariableInfo, VariableKind};
 pub use ag_engine::Bitness;
 pub use ag_engine::Placement;
-pub use ag_engine::typed::{format_type_uses, underlying_key, TypeUse};
 pub use ag_engine::{Line, NotLifted, OptionError, Options, Pseudocode, SiteOverride};
 
 pub mod binexport;
@@ -721,13 +721,12 @@ impl Binary {
         // AArch64 decodes with the ARM decoder and lifts itself, through
         // the architecture seam the engine built for plugins: the seam is
         // what makes its pseudocode, levels and workbench views work.
-        // RISC-V and the MSP430 decode and lift themselves through the
-        // same seam.
+        // RISC-V, the MSP430 and MIPS32 lift themselves through the same
+        // seam. MIPS still decodes on its own path below, so the global
+        // pointer and the delay slots stay with that decoder.
         let built_in = arm
             .filter(|arm| !arm.has_modes())
-            .map(|_| {
-                Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>
-            })
+            .map(|_| Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>)
             .or_else(|| {
                 riscv.map(|_| {
                     Arc::new(ag_engine::riscv::Arch) as Arc<dyn ag_engine::plugin::Architecture>
@@ -736,6 +735,11 @@ impl Binary {
             .or_else(|| {
                 msp430.map(|_| {
                     Arc::new(ag_engine::msp430::Arch) as Arc<dyn ag_engine::plugin::Architecture>
+                })
+            })
+            .or_else(|| {
+                mips.map(|_| {
+                    Arc::new(ag_engine::mips::Arch) as Arc<dyn ag_engine::plugin::Architecture>
                 })
             })
             .or_else(|| {
@@ -1871,6 +1875,18 @@ impl Binary {
             return decoded;
         }
         let bytes = self.patched(&code.bytes, code.section.vma);
+        // MIPS keeps its own decoder — delay slots, register facts, the
+        // global pointer — even though its architecture also lifts. A
+        // plugin must not take the section instead.
+        if let Some(variant) = self.mips {
+            let mut decoded = decode_mips_section(variant, &bytes, code.section.vma);
+            self.follow_global_pointer(&mut decoded, code);
+            let decoded = Arc::new(decoded);
+            if let Ok(mut held) = code.decoded.lock() {
+                *held = Some(Arc::clone(&decoded));
+            }
+            return decoded;
+        }
         if let Some(arch) = &self.plugin_arch {
             let decoded = Arc::new(decode_plugin_section(
                 arch.as_ref(),
@@ -1878,15 +1894,6 @@ impl Binary {
                 &bytes,
                 code.section.vma,
             ));
-            if let Ok(mut held) = code.decoded.lock() {
-                *held = Some(Arc::clone(&decoded));
-            }
-            return decoded;
-        }
-        if let Some(variant) = self.mips {
-            let mut decoded = decode_mips_section(variant, &bytes, code.section.vma);
-            self.follow_global_pointer(&mut decoded, code);
-            let decoded = Arc::new(decoded);
             if let Ok(mut held) = code.decoded.lock() {
                 *held = Some(Arc::clone(&decoded));
             }
@@ -1907,7 +1914,12 @@ impl Binary {
                     &marks,
                 )
             }
-            None => decode_section(&bytes, code.section.vma, code.bitness, self.options.x86_syntax),
+            None => decode_section(
+                &bytes,
+                code.section.vma,
+                code.bitness,
+                self.options.x86_syntax,
+            ),
         });
         if let Ok(mut held) = code.decoded.lock() {
             *held = Some(Arc::clone(&decoded));
@@ -5434,7 +5446,12 @@ mod tests {
     #[test]
     fn a_byte_that_does_not_decode_is_shown_as_data() {
         // A nop, a byte of data, and another nop.
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
+        let decoded = decode_section(
+            &[0x90, DATA, 0x90],
+            0x1000,
+            Bitness::Bits64,
+            X86Syntax::Intel,
+        );
 
         assert_eq!(
             decoded.text.get(&0x1001),
@@ -5446,7 +5463,12 @@ mod tests {
 
     #[test]
     fn the_code_after_a_byte_that_does_not_decode_is_still_decoded() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
+        let decoded = decode_section(
+            &[0x90, DATA, 0x90],
+            0x1000,
+            Bitness::Bits64,
+            X86Syntax::Intel,
+        );
 
         let addresses: Vec<u64> = decoded
             .disasm
@@ -5463,7 +5485,12 @@ mod tests {
 
     #[test]
     fn a_byte_that_does_not_decode_ends_the_block() {
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits64, X86Syntax::Intel);
+        let decoded = decode_section(
+            &[0x90, DATA, 0x90],
+            0x1000,
+            Bitness::Bits64,
+            X86Syntax::Intel,
+        );
         let cfg = resolve_branches(&decoded.disasm, 0x1000);
 
         assert_eq!(cfg.blocks.len(), 1, "the block ends at the byte: {cfg:?}");
@@ -5480,7 +5507,12 @@ mod tests {
     fn the_same_byte_is_an_instruction_in_32_bit_code() {
         // 0x06 is `push es` in 32-bit code, so the section decodes as three
         // instructions and the text is iced's, not `db`.
-        let decoded = decode_section(&[0x90, DATA, 0x90], 0x1000, Bitness::Bits32, X86Syntax::Intel);
+        let decoded = decode_section(
+            &[0x90, DATA, 0x90],
+            0x1000,
+            Bitness::Bits32,
+            X86Syntax::Intel,
+        );
 
         assert_eq!(
             decoded.text.get(&0x1001),
@@ -5497,7 +5529,12 @@ mod tests {
     fn the_text_of_32_bit_code_names_32_bit_registers() {
         // 55 89 e5: push ebp; mov ebp, esp. In 64-bit code the same bytes
         // spell push rbp; mov ebp, esp.
-        let decoded = decode_section(&[0x55, 0x89, 0xe5], 0x8049000, Bitness::Bits32, X86Syntax::Intel);
+        let decoded = decode_section(
+            &[0x55, 0x89, 0xe5],
+            0x8049000,
+            Bitness::Bits32,
+            X86Syntax::Intel,
+        );
 
         assert_eq!(
             decoded.text.get(&0x8049000),
@@ -5934,8 +5971,12 @@ mod named_registers {
     fn att_syntax_spells_the_listing_source_first() {
         // mov rax,[rbp-0x8] : 48 8b 45 f8. AT&T reads the source first, with
         // `%` on the registers and the displacement before the base.
-        let decoded =
-            decode_section(&[0x48, 0x8b, 0x45, 0xf8], 0x1000, Bitness::Bits64, X86Syntax::Att);
+        let decoded = decode_section(
+            &[0x48, 0x8b, 0x45, 0xf8],
+            0x1000,
+            Bitness::Bits64,
+            X86Syntax::Att,
+        );
         let (mnemonic, operands, registers) = decoded.text.get(&0x1000).expect("decoded").clone();
         assert_eq!(mnemonic, "mov");
         assert_eq!(operands, "-0x8(%rbp),%rax");

@@ -17,10 +17,13 @@
 //! and writes, its memory operand, and — as [`InsnFacts`] — the value it
 //! gives each register it writes, over the values before it: what the
 //! global pointer is followed through (see [`crate::global_pointer`]).
-//! Nothing here is lifted to pseudocode.
+//!
+//! Only MIPS32 `default` is lifted: the p-code of the instructions the CFG
+//! lists, delay slot included before the branch takes effect, into the
+//! medium level. nanoMIPS and MIPS64 are not.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
@@ -30,11 +33,16 @@ use kuna_num::pcoderaw::VarnodeData;
 use kuna_sleigh::globalcontext::ContextInternal;
 use kuna_sleigh::sleigh::Sleigh;
 
+use crate::arch::Bitness;
 use crate::arm::{read_ops, Op, Ops, SectionImage, Text};
+use crate::ast::{AstNode, BinaryOp};
 use crate::cpu_context::{Access, DecodedInsn, Flow, RegisterUse, RC_GPR};
 use crate::global_pointer::{BinOp, Expr, InsnFacts, MemoryOperand};
+use crate::lift::{NotLifted, Statement, StatementKind, Variable};
 use crate::pipeline::Disasm;
+use crate::plugin::{Architecture, DecodedSection, FunctionCode, LiftedGraph};
 use crate::register::RegisterId;
+use crate::structure::{Node, Terminator};
 
 /// The compiled specification of 32-bit MIPS, little-endian.
 const MIPS32_LE: &[u8] = include_bytes!("../specs/mips/mips32le.sla");
@@ -134,11 +142,8 @@ thread_local! {
     static ENGINES: RefCell<HashMap<bool, Engine>> = RefCell::new(HashMap::new());
 }
 
-/// Decode the `bytes` of a section that starts at `base`, under `variant`.
-///
-/// Bytes that do not decode are recorded as one word each and stepped over,
-/// shown as the word they are.
-pub fn decode_section(variant: MipsVariant, bytes: &[u8], base: u64) -> Result<MipsDecoded> {
+/// The engine for `variant`, created the first time this thread asks.
+fn with_engine<T>(variant: MipsVariant, body: impl FnOnce(&mut Engine) -> Result<T>) -> Result<T> {
     ENGINES.with(|engines| {
         let mut engines = engines.borrow_mut();
         let engine = match engines.entry(variant.big_endian) {
@@ -165,8 +170,104 @@ pub fn decode_section(variant: MipsVariant, bytes: &[u8], base: u64) -> Result<M
                 slot.insert(Engine { sleigh, gprs })
             }
         };
-        decode_with(engine, variant, bytes, base)
+        body(engine)
     })
+}
+
+/// Decode the `bytes` of a section that starts at `base`, under `variant`.
+///
+/// Bytes that do not decode are recorded as one word each and stepped over,
+/// shown as the word they are.
+pub fn decode_section(variant: MipsVariant, bytes: &[u8], base: u64) -> Result<MipsDecoded> {
+    with_engine(variant, |engine| decode_with(engine, variant, bytes, base))
+}
+
+/// The p-code and the text of one instruction. A branch's delay slot is
+/// taken out of the p-code: the CFG lists the slot as the next instruction,
+/// and the lift runs it on its own before the branch takes effect.
+pub(crate) fn instruction_ops(
+    variant: MipsVariant,
+    bytes: &[u8],
+    base: u64,
+    at: u64,
+) -> Result<(Vec<Op>, String, String)> {
+    with_engine(variant, |engine| {
+        let sleigh = &mut engine.sleigh;
+        sleigh.set_loader(Box::new(SectionImage {
+            base,
+            bytes: bytes.to_vec(),
+        }));
+        let ram = Rc::clone(
+            sleigh
+                .base()
+                .manager()
+                .get_space_by_name("ram")
+                .context("the MIPS specification names no ram space")?,
+        );
+        let at_address = |offset: u64| Address::new(Rc::clone(&ram), offset);
+        let end = base.saturating_add(bytes.len() as u64);
+        sleigh.with_context_db_mut(|db| {
+            let defaults = db.get_default_value().to_vec();
+            for (word, value) in defaults.iter().enumerate() {
+                db.set_context_region(
+                    &at_address(base),
+                    &at_address(end),
+                    word as i32,
+                    u32::MAX,
+                    *value,
+                );
+            }
+        });
+        let mut ops = Ops::default();
+        let mut printed = Text::default();
+        let whole = sleigh
+            .one_instruction_with_assembly(&mut ops, &mut printed, &at_address(at))
+            .map_err(|error| anyhow::anyhow!("{}", error.explain()))?;
+        let own = sleigh
+            .instruction_length(&at_address(at))
+            .map_err(|error| anyhow::anyhow!("{}", error.explain()))?;
+        if own == 0 {
+            return Err(anyhow::anyhow!("no instruction at {at:#x}"));
+        }
+        if whole > own {
+            let mut slot_ops = Ops::default();
+            if sleigh
+                .one_instruction(&mut slot_ops, &at_address(at + own as u64))
+                .is_ok()
+            {
+                strip_slot(&mut ops.0, &slot_ops.0);
+            }
+        }
+        Ok((ops.0, printed.mnemonic, printed.operands))
+    })
+}
+
+/// Drop the run of operations that is the delay slot, when it is present.
+fn strip_slot(all: &mut Vec<Op>, slot: &[Op]) {
+    if slot.is_empty() || slot.len() > all.len() {
+        return;
+    }
+    for start in 0..=all.len() - slot.len() {
+        if all[start..start + slot.len()]
+            .iter()
+            .zip(slot)
+            .all(|(a, b)| same_op(a, b))
+        {
+            all.drain(start..start + slot.len());
+            return;
+        }
+    }
+}
+
+/// The general register at `offset`, when `size` is a whole register.
+fn gpr_number(variant: MipsVariant, offset: u64, size: u32) -> Option<usize> {
+    if size != 4 {
+        return None;
+    }
+    with_engine(variant, |engine| Ok(engine.gprs.get(&offset).copied()))
+        .ok()
+        .flatten()
+        .map(|number| number as usize)
 }
 
 /// Decode a section with an engine that has read the specification.
@@ -627,6 +728,1119 @@ fn facts_of(ops: &[&Op], gprs: &HashMap<u64, u32>) -> (InsnFacts, Vec<RegisterUs
     (facts, register_uses)
 }
 
+/// The architecture: 32-bit MIPS, decoded here and lifted for `default`.
+#[derive(Debug, Clone, Copy)]
+pub struct Arch;
+
+impl Architecture for Arch {
+    fn name(&self) -> &str {
+        "mips"
+    }
+
+    fn languages(&self) -> Vec<String> {
+        vec![
+            "MIPS:LE:32:default".to_string(),
+            "MIPS:BE:32:default".to_string(),
+            "MIPS:LE:32".to_string(),
+            "MIPS:BE:32".to_string(),
+        ]
+    }
+
+    fn bitness(&self, language: &str) -> Bitness {
+        MipsVariant::of_language(language).map_or(Bitness::Bits32, |_| Bitness::Bits32)
+    }
+
+    fn decode_section(
+        &self,
+        language: &str,
+        bytes: &[u8],
+        base: u64,
+    ) -> Result<DecodedSection, String> {
+        let variant =
+            MipsVariant::of_language(language).ok_or_else(|| format!("{language} is not MIPS"))?;
+        let decoded = decode_section(variant, bytes, base).map_err(|error| format!("{error:#}"))?;
+        Ok(DecodedSection {
+            disasm: decoded.disasm,
+            text: decoded
+                .text
+                .into_iter()
+                .map(|(address, (mnemonic, operands))| (address, (mnemonic, operands, Vec::new())))
+                .collect(),
+        })
+    }
+
+    fn lifts(&self, language: &str) -> bool {
+        MipsVariant::of_language(language).is_some()
+    }
+
+    fn lift(&self, function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
+        let variant = MipsVariant::of_language(function.language)?;
+        Some(lift_function(function, variant).map_err(|error| error.reason))
+    }
+}
+
+// ---- The lift. Only MIPS32 default; nanoMIPS and MIPS64 are not. ----
+
+/// How often a function is re-lifted to settle its variables.
+const PASSES: usize = 8;
+
+/// O32 argument names, `a0`–`a3`.
+const PARAM_NAMES: [&str; 4] = ["a", "b", "c", "d"];
+
+/// `a0`: general register 4.
+const ARG_BASE: usize = 4;
+/// How many arguments the registers carry.
+const ARG_COUNT: usize = 4;
+/// `v0`: the result.
+const RESULT: usize = 2;
+/// `sp`.
+const SP: usize = 29;
+/// `ra`. The link is the flow, not a value.
+const RA: usize = 31;
+/// `zero`.
+const ZERO: usize = 0;
+
+/// The space a varnode lives in, by name.
+fn space_of(varnode: &VarnodeData) -> String {
+    varnode
+        .space
+        .as_ref()
+        .map(|space| space.get_name().to_string())
+        .unwrap_or_default()
+}
+
+/// The name of general register `index`.
+fn register_name(index: usize) -> &'static str {
+    GPR_NAMES[index]
+}
+
+/// The C type of a value `bits` wide. MIPS32 `int` is 32 bits.
+fn type_of(bits: u32) -> &'static str {
+    match bits {
+        8 => "char",
+        16 => "short",
+        32 => "int",
+        _ => "long",
+    }
+}
+
+/// What a register or a temporary holds.
+#[derive(Debug, Clone, PartialEq)]
+struct Value {
+    node: AstNode,
+    bits: u32,
+    frame: bool,
+}
+
+impl Value {
+    fn of(node: AstNode, bits: u32) -> Value {
+        Value {
+            node,
+            bits,
+            frame: false,
+        }
+    }
+}
+
+/// The general registers at one program point. `zero` is not stored.
+#[derive(Debug, Clone, PartialEq)]
+struct State {
+    regs: Vec<Option<Value>>,
+}
+
+impl State {
+    fn new() -> State {
+        let mut regs = vec![None; 32];
+        regs[SP] = Some(Value {
+            node: AstNode::var("sp"),
+            bits: 32,
+            frame: true,
+        });
+        State { regs }
+    }
+}
+
+/// The p-code, the text and the flow of one instruction.
+struct Decoded {
+    ops: Vec<Op>,
+    mnemonic: String,
+    flow: Flow,
+    delay_slot: bool,
+}
+
+/// Lift `function` under `variant`.
+fn lift_function(function: &FunctionCode, variant: MipsVariant) -> Result<LiftedGraph, NotLifted> {
+    let blocks = &function.cfg.blocks;
+    if blocks.is_empty() {
+        return Err(NotLifted::new("no blocks"));
+    }
+    let entry = blocks
+        .iter()
+        .position(|block| block.from == function.address)
+        .unwrap_or(0);
+    let mut code: HashMap<u64, Decoded> = HashMap::new();
+    for block in blocks {
+        let mut at = block.from;
+        while at < block.to {
+            let Some(ins) = function.disasm.instruction_at(at) else {
+                break;
+            };
+            let (ops, mnemonic, _) = instruction_ops(variant, function.bytes, function.base, at)
+                .map_err(|error| NotLifted::new(format!("{error:#}")))?;
+            code.insert(
+                at,
+                Decoded {
+                    ops,
+                    mnemonic,
+                    flow: ins.flow,
+                    delay_slot: ins.delay_slot,
+                },
+            );
+            at += ins.length as u64;
+        }
+    }
+    let index_of: HashMap<u64, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.from, index))
+        .collect();
+
+    let mut made: BTreeMap<usize, (String, u32)> = BTreeMap::new();
+    let mut params: BTreeMap<usize, (String, u32)> = BTreeMap::new();
+    for _ in 0..PASSES {
+        let attempt = lift_pass(
+            function, blocks, &index_of, entry, &code, variant, &made, &params,
+        )?;
+        let mut fresh = false;
+        for (index, bits, name) in &attempt.params {
+            if !params.contains_key(index) {
+                params.insert(*index, (name.clone(), *bits));
+                fresh = true;
+            }
+        }
+        for (index, bits, name) in &attempt.need {
+            if !made.contains_key(index) && !params.contains_key(index) {
+                made.insert(*index, (name.clone(), *bits));
+                fresh = true;
+            }
+        }
+        if !fresh {
+            return Ok(graph(function, attempt, params, made));
+        }
+    }
+    Err(NotLifted::new("the loop variables did not settle"))
+}
+
+/// What one walk of the blocks produced.
+struct Walked {
+    nodes: Vec<Node>,
+    frame: Vec<u64>,
+    need: Vec<(usize, u32, String)>,
+    params: Vec<(usize, u32, String)>,
+    locals: BTreeMap<String, u32>,
+    returns: Option<u32>,
+    calls: bool,
+}
+
+/// One walk of the blocks in order.
+#[allow(clippy::too_many_arguments)]
+fn lift_pass(
+    function: &FunctionCode,
+    blocks: &[crate::cfg::BasicBlock],
+    index_of: &HashMap<u64, usize>,
+    entry: usize,
+    code: &HashMap<u64, Decoded>,
+    variant: MipsVariant,
+    made: &BTreeMap<usize, (String, u32)>,
+    params: &BTreeMap<usize, (String, u32)>,
+) -> Result<Walked, NotLifted> {
+    let mut walked = Walked {
+        nodes: blocks
+            .iter()
+            .map(|block| Node {
+                address: block.from,
+                statements: Vec::new(),
+                terminator: Terminator::Return,
+            })
+            .collect(),
+        frame: Vec::new(),
+        need: Vec::new(),
+        params: Vec::new(),
+        locals: BTreeMap::new(),
+        returns: None,
+        calls: false,
+    };
+    let mut inputs: Vec<Option<State>> = vec![None; blocks.len()];
+    inputs[entry] = Some(State::new());
+    for _round in 0..PASSES {
+        let mut changed = false;
+        for index in 0..blocks.len() {
+            let Some(input) = inputs[index].clone() else {
+                continue;
+            };
+            let block = &blocks[index];
+            let instructions: Vec<u64> = function
+                .disasm
+                .instructions
+                .iter()
+                .filter(|ins| ins.address >= block.from && ins.address < block.to)
+                .map(|ins| ins.address)
+                .collect();
+            let mut run = Run {
+                code,
+                names: function.names,
+                statements: Vec::new(),
+                frame: &mut walked.frame,
+                made,
+                params,
+                new_params: &mut walked.params,
+                locals: &mut walked.locals,
+                returns: &mut walked.returns,
+                calls: &mut walked.calls,
+                variant,
+                regs: input.regs,
+            };
+            let terminator = run.walk_block(&instructions, block, index_of)?;
+            let output = State { regs: run.regs };
+            walked.nodes[index].statements = run.statements;
+            walked.nodes[index].terminator = terminator;
+            for successor in &block.successor_addresses {
+                let Some(&target) = index_of.get(successor) else {
+                    continue;
+                };
+                let joined = match inputs[target].take() {
+                    None => Some(output.clone()),
+                    Some(before) => Some(join(&before, &output, made, params, &mut walked.need)),
+                };
+                if let Some(joined) = joined {
+                    changed |= inputs[target].as_ref() != Some(&joined);
+                    inputs[target] = Some(joined);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(walked)
+}
+
+/// One block's walk.
+struct Run<'a> {
+    code: &'a HashMap<u64, Decoded>,
+    names: &'a BTreeMap<u64, String>,
+    statements: Vec<Statement>,
+    frame: &'a mut Vec<u64>,
+    made: &'a BTreeMap<usize, (String, u32)>,
+    params: &'a BTreeMap<usize, (String, u32)>,
+    new_params: &'a mut Vec<(usize, u32, String)>,
+    locals: &'a mut BTreeMap<String, u32>,
+    returns: &'a mut Option<u32>,
+    calls: &'a mut bool,
+    variant: MipsVariant,
+    regs: Vec<Option<Value>>,
+}
+
+/// Temporaries, values in registers that are not general (hi, lo, the
+/// status noise), and the condition a branch built.
+#[derive(Default)]
+struct Scratch {
+    temps: BTreeMap<(u64, u32), Value>,
+    others: BTreeMap<(u64, u32), Value>,
+    condition: Option<AstNode>,
+}
+
+impl Run<'_> {
+    fn variable(&self, index: usize) -> Option<&str> {
+        self.params
+            .get(&index)
+            .or_else(|| self.made.get(&index))
+            .map(|(name, _)| name.as_str())
+    }
+
+    fn read(&mut self, index: usize, bits: u32) -> Result<Value, NotLifted> {
+        if index == ZERO {
+            return Ok(Value::of(AstNode::constant(0, (bits / 8).max(1)), bits));
+        }
+        if let Some(name) = self.variable(index) {
+            return Ok(Value::of(AstNode::var(name), bits.min(32)));
+        }
+        match self.regs.get(index).and_then(Option::as_ref) {
+            Some(value) => {
+                let node = widen(&value.node, value.bits, bits);
+                Ok(Value {
+                    node,
+                    bits,
+                    frame: value.frame,
+                })
+            }
+            None if (ARG_BASE..ARG_BASE + ARG_COUNT).contains(&index) => {
+                let name = PARAM_NAMES[index - ARG_BASE].to_string();
+                if !self.new_params.iter().any(|(i, _, _)| *i == index) {
+                    self.new_params.push((index, bits, name.clone()));
+                }
+                let value = Value::of(AstNode::var(&name), bits);
+                self.regs[index] = Some(value.clone());
+                Ok(value)
+            }
+            None if index == SP => Ok(Value {
+                node: AstNode::var("sp"),
+                bits: 32,
+                frame: true,
+            }),
+            None => Ok(Value::of(AstNode::var(register_name(index)), bits.min(32))),
+        }
+    }
+
+    fn operand(
+        &mut self,
+        varnode: &VarnodeData,
+        scratch: &mut Scratch,
+    ) -> Result<Option<Value>, NotLifted> {
+        match space_of(varnode).as_str() {
+            "const" => Ok(Some(Value::of(
+                AstNode::constant(varnode.offset, varnode.size),
+                varnode.size * 8,
+            ))),
+            "unique" => Ok(scratch.temps.get(&(varnode.offset, varnode.size)).cloned()),
+            "register" => match gpr_number(self.variant, varnode.offset, varnode.size) {
+                Some(index) => self.read(index, varnode.size * 8).map(Some),
+                None => Ok(scratch.others.get(&(varnode.offset, varnode.size)).cloned()),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    fn write(&mut self, index: usize, value: Value, at: u64) {
+        if index == ZERO {
+            return;
+        }
+        if let Some(name) = self.variable(index).map(str::to_string) {
+            let bits = value.bits;
+            self.statements.push(Statement {
+                node: AstNode::Assign {
+                    lhs: Box::new(AstNode::var(&name)),
+                    rhs: Box::new(value.node),
+                },
+                addresses: vec![at],
+                kind: StatementKind::Plain,
+            });
+            self.regs[index] = Some(Value::of(AstNode::var(name), bits));
+        } else {
+            self.regs[index] = Some(value);
+        }
+    }
+
+    /// A load or store whose every pointer is rooted in the stack pointer:
+    /// a frame spill, not a value the function computes.
+    fn is_frame(&self, ops: &[Op]) -> bool {
+        let mut frame_temps: BTreeMap<(u64, u32), bool> = BTreeMap::new();
+        let mut accesses = 0;
+        let mut framed = 0;
+        let reg_rooted = |varnode: &VarnodeData| -> bool {
+            if space_of(varnode) != "register" {
+                return false;
+            }
+            match gpr_number(self.variant, varnode.offset, varnode.size) {
+                Some(index) => {
+                    index == SP
+                        || self
+                            .regs
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|held| held.frame)
+                }
+                None => false,
+            }
+        };
+        for op in ops {
+            match op.opcode {
+                OpCode::CPUI_COPY | OpCode::CPUI_INT_ADD | OpCode::CPUI_INT_SUB => {
+                    let Some(out) = &op.out else { continue };
+                    if space_of(out) != "unique" {
+                        continue;
+                    }
+                    let rooted = op.inputs.iter().any(|input| {
+                        reg_rooted(input)
+                            || (space_of(input) == "unique"
+                                && frame_temps
+                                    .get(&(input.offset, input.size))
+                                    .copied()
+                                    .unwrap_or(false))
+                    });
+                    frame_temps.insert((out.offset, out.size), rooted);
+                }
+                OpCode::CPUI_LOAD | OpCode::CPUI_STORE => {
+                    accesses += 1;
+                    let Some(pointer) = op.inputs.get(1) else {
+                        continue;
+                    };
+                    let rooted = reg_rooted(pointer)
+                        || space_of(pointer) == "unique"
+                            && frame_temps
+                                .get(&(pointer.offset, pointer.size))
+                                .copied()
+                                .unwrap_or(false);
+                    if rooted {
+                        framed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        accesses > 0 && framed == accesses
+    }
+
+    fn run_instruction(
+        &mut self,
+        at: u64,
+        mnemonic: &str,
+        ops: &[Op],
+        scratch: &mut Scratch,
+    ) -> Result<(), NotLifted> {
+        let frame = self.is_frame(ops);
+        for op in ops {
+            if let Some(out) = &op.out {
+                if space_of(out) == "register"
+                    && gpr_number(self.variant, out.offset, out.size).is_none()
+                    && !matches!(
+                        op.opcode,
+                        OpCode::CPUI_COPY
+                            | OpCode::CPUI_INT_ADD
+                            | OpCode::CPUI_INT_SUB
+                            | OpCode::CPUI_INT_AND
+                            | OpCode::CPUI_INT_OR
+                            | OpCode::CPUI_INT_XOR
+                            | OpCode::CPUI_INT_LEFT
+                            | OpCode::CPUI_INT_RIGHT
+                            | OpCode::CPUI_INT_SRIGHT
+                            | OpCode::CPUI_INT_MULT
+                            | OpCode::CPUI_INT_2COMP
+                            | OpCode::CPUI_INT_NEGATE
+                            | OpCode::CPUI_SUBPIECE
+                            | OpCode::CPUI_PIECE
+                            | OpCode::CPUI_INT_ZEXT
+                            | OpCode::CPUI_INT_SEXT
+                    )
+                {
+                    // Status and coprocessor registers the arithmetic does
+                    // not name: the flags a compare might leave, skipped.
+                    continue;
+                }
+            }
+            match op.opcode {
+                OpCode::CPUI_COPY | OpCode::CPUI_INT_ZEXT | OpCode::CPUI_INT_SEXT => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(source) = self.operand(&op.inputs[0], scratch)? else {
+                        if space_of(out) != "unique" {
+                            continue;
+                        }
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let mut value = source;
+                    if matches!(op.opcode, OpCode::CPUI_INT_SEXT) {
+                        value.node = AstNode::Cast {
+                            ty: type_of(out.size * 8).to_string(),
+                            target: Box::new(value.node),
+                        };
+                    }
+                    if matches!(op.opcode, OpCode::CPUI_COPY) {
+                        value.bits = out.size * 8;
+                    }
+                    self.store(out, value, frame, scratch, at);
+                }
+                OpCode::CPUI_INT_ADD
+                | OpCode::CPUI_INT_SUB
+                | OpCode::CPUI_INT_LEFT
+                | OpCode::CPUI_INT_RIGHT
+                | OpCode::CPUI_INT_SRIGHT
+                | OpCode::CPUI_INT_AND
+                | OpCode::CPUI_INT_OR
+                | OpCode::CPUI_INT_XOR
+                | OpCode::CPUI_INT_MULT
+                | OpCode::CPUI_INT_DIV
+                | OpCode::CPUI_INT_SDIV
+                | OpCode::CPUI_INT_REM
+                | OpCode::CPUI_INT_SREM => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(a) = self.operand(&op.inputs[0], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(b) = self.operand(&op.inputs[1], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let node = AstNode::binary(a.node, binary_op(op.opcode), b.node);
+                    let value = Value {
+                        node,
+                        bits: out.size * 8,
+                        frame: a.frame || b.frame,
+                    };
+                    self.store(out, value, frame, scratch, at);
+                }
+                OpCode::CPUI_INT_NEGATE | OpCode::CPUI_INT_2COMP => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(a) = self.operand(&op.inputs[0], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let node = if matches!(op.opcode, OpCode::CPUI_INT_NEGATE) {
+                        AstNode::binary(
+                            a.node,
+                            BinaryOp::Xor,
+                            AstNode::constant(u64::MAX, out.size),
+                        )
+                    } else {
+                        AstNode::binary(AstNode::constant(0, out.size), BinaryOp::Sub, a.node)
+                    };
+                    self.store(out, Value::of(node, out.size * 8), frame, scratch, at);
+                }
+                OpCode::CPUI_INT_EQUAL
+                | OpCode::CPUI_INT_NOTEQUAL
+                | OpCode::CPUI_INT_LESS
+                | OpCode::CPUI_INT_SLESS
+                | OpCode::CPUI_INT_LESSEQUAL
+                | OpCode::CPUI_INT_SLESSEQUAL => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(a) = self.operand(&op.inputs[0], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(b) = self.operand(&op.inputs[1], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let node = AstNode::binary(a.node, compare_op(op.opcode), b.node);
+                    scratch
+                        .temps
+                        .insert((out.offset, out.size), Value::of(node, out.size * 8));
+                }
+                OpCode::CPUI_BOOL_NEGATE
+                | OpCode::CPUI_BOOL_AND
+                | OpCode::CPUI_BOOL_OR
+                | OpCode::CPUI_BOOL_XOR => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(a) = self.operand(&op.inputs[0], scratch)? else {
+                        continue;
+                    };
+                    let node = if matches!(op.opcode, OpCode::CPUI_BOOL_NEGATE) {
+                        AstNode::Cast {
+                            ty: "!".to_string(),
+                            target: Box::new(a.node),
+                        }
+                    } else {
+                        let Some(b) = self.operand(&op.inputs[1], scratch)? else {
+                            continue;
+                        };
+                        AstNode::binary(
+                            a.node,
+                            match op.opcode {
+                                OpCode::CPUI_BOOL_AND => BinaryOp::And,
+                                OpCode::CPUI_BOOL_OR => BinaryOp::Or,
+                                _ => BinaryOp::Xor,
+                            },
+                            b.node,
+                        )
+                    };
+                    scratch
+                        .temps
+                        .insert((out.offset, out.size), Value::of(node, out.size * 8));
+                }
+                OpCode::CPUI_LOAD => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(pointer) = self.operand(&op.inputs[1], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let deref = AstNode::Deref {
+                        target: Box::new(AstNode::Cast {
+                            ty: format!("{} *", type_of(out.size * 8)),
+                            target: Box::new(pointer.node),
+                        }),
+                    };
+                    match gpr_number(self.variant, out.offset, out.size) {
+                        Some(index) => {
+                            if frame || index == ZERO {
+                                continue;
+                            }
+                            let name = match self.variable(index) {
+                                Some(name) => format!("{name}_loaded"),
+                                None => register_name(index).to_string(),
+                            };
+                            let bits = out.size * 8;
+                            self.locals
+                                .entry(name.clone())
+                                .and_modify(|wide| *wide = (*wide).max(bits))
+                                .or_insert(bits);
+                            self.statements.push(Statement {
+                                node: AstNode::Assign {
+                                    lhs: Box::new(AstNode::var(&name)),
+                                    rhs: Box::new(deref),
+                                },
+                                addresses: vec![at],
+                                kind: StatementKind::Plain,
+                            });
+                            self.regs[index] = Some(Value::of(AstNode::var(name), bits));
+                        }
+                        None => {
+                            scratch
+                                .temps
+                                .insert((out.offset, out.size), Value::of(deref, out.size * 8));
+                        }
+                    }
+                }
+                OpCode::CPUI_STORE => {
+                    let Some(pointer) = self.operand(&op.inputs[1], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(value) = self.operand(&op.inputs[2], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let width = value.bits;
+                    if !frame {
+                        self.statements.push(Statement {
+                            node: AstNode::Assign {
+                                lhs: Box::new(AstNode::Deref {
+                                    target: Box::new(AstNode::Cast {
+                                        ty: format!("{} *", type_of(width)),
+                                        target: Box::new(pointer.node),
+                                    }),
+                                }),
+                                rhs: Box::new(value.node),
+                            },
+                            addresses: vec![at],
+                            kind: StatementKind::Plain,
+                        });
+                    }
+                }
+                OpCode::CPUI_SUBPIECE => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(a) = self.operand(&op.inputs[0], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let shift = op.inputs.get(1).map_or(0, |v| v.offset);
+                    let node = if shift == 0 {
+                        AstNode::Cast {
+                            ty: type_of(out.size * 8).to_string(),
+                            target: Box::new(a.node),
+                        }
+                    } else {
+                        AstNode::binary(
+                            AstNode::binary(
+                                a.node,
+                                BinaryOp::Shr,
+                                AstNode::constant(shift * 8, out.size),
+                            ),
+                            BinaryOp::And,
+                            AstNode::constant(mask(out.size), out.size),
+                        )
+                    };
+                    self.store(out, Value::of(node, out.size * 8), frame, scratch, at);
+                }
+                OpCode::CPUI_PIECE => {
+                    let Some(out) = &op.out else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(hi) = self.operand(&op.inputs[0], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let Some(lo) = self.operand(&op.inputs[1], scratch)? else {
+                        return Err(NotLifted::new(mnemonic.to_string()));
+                    };
+                    let node = AstNode::binary(
+                        AstNode::binary(
+                            hi.node,
+                            BinaryOp::Shl,
+                            AstNode::constant(lo.bits as u64, out.size),
+                        ),
+                        BinaryOp::Or,
+                        lo.node,
+                    );
+                    self.store(out, Value::of(node, out.size * 8), frame, scratch, at);
+                }
+                OpCode::CPUI_CBRANCH => {
+                    if let Some(condition) = op.inputs.get(1).cloned() {
+                        scratch.condition =
+                            self.operand(&condition, scratch)?.map(|value| value.node);
+                    }
+                }
+                OpCode::CPUI_BRANCH
+                | OpCode::CPUI_BRANCHIND
+                | OpCode::CPUI_CALL
+                | OpCode::CPUI_CALLIND
+                | OpCode::CPUI_RETURN
+                | OpCode::CPUI_CALLOTHER => {}
+                _ => {
+                    if op.out.as_ref().is_some_and(|out| {
+                        space_of(out) == "register"
+                            && gpr_number(self.variant, out.offset, out.size).is_none()
+                    }) {
+                        continue;
+                    }
+                    return Err(NotLifted::new(format!("{mnemonic} {:?}", op.opcode)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn store(
+        &mut self,
+        out: &VarnodeData,
+        mut value: Value,
+        frame: bool,
+        scratch: &mut Scratch,
+        at: u64,
+    ) {
+        match space_of(out).as_str() {
+            "register" => match gpr_number(self.variant, out.offset, out.size) {
+                Some(index) => {
+                    if index == SP {
+                        self.regs[SP] = Some(Value {
+                            node: value.node,
+                            bits: 32,
+                            frame: true,
+                        });
+                    } else if !frame && index != RA {
+                        self.write(index, value, at);
+                    }
+                }
+                None => {
+                    scratch.others.insert((out.offset, out.size), value);
+                }
+            },
+            "unique" => {
+                let rooted = scratch
+                    .temps
+                    .get(&(out.offset, out.size))
+                    .is_some_and(|held| held.frame);
+                value.frame = value.frame || rooted;
+                scratch.temps.insert((out.offset, out.size), value);
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_block(
+        &mut self,
+        instructions: &[u64],
+        block: &crate::cfg::BasicBlock,
+        index_of: &HashMap<u64, usize>,
+    ) -> Result<Terminator, NotLifted> {
+        let mut index = 0;
+        while index < instructions.len() {
+            let at = instructions[index];
+            let decoded = self
+                .code
+                .get(&at)
+                .ok_or_else(|| NotLifted::new(format!("no p-code at {at:#x}")))?;
+            let mnemonic = decoded.mnemonic.clone();
+            let flow = decoded.flow;
+            let delay_slot = decoded.delay_slot;
+            let before = self.statements.len();
+            let mut scratch = Scratch::default();
+            self.run_instruction(at, &mnemonic, &decoded.ops, &mut scratch)?;
+            // The slot runs before the branch, the call or the return.
+            if delay_slot {
+                if let Some(&slot_at) = instructions.get(index + 1) {
+                    let slot = self
+                        .code
+                        .get(&slot_at)
+                        .ok_or_else(|| NotLifted::new(format!("no p-code at {slot_at:#x}")))?;
+                    let slot_mnemonic = slot.mnemonic.clone();
+                    let slot_before = self.statements.len();
+                    let mut slot_scratch = Scratch::default();
+                    self.run_instruction(slot_at, &slot_mnemonic, &slot.ops, &mut slot_scratch)?;
+                    if self.statements.len() == slot_before {
+                        self.frame.push(slot_at);
+                    }
+                    index += 1;
+                }
+            }
+            match flow {
+                Flow::Next => {
+                    if self.statements.len() == before {
+                        self.frame.push(at);
+                    }
+                }
+                Flow::Call(target) => self.emit_call(at, target)?,
+                Flow::IndirectCall => self.emit_indirect_call(at)?,
+                Flow::Return => {
+                    self.emit_return(at)?;
+                    return Ok(Terminator::Return);
+                }
+                Flow::ConditionalBranch(target) => {
+                    let cond = scratch.condition.ok_or_else(|| {
+                        NotLifted::new(format!("{mnemonic} at {at:#x} tests no condition"))
+                    })?;
+                    let taken = index_of
+                        .get(&target)
+                        .copied()
+                        .ok_or_else(|| NotLifted::new("a branch outside the function"))?;
+                    let next = block
+                        .successor_addresses
+                        .iter()
+                        .find(|&&successor| successor != target)
+                        .and_then(|successor| index_of.get(successor).copied())
+                        .ok_or_else(|| NotLifted::new("a branch with no fall-through"))?;
+                    return Ok(Terminator::Branch {
+                        cond,
+                        taken,
+                        next,
+                        addresses: vec![at],
+                    });
+                }
+                Flow::UnconditionalBranch(target) => {
+                    let target = index_of
+                        .get(&target)
+                        .copied()
+                        .ok_or_else(|| NotLifted::new("a jump outside the function"))?;
+                    return Ok(Terminator::Goto {
+                        target,
+                        addresses: vec![at],
+                    });
+                }
+                _ => return Err(NotLifted::new(mnemonic)),
+            }
+            index += 1;
+        }
+        match block
+            .successor_addresses
+            .first()
+            .and_then(|successor| index_of.get(successor))
+        {
+            Some(&target) => Ok(Terminator::Goto {
+                target,
+                addresses: Vec::new(),
+            }),
+            None => Ok(Terminator::Return),
+        }
+    }
+
+    fn emit_call(&mut self, at: u64, target: u64) -> Result<(), NotLifted> {
+        let args: Vec<AstNode> = (ARG_BASE..ARG_BASE + ARG_COUNT)
+            .filter_map(|index| self.regs[index].clone())
+            .map(|value| value.node)
+            .collect();
+        let lhs = match self.variable(RESULT) {
+            Some(name) => name.to_string(),
+            None => register_name(RESULT).to_string(),
+        };
+        self.statements.push(Statement {
+            node: AstNode::Assign {
+                lhs: Box::new(AstNode::var(&lhs)),
+                rhs: Box::new(AstNode::Call {
+                    callee: Box::new(AstNode::FunctionName {
+                        name: self
+                            .names
+                            .get(&target)
+                            .cloned()
+                            .unwrap_or_else(|| format!("sub_{target:x}")),
+                        address: target,
+                    }),
+                    args,
+                }),
+            },
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        });
+        self.after_call(lhs);
+        Ok(())
+    }
+
+    fn emit_indirect_call(&mut self, at: u64) -> Result<(), NotLifted> {
+        let args: Vec<AstNode> = (ARG_BASE..ARG_BASE + ARG_COUNT)
+            .filter_map(|index| self.regs[index].clone())
+            .map(|value| value.node)
+            .collect();
+        let lhs = match self.variable(RESULT) {
+            Some(name) => name.to_string(),
+            None => register_name(RESULT).to_string(),
+        };
+        self.statements.push(Statement {
+            node: AstNode::Assign {
+                lhs: Box::new(AstNode::var(&lhs)),
+                rhs: Box::new(AstNode::Call {
+                    callee: Box::new(AstNode::var("target")),
+                    args,
+                }),
+            },
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        });
+        self.after_call(lhs);
+        Ok(())
+    }
+
+    /// `v0` holds the result. Caller-saved registers are forgotten; `sp`,
+    /// `gp` and the callee-saved registers stay.
+    fn after_call(&mut self, lhs: String) {
+        self.regs[RESULT] = Some(Value::of(AstNode::var(&lhs), 32));
+        for index in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, RA] {
+            self.regs[index] = None;
+        }
+        *self.calls = true;
+    }
+
+    fn emit_return(&mut self, at: u64) -> Result<(), NotLifted> {
+        if self.regs[RESULT].is_none() {
+            self.statements.push(Statement {
+                node: AstNode::Return { value: None },
+                addresses: vec![at],
+                kind: StatementKind::Plain,
+            });
+            return Ok(());
+        }
+        let bits = self.regs[RESULT].as_ref().map_or(32, |value| value.bits);
+        let value = self.read(RESULT, bits)?.node;
+        *self.returns = Some(match *self.returns {
+            None => bits,
+            Some(narrowest) => narrowest.min(bits),
+        });
+        self.statements.push(Statement {
+            node: AstNode::Return {
+                value: Some(Box::new(value)),
+            },
+            addresses: vec![at],
+            kind: StatementKind::Plain,
+        });
+        Ok(())
+    }
+}
+
+fn binary_op(opcode: OpCode) -> BinaryOp {
+    match opcode {
+        OpCode::CPUI_INT_ADD => BinaryOp::Add,
+        OpCode::CPUI_INT_SUB => BinaryOp::Sub,
+        OpCode::CPUI_INT_LEFT => BinaryOp::Shl,
+        OpCode::CPUI_INT_RIGHT | OpCode::CPUI_INT_SRIGHT => BinaryOp::Shr,
+        OpCode::CPUI_INT_AND => BinaryOp::And,
+        OpCode::CPUI_INT_OR => BinaryOp::Or,
+        OpCode::CPUI_INT_XOR => BinaryOp::Xor,
+        OpCode::CPUI_INT_MULT => BinaryOp::Mul,
+        OpCode::CPUI_INT_DIV | OpCode::CPUI_INT_SDIV => BinaryOp::Div,
+        _ => BinaryOp::Mod,
+    }
+}
+
+fn compare_op(opcode: OpCode) -> BinaryOp {
+    match opcode {
+        OpCode::CPUI_INT_EQUAL => BinaryOp::Equal,
+        OpCode::CPUI_INT_NOTEQUAL => BinaryOp::NotEqual,
+        OpCode::CPUI_INT_LESS => BinaryOp::Less,
+        OpCode::CPUI_INT_SLESS => BinaryOp::Less,
+        OpCode::CPUI_INT_LESSEQUAL => BinaryOp::LessEqual,
+        _ => BinaryOp::LessEqual,
+    }
+}
+
+fn mask(size: u32) -> u64 {
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (size * 8)) - 1
+    }
+}
+
+fn widen(node: &AstNode, from: u32, to: u32) -> AstNode {
+    if to <= from {
+        return node.clone();
+    }
+    AstNode::Cast {
+        ty: format!("unsigned {}", type_of(to)),
+        target: Box::new(node.clone()),
+    }
+}
+
+fn join(
+    before: &State,
+    coming: &State,
+    made: &BTreeMap<usize, (String, u32)>,
+    params: &BTreeMap<usize, (String, u32)>,
+    need: &mut Vec<(usize, u32, String)>,
+) -> State {
+    let mut joined = coming.clone();
+    for index in 1..32 {
+        if index == SP {
+            continue;
+        }
+        let bits = std::cmp::max(
+            before.regs[index].as_ref().map_or(0, |value| value.bits),
+            coming.regs[index].as_ref().map_or(0, |value| value.bits),
+        );
+        let bits = if bits == 0 { 32 } else { bits };
+        match (&before.regs[index], &coming.regs[index]) {
+            (Some(a), Some(b)) if a.node == b.node => {}
+            (None, None) => {}
+            _ => {
+                let name = params
+                    .get(&index)
+                    .or_else(|| made.get(&index))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| register_name(index).to_string());
+                if !need.iter().any(|(i, _, _)| *i == index) {
+                    need.push((index, bits, name.clone()));
+                }
+                joined.regs[index] = Some(Value::of(AstNode::var(&name), bits));
+            }
+        }
+    }
+    joined
+}
+
+fn graph(
+    function: &FunctionCode,
+    walked: Walked,
+    params: BTreeMap<usize, (String, u32)>,
+    made: BTreeMap<usize, (String, u32)>,
+) -> LiftedGraph {
+    let result_is_param = params.contains_key(&RESULT);
+    let params: Vec<Variable> = params
+        .iter()
+        .map(|(_, (name, bits))| Variable::new(type_of(*bits), name.clone()))
+        .collect();
+    let mut locals: Vec<Variable> = walked
+        .locals
+        .iter()
+        .map(|(name, bits)| Variable::new(type_of(*bits), name.clone()))
+        .collect();
+    for (name, bits) in made.values() {
+        if !locals.iter().any(|held| held.name == *name)
+            && !params.iter().any(|held| held.name == *name)
+        {
+            locals.push(Variable::new(type_of(*bits), name.clone()));
+        }
+    }
+    if walked.calls && !result_is_param && !made.contains_key(&RESULT) {
+        locals.push(Variable::new(type_of(32), register_name(RESULT)));
+    }
+    let return_type = match walked.returns {
+        Some(bits) => type_of(bits).to_string(),
+        None => "void".to_string(),
+    };
+    LiftedGraph {
+        return_type,
+        params,
+        locals,
+        entry: walked
+            .nodes
+            .iter()
+            .position(|node| node.address == function.address)
+            .unwrap_or(0),
+        nodes: walked.nodes,
+        frame: walked.frame,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,5 +2051,118 @@ mod tests {
             decoded.text[&0x2004],
             ("db".to_string(), "0xabcd".to_string())
         );
+    }
+
+    use crate::cfg::ProcedureCfg;
+    use crate::image::Image;
+    use std::path::Path;
+
+    fn fixture(name: &str) -> Image {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ag-image/tests/fixtures")
+            .join(name);
+        Image::open(&path).expect("the MIPS fixture loads")
+    }
+
+    fn function(
+        image: &Image,
+        name: &str,
+    ) -> (Vec<u8>, u64, crate::pipeline::Disasm, ProcedureCfg, u64) {
+        let variant = MipsVariant::of_language(&image.language()).expect("MIPS");
+        let text = image
+            .sections()
+            .into_iter()
+            .find(|section| section.name == ".text")
+            .expect(".text");
+        let bytes = image.bytes_from(text.vma).expect("bytes").to_vec();
+        let decoded = decode_section(variant, &bytes, text.vma).expect("decodes");
+        let address = image
+            .function_symbols()
+            .into_iter()
+            .find(|(_, found)| found == name)
+            .map(|(address, _)| address)
+            .unwrap_or_else(|| panic!("{name} is a symbol"));
+        let cfg = resolve_branches(&decoded.disasm, address);
+        (bytes, text.vma, decoded.disasm, cfg, address)
+    }
+
+    fn lift(file: &str, name: &str) -> LiftedGraph {
+        let image = fixture(file);
+        let (bytes, base, disasm, cfg, address) = function(&image, name);
+        let language = image.language();
+        let code = FunctionCode {
+            language: &language,
+            address,
+            name,
+            disasm: &disasm,
+            cfg: &cfg,
+            bytes: &bytes,
+            base,
+            names: &BTreeMap::new(),
+        };
+        match Arch.lift(&code) {
+            Some(Ok(graph)) => graph,
+            Some(Err(reason)) => panic!("{name} refused: {reason}"),
+            None => panic!("{name} not lifted"),
+        }
+    }
+
+    fn returned_add(node: &AstNode) -> bool {
+        match node {
+            AstNode::Return { value: Some(value) } => is_param_add(value),
+            AstNode::Binary { op, lhs, rhs } if *op == BinaryOp::Add => {
+                is_param_add(&AstNode::Binary {
+                    op: BinaryOp::Add,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn is_param_add(node: &AstNode) -> bool {
+        let AstNode::Binary { op, lhs, rhs } = node else {
+            return false;
+        };
+        if *op != BinaryOp::Add {
+            return false;
+        }
+        let left = match lhs.as_ref() {
+            AstNode::Var { name } => name.as_str(),
+            _ => "",
+        };
+        let right = match rhs.as_ref() {
+            AstNode::Var { name } => name.as_str(),
+            _ => "",
+        };
+        matches!((left, right), ("a", "b") | ("b", "a"))
+    }
+
+    #[test]
+    fn add_lifts_to_the_sum_of_its_parameters() {
+        let graph = lift("mips_nopic.elf", "add");
+        assert_eq!(graph.return_type, "int");
+        let names: Vec<&str> = graph.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(
+            graph.nodes.iter().any(|node| node
+                .statements
+                .iter()
+                .any(|statement| returned_add(&statement.node))),
+            "{:?}",
+            graph
+                .nodes
+                .iter()
+                .flat_map(|node| node.statements.iter())
+                .map(|statement| crate::emit::emit_node(&statement.node))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sum_lifts() {
+        let graph = lift("mips_nopic.elf", "sum");
+        assert!(!graph.nodes.is_empty());
     }
 }
