@@ -31,6 +31,7 @@ pub mod frame;
 pub mod funcid;
 pub mod global_pointer;
 pub mod headers;
+pub mod ida;
 pub mod il;
 pub mod image;
 pub mod inline;

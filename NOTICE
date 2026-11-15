@@ -40,3 +40,9 @@ kuna's NOTICE file:
 
     Portions of the structuring and region-recovery code are ported from angr
     (https://github.com/angr/angr), released under the BSD 2-Clause License.
+
+The IDA database and type-library reader (crates/ag-engine/src/ida) reads the
+IDA formats documented by python-idb (https://github.com/williballenthin/python-idb),
+Copyright Willi Ballenthin, released under the Apache License, Version 2.0.
+The test fixtures under crates/ag-engine/tests/fixtures/ida are copied from
+python-idb's test data; see the README there for what each holds.

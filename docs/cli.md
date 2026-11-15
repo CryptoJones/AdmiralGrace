@@ -12,7 +12,8 @@ Every subcommand lives under `corpus`, because both sources are described the sa
 | [DWARF](#debug-information-ag-image-dwarf) | [Ghidra](#ghidra-ag-image-gzf) |
 | [`ag asm`](#assembling-one-instruction-ag-asm) | [`ag project`](#the-project-file-ag-project) |
 | [`ag archive`](#type-archives-shared-across-projects-ag-archive) | [`ag funcid`](#library-identification-by-whole-function-hash-ag-funcid) |
-| [`ag platform`](#platform-types-ag-platform) | [`ag debug`](#a-program-under-the-debugger-ag-debug) |
+| [`ag ida`](#importing-ida-databases-and-type-libraries-ag-ida) | [`ag platform`](#platform-types-ag-platform) |
+| [`ag debug`](#a-program-under-the-debugger-ag-debug) | |
 | [Plugins](#plugins-ag-plugins-and-ag-tool) | [`ag mcp`](#an-mcp-server-ag-mcp) |
 | [`ag catalog`](#ag-catalog-the-engines-options) | [The embedded manual](#the-embedded-manual-and-agent-skill) |
 | [Exit codes](#exit-codes) | |
@@ -874,6 +875,38 @@ ag funcid match ./stripped-program --sig libfoo.agpat
 | `ag funcid push FILE… --server URL [--token TOKEN] [--json]` | Sends signature files for the server to merge: new hashes are added, a hash already held keeps its name and only gains a missing prototype or comment. |
 | `ag funcid pull --server URL [--library NAME]… [--arch ARCH] [-o DIR] [--token TOKEN] [--json]` | Writes the server's libraries into a directory as signature files (`LIBRARY@ARCH.agsig`), to match offline with `--sig`. |
 | `ag funcid match\|apply … --server URL [--token TOKEN]` | Asks a signature server about the image's functions as well, after the built-ins and each `--sig`. Only the functions' hashes are sent. May be repeated. |
+
+## Importing IDA databases and type libraries: `ag ida`
+
+Work done in IDA — the names, the comments, the prototypes and the types —
+need not be typed in again. `ag ida` reads an IDA database (`.idb`,
+32-bit, or `.i64`, 64-bit) or a type library (`.til`) and reports what it
+holds (`info`), or writes it into a project (`apply`). The reader
+decompresses the database's sections, walks its index, and deserializes
+IDA's packed types into the C the engine reads back; it is built on the
+format documented by python-idb (see NOTICE).
+
+`apply` keeps the analyst's own words: a rename, a comment, a prototype or
+a type already in the project stands, and the import fills only what is
+not said. A function's comment and prototype land on its entry; an
+address's anterior lines stand above the line, its regular and repeatable
+comments inline. The types are added in dependency order; a type that is
+no plain C (a C++ class with base classes or a scoped name) is held back
+and counted, not written.
+
+```sh
+ag ida info program.i64
+ag ida info program.i64 --list --json
+ag ida info types.til
+ag ida apply program.i64 --binary ./program --project program.agproj
+ag ida apply program.idb --binary ./blob --raw x86 --base 0x8000 --project blob.agproj
+ag ida apply types.til --binary ./program --project program.agproj
+```
+
+| Command | What it does |
+|---|---|
+| `ag ida info FILE [--list] [--json]` | Reports the IDA version, processor, imagebase and input file a database describes, and its counts of names, functions, segments, comments and types; a type library reports its title, base and type count. `--list` names every name, function and type. |
+| `ag ida apply FILE --binary BINARY --project PROJECT [--raw ARCH --base ADDR …] [--no-types] [--json]` | Writes the database's names, comments, prototypes and types into a project, made from `BINARY` when not there yet (raw bytes load as `--raw`/`--base` say). A rename, comment, prototype or type already present stands. `--no-types` leaves the types out. The summary counts what was named, commented, prototyped and added. |
 
 ## Platform types: `ag platform`
 

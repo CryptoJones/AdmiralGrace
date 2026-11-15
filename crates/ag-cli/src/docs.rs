@@ -191,8 +191,10 @@ mod tests {
         assert!(DOCS.len() >= 3);
         for doc in DOCS {
             assert!(!doc.body.is_empty(), "{} embedded empty", doc.topic);
+            // A manual opens with its title, or with the decorative HTML
+            // hero that stands above it (#613).
             assert!(
-                doc.body.starts_with('#'),
+                doc.body.starts_with('#') || doc.body.starts_with('<'),
                 "{} is not a markdown file",
                 doc.topic
             );

@@ -24,6 +24,7 @@ mod dwarf;
 mod export;
 mod funcid;
 mod gzf;
+mod ida;
 mod image;
 mod mcp;
 mod platform;
@@ -231,6 +232,13 @@ enum Cmd {
     Funcid {
         #[command(subcommand)]
         cmd: funcid::FuncidCmd,
+    },
+    /// Read IDA databases (.idb, .i64) and type libraries (.til): report
+    /// what they hold (info), or write their names, comments, prototypes
+    /// and types into a project (apply).
+    Ida {
+        #[command(subcommand)]
+        cmd: ida::IdaCmd,
     },
     /// Compare two versions of a program: match their functions by hash,
     /// name and shape, report the differences, and carry names and types
@@ -503,6 +511,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Archive { cmd } => archive::run(cmd),
         Cmd::Platform { cmd } => platform::run(cmd),
         Cmd::Funcid { cmd } => funcid::run(cmd),
+        Cmd::Ida { cmd } => ida::run(cmd),
         Cmd::Diff(args) => diff::run(args),
     }
 }
