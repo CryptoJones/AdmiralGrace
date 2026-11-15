@@ -48,6 +48,7 @@ pub mod options;
 pub mod pipeline;
 pub mod platform;
 pub mod plugin;
+pub mod powerpc;
 pub mod procedure;
 pub mod propagate;
 pub mod properties;

@@ -491,6 +491,9 @@ pub struct Binary {
     /// Which MIPS specification the image decodes under, when it is 32-bit
     /// MIPS: SLEIGH reads it, as it does ARM.
     mips: Option<MipsVariant>,
+    /// Which PowerPC specification the image decodes under, when it is
+    /// PowerPC: SLEIGH reads it, as it does ARM.
+    powerpc: Option<ag_engine::powerpc::PowerPcVariant>,
     /// What the image says about its global pointer outside its code: the
     /// linker's symbol for it, and the GOT's start.
     gp_hints: ImageHints,
@@ -719,12 +722,14 @@ impl Binary {
         let m6502 = ag_engine::m6502::M6502Variant::of_language(&language);
         let z80 = ag_engine::z80::Z80Variant::of_language(&language);
         let superh = ag_engine::superh::SuperhVariant::of_language(&language);
+        // So is PowerPC, of either width and byte order, VLE included.
+        let powerpc = ag_engine::powerpc::PowerPcVariant::of_language(&language);
         // AArch64 decodes with the ARM decoder and lifts itself, through
         // the architecture seam the engine built for plugins: the seam is
         // what makes its pseudocode, levels and workbench views work.
-        // RISC-V, the MSP430 and MIPS32 lift themselves through the same
-        // seam. MIPS still decodes on its own path below, so the global
-        // pointer and the delay slots stay with that decoder.
+        // RISC-V, the MSP430, MIPS32 and PowerPC lift themselves through
+        // the same seam. MIPS still decodes on its own path below, so the
+        // global pointer and the delay slots stay with that decoder.
         let built_in = arm
             .filter(|arm| !arm.has_modes())
             .map(|_| Arc::new(ag_engine::aarch64::Arch) as Arc<dyn ag_engine::plugin::Architecture>)
@@ -757,6 +762,11 @@ impl Binary {
                 superh.map(|_| {
                     Arc::new(ag_engine::superh::Arch) as Arc<dyn ag_engine::plugin::Architecture>
                 })
+            })
+            .or_else(|| {
+                powerpc.map(|_| {
+                    Arc::new(ag_engine::powerpc::Arch) as Arc<dyn ag_engine::plugin::Architecture>
+                })
             });
         // A language no decoder reads may be a registered plugin's.
         let plugin_arch = built_in.or_else(|| {
@@ -768,6 +778,7 @@ impl Binary {
                 && m6502.is_none()
                 && z80.is_none()
                 && superh.is_none()
+                && powerpc.is_none()
             {
                 ag_engine::plugin::architecture_for(&language)
             } else {
@@ -974,6 +985,7 @@ impl Binary {
             bitness,
             arm,
             mips,
+            powerpc,
             gp_hints: if mips.is_some() {
                 image.global_pointer_hints(gp::MIPS.symbol)
             } else {
@@ -1381,6 +1393,40 @@ impl Binary {
         }
         decoded.resolved = resolved;
         decoded.global_pointers = pointers;
+    }
+
+    /// Resolve the calls of a 64-bit big-endian PowerPC image: the ELFv1
+    /// ABI calls a function through its descriptor in `.opd`, and the
+    /// function is the code the descriptor's first word names. The call's
+    /// target becomes the code, so the walk, the listing and the lift read
+    /// the function, not its descriptor. Every other image calls its code
+    /// outright.
+    fn resolve_opd_calls(&self, decoded: &mut Decoded) {
+        let Some(variant) = self.powerpc else {
+            return;
+        };
+        if variant.bits != 64 || !variant.big_endian || variant.vle {
+            return;
+        }
+        let Some(opd) = self
+            .file
+            .iter()
+            .find(|file| file.section.name == ".opd")
+            .map(|file| (file.section.vma, file.section.vma + file.section.size))
+        else {
+            return;
+        };
+        for ins in &mut decoded.disasm.instructions {
+            if let Flow::Call(target) = ins.flow {
+                if (opd.0..opd.1).contains(&target) {
+                    if let Some(bytes) = self.bytes_at(target, 8) {
+                        if let Ok(word) = bytes.as_slice().try_into() {
+                            ins.flow = Flow::Call(u64::from_be_bytes(word));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The word of the program at `address`, in the image's byte order,
@@ -1889,12 +1935,10 @@ impl Binary {
             return decoded;
         }
         if let Some(arch) = &self.plugin_arch {
-            let decoded = Arc::new(decode_plugin_section(
-                arch.as_ref(),
-                &self.language,
-                &bytes,
-                code.section.vma,
-            ));
+            let mut decoded =
+                decode_plugin_section(arch.as_ref(), &self.language, &bytes, code.section.vma);
+            self.resolve_opd_calls(&mut decoded);
+            let decoded = Arc::new(decoded);
             if let Ok(mut held) = code.decoded.lock() {
                 *held = Some(Arc::clone(&decoded));
             }

@@ -119,7 +119,12 @@ impl DataModel {
     pub fn of_language(language: &str) -> DataModel {
         let fields: Vec<&str> = language.split(':').collect();
         let processor = fields.first().copied().unwrap_or("").to_ascii_lowercase();
-        let width = fields.get(2).copied().unwrap_or("64");
+        let mut width = fields.get(2).copied().unwrap_or("64");
+        // VLE's id spells the 64-bit ISA over 32-bit addresses: the
+        // program's pointers and ints are 32 bits.
+        if fields.get(3).is_some_and(|v| v.starts_with("VLE")) {
+            width = "32";
+        }
         let windows = fields.get(4).is_some_and(|c| *c == "windows");
         let x32 = fields.get(4).is_some_and(|c| *c == "x32");
         match (width, windows) {
