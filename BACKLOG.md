@@ -373,6 +373,48 @@ Filed 2026-10-31 – 2026-11-01 while working the advanced-analysis roadmap; mir
 - [x] `ag image pseudocode --project` does not apply the analyst's variable renames — [#552](https://github.com/CryptoJones/AdmiralGrace/issues/552)
 - [x] Lift prints a call with its arguments missing (fragments.elf: second calls make()) — [#562](https://github.com/CryptoJones/AdmiralGrace/issues/562)
 
+### Audit correctness bugs
+
+Filed 2026-11-13 from the Fable 5.2 + Flatline panel audits; each issue names the failing regression tests on `verify/audit-regression` (PR #614) that prove it.
+
+- [ ] AstNode::substitute/replace skip recursive variants, silently dropping calls — [#615](https://github.com/CryptoJones/AdmiralGrace/issues/615)
+- [ ] resolve_all ignores terminator uses, emitting a bare call with an undeclared temporary — [#616](https://github.com/CryptoJones/AdmiralGrace/issues/616)
+- [ ] Calls do not clobber APX registers r16-r31 — [#617](https://github.com/CryptoJones/AdmiralGrace/issues/617)
+- [ ] at_width widens a narrow constant, making the upper bits known — [#618](https://github.com/CryptoJones/AdmiralGrace/issues/618)
+- [ ] Global, parameter and temporary names collide (variables matched by name) — [#619](https://github.com/CryptoJones/AdmiralGrace/issues/619)
+- [ ] String literals use greedy \xNN escapes that change meaning — [#620](https://github.com/CryptoJones/AdmiralGrace/issues/620)
+- [ ] Enum-only annotations are silently dropped on save — [#621](https://github.com/CryptoJones/AdmiralGrace/issues/621)
+- [ ] Corpus relative_path can escape the corpus root (path traversal) — [#622](https://github.com/CryptoJones/AdmiralGrace/issues/622)
+- [ ] Swift demangler: Z-nesting has no depth bound (stack-overflow crash) — [#623](https://github.com/CryptoJones/AdmiralGrace/issues/623)
+- [ ] Swift demangler: remember() does not charge the node budget — [#624](https://github.com/CryptoJones/AdmiralGrace/issues/624)
+- [ ] Swift demangler: multi-depth generic signatures collapse to the last depth — [#625](https://github.com/CryptoJones/AdmiralGrace/issues/625)
+- [ ] Inline: Reads::statement never sets `late` for nested reads — [#626](https://github.com/CryptoJones/AdmiralGrace/issues/626)
+- [ ] Inline: splice declares callee locals even when the body is rejected — [#627](https://github.com/CryptoJones/AdmiralGrace/issues/627)
+- [ ] Inline: fragment-rename loop renames earlier inlines' variables — [#628](https://github.com/CryptoJones/AdmiralGrace/issues/628)
+- [ ] structure: continues() ignores Switch, so fold_for misfires — [#629](https://github.com/CryptoJones/AdmiralGrace/issues/629)
+- [ ] options: Sites::over picks the highest address, not the branch — [#630](https://github.com/CryptoJones/AdmiralGrace/issues/630)
+- [ ] lift: a prototype with a project-enum array bound loses call arity — [#631](https://github.com/CryptoJones/AdmiralGrace/issues/631)
+- [ ] lift: variable_changed drops the flags the storing instruction just set — [#632](https://github.com/CryptoJones/AdmiralGrace/issues/632)
+- [ ] lift_graph keeps a stale entry after a plugin prunes blocks below it — [#633](https://github.com/CryptoJones/AdmiralGrace/issues/633)
+- [ ] Corpus: a loaded 0X10 address is not found by its canonical spelling — [#634](https://github.com/CryptoJones/AdmiralGrace/issues/634)
+- [ ] Corpus: spaced and plain addresses of the same value falsely clash — [#635](https://github.com/CryptoJones/AdmiralGrace/issues/635)
+- [ ] Debugger: an Exited event before the first stop is dropped — [#636](https://github.com/CryptoJones/AdmiralGrace/issues/636)
+- [ ] Debugger: non-zero image_base without a learned slide sets unslid breakpoints — [#637](https://github.com/CryptoJones/AdmiralGrace/issues/637)
+- [ ] Debugger: a transport error marks the session Exited — [#638](https://github.com/CryptoJones/AdmiralGrace/issues/638)
+- [ ] funcid: candidates() panics if the databases vec is shrunk — [#639](https://github.com/CryptoJones/AdmiralGrace/issues/639)
+- [ ] Corpus: stats() decides "external" by name prefix, ignoring space — [#640](https://github.com/CryptoJones/AdmiralGrace/issues/640)
+- [ ] cdecl convention resolves to System V registers and clobbers on a Win64 image — [#641](https://github.com/CryptoJones/AdmiralGrace/issues/641)
+- [ ] Call sites ignore a callee's per-function abi option (arguments and clobbers use the caller's ABI) — [#642](https://github.com/CryptoJones/AdmiralGrace/issues/642)
+- [ ] An unreadable argument name shifts the remaining arguments instead of falling back to the convention — [#643](https://github.com/CryptoJones/AdmiralGrace/issues/643)
+- [ ] drop_header strips engine notes and whole thunk bodies, not just the provider header — [#644](https://github.com/CryptoJones/AdmiralGrace/issues/644)
+- [ ] Corpus::load ignores Index.version; unknown versions are read as version 1 — [#645](https://github.com/CryptoJones/AdmiralGrace/issues/645)
+- [ ] Debugger stderr is discarded; a debugger that dies at startup reports only 'the debugger ended' — [#646](https://github.com/CryptoJones/AdmiralGrace/issues/646)
+- [ ] replace_words rescans the whole remainder for every pair on every step (quadratic) — [#647](https://github.com/CryptoJones/AdmiralGrace/issues/647)
+- [ ] External lift and lift-hook requests list the whole section's instructions per function per hook — [#648](https://github.com/CryptoJones/AdmiralGrace/issues/648)
+- [ ] Linear scans of Disasm.instructions per block and per lookup (chains, instruction_at, build_disassembly) — [#649](https://github.com/CryptoJones/AdmiralGrace/issues/649)
+- [ ] register_def_use ignores a function's per-function abi option — [#650](https://github.com/CryptoJones/AdmiralGrace/issues/650)
+- [ ] The plugin_stages cache ignores a per-function loop-form option (stale plugin lift) — [#651](https://github.com/CryptoJones/AdmiralGrace/issues/651)
+
 ---
 
 Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/2347/
