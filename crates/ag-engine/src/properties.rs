@@ -285,4 +285,20 @@ mod tests {
         assert!(Abi::Pascal.is_callee_saved(7));
         assert!(!Abi::Pascal.is_callee_saved(0));
     }
+
+    #[test]
+    fn audit_unreadable_argument_name_does_not_shift_positions() {
+        // Side finding: arguments ["rcx","xmm0","rdx"] — xmm0 is no GPR, so
+        // filter_map drops it and rdx silently becomes the second argument.
+        let p = FunctionProperties {
+            arguments: vec!["rcx".to_string(), "xmm0".to_string(), "rdx".to_string()],
+            ..Default::default()
+        };
+        let regs = p.argument_registers(Abi::Win64);
+        assert_eq!(
+            regs,
+            Abi::Win64.argument_registers().to_vec(),
+            "an unreadable argument name must fall back to the convention, not shift positions: {regs:?}"
+        );
+    }
 }

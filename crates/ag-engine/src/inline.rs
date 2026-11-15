@@ -1333,4 +1333,178 @@ mod tests {
             "{text}"
         );
     }
+
+    // audit_P2-04: Reads::statement must mark a parameter read inside a
+    // nested arm of the first statement as late, so a non-simple argument
+    // is bound rather than substituted.
+    #[test]
+    fn audit_p2_04_nested_read_in_first_statement_arm_is_late() {
+        // callee body: if (c) { g(); x = a; }
+        let call_g = AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: "g".to_string(),
+                address: 0x5000,
+            }),
+            args: Vec::new(),
+        };
+        let assign = AstNode::Assign {
+            lhs: Box::new(var("x")),
+            rhs: Box::new(var("a")),
+        };
+        let body = vec![Statement {
+            node: var("c"),
+            addresses: vec![0x9000],
+            kind: StatementKind::If {
+                then_part: vec![
+                    Statement::plain(call_g, vec![0x9000]),
+                    Statement::plain(assign, vec![0x9000]),
+                ],
+                else_part: Vec::new(),
+            },
+        }];
+        let reads = Reads::of(&body, None, "a");
+        assert_eq!(reads.total, 1);
+        assert!(!reads.in_loop);
+        assert!(
+            reads.late,
+            "a conditional / non-first nested read must force binding"
+        );
+    }
+
+    // audit_P2-05: when a call is left in place (Ok((_, None)) from a
+    // callee that returns no value), splice must not have leaked its locals
+    // or bound-argument locals into the caller's declaration list.
+    #[test]
+    fn audit_p2_05_call_left_in_place_declares_nothing() {
+        struct NoValue;
+        impl Symbols for NoValue {
+            fn function_name(&self, _: u64) -> Option<String> {
+                Some("noval".to_string())
+            }
+            fn inline_body(&self, address: u64) -> Option<Result<LiftedFunction, String>> {
+                // noval(a) { t = a + 1; }  — no value returned
+                (address == 0x2000).then(|| {
+                    Ok(lifted(
+                        "noval",
+                        &["a"],
+                        &["t"],
+                        vec![AstNode::Assign {
+                            lhs: Box::new(var("t")),
+                            rhs: Box::new(AstNode::binary(
+                                var("a"),
+                                BinaryOp::Add,
+                                AstNode::constant(1, 4),
+                            )),
+                        }],
+                    ))
+                })
+            }
+        }
+        // g() { x = noval(5); }
+        let mut function = lifted(
+            "g",
+            &[],
+            &["x"],
+            vec![AstNode::Assign {
+                lhs: Box::new(var("x")),
+                rhs: Box::new(AstNode::Call {
+                    callee: Box::new(AstNode::FunctionName {
+                        name: "noval".to_string(),
+                        address: 0x2000,
+                    }),
+                    args: vec![AstNode::constant(5, 4)],
+                }),
+            }],
+        );
+        function.address = 0x7000;
+        inline_calls(
+            &mut function,
+            &NoValue,
+            &BTreeMap::from([(0x9000, 0x2000)]),
+        );
+        assert!(
+            function
+                .notes
+                .iter()
+                .any(|n| n.ends_with("it returns no value")),
+            "the call must be left in place"
+        );
+        // Expected to fail today: noval_t (and possibly noval_a) are
+        // declared even though the call stayed.
+        assert_eq!(function.locals, vec![int("x")], "{:?}", function.locals);
+    }
+
+    // audit_P2-12: splice's fragment-rename loop must only touch the
+    // variables pushed by the current call, not those left by earlier
+    // inlines.
+    #[test]
+    fn audit_p2_12_fragment_of_earlier_inline_not_renamed_by_later_callee() {
+        use crate::lift::Fragment;
+        fn frag(within: &str) -> Fragment {
+            Fragment {
+                of: "struct point".to_string(),
+                offset: 4,
+                size: 4,
+                members: vec!["y".to_string()],
+                whole: false,
+                within: Some(within.to_string()),
+                signed: false,
+            }
+        }
+        struct Two;
+        impl Symbols for Two {
+            fn function_name(&self, _: u64) -> Option<String> {
+                None
+            }
+            fn inline_body(&self, address: u64) -> Option<Result<LiftedFunction, String>> {
+                let ret = AstNode::Return {
+                    value: Some(Box::new(AstNode::constant(0, 4))),
+                };
+                Some(Ok(match address {
+                    0xa000 => {
+                        // callee a has locals s and m; m's fragment.within
+                        // points at s, which in the caller becomes a_s.
+                        let mut a = lifted("a", &[], &["s", "m"], vec![ret.clone()]);
+                        a.locals[1].fragment = Some(frag("s"));
+                        a
+                    }
+                    // callee b has a local whose name collides with the
+                    // caller-side name of a's s.
+                    0xb000 => lifted("b", &[], &["a_s"], vec![ret]),
+                    _ => return None,
+                }))
+            }
+        }
+        let call = |name: &str, address| AstNode::Call {
+            callee: Box::new(AstNode::FunctionName {
+                name: name.to_string(),
+                address,
+            }),
+            args: vec![],
+        };
+        // Caller g() returns a(); then b(); — both are spliced.
+        let mut g = lifted(
+            "g",
+            &[],
+            &[],
+            vec![call("a", 0xa000), call("b", 0xb000)],
+        );
+        g.address = 0x7000;
+        inline_calls(
+            &mut g,
+            &Two,
+            &BTreeMap::from([(0x9000, 0xa000), (0x9001, 0xb000)]),
+        );
+        let m = g
+            .locals
+            .iter()
+            .find(|v| v.name == "a_m")
+            .expect("a's fragment-bearing local is declared");
+        // Fails today: within was rewritten to "b_a_s" by the second
+        // splice's fragment-rename loop.
+        assert_eq!(
+            m.fragment.as_ref().unwrap().within.as_deref(),
+            Some("a_s")
+        );
+    }
 }

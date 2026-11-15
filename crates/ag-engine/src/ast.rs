@@ -604,4 +604,21 @@ mod tests {
         };
         assert_eq!(field.name(), "at_8");
     }
+
+    #[test]
+    fn audit_substitute_descends_into_intrinsic_args() {
+        let node = AstNode::Intrinsic { name: "bswap".into(), args: vec![AstNode::var("x")] };
+        let with = AstNode::constant(1, 4);
+        let want = AstNode::Intrinsic { name: "bswap".into(), args: vec![with.clone()] };
+        assert!(node.reads_var("x"));
+        assert_eq!(node.clone().substitute("x", &with), want);
+    }
+
+    #[test]
+    fn audit_replace_descends_into_intrinsic_args() {
+        let node = AstNode::Intrinsic { name: "bswap".into(), args: vec![AstNode::var("x")] };
+        let with = AstNode::constant(1, 4);
+        let want = AstNode::Intrinsic { name: "bswap".into(), args: vec![with.clone()] };
+        assert_eq!(node.replace(&AstNode::var("x"), &with), want);
+    }
 }

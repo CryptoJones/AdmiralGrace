@@ -1120,4 +1120,137 @@ mod tests {
         );
         assert!(session.breakpoints().contains(&0x1149));
     }
+
+    #[test]
+    fn audit_p2_08a_exit_before_first_stop_is_dropped_by_retain() {
+        // BUG: start() ends with events.retain(|e| matches!(e, Event::Log(_))),
+        // which drops any Event::Exited if the program exits before its first stop.
+        let scripted = Scripted::new();
+        scripted.answer("-gdb-set mi-async on", &["^done"]);
+        scripted.answer("-file-exec-and-symbols", &["^done"]);
+        // The program exits immediately with code 1 (octal "01")
+        scripted.answer(
+            "-interpreter-exec console \"starti\"",
+            &[
+                "^running",
+                "*stopped,reason=\"exited\",exit-code=\"01\"",
+            ],
+        );
+        // Mapping query fails (no process) so runtime_base stays None
+        scripted.answer(
+            "-interpreter-exec console \"info proc mappings\"",
+            &["^error,msg=\"No current process\""],
+        );
+        let mut session =
+            Session::with_transport(Box::new(scripted), Path::new("/x/pie"), 0);
+        session.hello().unwrap();
+        session.start(&[]).unwrap();
+        // After start(), the state should reflect the exit
+        assert!(
+            matches!(session.state(), State::Exited { code: Some(1) }),
+            "state should be Exited but is {:?}",
+            session.state()
+        );
+        // BUG: poll() returns no Exited event because retain() dropped it
+        let events = session.poll(Duration::ZERO);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Exited { .. })),
+            "poll should return the Exited event, but got: {events:?}"
+        );
+    }
+
+    #[test]
+    fn audit_p2_08b_nonzero_image_base_without_slide_sets_unslid_breakpoints() {
+        // BUG: addresses_known() returns true when image_base != 0, even if
+        // runtime_base is None (slide not learned). This causes breakpoints
+        // to be set at unslid addresses for a PIE binary whose slide is unknown.
+        let scripted = Scripted::new();
+        let sent = scripted.sent();
+        scripted.answer("-gdb-set mi-async on", &["^done"]);
+        scripted.answer("-file-exec-and-symbols", &["^done"]);
+        scripted.answer(
+            "-interpreter-exec console \"starti\"",
+            &[
+                "=thread-group-started,id=\"i1\",pid=\"4242\"",
+                "^running",
+                "*running,thread-id=\"all\"",
+                "*stopped,reason=\"signal-received\",frame={addr=\"0x7ffff7fe3340\"}",
+            ],
+        );
+        // Mappings are unreadable - runtime_base stays None
+        scripted.answer(
+            "-interpreter-exec console \"info proc mappings\"",
+            &["~\"process 1\\n\"", "^done"],
+        );
+        scripted.answer("-break-insert", &["^done,bkpt={number=\"1\"}"]);
+        // image_base is non-zero (PIE binary) but slide was not learned
+        let mut session = Session::with_transport(
+            Box::new(scripted),
+            Path::new("/x/pie"),
+            0x1_0000_0000, // non-zero image_base
+        );
+        session.hello().unwrap();
+        session.add_breakpoint(0x1_0000_1149).unwrap();
+        session.start(&[]).unwrap();
+        // Slide should be None (not learned)
+        assert_eq!(session.slide(), None);
+        // BUG: Because addresses_known() returns true (image_base != 0),
+        // breakpoints are set at the raw image address without translation.
+        // The breakpoint should wait until the slide is known.
+        let sent_lines = sent.lock().unwrap();
+        let break_inserts: Vec<_> = sent_lines
+            .iter()
+            .filter(|l| l.contains("-break-insert"))
+            .collect();
+        assert!(
+            break_inserts.is_empty(),
+            "breakpoints should wait for slide, but these were sent: {break_inserts:?}"
+        );
+    }
+
+    #[test]
+    fn audit_p2_08d_transport_error_marks_session_as_exited() {
+        // BUG: poll() treats any Err from next_line as the debugger ending,
+        // marking the session Exited even if the debugger is still alive.
+        // This can happen on non-UTF-8 output from the debugger.
+        use std::io::ErrorKind;
+
+        struct ErrorTransport {
+            error_on_call: usize,
+            call_count: usize,
+        }
+
+        impl Transport for ErrorTransport {
+            fn send_line(&mut self, _line: &str) -> std::io::Result<()> {
+                Ok(())
+            }
+
+            fn next_line(&mut self, _timeout: Duration) -> std::io::Result<Option<String>> {
+                self.call_count += 1;
+                if self.call_count >= self.error_on_call {
+                    Err(ErrorKind::InvalidData.into())
+                } else {
+                    Ok(Some("(gdb) ".to_string()))
+                }
+            }
+        }
+
+        let mut session = Session::with_transport(
+            Box::new(ErrorTransport {
+                error_on_call: 1,
+                call_count: 0,
+            }),
+            Path::new("/x/test"),
+            0,
+        );
+        // State starts Idle
+        assert!(matches!(session.state(), State::Idle));
+        // BUG: poll() sees the Err and marks the session as Exited
+        let _events = session.poll(Duration::ZERO);
+        assert!(
+            !matches!(session.state(), State::Exited { .. }),
+            "poll should not mark session as Exited on a transport error, but state is {:?}",
+            session.state()
+        );
+    }
 }

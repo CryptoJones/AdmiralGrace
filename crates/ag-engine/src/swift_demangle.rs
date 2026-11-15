@@ -1931,4 +1931,61 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn audit_p2_06a_remember_does_not_charge_node_budget() {
+        // P2-06(a): remember() clones a node into substitutions without calling charge(),
+        // so repeated bound-generic wrappers (G) can accumulate huge node counts in
+        // substitutions without hitting MOST_NODES. A large inner type wrapped many times
+        // should exceed the node budget and return None, but currently succeeds.
+        // Build a ~56k-node type (7 copies of S4000i) wrapped 250 times with Say...G.
+        // The inner type alone is ~56k nodes; each G wraps and remembers it uncharged.
+        // With 250 wrappers, substitutions holds ~250 * 56k = 14M nodes uncharged.
+        let nested = format!("{}{}{}", "Say".repeat(250), "S4000i".repeat(7), "G".repeat(250));
+        // This should return None (budget exceeded) but currently succeeds.
+        assert_eq!(
+            demangle_type(&nested),
+            None,
+            "remember() should charge for cloned nodes; 250 wrappers of a 56k-node type should exceed MOST_NODES"
+        );
+    }
+
+    #[test]
+    fn audit_p2_06b_static_nesting_not_bounded_by_wrap_depth() {
+        // P2-06(b): The Z case in operator() creates Node::Static without calling wrap(),
+        // so depth is bounded only by MOST_STEPS (4096), not MOST_WRAPS (256). This causes
+        // stack overflow in print/size for deeply nested Static nodes.
+        // Construct: $s6sample4BaseC6answerSiyF followed by 260 Z operators.
+        // Currently this overflows the stack during print (proving the bug).
+        // After the fix (Z calls wrap()), this should return None cleanly.
+        use std::panic;
+        let result = panic::catch_unwind(|| {
+            demangle(&format!("$s6sample4BaseC6answerSiyF{}", "Z".repeat(260)))
+        });
+        match result {
+            Ok(val) => {
+                // If it didn't overflow, it should still be None (after fix)
+                assert_eq!(val, None, "260 Z's should exceed MOST_WRAPS (256) and return None");
+            }
+            Err(_) => {
+                // Stack overflow proves the bug: depth not bounded by MOST_WRAPS
+                panic!("Stack overflow proves P2-06(b): Z does not call wrap(), allowing unbounded Static nesting depth");
+            }
+        }
+    }
+
+    #[test]
+    fn audit_p2_10_multi_depth_generic_signature_collapsed() {
+        // P2-10: generic_signature() keeps only the last depth's count, so multi-depth
+        // generic signatures print wrong text (all params at depth 0) instead of None.
+        // r0__l means: two parameters at depth 0, one at depth 1. The current code
+        // overwrites params on each iteration, keeping only the last (1). The printer
+        // then outputs <A> instead of the correct per-depth listing or None.
+        let got = demangle("$s4main3fooyyr0__lF");
+        // Either past the grammar (None), or every depth printed — never "<A>" alone.
+        assert!(
+            got.is_none() || got.as_deref() == Some("main.foo<A, B><A1>() -> ()"),
+            "multi-depth signature r0__l should not collapse to last depth; got {got:?}"
+        );
+    }
 }

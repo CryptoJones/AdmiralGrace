@@ -8,8 +8,11 @@ use ag_engine::plugin::{
     self, Architecture, DecodedSection, FunctionCode, LiftHook, LiftedGraph, LoadedImage, Loader,
     RecoveredBlock, Rewrite,
 };
+use ag_engine::ast::BinaryOp;
 use ag_engine::{AstNode, Bitness, Node, Terminator};
 use ag_image::{Binary, EdgeKind, Level};
+use ag_image::FunctionProperties;
+use std::collections::BTreeMap;
 
 /// A toy container: `TOY!`, a byte of code length, then the code at 0x100.
 struct ToyLoader;
@@ -562,4 +565,192 @@ fn a_lift_hook_gives_pseudocode_to_an_architecture_that_only_decodes() {
     let medium = image.il(0x100, Level::Medium, false).expect("medium");
     assert!(medium.text().contains("hooked()"), "{}", medium.text());
     plugin::unregister_lift_hook("toy-lift-hook");
+}
+
+/// A toy container whose architecture lifts every function to the same
+/// counted loop, so the engine's structuring — and its `loop-form` option —
+/// can be exercised without a real instruction set.
+struct ToyLoopLoader;
+
+impl Loader for ToyLoopLoader {
+    fn name(&self) -> &str {
+        "toy-loop-loader"
+    }
+    fn recognizes(&self, bytes: &[u8]) -> bool {
+        bytes.starts_with(b"TOYL")
+    }
+    fn load(&self, name: &str, bytes: &[u8]) -> Result<LoadedImage, String> {
+        let mut image = ToyLoader.load(name, bytes)?;
+        image.language = "TOYLOOP:LE:32:default".to_string();
+        Ok(image)
+    }
+}
+
+/// Lifts every function to the counted loop of structure.rs's
+/// `a_header_that_branches_out_is_a_while_and_a_counted_one_a_for`:
+/// `i = 0; for/while (i < 3) { x = 1; i = i + 1; }`. The graph is fixed,
+/// independent of the toy code, so the engine structures the same loop
+/// under whatever `loop-form` the function is analyzed with.
+struct ToyLoop;
+
+impl Architecture for ToyLoop {
+    fn name(&self) -> &str {
+        "toy-loop"
+    }
+    fn languages(&self) -> Vec<String> {
+        vec!["TOYLOOP:LE:32:default".to_string()]
+    }
+    fn bitness(&self, _language: &str) -> Bitness {
+        Bitness::Bits32
+    }
+    fn decode_section(
+        &self,
+        language: &str,
+        bytes: &[u8],
+        base: u64,
+    ) -> Result<DecodedSection, String> {
+        ToyCpu.decode_section(language, bytes, base)
+    }
+    fn lifts(&self, _language: &str) -> bool {
+        true
+    }
+    fn blocks(
+        &self,
+        _language: &str,
+        disasm: &ag_engine::Disasm,
+        entry: u64,
+    ) -> Option<Result<Vec<RecoveredBlock>, String>> {
+        let end = disasm
+            .instructions
+            .last()
+            .map_or(entry, |ins| ins.address + ins.length as u64);
+        Some(Ok(vec![RecoveredBlock {
+            from: entry,
+            to: end,
+            successors: Vec::new(),
+            calls: Vec::new(),
+        }]))
+    }
+    fn lift(&self, _function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
+        let assign = |name: &str, value: u64, address: u64| {
+            Rewrite::statement(
+                AstNode::Assign {
+                    lhs: Box::new(AstNode::var(name)),
+                    rhs: Box::new(AstNode::constant(value, 4)),
+                },
+                vec![address],
+            )
+        };
+        let step = Rewrite::statement(
+            AstNode::Assign {
+                lhs: Box::new(AstNode::var("i")),
+                rhs: Box::new(AstNode::binary(
+                    AstNode::var("i"),
+                    BinaryOp::Add,
+                    AstNode::constant(1, 4),
+                )),
+            },
+            vec![0x1024],
+        );
+        let nodes = vec![
+            Node {
+                address: 0x1000,
+                statements: vec![assign("i", 0, 0x1000)],
+                terminator: Terminator::Goto {
+                    target: 1,
+                    addresses: vec![],
+                },
+            },
+            Node {
+                address: 0x1010,
+                statements: vec![],
+                terminator: Terminator::Branch {
+                    cond: AstNode::binary(
+                        AstNode::var("i"),
+                        BinaryOp::GreaterEqual,
+                        AstNode::constant(3, 4),
+                    ),
+                    taken: 3,
+                    next: 2,
+                    addresses: vec![0x1010, 0x1013],
+                },
+            },
+            Node {
+                address: 0x1020,
+                statements: vec![assign("x", 1, 0x1020), step],
+                terminator: Terminator::Goto {
+                    target: 1,
+                    addresses: vec![0x1028],
+                },
+            },
+            Node {
+                address: 0x1030,
+                statements: vec![],
+                terminator: Terminator::Return,
+            },
+        ];
+        Some(Ok(LiftedGraph {
+            return_type: "void".to_string(),
+            params: Vec::new(),
+            locals: vec![
+                ag_engine::lift::Variable::new("int", "i"),
+                ag_engine::lift::Variable::new("int", "x"),
+            ],
+            entry: 0,
+            nodes,
+            frame: Vec::new(),
+        }))
+    }
+}
+
+#[test]
+fn audit_plugin_stages_cache_ignores_a_per_function_loop_form_option() {
+    plugin::register_loader(Arc::new(ToyLoopLoader));
+    plugin::register_architecture(Arc::new(ToyLoop));
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = Scratch(std::env::temp_dir().join(format!(
+        "ag-image-loop-{}-{:?}.toy",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    // 0x100: nop nop nop ret — the architecture lifts a fixed counted loop
+    // regardless of these bytes.
+    std::fs::write(&path.0, b"TOYL\x04\x00\x00\x00\x01").unwrap();
+    let image = Binary::open(&path.0).expect("the loop toy loader reads the file");
+    assert!(image.supports_pseudocode());
+
+    // Control: under the default loop-form=for the counted loop is a for.
+    let for_text = image
+        .pseudocode(0x100)
+        .expect("lifted by the architecture")
+        .text()
+        .to_string();
+    assert!(
+        for_text.contains("for ("),
+        "control: default loop-form is for: {for_text}"
+    );
+    assert!(!for_text.contains("while ("), "control: {for_text}");
+
+    // The same function with a per-function loop-form=while option.
+    let mut props = FunctionProperties::default();
+    props
+        .options
+        .insert("loop-form".to_string(), "while".to_string());
+    assert!(image.set_function_properties(BTreeMap::from([(0x100u64, props)])));
+    let while_text = image
+        .pseudocode(0x100)
+        .expect("lifted again")
+        .text()
+        .to_string();
+    assert!(
+        while_text.contains("while ("),
+        "per-function loop-form=while must restructure the cached plugin lift; \
+         set_function_properties cleared pseudocode but not plugin_stages, so \
+         architecture_stages returned the stale for-loop: {while_text}"
+    );
 }
