@@ -73,6 +73,7 @@ pub use ag_engine::global_pointer::{
     GlobalPointer, Resolved as ResolvedAddress, Source as GlobalPointerSource,
 };
 pub use ag_engine::headers::{self as headers, HeaderError, HeaderOptions};
+pub use ag_engine::ida;
 pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
