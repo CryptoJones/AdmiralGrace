@@ -21,6 +21,7 @@ pub fn run(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
     debugger: Debugger,
@@ -38,7 +39,7 @@ pub fn run(
         Some(path) if path.exists() => Some(ag_corpus::project::ProjectFile::load(path)?),
         _ => None,
     };
-    let image = crate::image::open_image(binary, raw, slice, project_file.as_ref(), options)?;
+    let image = crate::image::open_image(binary, raw, slice, dyld, project_file.as_ref(), options)?;
     // A breakpoint is a function, by address or name, or any address in
     // the image's code.
     let stops: Vec<u64> = breakpoints

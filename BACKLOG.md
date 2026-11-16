@@ -260,7 +260,7 @@ Filed 2026-10-26.
 
 ### Formats and loaders
 
-- [ ] Load the dyld shared cache, one image at a time — [#416](https://github.com/CryptoJones/AdmiralGrace/issues/416)
+- [x] Load the dyld shared cache, one image at a time — [#416](https://github.com/CryptoJones/AdmiralGrace/issues/416)
 - [ ] Load an Apple kernelcache — [#417](https://github.com/CryptoJones/AdmiralGrace/issues/417)
 - [ ] Load MediaTek MD1ROM modem images — [#418](https://github.com/CryptoJones/AdmiralGrace/issues/418)
 - [ ] Load VxWorks images and TI COFF — [#419](https://github.com/CryptoJones/AdmiralGrace/issues/419)

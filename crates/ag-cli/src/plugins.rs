@@ -180,11 +180,13 @@ pub fn list(json: bool) -> Result<i32> {
 
 /// Run the tool `name` over the image, with `arguments` as `name=value`
 /// pairs, and print its answer: JSON pretty, or the text it is.
+#[allow(clippy::too_many_arguments)]
 pub fn tool(
     name: &str,
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
     arguments: &[String],
@@ -207,7 +209,7 @@ pub fn tool(
         Some(path) if path.exists() => Some(ag_corpus::project::ProjectFile::load(path)?),
         _ => None,
     };
-    let image = crate::image::open_image(binary, raw, slice, project_file.as_ref(), options)?;
+    let image = crate::image::open_image(binary, raw, slice, dyld, project_file.as_ref(), options)?;
     let context = ag_image::plugin::ToolContext {
         image_path: Some(binary.to_path_buf()),
         project_path: project.map(Path::to_path_buf),

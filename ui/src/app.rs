@@ -2713,6 +2713,7 @@ impl App {
             sha256,
             raw: self.raw.as_ref().map(raw_target_of),
             slice: self.slice.clone(),
+            dyld_image: None,
         };
         match self.annotations.save(path) {
             Ok(()) => {

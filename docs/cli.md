@@ -183,6 +183,19 @@ every command that reads the project reads that slice after; a `--slice` that na
 is refused. The file offsets `info` prints for a slice are the slice's own, measured from
 where it starts in the file.
 
+A dyld shared cache holds many dylibs mapped together, the way macOS and iOS load them.
+`ag image FILE dyld` lists its images — each one's install path and the address it loads
+at — and `--dyld-image IMAGE` before the subcommand says which one to read: by its install
+path in full, by its basename (`libsystem_kernel.dylib`), or by its position from 0, as
+`ag image dyld_shared_cache_arm64 --dyld-image libsystem_kernel.dylib disasm _open`. Opened
+without one, the cache is refused with a count of its images. The chosen image is lifted
+out into a standalone Mach-O at the cache's unslid addresses, so every command reads it as
+any other image; pointers into other dylibs of the cache stand as external references.
+`ag project TARGET --dyld-image … save` records the choice, and every command that reads
+the project reads that image after; a `--dyld-image` that names another is refused. The
+cache's subcaches (the main file's siblings, such as `….1` and `….symbols`) are read
+alongside it when the header names them.
+
 ```sh
 # The language, the entry point and the sections
 cargo run --bin ag -- image ./sample.elf info
@@ -220,6 +233,10 @@ cargo run --bin ag -- image ./firmware.bin --raw thumb --base 0x8000000 --entry 
 # A universal Mach-O: its slices, and one of them read
 cargo run --bin ag -- image ./app slices
 cargo run --bin ag -- image ./app --slice arm64 symbols
+
+# A dyld shared cache: its images, and one of them read
+cargo run --bin ag -- image ./dyld_shared_cache_arm64 dyld
+cargo run --bin ag -- image ./dyld_shared_cache_arm64 --dyld-image libsystem_kernel.dylib symbols
 ```
 
 ## `ag image` subcommands
@@ -231,6 +248,7 @@ cargo run --bin ag -- image ./app --slice arm64 symbols
 | `jni` | The JNI functions the image holds — each `Java_<class>_<method>` export and `JNI_OnLoad` and its kin — with the types their names give: `JNIEnv *`, the object or class the method runs on, and the overload signature's own when the name carries one, and the return; `--json` gives `functions` with each `address`, `name`, `params` and `returns`; `--header` writes the JNI types as a C header. |
 | `objc` | The Objective-C a Mach-O describes: each class with its superclass, protocols, properties, instance variables and methods (`+` class, `-` instance, with the implementation's address and the type encoding), each category on a class, each protocol with its required and optional selectors; `--json` gives the same as JSON; `--header` writes it as an Objective-C header, declarations in dependency order and types decoded from the encodings. The methods' code is in `symbols`, `disasm`, `calls` and the rest under its runtime name — `-[Class sel]`, `+[Class sel]`, `-[Class(Category) sel]` — from the metadata alone, so a stripped image is named too. |
 | `slices` | The slices of a universal (fat) Mach-O — each architecture in the file, with its position, offset and size — or that the file is one image. The only subcommand that reads a universal file whole; the rest take `--slice`. |
+| `dyld` | The images of a dyld shared cache — each dylib's position, install path and the address it loads at — or that the file is not a cache. The only subcommand that reads a cache whole; the rest take `--dyld-image`. |
 | `info` | The language id, the entry point, and one line per section: its name, its vma, its size, whether it holds code, and its range in the file. With `--project FILE`, `info`, `symbols` and `strings` read the image under the project's layout — its base and its segments — as `disasm`, `cfg` and `pseudocode` do. |
 | `symbols` | The function symbols as `address name` — the functions the unwind data alone knows as `sub_<address>` — and the data symbols with their size; `--json` carries each function's `end` where the unwind data says. A C++ or Rust name is shown demangled, with its signature — `geometry::area(int, int)` for `_ZN8geometry4areaEii` or `?area@geometry@@YAHHH@Z` — and `--json` carries the mangled name beside it as `mangled`; `--filter` matches either. |
 | `symbols --filter REGEX` | Only the symbols whose name matches the regular expression. |

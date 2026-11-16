@@ -709,13 +709,15 @@ pub fn run(
     target: PathBuf,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     cmd: ProjectCmd,
 ) -> Result<i32> {
-    // The flags that say how raw bytes load, or which slice the target is,
-    // are recorded when the project is made, so every command after reads
-    // the target the same way.
+    // The flags that say how raw bytes load, or which slice or cache image
+    // the target is, are recorded when the project is made, so every command
+    // after reads the target the same way.
     RAW.with(|held| *held.borrow_mut() = raw);
     SLICE.with(|held| *held.borrow_mut() = slice);
+    DYLD.with(|held| *held.borrow_mut() = dyld);
     match cmd {
         ProjectCmd::Save {
             out,
@@ -1420,6 +1422,9 @@ thread_local! {
     /// Which slice of a universal Mach-O the command line said the target
     /// is, likewise.
     static SLICE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// Which image of a dyld shared cache the command line said the target
+    /// is, likewise.
+    static DYLD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The target as this run was told to read it, with the raw flags folded
@@ -1427,21 +1432,25 @@ thread_local! {
 fn target_of(target: &Path, sha256: Option<String>) -> Target {
     let raw = RAW.with(|held| held.borrow().clone());
     let slice = SLICE.with(|held| held.borrow().clone());
-    target_for(target, sha256, raw.as_ref(), slice.as_deref())
+    let dyld = DYLD.with(|held| held.borrow().clone());
+    target_for(target, sha256, raw.as_ref(), slice.as_deref(), dyld.as_deref())
 }
 
-/// The target as a run reads it: the raw flags and the slice folded in when
-/// they were given, so a project made here opens the same bytes later.
+/// The target as a run reads it: the raw flags, the slice and the cache
+/// image folded in when they were given, so a project made here opens the
+/// same bytes later.
 pub(crate) fn target_for(
     target: &Path,
     sha256: Option<String>,
     raw: Option<&ag_image::RawSpec>,
     slice: Option<&str>,
+    dyld: Option<&str>,
 ) -> Target {
     Target {
         path: Some(target.display().to_string()),
         sha256,
         slice: slice.map(str::to_string),
+        dyld_image: dyld.map(str::to_string),
         raw: raw.map(|spec| {
             let arch = ag_image::raw_arch(&spec.language)
                 .expect("a raw language the command line handed out has its word");
@@ -1505,6 +1514,34 @@ fn save(
                 .join(", ")
         );
     }
+    // So would a cache image the file does not have, or a cache with no
+    // image named.
+    if DYLD.with(|held| held.borrow().is_none()) {
+        if let Some(images) = ag_image::Binary::dyld_images_of(target)? {
+            anyhow::bail!(
+                "{} is a dyld shared cache of {} image{}: say which one with --dyld-image (`ag image {} dyld` lists them)",
+                target.display(),
+                images.len(),
+                if images.len() == 1 { "" } else { "s" },
+                target.display()
+            );
+        }
+    }
+    if let Some(dyld) = DYLD.with(|held| held.borrow().clone()) {
+        let images = ag_image::Binary::dyld_images_of(target)?.with_context(|| {
+            format!(
+                "{} is not a dyld shared cache: it has no images",
+                target.display()
+            )
+        })?;
+        anyhow::ensure!(
+            ag_image::resolve_dyld_image(&images, &dyld).is_some(),
+            "{} has no image {dyld:?}; it holds {} image{}",
+            target.display(),
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
+        );
+    }
     let mut project = ProjectFile::new(target_of(target, Some(sha256)));
     for pair in options {
         let (name, value) = pair
@@ -1553,6 +1590,11 @@ pub struct RawArgs {
     /// `arm64` or `x86_64`, or its position from 0.
     #[arg(long, conflicts_with = "raw")]
     pub slice: Option<String>,
+    /// Which image of a dyld shared cache to read: its install path (in full
+    /// or by basename, such as `libsystem_kernel.dylib`), or its position
+    /// from 0. `ag image FILE dyld` lists them.
+    #[arg(long, value_name = "IMAGE", conflicts_with_all = ["raw", "slice"])]
+    pub dyld_image: Option<String>,
 }
 
 impl RawArgs {
@@ -1632,21 +1674,28 @@ pub fn raw_of_project(project: &ProjectFile) -> Result<Option<ag_image::RawSpec>
     }))
 }
 
-/// Read `target` as the project says — raw bytes when its target says so —
+/// Read `target` as the project says — raw bytes, a slice of a universal
+/// Mach-O, or an image of a dyld shared cache when its target says so —
 /// under `layout`.
 pub fn open_target(
     target: &Path,
     raw: Option<&ag_image::RawSpec>,
     slice: Option<&str>,
+    dyld: Option<&str>,
     layout: &ag_image::Layout,
 ) -> Result<ag_image::Binary> {
-    match (raw, slice) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("a target is raw bytes or a slice of a universal Mach-O, not both")
+    match (raw, slice, dyld) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+            anyhow::bail!(
+                "a target is raw bytes, a slice of a universal Mach-O, or an image of a dyld shared cache, not more than one"
+            )
         }
-        (Some(spec), None) => ag_image::Binary::open_raw_with_layout(target, spec, layout),
-        (None, Some(slice)) => ag_image::Binary::open_slice_with_layout(target, slice, layout),
-        (None, None) => ag_image::Binary::open_with_layout(target, layout),
+        (Some(spec), None, None) => ag_image::Binary::open_raw_with_layout(target, spec, layout),
+        (None, Some(slice), None) => {
+            ag_image::Binary::open_slice_with_layout(target, slice, layout)
+        }
+        (None, None, Some(dyld)) => ag_image::Binary::open_dyld_with_layout(target, dyld, layout),
+        (None, None, None) => ag_image::Binary::open_with_layout(target, layout),
     }
     .with_context(|| format!("reading {}", target.display()))
 }
@@ -1855,6 +1904,7 @@ fn image_under(target: &Path, project: &ProjectFile) -> Result<ag_image::Binary>
         target,
         raw_of_project(project)?.as_ref(),
         project.target.slice.as_deref(),
+        project.target.dyld_image.as_deref(),
         &layout,
     )?;
     if let Err(why) = image.set_type_definitions(&crate::types::texts(project)) {
@@ -1963,6 +2013,7 @@ fn struct_from(
     let mut project = open_project(target, file)?;
     let image = crate::image::open_image(
         target,
+        None,
         None,
         None,
         Some(&project),
@@ -2199,6 +2250,7 @@ fn types(target: &Path, file: &Path, cmd: TypesCmd) -> Result<i32> {
                 target,
                 None,
                 None,
+                None,
                 Some(&project),
                 ag_image::Options::default(),
             )?;
@@ -2265,6 +2317,7 @@ fn port_inputs(
                 &target_path,
                 raw.as_ref(),
                 source_file.target.slice.as_deref(),
+                source_file.target.dyld_image.as_deref(),
                 &layout,
             )
             .ok()
@@ -3016,10 +3069,12 @@ fn patch_opaque(
     // branch patched before is not found again.
     let raw = RAW.with(|held| held.borrow().clone());
     let slice = SLICE.with(|held| held.borrow().clone());
+    let dyld = DYLD.with(|held| held.borrow().clone());
     let image = crate::image::open_image(
         target,
         raw,
         slice,
+        dyld,
         Some(&project),
         ag_image::Options::default(),
     )?;
@@ -3597,6 +3652,39 @@ pub fn check_slice_flag(
     }
 }
 
+/// The project says which image of a dyld shared cache its target is; a
+/// `--dyld-image` that names another — by whatever spelling — would read
+/// another image under the same records, and is refused. The flag and the
+/// record are the same image when they resolve to the same address.
+pub fn check_dyld_flag(
+    target: &Path,
+    flag: Option<&str>,
+    recorded: Option<&str>,
+    file: &Path,
+) -> Result<()> {
+    let Some(flag) = flag else {
+        return Ok(());
+    };
+    let images = ag_image::Binary::dyld_images_of(target)?.unwrap_or_default();
+    let place = |selector: &str| {
+        ag_image::resolve_dyld_image(&images, selector)
+            .map(|image| image.address)
+            .with_context(|| format!("{} has no image {selector:?}", target.display()))
+    };
+    let wanted = place(flag)?;
+    match recorded {
+        Some(recorded) if place(recorded)? == wanted => Ok(()),
+        Some(recorded) => anyhow::bail!(
+            "the --dyld-image flag says the target is {flag}, but {} says {recorded}: drop the flag, or make a new project",
+            file.display()
+        ),
+        None => anyhow::bail!(
+            "the --dyld-image flag says the target is {flag}, but {} says it is the whole file: drop the flag, or make a new project",
+            file.display()
+        ),
+    }
+}
+
 /// Read the project at `file`, which has to exist, with the flags checked.
 fn load_project(target: &Path, file: &Path) -> Result<ProjectFile> {
     let project = ProjectFile::load(file)?;
@@ -3606,6 +3694,13 @@ fn load_project(target: &Path, file: &Path) -> Result<ProjectFile> {
         target,
         flag.as_deref(),
         project.target.slice.as_deref(),
+        file,
+    )?;
+    let dyld = DYLD.with(|held| held.borrow().clone());
+    check_dyld_flag(
+        target,
+        dyld.as_deref(),
+        project.target.dyld_image.as_deref(),
         file,
     )?;
     Ok(project)
@@ -3622,6 +3717,13 @@ fn open_project(target: &Path, file: &Path) -> Result<ProjectFile> {
                 target,
                 flag.as_deref(),
                 project.target.slice.as_deref(),
+                file,
+            )?;
+            let dyld = DYLD.with(|held| held.borrow().clone());
+            check_dyld_flag(
+                target,
+                dyld.as_deref(),
+                project.target.dyld_image.as_deref(),
                 file,
             )?;
             Ok(project)

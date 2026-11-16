@@ -1862,6 +1862,40 @@ fn a_universal_macho_lists_its_slices_and_is_read_as_the_one_chosen() {
 }
 
 #[test]
+fn a_dyld_cache_lists_its_images_and_is_read_as_the_one_chosen() {
+    let report = image("sample_dyld.cache", &["dyld"]);
+    assert!(report.contains("0: 0x100000000 /usr/lib/libsample.dylib"), "{report}");
+    assert!(report.contains("1: 0x110000000 /usr/lib/libother.dylib"), "{report}");
+    let report = image("sample.macho", &["dyld"]);
+    assert!(report.contains("not a dyld shared cache"), "{report}");
+
+    // The JSON listing names each image's position, path and address.
+    let rows = image_json("sample_dyld.cache", &["dyld"]);
+    assert_eq!(rows[0]["path"], "/usr/lib/libsample.dylib");
+    assert_eq!(rows[0]["address"], "0x100000000");
+    assert_eq!(rows[1]["index"], 1);
+
+    // Opened whole it says what to choose; chosen, it is that image.
+    let (ok, _, stderr) = image_result("sample_dyld.cache", &["info"]);
+    assert!(!ok);
+    assert!(stderr.contains("dyld shared cache"), "{stderr}");
+    assert!(stderr.contains("--dyld-image"), "{stderr}");
+    let report = image("sample_dyld.cache", &["--dyld-image", "libsample.dylib", "info"]);
+    assert!(report.contains("language: x86:LE:64"), "{report}");
+    let report = image("sample_dyld.cache", &["--dyld-image", "0", "symbols"]);
+    assert!(report.contains("_add"), "{report}");
+    let report = image(
+        "sample_dyld.cache",
+        &["--dyld-image", "/usr/lib/libother.dylib", "symbols"],
+    );
+    assert!(report.contains("_main"), "{report}");
+    let (ok, _, stderr) =
+        image_result("sample_dyld.cache", &["--dyld-image", "libmissing.dylib", "info"]);
+    assert!(!ok);
+    assert!(stderr.contains("has no image"), "{stderr}");
+}
+
+#[test]
 fn the_dead_code_option_drops_what_nothing_uses() {
     // As made: a store nothing reads, and a branch that can only go one way.
     let report = image("sample.elf", &["pseudocode", "deregister_tm_clones"]);

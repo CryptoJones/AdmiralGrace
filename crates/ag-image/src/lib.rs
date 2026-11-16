@@ -75,6 +75,7 @@ pub use ag_engine::global_pointer::{
 pub use ag_engine::headers::{self as headers, HeaderError, HeaderOptions};
 pub use ag_engine::ida;
 pub use ag_engine::il::{self as il, IlBlock, IlFunction, IlItem, Level, Render};
+pub use ag_engine::dyld::{dyld_images, resolve_dyld_image, DyldImage};
 pub use ag_engine::image::{
     fat_slices, raw_arch, raw_language, resolve_slice, RawSpec, Slice, RAW_ARCHITECTURES,
 };
@@ -511,6 +512,9 @@ pub struct Binary {
     slice_offset: u64,
     /// The slice of a universal Mach-O the image is, when it is one.
     slice: Option<Slice>,
+    /// The image of a dyld shared cache the image was lifted from, when it
+    /// was one.
+    dyld: Option<DyldImage>,
     /// The Objective-C metadata the image carries, when it carries any.
     objc: Option<ObjcMetadata>,
     /// The Swift metadata the image carries, when it carries any.
@@ -679,6 +683,21 @@ impl Binary {
     pub fn slices_of(path: &Path) -> Result<Option<Vec<Slice>>> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(fat_slices(&bytes))
+    }
+
+    /// Read the image `image` names — its install path in full or by its
+    /// basename, or its position from 0 — of the dyld shared cache at
+    /// `path`, under the analyst's `layout`.
+    pub fn open_dyld_with_layout(path: &Path, image: &str, layout: &Layout) -> Result<Binary> {
+        let image = Image::open_dyld(path, image)?;
+        Self::from_opened(&image, layout)
+    }
+
+    /// The images of the dyld shared cache at `path`, or `None` when the
+    /// file is not a cache.
+    pub fn dyld_images_of(path: &Path) -> Result<Option<Vec<DyldImage>>> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(dyld_images(&bytes))
     }
 
     /// Read the file at `path` as raw bytes, loaded as `spec` says, under
@@ -997,6 +1016,7 @@ impl Binary {
             base: image.load_base(),
             slice_offset: image.slice().map_or(0, |slice| slice.offset),
             slice: image.slice().cloned(),
+            dyld: image.dyld_image().cloned(),
             objc: image.objc().cloned(),
             swift: image.swift().cloned(),
             cxx: image.cxx().cloned(),
@@ -1143,6 +1163,12 @@ impl Binary {
     /// The slice of a universal Mach-O the image is, when it is one.
     pub fn slice(&self) -> Option<&Slice> {
         self.slice.as_ref()
+    }
+
+    /// The image of a dyld shared cache the image was lifted from, when it
+    /// was one: its install path and its address in the cache.
+    pub fn dyld_image(&self) -> Option<&DyldImage> {
+        self.dyld.as_ref()
     }
 
     /// The Objective-C metadata the image carries — its classes, categories

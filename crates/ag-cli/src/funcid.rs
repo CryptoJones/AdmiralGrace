@@ -457,6 +457,7 @@ fn create(
         binary,
         raw.spec()?,
         raw.slice.clone(),
+        raw.dyld_image.clone(),
         None,
         Default::default(),
     )?;
@@ -773,6 +774,7 @@ fn match_image(
         binary,
         raw.spec()?,
         raw.slice.clone(),
+        raw.dyld_image.clone(),
         None,
         Default::default(),
     )?;
@@ -850,6 +852,7 @@ fn apply(
         binary,
         raw.spec()?,
         raw.slice.clone(),
+        raw.dyld_image.clone(),
         file.as_ref(),
         Default::default(),
     )?;
@@ -863,6 +866,7 @@ fn apply(
             sha256,
             raw: None,
             slice: None,
+            dyld_image: None,
         })
     });
     let mut named = 0usize;

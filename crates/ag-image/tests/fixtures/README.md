@@ -36,6 +36,8 @@ The images the image tests read, and how they were made.
 | `wrap_retro_elf.py` | Wraps a flat retro binary — or Intel HEX, with `--ihx` — in a minimal ELF with one loadable `.text` and a symbol per function, for cores whose toolchains do not emit one. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
+| `sample_dyld.cache` | A synthetic dyld shared cache holding two images: `sample.macho` wrapped as `/usr/lib/libsample.dylib` at its own addresses (`0x100000000`) and as `/usr/lib/libother.dylib` moved up 256 MiB (`0x110000000`). The first lifts back out to the very bytes of `sample.macho`. |
+| `make_dyld_cache.py` | Wraps thin Mach-O files into a dyld shared cache, as Apple's cache builder does, for hosts without macOS: copies each image's segments into the cache file and rewrites its load commands' offsets to the cache's layout. |
 | `sample_objc` | An x86-64 Mach-O built from `sample.m`: a root class, a subclass with properties, a category and a protocol with an optional method, and methods whose types are a struct, a pointer, a class and a block, with the Objective-C metadata the runtime reads and the symbols the linker kept. |
 | `sample_objc_stripped` | The same file with its symbol table emptied: the method names come from the metadata alone, as in a shipped binary. |
 | `sample_cpp.elf`, `sample_cpp.macho`, `sample_cpp.exe` | A C++ program built from `sample.cpp` for the three containers, with no runtime library: a namespace, a class with a constructor, two methods and a static member, two overloads of a free function and two instances of a template — every common shape of a mangled name, Itanium in the ELF and the Mach-O, Microsoft in the PE's export table. |
@@ -314,6 +316,19 @@ one `fat_arch` per slice, each slice at an offset aligned to 2^14 as `lipo` alig
 clang --target=arm64-apple-macos11 -O1 -nostdlib -fuse-ld=lld -Wl,-e,_sum \
       -Wl,-platform_version,macos,11.0,11.0 arm_sample.c -o sample_arm64.macho
 python3 make_fat.py sample_fat.macho x86_64=sample.macho arm64=sample_arm64.macho
+```
+
+The dyld shared cache was put together here, where there is no macOS cache builder:
+`make_dyld_cache.py` wraps `sample.macho` twice, as two install paths, moving the second
+image's addresses up 256 MiB so the two do not overlap. It writes the cache header, the
+mapping table and the image table as `dyld_cache_format.h` spells them (the layout the
+`object` crate reads), copies each image's segments into the cache file at page-aligned
+offsets, and rewrites the image's segment, section and linkedit offsets to the cache's
+layout — the inverse of the extraction the engine does to lift one image back out.
+
+```sh
+python3 make_dyld_cache.py sample_dyld.cache \
+    /usr/lib/libsample.dylib=sample.macho /usr/lib/libother.dylib=sample.macho
 ```
 
 The C++ program was built with g++ (the ELF), clang and lld (the Mach-O and the PE), with no
