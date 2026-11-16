@@ -1681,6 +1681,102 @@ fn a_slice_flag_that_disagrees_with_the_project_is_refused_and_save_checks_the_s
 }
 
 #[test]
+fn a_project_remembers_which_image_of_a_dyld_cache_it_describes() {
+    let file = TempFile::new("dyld");
+    let cache = fixture("sample_dyld.cache").display().to_string();
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .args(args)
+            .output()
+            .expect("the ag binary runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, _, stderr) = run(&[
+        "project",
+        &cache,
+        "--dyld-image",
+        "libsample.dylib",
+        "save",
+        "--out",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+    let report = show_json(&file);
+    assert_eq!(
+        report["target"]["dyld_image"],
+        serde_json::json!("libsample.dylib")
+    );
+
+    // Every command after reads that image, flags or not.
+    let (ok, stdout, stderr) = run(&["image", &cache, "symbols", "--project", &file.text()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("_add"), "{stdout}");
+
+    // Another image is refused; the same image by its position is accepted.
+    let (ok, _, stderr) = run(&[
+        "image",
+        &cache,
+        "--dyld-image",
+        "libother.dylib",
+        "info",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("says libsample.dylib"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "image",
+        &cache,
+        "--dyld-image",
+        "0",
+        "info",
+        "--project",
+        &file.text(),
+    ]);
+    assert!(ok, "{stderr}");
+
+    // A cache with no image named cannot be saved; an image the cache lacks,
+    // or a file that is not a cache, cannot be chosen.
+    let missing = TempFile::new("dyld-missing");
+    let (ok, _, stderr) = run(&["project", &cache, "save", "--out", &missing.text()]);
+    assert!(!ok);
+    assert!(stderr.contains("say which one with --dyld-image"), "{stderr}");
+    let (ok, _, stderr) = run(&[
+        "project",
+        &cache,
+        "--dyld-image",
+        "libmissing.dylib",
+        "save",
+        "--out",
+        &missing.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("has no image"), "{stderr}");
+    let thin = fixture("sample.macho").display().to_string();
+    let (ok, _, stderr) = run(&[
+        "project",
+        &thin,
+        "--dyld-image",
+        "0",
+        "save",
+        "--out",
+        &missing.text(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("not a dyld shared cache"), "{stderr}");
+    // The cache image flag conflicts with the slice and raw flags.
+    let (ok, _, stderr) = run(&[
+        "image", &cache, "--dyld-image", "0", "--slice", "0", "info",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+#[test]
 fn a_site_override_is_recorded_and_told_to_the_image() {
     let file = TempFile::new("override");
     // What `ag image switch.elf COMMAND classify --project FILE` prints,

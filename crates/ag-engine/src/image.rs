@@ -52,6 +52,9 @@ pub struct Image {
     /// The slice of a universal Mach-O the bytes are, when they are one:
     /// the file's offsets are the slice's, this far into the file.
     slice: Option<Slice>,
+    /// The image of a dyld shared cache the bytes were lifted from, when
+    /// they were: the path it is named by and its address in the cache.
+    dyld: Option<crate::dyld::DyldImage>,
     /// The Objective-C metadata the image carries, read once when asked.
     objc: std::cell::OnceCell<Option<crate::objc::ObjcMetadata>>,
     /// The mangled names the symbol table spells, by address, with what
@@ -392,7 +395,55 @@ impl Image {
                     .join(", ")
             );
         }
+        // So is a dyld shared cache, many dylibs mapped together: which one
+        // is the analyst's to say, and `ag image FILE dyld` lists them.
+        if let Some(images) = crate::dyld::dyld_images(&bytes) {
+            anyhow::bail!(
+                "{name} is a dyld shared cache of {} image{}: say which one to read with --dyld-image (`ag image {name} dyld` lists them)",
+                images.len(),
+                if images.len() == 1 { "" } else { "s" }
+            );
+        }
         Image::from_bytes(&name, bytes)
+    }
+
+    /// Read one image of the dyld shared cache at `path`: the one whose
+    /// install path `image` names — in full or by its basename — or whose
+    /// position it is, counted from 0. The cache's subcaches (the main
+    /// file's siblings, named by its header) are read alongside it. A file
+    /// that is not a cache has no images to choose from, and is refused
+    /// with that said.
+    pub fn open_dyld(path: &Path, image: &str) -> Result<Image> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let images = crate::dyld::dyld_images(&bytes)
+            .with_context(|| format!("{name} is not a dyld shared cache: it has no images"))?;
+        anyhow::ensure!(
+            crate::dyld::resolve_dyld_image(&images, image).is_some(),
+            "{name} has no image {:?}; it holds {} image{}",
+            image.trim(),
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
+        );
+        // The subcaches hold the segments of images the main file maps: the
+        // header names their suffixes, appended to the main file's path.
+        let suffixes =
+            object::read::macho::DyldCache::<object::Endianness>::subcache_suffixes(bytes.as_slice())
+                .with_context(|| format!("reading the subcache list of {name}"))?;
+        let mut subcaches = Vec::new();
+        for suffix in &suffixes {
+            let sub_path = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+            let sub = std::fs::read(&sub_path)
+                .with_context(|| format!("reading the subcache {}", sub_path.display()))?;
+            subcaches.push(sub);
+        }
+        let (chosen, extracted) = crate::dyld::extract(&bytes, &subcaches, image)?;
+        let mut image = Image::from_bytes(&format!("{name} ({})", chosen.path), extracted)?;
+        image.dyld = Some(chosen);
+        Ok(image)
     }
 
     /// Read one slice of the universal Mach-O at `path`: the one whose
@@ -445,6 +496,12 @@ impl Image {
         self.slice.as_ref()
     }
 
+    /// The image of a dyld shared cache this image was lifted from, when it
+    /// was one: its install path and its address in the cache.
+    pub fn dyld_image(&self) -> Option<&crate::dyld::DyldImage> {
+        self.dyld.as_ref()
+    }
+
     /// Parse an image already in memory; `name` labels it in errors.
     pub fn from_bytes(name: &str, bytes: Vec<u8>) -> Result<Image> {
         // A registered loader that knows the bytes reads them first: that
@@ -458,6 +515,7 @@ impl Image {
                         bytes,
                         name: name.to_string(),
                         slice: None,
+                        dyld: None,
                         objc: std::cell::OnceCell::new(),
                         mangled: std::cell::OnceCell::new(),
                         swift: std::cell::OnceCell::new(),
@@ -499,6 +557,7 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            dyld: None,
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),
@@ -572,6 +631,7 @@ impl Image {
             bytes,
             name: name.to_string(),
             slice: None,
+            dyld: None,
             objc: std::cell::OnceCell::new(),
             mangled: std::cell::OnceCell::new(),
             swift: std::cell::OnceCell::new(),

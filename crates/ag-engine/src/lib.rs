@@ -24,6 +24,7 @@ pub mod debuginfo;
 pub mod defuse;
 pub mod demangle;
 pub mod diff;
+pub mod dyld;
 pub mod emit;
 pub mod emulate;
 pub mod fragments;
@@ -81,6 +82,7 @@ pub use cfg::{
 };
 pub use defuse::{register_def_use, DefUse, Location, Role, Touch, ValueWeb};
 pub use diff::{diff, DiffOptions, DiffReport, FunctionFacts, FunctionMatch, FunctionRef, MatchKind};
+pub use dyld::{dyld_images, resolve_dyld_image, DyldImage};
 pub use emit::{Line, Pseudocode};
 pub use frame::{FrameRow, Region, StackFrame};
 pub use funcid::pattern::{Pattern, PatternCandidate, PatternDb, PatternSet};

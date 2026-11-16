@@ -1595,6 +1595,7 @@ impl Server {
                             std::path::Path::new(path),
                             raw.as_ref(),
                             source_file.target.slice.as_deref(),
+                            source_file.target.dyld_image.as_deref(),
                             &layout,
                         )
                         .ok()
@@ -2781,6 +2782,7 @@ pub fn open(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
 ) -> Result<Server> {
@@ -2810,6 +2812,7 @@ pub fn open(
                         sha256,
                         raw.as_ref(),
                         slice.as_deref(),
+                        dyld.as_deref(),
                     ))
                 }
                 Err(error) => return Err(error),
@@ -2822,6 +2825,7 @@ pub fn open(
         binary,
         raw,
         slice,
+        dyld,
         project.as_ref().map(|(_, file)| file),
         options,
     )?;
@@ -2842,10 +2846,11 @@ pub fn run(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
 ) -> Result<i32> {
-    let mut server = open(binary, raw, slice, project, options)?;
+    let mut server = open(binary, raw, slice, dyld, project, options)?;
     server.warm_up();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -3436,7 +3441,7 @@ mod tests {
             ..Default::default()
         };
         let raw = flags.spec().expect("the flags read").expect("raw");
-        let mut server = open(&fixture(), Some(raw), None, Some(&path), Vec::new())
+        let mut server = open(&fixture(), Some(raw), None, None, Some(&path), Vec::new())
             .expect("a raw image with a project not there yet opens");
         let _ = call(
             &mut server,
@@ -3459,7 +3464,7 @@ mod tests {
             ..Default::default()
         };
         let raw = flags.spec().unwrap().unwrap();
-        assert!(open(&fixture(), Some(raw), None, Some(&path), Vec::new()).is_ok());
+        assert!(open(&fixture(), Some(raw), None, None, Some(&path), Vec::new()).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 

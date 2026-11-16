@@ -259,6 +259,7 @@ fn apply(
         binary,
         spec.clone(),
         raw.slice.clone(),
+        raw.dyld_image.clone(),
         existing.as_ref(),
         Default::default(),
     )?;
@@ -278,6 +279,7 @@ fn apply(
             sha256,
             raw: raw_target,
             slice: raw.slice.clone(),
+            dyld_image: raw.dyld_image.clone(),
         })
     });
 

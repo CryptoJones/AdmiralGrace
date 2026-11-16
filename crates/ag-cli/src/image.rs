@@ -25,6 +25,15 @@ pub enum ImageCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The images of a dyld shared cache: each dylib's install path and the
+    /// address it loads at. Read one with `--dyld-image PATH` (or its
+    /// position from 0) before the subcommand. A file that is not a cache
+    /// has none.
+    Dyld {
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// The Swift the image describes: its types with their kind, module,
     /// superclass, fields or cases, conformances and vtable methods; its
     /// protocols.
@@ -1014,6 +1023,7 @@ pub(crate) fn open_image(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&ag_corpus::project::ProjectFile>,
     options: Options,
 ) -> Result<Binary> {
@@ -1054,8 +1064,25 @@ pub(crate) fn open_image(
         )?;
     }
     let slice = slice.or_else(|| project.and_then(|project| project.target.slice.clone()));
-    let image = crate::project::open_target(binary, raw.as_ref(), slice.as_deref(), &layout)?
-        .with_options(options);
+    // So is the image of a dyld shared cache chosen: by the flag, or as the
+    // project remembers — and a flag that names another image is refused.
+    if let (Some(flag), Some(project)) = (dyld.as_deref(), project) {
+        crate::project::check_dyld_flag(
+            binary,
+            Some(flag),
+            project.target.dyld_image.as_deref(),
+            Path::new("the project"),
+        )?;
+    }
+    let dyld = dyld.or_else(|| project.and_then(|project| project.target.dyld_image.clone()));
+    let image = crate::project::open_target(
+        binary,
+        raw.as_ref(),
+        slice.as_deref(),
+        dyld.as_deref(),
+        &layout,
+    )?
+    .with_options(options);
     if let Some(project) = project {
         // The analyst's patches are the bytes the image is read with, and
         // the modes the instruction sets they are read in.
@@ -1234,8 +1261,35 @@ pub fn run(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     cmd: ImageCmd,
 ) -> Result<i32> {
+    // The cache's images are read off the file itself, before any one is
+    // opened, as the slices of a universal Mach-O are.
+    if let ImageCmd::Dyld { json } = &cmd {
+        let images = Binary::dyld_images_of(binary)?.unwrap_or_default();
+        if *json {
+            let rows: Vec<serde_json::Value> = images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    serde_json::json!({
+                        "index": index,
+                        "path": image.path,
+                        "address": format!("{:#x}", image.address),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        } else if images.is_empty() {
+            println!("{} is not a dyld shared cache: no images", binary.display());
+        } else {
+            for (index, image) in images.iter().enumerate() {
+                println!("{index}: {:#x} {}", image.address, image.path);
+            }
+        }
+        return Ok(0);
+    }
     // The slices are read off the file itself, before any image is opened.
     if let ImageCmd::Slices { json } = &cmd {
         let slices = Binary::slices_of(binary)?.unwrap_or_default();
@@ -1311,14 +1365,14 @@ pub fn run(
             .transpose()?,
         _ => None,
     };
-    let image = open_image(binary, raw, slice, project.as_ref(), options)?;
+    let image = open_image(binary, raw, slice, dyld, project.as_ref(), options)?;
 
     match cmd {
         ImageCmd::Info { json, .. } => info(&image, json),
         ImageCmd::Objc { json, header } => objc(&image, json, header),
         ImageCmd::Swift { json } => swift(&image, json),
         // Answered above, before any image was read.
-        ImageCmd::Slices { .. } => Ok(0),
+        ImageCmd::Slices { .. } | ImageCmd::Dyld { .. } => Ok(0),
         ImageCmd::Symbols { filter, json, .. } => symbols(&image, filter.as_deref(), json),
         ImageCmd::Disasm {
             target,
@@ -4837,6 +4891,7 @@ mod tests {
             &sample_path(),
             None,
             None,
+            None,
             ImageCmd::Pseudocode {
                 target: "sum_to".into(),
                 json: false,
@@ -4855,6 +4910,7 @@ mod tests {
         );
         let error = run(
             &sample_path(),
+            None,
             None,
             None,
             ImageCmd::Pseudocode {

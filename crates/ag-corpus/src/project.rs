@@ -1888,6 +1888,10 @@ pub struct Target {
     /// the architecture's name, or its position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice: Option<String>,
+    /// Which image of a dyld shared cache the target is, when it is one:
+    /// the install path (in full or by basename), or its position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dyld_image: Option<String>,
 }
 
 /// How a target of raw bytes loads: the analyst's answer to what a
@@ -2750,6 +2754,7 @@ mod tests {
             sha256: Some("9f86d0".into()),
             raw: None,
             slice: None,
+            dyld_image: None,
         });
         project
             .options

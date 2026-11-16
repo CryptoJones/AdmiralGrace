@@ -84,6 +84,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
         &args.old,
         spec.clone(),
         args.raw.slice.clone(),
+        args.raw.dyld_image.clone(),
         old_project.as_ref(),
         Default::default(),
     )?;
@@ -91,6 +92,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
         &args.new,
         spec,
         args.raw.slice.clone(),
+        args.raw.dyld_image.clone(),
         new_project.as_ref(),
         Default::default(),
     )?;
@@ -116,6 +118,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
                 sha256,
                 raw: None,
                 slice: None,
+                dyld_image: None,
             })
         });
         let carried = carry(

@@ -32,6 +32,7 @@ pub fn run(
     binary: &Path,
     raw: Option<ag_image::RawSpec>,
     slice: Option<String>,
+    dyld: Option<String>,
     project: Option<&Path>,
     options: Vec<String>,
     command: &[String],
@@ -39,7 +40,7 @@ pub fn run(
     let (program, arguments) = command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("a command to run comes after `--`"))?;
-    let mut server = crate::mcp::open(binary, raw, slice, project, options)?;
+    let mut server = crate::mcp::open(binary, raw, slice, dyld, project, options)?;
     server.warm_up();
     let mut child = Command::new(program)
         .args(arguments)
