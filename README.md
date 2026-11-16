@@ -155,14 +155,14 @@ Every subcommand takes `--json` for the same report as JSON.
 
 `info` and `symbols` read any format the loader reads.
 
-`disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`). Through SLEIGH it also decodes 32-bit ARM and Thumb, AArch64, 32-bit MIPS of either byte order, little-endian RISC-V of either width, the 16-bit MSP430, and the retro and embedded cores: the 6502, the Z80, and the little-endian SH4.
+`disasm` decodes x86, 32-bit and 64-bit, taking the width from the image's language (`x86:LE:32:...` or `x86:LE:64:...`). Through SLEIGH it also decodes 32-bit ARM and Thumb, AArch64, 32-bit MIPS of either byte order, little-endian RISC-V of either width, PowerPC of either width and byte order with VLE and the paired-single extensions, the 16-bit MSP430, and the retro and embedded cores: the 6502, the Z80, and the little-endian SH4.
 
 | Architecture | What you get today |
 | --- | --- |
 | ARM, Thumb, MIPS, 6502, Z80, SuperH | Decoded, walked, and listed. Not yet lifted. |
 | MIPS | Operands read through the global pointer. `global-pointer` says where its value came from. |
 | SuperH | Branch delay slots folded into the branch. |
-| AArch64, RISC-V, MSP430 | Lifted to pseudocode. RISC-V's bit-manipulation extension is disassembled but not lifted. |
+| AArch64, RISC-V, MSP430, PowerPC | Lifted to pseudocode. RISC-V's bit-manipulation extension is disassembled but not lifted; PowerPC's paired singles and floating point are disassembled but not lifted, and its 64-bit big-endian ELFv1 function descriptors are resolved to their code. |
 
 An image of another architecture is refused rather than printed as nonsense.
 

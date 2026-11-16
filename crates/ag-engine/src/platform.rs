@@ -88,7 +88,12 @@ impl Platform {
         let fields: Vec<&str> = language.split(':').collect();
         let processor = fields.first().copied().unwrap_or("").to_ascii_lowercase();
         let windows = fields.get(4).is_some_and(|c| *c == "windows");
-        let width = fields.get(2).copied().unwrap_or("");
+        let mut width = fields.get(2).copied().unwrap_or("");
+        // VLE's id spells the 64-bit ISA over 32-bit addresses: the
+        // program is a 32-bit one.
+        if fields.get(3).is_some_and(|v| v.starts_with("VLE")) {
+            width = "32";
+        }
         let arch = arch_of(&processor, width)?;
         let os = if windows {
             Os::Windows
@@ -128,6 +133,8 @@ impl Platform {
             "aarch64" | "arm64" => "aarch64",
             "riscv64" | "rv64" => "riscv64",
             "riscv32" | "rv32" => "riscv32",
+            "powerpc" | "ppc" => "powerpc",
+            "powerpc64" | "ppc64" => "powerpc64",
             "msp430" => "msp430",
             "6502" | "m6502" | "mos6502" => "6502",
             "z80" => "z80",
@@ -142,8 +149,19 @@ impl Platform {
     pub fn candidates(self) -> Vec<Platform> {
         let mut out = vec![self];
         for arch in [
-            "x86-64", "aarch64", "x86", "arm", "thumb", "riscv64", "riscv32", "msp430", "6502",
-            "z80", "superh",
+            "x86-64",
+            "aarch64",
+            "x86",
+            "arm",
+            "thumb",
+            "riscv64",
+            "riscv32",
+            "powerpc",
+            "powerpc64",
+            "msp430",
+            "6502",
+            "z80",
+            "superh",
         ] {
             if arch != self.arch {
                 out.push(Platform {
@@ -200,6 +218,10 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
         "arm" => "arm",
         "aarch64" => "aarch64",
         "mips" => "mips",
+        "powerpc" => match width {
+            "64" => "powerpc64",
+            _ => "powerpc",
+        },
         "riscv" => match width {
             "64" => "riscv64",
             _ => "riscv32",
@@ -215,8 +237,8 @@ fn arch_of(processor: &str, width: &str) -> Option<&'static str> {
 /// The width the architecture word names, in bits, when it names one.
 fn arch_bits(arch: &str) -> Option<u64> {
     match arch {
-        "x86-64" | "aarch64" | "riscv64" => Some(64),
-        "x86" | "arm" | "thumb" | "mips" | "riscv32" | "superh" => Some(32),
+        "x86-64" | "aarch64" | "riscv64" | "powerpc64" => Some(64),
+        "x86" | "arm" | "thumb" | "mips" | "riscv32" | "powerpc" | "superh" => Some(32),
         "msp430" | "6502" | "z80" => Some(16),
         _ => None,
     }

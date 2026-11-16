@@ -27,6 +27,12 @@ The images the image tests read, and how they were made.
 | `m6502.s` | The source of the 6502 executable. |
 | `z80.elf` | A Z80 ELF wrapped from the Intel HEX sdldz80 linked: the same shapes. The wrapper writes `220` (`EM_Z80`) and the engine names `z80:LE:16:default`. |
 | `z80.s` | The source of the Z80 executable. |
+| `powerpc.elf` | A 32-bit big-endian PowerPC ELF executable built from `powerpc_sample.c`, statically linked with no C library: a leaf, a subtraction, a compare-and-branch, a loop with a call, and a floating-point leaf the lift refuses. |
+| `powerpc64.elf` | The same source built 64-bit big-endian: the ELFv1 ABI, whose function symbols name descriptors in `.opd` — the loader reads the code address out of them, and calls through them resolve to the code. |
+| `powerpc64le.elf` | The same source built 64-bit little-endian: the ELFv2 ABI, no descriptors. Built `-mno-isel -mno-vsx` so the compare-and-branch reads as a branch and the floating-point leaf as `fmadd`, the forms the specification carries. |
+| `powerpc_sample.c` | The source of the three PowerPC executables. |
+| `powerpc_vle.bin` | Hand-assembled VLE code, big-endian halfwords: `add` (`se_add r3,r4; se_blr`) and `max` (`se_cmp r3,r4; se_bgt cr0,+4; se_mr r3,r4; se_blr`), read as raw bytes under `PowerPC:BE:64:VLE-32addr`. |
+| `powerpc_paired.bin` | Hand-assembled paired-single code, big-endian words: `ps_add f1,f2,f3; blr` — the Gekko extension Ghidra's specification does not carry, which the decoder reads itself and the lift refuses. |
 | `wrap_retro_elf.py` | Wraps a flat retro binary — or Intel HEX, with `--ihx` — in a minimal ELF with one loadable `.text` and a symbol per function, for cores whose toolchains do not emit one. |
 | `sample_fat.macho` | A universal (fat) Mach-O holding two slices: `sample.macho` (x86-64) and an arm64 Mach-O built from `arm_sample.c`. |
 | `make_fat.py` | Combines thin Mach-O files into a universal one, as `lipo -create` would, for hosts without `lipo`. |
@@ -248,6 +254,24 @@ sh4-linux-gnu-objcopy --strip-all --keep-symbol=add --keep-symbol=sub --keep-sym
 `add` is at `0x4000`, `sub` at `0x4006`, `max` at `0x400c` and `sum` (the entry) at `0x4018`.
 The big-endian twin is not built: the SH4 linker here links little-endian only, and the engine
 carries only `SuperH4_le.sla`. The earlier SH-1, SH-2 and SH-2A cores are not carried either.
+
+The PowerPC executables were built with clang and lld (21.1.8), with no C library and
+`.text` pinned at `0x20000`:
+
+```sh
+for target in powerpc-linux-gnu powerpc64-linux-gnu powerpc64le-linux-gnu; do
+    clang --target=$target -O1 -fno-pic -mno-isel -fno-asynchronous-unwind-tables \
+        -nostdlib -c powerpc_sample.c -o $target.o
+    ld.lld-21 -e sum --image-base=0x10000 -z max-page-size=4096 -z noseparate-code \
+        -Ttext=0x20000 $target.o -o ${target%%-*}.elf   # names adjusted per target
+done
+# the little-endian 64-bit one also takes -mno-vsx
+```
+
+In each, `add` is at `0x20000`; the 64-bit big-endian `add`'s symbol names its `.opd`
+descriptor at `0x220d8`, whose first word is `0x20000`. The VLE and paired-single binaries
+are the halfwords and words above, written big-endian; the engine tests read them as raw
+bytes under their languages.
 
 The 6502 and the Z80 toolchains do not emit ELF — cc65 links a flat binary, sdldz80 links Intel
 HEX — so each is assembled and linked to a flat image, then wrapped in a minimal ELF by

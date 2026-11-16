@@ -230,6 +230,11 @@ const RAW_ARCHITECTURE_TABLE: &[(&str, &str)] = &[
     ("aarch64", "AARCH64:LE:64:v8A:default"),
     ("riscv64", "RISCV:LE:64:default"),
     ("riscv32", "RISCV:LE:32:default"),
+    ("powerpc", "PowerPC:BE:32:default"),
+    ("powerpcle", "PowerPC:LE:32:default"),
+    ("powerpc64", "PowerPC:BE:64:default"),
+    ("powerpc64le", "PowerPC:LE:64:default"),
+    ("vle", "PowerPC:BE:64:VLE-32addr"),
     ("msp430", "TI_MSP430:LE:16:default"),
     ("6502", "6502:LE:16:default"),
     ("z80", "z80:LE:16:default"),
@@ -249,6 +254,11 @@ pub fn raw_language(arch: &str) -> Option<&'static str> {
         "aarch64" | "arm64" => "aarch64",
         "riscv64" | "rv64" => "riscv64",
         "riscv32" | "rv32" => "riscv32",
+        "powerpc" | "ppc" => "powerpc",
+        "powerpcle" | "ppcle" => "powerpcle",
+        "powerpc64" | "ppc64" => "powerpc64",
+        "powerpc64le" | "ppc64le" => "powerpc64le",
+        "vle" => "vle",
         "msp430" => "msp430",
         "6502" | "m6502" | "mos6502" => "6502",
         "z80" => "z80",
@@ -272,7 +282,7 @@ pub fn raw_arch(language: &str) -> Option<&'static str> {
 
 /// The architecture names [`raw_language`] knows, for a message.
 pub const RAW_ARCHITECTURES: &str =
-    "x86-64, x32, x86, arm, thumb, aarch64, riscv64, riscv32, msp430, 6502, z80, superh";
+    "x86-64, x32, x86, arm, thumb, aarch64, riscv64, riscv32, powerpc, powerpcle, powerpc64, powerpc64le, vle, msp430, 6502, z80, superh";
 
 /// The language a retro- or embedded-architecture ELF decodes under, when
 /// the bytes are one. The loader has no opinion for these, so the engine
@@ -778,11 +788,34 @@ impl Image {
 
     /// The container's declared entry point, when it declares one.
     pub fn entry(&self) -> Option<u64> {
-        match &self.inner {
+        let entry = match &self.inner {
             Loaded::Object(inner) => inner.image_entry(),
             Loaded::Raw(spec) => spec.entry,
             Loaded::Plugin(loaded) => loaded.entry,
+        };
+        entry.map(|address| self.opd_code(address).unwrap_or(address))
+    }
+
+    /// The code address a 64-bit big-endian PowerPC function descriptor
+    /// names, when `address` is one. The ELFv1 ABI keeps a function's
+    /// symbol in `.opd`, three words — the code address, the TOC value,
+    /// the environment — and the code is the first; the symbol names the
+    /// descriptor, not the code. Every other image names its code
+    /// outright, and `None` leaves the address as it is.
+    fn opd_code(&self, address: u64) -> Option<u64> {
+        if !self.language().starts_with("PowerPC:BE:64") {
+            return None;
         }
+        let opd = self
+            .sections()
+            .into_iter()
+            .find(|section| section.name == ".opd")?;
+        if !(opd.vma..opd.vma.saturating_add(opd.size)).contains(&address) {
+            return None;
+        }
+        let bytes = self.bytes_from(address)?;
+        let word: [u8; 8] = bytes.get(..8)?.try_into().ok()?;
+        Some(u64::from_be_bytes(word))
     }
 
     /// The named sections, in the container's order.
@@ -910,6 +943,13 @@ impl Image {
                 }
             }
             symbols.sort_by_key(|(address, _)| *address);
+        }
+        // A 64-bit big-endian PowerPC function's symbol names its ELFv1
+        // descriptor in `.opd`: the code is the descriptor's first word.
+        for (address, _) in symbols.iter_mut() {
+            if let Some(code) = self.opd_code(*address) {
+                *address = code;
+            }
         }
         symbols
     }

@@ -1868,6 +1868,148 @@ fn a_riscv_image_decodes_and_lifts_at_each_width() {
 }
 
 #[test]
+fn a_powerpc_image_decodes_and_lifts_at_each_width_and_order() {
+    for (file, prefix) in [
+        ("powerpc.elf", "PowerPC:BE:32"),
+        ("powerpc64.elf", "PowerPC:BE:64"),
+        ("powerpc64le.elf", "PowerPC:LE:64"),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(file);
+        let binary = Binary::open(&path).expect("the PowerPC fixture loads");
+        assert!(
+            binary.language().starts_with(prefix),
+            "{}: {}",
+            file,
+            binary.language()
+        );
+        assert!(binary.supports_disassembly(), "{file}");
+        assert!(binary.supports_pseudocode(), "{file}");
+
+        let address_of = |name: &str| {
+            binary
+                .functions()
+                .iter()
+                .find(|function| function.name == name)
+                .unwrap_or_else(|| panic!("{file}: {name} is a function"))
+                .address
+        };
+
+        // The leaf decodes to an add and a return.
+        let add = binary
+            .disassembly(address_of("add"))
+            .expect("add is decoded");
+        let lines: Vec<&Instruction> = add
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .collect();
+        assert_eq!(lines[0].mnemonic, "add", "{file}");
+        assert!(lines.iter().any(|line| line.mnemonic == "blr"), "{file}");
+
+        // The leaf lifts to a signature and a sum; the loop to a loop with
+        // the call named by its symbol.
+        let add = binary.pseudocode(address_of("add")).expect("add is lifted");
+        assert!(add.text().contains("int add("), "{file}: {}", add.text());
+        assert!(add.text().contains('+'), "{file}: {}", add.text());
+        let sum = binary.pseudocode(address_of("sum")).expect("sum is lifted");
+        let text = sum.text();
+        assert!(text.contains("add("), "{file}: {text}");
+        assert!(
+            text.contains("while") || text.contains("do"),
+            "{file}: {text}"
+        );
+
+        // The floating-point leaf disassembles, but the lift reads no
+        // floating-point p-code and refuses it.
+        let fp = binary.disassembly(address_of("fp")).expect("fp is decoded");
+        assert!(
+            fp.blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|line| line.mnemonic.starts_with("fmadd")
+                    || line.mnemonic.starts_with("xsmadd")),
+            "{file}"
+        );
+        assert!(
+            binary.pseudocode(address_of("fp")).is_err(),
+            "{file}: fp is refused"
+        );
+    }
+}
+
+#[test]
+fn a_powerpc64_big_endian_image_resolves_its_function_descriptors() {
+    // The ELFv1 ABI: a function's symbol names its descriptor in .opd,
+    // and the code is the descriptor's first word.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join("powerpc64.elf");
+    let binary = Binary::open(&path).expect("the PowerPC fixture loads");
+    let add = binary
+        .functions()
+        .iter()
+        .find(|function| function.name == "add")
+        .expect("add")
+        .address;
+    assert_eq!(add, 0x20000);
+    assert!(binary.disassembly(add).is_some());
+    assert!(binary.pseudocode(add).is_ok());
+}
+
+#[test]
+fn vle_raw_bytes_decode_and_lift() {
+    use ag_image::{raw_language, Layout, RawSpec};
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join("powerpc_vle.bin");
+    let spec = RawSpec {
+        language: raw_language("vle").unwrap().to_string(),
+        base: 0x20000,
+        entry: Some(0x20000),
+        offset: 0,
+        length: None,
+    };
+    let raw =
+        Binary::open_raw_with_layout(&path, &spec, &Layout::default()).expect("the VLE bytes load");
+    assert!(raw.supports_disassembly());
+    assert!(raw.supports_pseudocode());
+    let add = raw.disassembly(0x20000).expect("the entry is decoded");
+    assert_eq!(add.blocks[0].instructions[0].mnemonic, "se_add");
+    let text = raw.pseudocode(0x20000).expect("the VLE add lifts").text();
+    assert!(text.contains('+'), "{text}");
+}
+
+#[test]
+fn paired_singles_disassemble_but_do_not_lift() {
+    use ag_image::{raw_language, Layout, RawSpec};
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join("powerpc_paired.bin");
+    let spec = RawSpec {
+        language: raw_language("powerpc").unwrap().to_string(),
+        base: 0x20000,
+        entry: Some(0x20000),
+        offset: 0,
+        length: None,
+    };
+    let raw = Binary::open_raw_with_layout(&path, &spec, &Layout::default())
+        .expect("the paired-single bytes load");
+    let code = raw.disassembly(0x20000).expect("the entry is decoded");
+    let lines: Vec<&Instruction> = code
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect();
+    assert_eq!(lines[0].mnemonic, "ps_add");
+    assert_eq!(lines[0].operands, "f1,f2,f3");
+    assert!(raw.pseudocode(0x20000).is_err());
+}
+
+#[test]
 fn a_msp430_image_decodes_and_lifts() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")

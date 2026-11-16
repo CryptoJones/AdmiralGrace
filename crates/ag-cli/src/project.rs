@@ -1532,7 +1532,8 @@ fn save(
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct RawArgs {
     /// Read the target as raw bytes of this architecture: x86-64, x86,
-    /// arm, thumb, aarch64, riscv64, riscv32, msp430, 6502, z80 or superh.
+    /// arm, thumb, aarch64, riscv64, riscv32, powerpc, powerpcle, powerpc64,
+    /// powerpc64le, vle, msp430, 6502, z80 or superh.
     #[arg(long, value_name = "ARCH")]
     pub raw: Option<String>,
     /// The address the bytes load at (with --raw).
