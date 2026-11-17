@@ -3577,7 +3577,10 @@ impl<'a> Lifter<'a> {
             from,
         } = value;
         let node = match sym {
-            Sym::Node(AstNode::Constant { value, .. }) => {
+            // A constant is narrowed, or zero-extended from 32 bits, like
+            // any other value: an 8- or 16-bit write leaves the upper bits
+            // the register had, which the constant says nothing of.
+            Sym::Node(AstNode::Constant { value, .. }) if bits < had || had == 32 => {
                 AstNode::constant(value & mask(bits), bits / 8)
             }
             Sym::Node(node) if bits < had || had == 32 => cast(node, had, bits),
