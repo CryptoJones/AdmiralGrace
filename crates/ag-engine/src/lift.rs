@@ -5530,7 +5530,7 @@ impl<'a> Lifter<'a> {
         // The call clobbers the caller-saved registers of the callee's
         // convention — the program's own when the callee says none — the
         // flags, and anything in memory it can reach.
-        let clobber_abi = props.convention_abi().unwrap_or(self.abi);
+        let clobber_abi = props.convention_abi(self.abi).unwrap_or(self.abi);
         for index in 0..16 {
             if !clobber_abi.is_callee_saved(index) {
                 self.state.regs.insert(
