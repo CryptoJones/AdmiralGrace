@@ -352,8 +352,11 @@ impl Session {
         self.set_pending_breakpoints()?;
         // The start's own words — the run, the first stop — are not news:
         // the program is stopped at its first instruction, as asked. What
-        // the session itself noted — a slide not learned — is kept.
-        self.events.retain(|event| matches!(event, Event::Log(_)));
+        // the session itself noted — a slide not learned — is kept, and so
+        // is the program's end: one that exits before its first stop is
+        // not stopped as asked, and the one driving it must hear so.
+        self.events
+            .retain(|event| matches!(event, Event::Log(_) | Event::Exited { .. }));
         Ok(())
     }
 
