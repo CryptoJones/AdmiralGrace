@@ -20,9 +20,10 @@
 //! An argument is read where its parameter is, unless that would read it
 //! other than once, in order: an argument that is not a variable or a
 //! constant, read more than once, inside a loop, after the body's first
-//! statement, or not at all while it has an effect of its own, is assigned
-//! to a fresh local first; so is any argument whose parameter the body
-//! writes or takes the address of. Where a call is not inlined it stays,
+//! statement or inside a statement it holds, or not at all while it has an
+//! effect of its own, is assigned to a fresh local first; so is any
+//! argument whose parameter the body writes or takes the address of.
+//! Where a call is not inlined it stays,
 //! and the caller says why: `f is not inlined at 0x401020: its body has a
 //! goto`.
 
@@ -592,8 +593,9 @@ struct Reads {
     total: usize,
     /// Whether a read is inside a loop, so happens as often as it runs.
     in_loop: bool,
-    /// Whether a read is after the body's first statement, past what may
-    /// have changed the argument's value.
+    /// Whether a read is after the body's first statement, or inside a
+    /// statement that one holds — an arm or a loop's body — so past what
+    /// may have changed the argument's value, or not always reached.
     late: bool,
     /// Whether the body writes the parameter or takes its address.
     written: bool,
@@ -641,9 +643,12 @@ impl Reads {
                 _ => false,
             });
         }
+        // A read in a statement this one holds is late wherever this one
+        // stands: it happens only if the arm is taken, and after whatever
+        // came before it.
         for child in statement.children() {
             for inner in child {
-                self.statement(inner, name, looping, late);
+                self.statement(inner, name, looping, true);
             }
         }
     }
