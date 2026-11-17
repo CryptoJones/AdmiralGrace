@@ -17,6 +17,7 @@
 //! followed.
 
 use crate::lift::{gpr_name, Abi};
+use crate::options::Options;
 
 /// The analyst's words on one function's signature and how a call to it
 /// behaves, read through [`crate::lift::Symbols::function_properties`].
@@ -93,6 +94,17 @@ impl FunctionProperties {
     /// program whose own convention is `abi`.
     pub fn convention_abi(&self, abi: Abi) -> Option<Abi> {
         convention_abi(self.convention.as_deref()?, abi)
+    }
+
+    /// The integer ABI a call to the function follows, in a program whose
+    /// own convention is `program`: the convention's when it names one, else
+    /// the one the function's own `abi` option names outright — read as
+    /// [`Options`] reads it, so a value that does not read, and `auto`, are
+    /// not followed — else the program's own.
+    pub fn abi(&self, program: Abi) -> Abi {
+        self.convention_abi(program)
+            .or_else(|| Options::default().overlaid(&self.options).explicit_abi())
+            .unwrap_or(program)
     }
 
     /// The extra registers the function clobbers, as GPR indices; a name
@@ -310,6 +322,31 @@ mod tests {
         assert!(Abi::Pascal.is_callee_saved(6));
         assert!(Abi::Pascal.is_callee_saved(7));
         assert!(!Abi::Pascal.is_callee_saved(0));
+    }
+
+    #[test]
+    fn the_abi_option_stands_in_where_no_convention_is_named() {
+        let with_abi = |value: &str| {
+            let mut props = FunctionProperties::default();
+            props.options.insert("abi".to_string(), value.to_string());
+            props
+        };
+        // Nothing said is the program's own.
+        assert_eq!(
+            FunctionProperties::default().abi(Abi::SystemV),
+            Abi::SystemV
+        );
+        assert_eq!(with_abi("win64").abi(Abi::SystemV), Abi::Win64);
+        assert_eq!(with_abi("x32").abi(Abi::Win64), Abi::X32);
+        // The convention, when it names one, wins over the option.
+        let mut props = with_abi("win64");
+        props.convention = Some("sysv".to_string());
+        assert_eq!(props.abi(Abi::Win64), Abi::SystemV);
+        // `auto`, and a value the option does not take — a convention's
+        // name among them — are not followed.
+        assert_eq!(with_abi("auto").abi(Abi::Go), Abi::Go);
+        assert_eq!(with_abi("stdcall").abi(Abi::SystemV), Abi::SystemV);
+        assert_eq!(with_abi("nope").abi(Abi::Go), Abi::Go);
     }
 
     #[test]

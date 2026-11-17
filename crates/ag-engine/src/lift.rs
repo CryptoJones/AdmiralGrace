@@ -5412,7 +5412,10 @@ impl<'a> Lifter<'a> {
             Some(target) => self.symbols.function_properties(target),
             None => crate::properties::FunctionProperties::default(),
         };
-        let registers = props.argument_registers(self.abi);
+        // The callee's own ABI: its convention's, else its per-function
+        // `abi` option's, else the program's.
+        let callee_abi = props.abi(self.abi);
+        let registers = props.argument_registers(callee_abi);
         // A prototype reads an exact number of arguments; without one the
         // convention is positional: the arguments run to the last argument
         // register the block left a value in. One it never touched below
@@ -5528,11 +5531,10 @@ impl<'a> Lifter<'a> {
             args,
         };
         // The call clobbers the caller-saved registers of the callee's
-        // convention — the program's own when the callee says none — the
-        // flags, and anything in memory it can reach.
-        let clobber_abi = props.convention_abi(self.abi).unwrap_or(self.abi);
+        // ABI — its convention's, else its `abi` option's, else the
+        // program's own — the flags, and anything in memory it can reach.
         for index in 0..16 {
-            if !clobber_abi.is_callee_saved(index) {
+            if !callee_abi.is_callee_saved(index) {
                 self.state.regs.insert(
                     index,
                     Value::unknown(

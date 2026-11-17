@@ -1611,16 +1611,23 @@ impl Options {
             .collect()
     }
 
+    /// The convention the `abi` option names outright, whatever the image
+    /// says; `None` under `auto`, which leaves it to the image's language.
+    pub fn explicit_abi(&self) -> Option<Abi> {
+        match self.abi {
+            AbiChoice::Auto => None,
+            AbiChoice::SysV => Some(Abi::SystemV),
+            AbiChoice::Win64 => Some(Abi::Win64),
+            AbiChoice::Go => Some(Abi::Go),
+            AbiChoice::Pascal => Some(Abi::Pascal),
+            AbiChoice::X32 => Some(Abi::X32),
+        }
+    }
+
     /// The convention to lift the code of a program in `language` with.
     pub fn abi_for(&self, language: &str) -> Abi {
-        match self.abi {
-            AbiChoice::Auto => Abi::of_language(language),
-            AbiChoice::SysV => Abi::SystemV,
-            AbiChoice::Win64 => Abi::Win64,
-            AbiChoice::Go => Abi::Go,
-            AbiChoice::Pascal => Abi::Pascal,
-            AbiChoice::X32 => Abi::X32,
-        }
+        self.explicit_abi()
+            .unwrap_or_else(|| Abi::of_language(language))
     }
 }
 
