@@ -32,7 +32,10 @@ pub trait Transport: Send {
     /// Send one command line.
     fn send_line(&mut self, line: &str) -> std::io::Result<()>;
     /// The next line the debugger printed, when one comes within
-    /// `timeout`; an error when the debugger is gone.
+    /// `timeout`. An error whose kind says the pipe is closed —
+    /// `BrokenPipe`, `UnexpectedEof`, a connection reset — means the
+    /// debugger is gone; any other error means only that a line could not
+    /// be read, and the debugger may well still be there.
     fn next_line(&mut self, timeout: Duration) -> std::io::Result<Option<String>>;
 }
 
@@ -690,10 +693,19 @@ impl Session {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => {
-                    if !matches!(self.state, State::Exited { .. }) {
-                        self.state = State::Exited { code: None };
-                        self.events.push_back(Event::Exited { code: None });
+                Err(error) => {
+                    if debugger_gone(&error) {
+                        if !matches!(self.state, State::Exited { .. }) {
+                            self.state = State::Exited { code: None };
+                            self.events.push_back(Event::Exited { code: None });
+                        }
+                    } else {
+                        // A line that could not be read — bytes that are
+                        // not text, say — is not the program's end: it is
+                        // noted, and the session stays as it was.
+                        self.events.push_back(Event::Log(format!(
+                            "a line from the debugger could not be read: {error}"
+                        )));
                     }
                     break;
                 }
@@ -836,6 +848,20 @@ impl Session {
         }
         Some(record)
     }
+}
+
+/// Whether `error` says the debugger is gone — its pipe closed — and not
+/// only that a line of its output could not be read.
+fn debugger_gone(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+    )
 }
 
 /// Whether `program` is linked to load at the addresses its image has: an
