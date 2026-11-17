@@ -668,9 +668,12 @@ impl<'a> Demangler<'a> {
         (self.nodes <= MOST_NODES).then_some(())
     }
 
-    /// Remember a node for `A` substitutions later.
-    fn remember(&mut self, node: &Node) {
+    /// Remember a node for `A` substitutions later. The copy kept counts
+    /// against the budget of nodes; `None` past the bound.
+    fn remember(&mut self, node: &Node) -> Option<()> {
+        self.charge(node.size())?;
         self.substitutions.push(node.clone());
+        Some(())
     }
 
     /// A whole symbol: every operator, leaving one entity or type.
@@ -839,7 +842,7 @@ impl<'a> Demangler<'a> {
             return None;
         }
         let node = Node::Identifier(identifier);
-        self.remember(&node);
+        self.remember(&node)?;
         Some(node)
     }
 
@@ -925,7 +928,7 @@ impl<'a> Demangler<'a> {
             context: Box::new(context),
             name,
         };
-        self.remember(&node);
+        self.remember(&node)?;
         Some(node)
     }
 
@@ -961,7 +964,7 @@ impl<'a> Demangler<'a> {
                     base: Box::new(standard_nominal(NominalKind::Enum, "Optional")),
                     args: vec![ty],
                 };
-                self.remember(&node);
+                self.remember(&node)?;
                 node
             }
             _ => {
@@ -1099,7 +1102,7 @@ impl<'a> Demangler<'a> {
             base: Box::new(Node::GenericParam { depth, index }),
             name,
         };
-        self.remember(&node);
+        self.remember(&node)?;
         Some(node)
     }
 
@@ -1179,7 +1182,7 @@ impl<'a> Demangler<'a> {
             base: Box::new(base),
             args,
         };
-        self.remember(&node);
+        self.remember(&node)?;
         Some(node)
     }
 
