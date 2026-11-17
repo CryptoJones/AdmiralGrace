@@ -435,8 +435,10 @@ impl Inliner<'_> {
             });
             renames.insert(local.name.clone(), AstNode::var(fresh));
         }
-        // The structure a fragment is of is named as the caller names it.
-        for variable in self.declared.iter_mut().chain(&mut staged) {
+        // The structure a fragment is of is named as the caller names it:
+        // only the variables this body brings, not those earlier bodies
+        // left, whose names this callee's renames do not speak of.
+        for variable in &mut staged {
             if let Some(fragment) = &mut variable.fragment {
                 if let Some(AstNode::Var { name }) = fragment
                     .within
