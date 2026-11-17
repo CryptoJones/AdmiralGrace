@@ -2681,10 +2681,14 @@ impl ProjectFile {
         let mut project: ProjectFile =
             serde_json::from_str(raw).context("parsing the project file")?;
         // Another tool may write a record's tags in its own order, or
-        // twice; they are put in the stored order here so every lookup
-        // afterwards sees one shape.
+        // twice, and its address in another spelling — `0X10`, `10`; both
+        // are put in the stored shape here so every lookup afterwards sees
+        // one. An address that names no address is keyed as written.
         for annotation in &mut project.annotations {
             annotation.normalize_tags();
+            if let Some(canonical) = canonical_address(&annotation.address) {
+                annotation.address = canonical;
+            }
         }
         Ok(project)
     }
