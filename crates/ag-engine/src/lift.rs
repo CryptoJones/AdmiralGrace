@@ -5835,10 +5835,22 @@ impl<'a> Lifter<'a> {
                         // Count the reads, not the statements that make
                         // them: `add eax, eax` reads the result twice, and
                         // inlining the call into both operands would make
-                        // the call twice over.
+                        // the call twice over. A chain's end reads too: a
+                        // branch's condition or a switch's index is no
+                        // statement, and a result only one of them reads
+                        // is declared, not left a bare call.
                         let uses: usize = all
                             .iter()
                             .map(|(_, other, _)| crate::inline::occurrences(other, &name))
+                            .chain(lifted.iter().map(|(_, terminator)| match terminator {
+                                Terminator::Branch { cond, .. } => {
+                                    crate::inline::occurrences(cond, &name)
+                                }
+                                Terminator::Switch { index, .. } => {
+                                    crate::inline::occurrences(index, &name)
+                                }
+                                Terminator::Return | Terminator::Goto { .. } => 0,
+                            }))
                             .sum();
                         let next_reads = statements
                             .get(i + 1)
