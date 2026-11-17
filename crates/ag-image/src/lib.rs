@@ -2488,6 +2488,11 @@ impl Binary {
             self.forget_decoded();
             return true;
         }
+        // A plugin architecture's stages are structured under the function's
+        // own options, so they are forgotten with the pseudocode.
+        if let Ok(mut cache) = self.plugin_stages.lock() {
+            cache.clear();
+        }
         if let Ok(mut cache) = self.pseudocode.lock() {
             cache.clear();
         }
