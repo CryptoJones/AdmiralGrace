@@ -3829,7 +3829,9 @@ impl<'a> Lifter<'a> {
     /// the very expression assigned (`eax` after `add eax, 1; mov [x], eax`)
     /// holds the variable; another register computed from it is forgotten;
     /// a slot computed from it is saved into a temporary first. What does
-    /// not read the variable is unaffected.
+    /// not read the variable is unaffected. The flags the instruction at
+    /// `at` set from the very result it stores (`sub [x], 1`) stand: they
+    /// are the flags of the variable's new value.
     fn variable_changed(&mut self, name: &str, value: &Value, at: u64) {
         let stored = match &value.sym {
             Sym::Node(node) if node.reads_var(name) => Some(node),
@@ -3881,19 +3883,52 @@ impl<'a> Lifter<'a> {
                 },
             );
         }
-        // A flag whose producer read the variable is stale now.
+        // A flag whose producer read the variable is stale now — the flags
+        // of the instruction at `at` aside, when what it stored is its own
+        // result (`sub [x], 1`): those are the flags of the value the
+        // variable holds from here on.
+        let is_stored =
+            |value: &Value| matches!(&value.sym, Sym::Node(node) if Some(node) == stored);
+        let own = |flags: &Flags| {
+            flags.at == at
+                && match &flags.producer {
+                    Producer::Arith { result, .. } | Producer::Result(result) => is_stored(result),
+                    Producer::Cmp(..) | Producer::Test(..) | Producer::Bit(..) => false,
+                }
+        };
         self.state.flags.retain(|flags| {
             let reads = |value: &Value| value.reads_var(name);
-            !match &flags.producer {
-                Producer::Cmp(lhs, rhs) | Producer::Test(lhs, rhs) | Producer::Bit(lhs, rhs) => {
-                    reads(lhs) || reads(rhs)
+            own(flags)
+                || !match &flags.producer {
+                    Producer::Cmp(lhs, rhs)
+                    | Producer::Test(lhs, rhs)
+                    | Producer::Bit(lhs, rhs) => reads(lhs) || reads(rhs),
+                    Producer::Arith {
+                        lhs, rhs, result, ..
+                    } => reads(lhs) || reads(rhs) || reads(result),
+                    Producer::Result(value) => reads(value),
                 }
-                Producer::Arith {
-                    lhs, rhs, result, ..
-                } => reads(lhs) || reads(rhs) || reads(result),
-                Producer::Result(value) => reads(value),
-            }
         });
+        // The result those flags were set from is the variable now, as a
+        // register that holds the stored expression is; a source operand
+        // computed from the variable does not stand after the write.
+        for flags in self.state.flags.by_flag.values_mut() {
+            if !own(&*flags) {
+                continue;
+            }
+            match &mut flags.producer {
+                Producer::Arith {
+                    rhs, result, same, ..
+                } => {
+                    *same |= rhs.reads_var(name);
+                    *result = Value::node(AstNode::var(name), result.bits, result.from.clone());
+                }
+                Producer::Result(result) => {
+                    *result = Value::node(AstNode::var(name), result.bits, result.from.clone());
+                }
+                Producer::Cmp(..) | Producer::Test(..) | Producer::Bit(..) => {}
+            }
+        }
     }
 
     /// Forget every slot that overlaps the `bits` bits at `offset`.
