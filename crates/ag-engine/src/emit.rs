@@ -2087,11 +2087,14 @@ fn constant_text(value: u64, width_bytes: u32, style: ConstantStyle) -> String {
 
 /// A string as a C literal: in double quotes, with the quote, the backslash
 /// and the control characters escaped, and any other byte outside printable
-/// ASCII written as `\xNN` in octets.
+/// ASCII written as `\xNN` in octets — or as the three octal digits `\NNN`
+/// where a hex digit follows, since C reads a hex escape for as long as the
+/// hex digits go on and `"\x01a"` would be the one byte 0x1a.
 fn string_literal(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + 2);
     out.push('"');
-    for byte in text.bytes() {
+    for (index, &byte) in bytes.iter().enumerate() {
         match byte {
             b'"' => out.push_str("\\\""),
             b'\\' => out.push_str("\\\\"),
@@ -2099,6 +2102,10 @@ fn string_literal(text: &str) -> String {
             b'\t' => out.push_str("\\t"),
             b'\r' => out.push_str("\\r"),
             0x20..=0x7e => out.push(byte as char),
+            // An octal escape ends after three digits whatever follows.
+            _ if bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit) => {
+                let _ = write!(out, "\\{byte:03o}");
+            }
             _ => {
                 let _ = write!(out, "\\x{byte:02x}");
             }
