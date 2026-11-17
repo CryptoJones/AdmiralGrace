@@ -924,7 +924,8 @@ fn is_counted(before: &Statement, lp: &Statement) -> bool {
 }
 
 /// Whether the statements `continue` the loop they are in (not a nested
-/// one), which would skip a step folded into a `for`.
+/// one), which would skip a step folded into a `for`. A `switch` is not a
+/// loop: a `continue` in one of its arms is still the enclosing loop's.
 fn continues(statements: &[Statement]) -> bool {
     statements.iter().any(|statement| match &statement.kind {
         StatementKind::Plain => statement.node == AstNode::Continue,
@@ -932,6 +933,7 @@ fn continues(statements: &[Statement]) -> bool {
             then_part,
             else_part,
         } => continues(then_part) || continues(else_part),
+        StatementKind::Switch { arms } => arms.iter().any(|arm| continues(&arm.body)),
         _ => false,
     })
 }
