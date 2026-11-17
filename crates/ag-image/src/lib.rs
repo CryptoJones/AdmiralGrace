@@ -3392,7 +3392,7 @@ impl Binary {
             &cfg,
             address,
             bitness,
-            self.abi(),
+            self.abi_for(address),
         ))
     }
 
