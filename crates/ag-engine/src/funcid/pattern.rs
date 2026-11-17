@@ -394,6 +394,10 @@ impl PatternSet {
     /// its length, when the image knows where it ends. A function of known
     /// length fits only a pattern of that length; one of unknown length
     /// fits any pattern there is room for. Empty when no pattern fits.
+    ///
+    /// [`PatternSet::databases`] is public, so it may have been shrunk since
+    /// the set was made: a pattern whose library or whose place in it is no
+    /// longer there is skipped.
     pub fn candidates(
         &self,
         arch: &str,
@@ -411,7 +415,11 @@ impl PatternSet {
             .flatten()
             .chain(&self.any_first)
             .map(|index| &self.compiled[*index])
-            .filter(|compiled| self.databases[compiled.db].arch == arch)
+            .filter(|compiled| {
+                self.databases
+                    .get(compiled.db)
+                    .is_some_and(|database| database.arch == arch)
+            })
             .filter(|compiled| compiled.fits(bytes, available, extent))
             .collect();
         fitting.sort_by_key(|compiled| {
@@ -423,12 +431,12 @@ impl PatternSet {
         });
         fitting
             .into_iter()
-            .map(|compiled| {
-                let database = &self.databases[compiled.db];
-                PatternCandidate {
+            .filter_map(|compiled| {
+                let database = self.databases.get(compiled.db)?;
+                Some(PatternCandidate {
                     library: &database.library,
-                    pattern: &database.patterns[compiled.pattern],
-                }
+                    pattern: database.patterns.get(compiled.pattern)?,
+                })
             })
             .collect()
     }
@@ -468,13 +476,23 @@ mod tests {
         }
     }
 
+    /// Regression test for #639: a stale index is skipped, not a panic. The
+    /// name is the one the pre-commit hook filters on.
     #[test]
-    #[should_panic(expected = "index out of bounds")]
     fn audit_candidates_panics_when_databases_shrunk() {
         let pattern = Pattern::of("x86-64", &body(0, 7), 0, NOTHING, "f").unwrap();
-        let mut set = PatternSet::new(vec![db(vec![pattern])]);
+        let bytes = body(0, 7);
+
+        // The library itself is gone.
+        let mut set = PatternSet::new(vec![db(vec![pattern.clone()])]);
+        assert_eq!(set.candidates("x86-64", &bytes, 64, Some(16)).len(), 1);
         set.databases.clear(); // allowed: the field is pub
-        let _ = set.candidates("x86-64", &body(0, 7), 64, Some(16));
+        assert!(set.candidates("x86-64", &bytes, 64, Some(16)).is_empty());
+
+        // The library is there and its pattern is gone.
+        let mut set = PatternSet::new(vec![db(vec![pattern])]);
+        set.databases[0].patterns.clear();
+        assert!(set.candidates("x86-64", &bytes, 64, Some(16)).is_empty());
     }
 
     #[test]
