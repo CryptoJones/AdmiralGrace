@@ -422,6 +422,39 @@ impl AstNode {
                 callee: sub(callee),
                 args: args.into_iter().map(|a| a.replace(target, with)).collect(),
             },
+            Self::Intrinsic { name, args } => Self::Intrinsic {
+                name,
+                args: args.into_iter().map(|a| a.replace(target, with)).collect(),
+            },
+            Self::If {
+                cond,
+                then_part,
+                else_part,
+                if_type,
+            } => Self::If {
+                cond: sub(cond),
+                then_part: sub(then_part),
+                else_part: else_part.map(sub),
+                if_type,
+            },
+            Self::IfGoto {
+                cond,
+                label,
+                negated,
+            } => Self::IfGoto {
+                cond: sub(cond),
+                label,
+                negated,
+            },
+            Self::Loop { cond, body, kind } => Self::Loop {
+                cond: cond.map(sub),
+                body: sub(body),
+                kind,
+            },
+            Self::ConstantCondition { holds, compared } => Self::ConstantCondition {
+                holds,
+                compared: sub(compared),
+            },
             Self::StructInit { fields } => Self::StructInit {
                 fields: fields
                     .into_iter()
@@ -476,6 +509,42 @@ impl AstNode {
             Self::Call { callee, args } => Self::Call {
                 callee: sub(callee),
                 args: args.into_iter().map(|a| a.substitute(name, with)).collect(),
+            },
+            Self::Intrinsic {
+                name: intrinsic,
+                args,
+            } => Self::Intrinsic {
+                name: intrinsic,
+                args: args.into_iter().map(|a| a.substitute(name, with)).collect(),
+            },
+            Self::If {
+                cond,
+                then_part,
+                else_part,
+                if_type,
+            } => Self::If {
+                cond: sub(cond),
+                then_part: sub(then_part),
+                else_part: else_part.map(sub),
+                if_type,
+            },
+            Self::IfGoto {
+                cond,
+                label,
+                negated,
+            } => Self::IfGoto {
+                cond: sub(cond),
+                label,
+                negated,
+            },
+            Self::Loop { cond, body, kind } => Self::Loop {
+                cond: cond.map(sub),
+                body: sub(body),
+                kind,
+            },
+            Self::ConstantCondition { holds, compared } => Self::ConstantCondition {
+                holds,
+                compared: sub(compared),
             },
             Self::StructInit { fields } => Self::StructInit {
                 fields: fields
