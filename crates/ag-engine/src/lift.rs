@@ -5533,7 +5533,9 @@ impl<'a> Lifter<'a> {
         // The call clobbers the caller-saved registers of the callee's
         // ABI — its convention's, else its `abi` option's, else the
         // program's own — the flags, and anything in memory it can reach.
-        for index in 0..16 {
+        // The whole register file: the APX registers r16-r31 are
+        // caller-saved too.
+        for index in 0..32 {
             if !callee_abi.is_callee_saved(index) {
                 self.state.regs.insert(
                     index,
