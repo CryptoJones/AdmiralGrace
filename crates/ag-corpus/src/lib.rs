@@ -200,6 +200,12 @@ pub fn parse_addr(s: &str) -> Result<u64> {
     u64::from_str_radix(digits, 16).map_err(|_| anyhow::anyhow!("bad address {s:?}"))
 }
 
+/// The newest `decompile-index.json` version this build reads.
+///
+/// An index that says a greater version was written by a format this build
+/// does not know, and is refused rather than read with today's rules.
+pub const INDEX_VERSION: u64 = 1;
+
 #[derive(Debug, Deserialize)]
 pub struct Index {
     pub version: u64,
@@ -238,6 +244,14 @@ impl Corpus {
         let raw = fs::read_to_string(&index_path)
             .with_context(|| format!("reading {}", index_path.display()))?;
         let idx: Index = serde_json::from_str(&raw).context("parsing decompile-index.json")?;
+
+        if idx.version > INDEX_VERSION {
+            return Err(anyhow::anyhow!(
+                "decompile-index.json is version {}; this build reads version {}",
+                idx.version,
+                INDEX_VERSION
+            ));
+        }
 
         let mut functions = Vec::with_capacity(idx.functions.len());
         let mut warnings = Vec::new();
