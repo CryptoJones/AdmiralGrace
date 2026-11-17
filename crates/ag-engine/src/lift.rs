@@ -5530,8 +5530,13 @@ impl<'a> Lifter<'a> {
         // register the block left a value in. One it never touched below
         // that holds the function's own parameter, passed on to the callee;
         // one above it is not an argument at all, and the list stops there.
+        // The prototype is read against the project's types, as the
+        // function's own is: an array bound may name a project enumerator.
         let arity = props.prototype.as_deref().and_then(|text| {
-            let store = crate::types::TypeStore::default();
+            let store = self
+                .symbols
+                .types()
+                .unwrap_or_else(|| std::sync::Arc::new(crate::types::TypeStore::default()));
             crate::ctype::parse_prototype(&store, text)
                 .ok()
                 .map(|proto| proto.params.len())
