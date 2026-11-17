@@ -770,6 +770,7 @@ impl<'a> Demangler<'a> {
             b'v' => self.variable(),
             b'f' => self.function_entity(),
             b'Z' => {
+                self.wrap()?;
                 let entity = self.pop_if(Node::is_entity)?;
                 Some(Node::Static(Box::new(entity)))
             }
