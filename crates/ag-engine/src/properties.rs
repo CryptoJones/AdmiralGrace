@@ -83,15 +83,16 @@ impl FunctionProperties {
                 return named;
             }
         }
-        self.convention_abi()
+        self.convention_abi(abi)
             .unwrap_or(abi)
             .argument_registers()
             .to_vec()
     }
 
-    /// The integer ABI the convention names, when it names one.
-    pub fn convention_abi(&self) -> Option<Abi> {
-        convention_abi(self.convention.as_deref()?)
+    /// The integer ABI the convention names, when it names one, in a
+    /// program whose own convention is `abi`.
+    pub fn convention_abi(&self, abi: Abi) -> Option<Abi> {
+        convention_abi(self.convention.as_deref()?, abi)
     }
 
     /// The extra registers the function clobbers, as GPR indices; a name
@@ -132,13 +133,22 @@ pub fn parse_convention(word: &str) -> Option<&'static str> {
     }
 }
 
-/// The integer ABI a convention `word` implies: `cdecl` and `sysv` pass
-/// arguments as System V does, the Microsoft conventions as Win64 does,
-/// `go` as Go's register ABI does and `pascal` as the Borland register
+/// The integer ABI a convention `word` implies in a program whose own
+/// convention is `abi`: `cdecl` is the platform's C convention — Microsoft
+/// x64 on a Win64 image, x32 on an x32 one, System V anywhere else — `sysv`
+/// passes arguments as System V does, the Microsoft conventions as Win64
+/// does, `go` as Go's register ABI does and `pascal` as the Borland register
 /// convention does. `None` for a word that names no convention.
-pub fn convention_abi(word: &str) -> Option<Abi> {
+pub fn convention_abi(word: &str, abi: Abi) -> Option<Abi> {
     match parse_convention(word)? {
-        "cdecl" | "sysv" => Some(Abi::SystemV),
+        // A C function in a Go or Pascal program is not the program's own
+        // convention's: it stays System V there.
+        "cdecl" => Some(match abi {
+            Abi::Win64 => Abi::Win64,
+            Abi::X32 => Abi::X32,
+            Abi::SystemV | Abi::Go | Abi::Pascal => Abi::SystemV,
+        }),
+        "sysv" => Some(Abi::SystemV),
         "go" => Some(Abi::Go),
         "pascal" => Some(Abi::Pascal),
         _ => Some(Abi::Win64),
@@ -200,12 +210,25 @@ mod tests {
             convention: Some("__stdcall".to_string()),
             ..Default::default()
         };
-        assert_eq!(props.convention_abi(), Some(Abi::Win64));
+        assert_eq!(props.convention_abi(Abi::SystemV), Some(Abi::Win64));
+        // `cdecl` is the platform's C convention: System V only on a System
+        // V image, Microsoft x64 on a Win64 one, x32 on an x32 one.
         let props = FunctionProperties {
             convention: Some("cdecl".to_string()),
             ..Default::default()
         };
-        assert_eq!(props.convention_abi(), Some(Abi::SystemV));
+        assert_eq!(props.convention_abi(Abi::SystemV), Some(Abi::SystemV));
+        assert_eq!(props.convention_abi(Abi::Win64), Some(Abi::Win64));
+        assert_eq!(props.convention_abi(Abi::X32), Some(Abi::X32));
+        assert_eq!(props.convention_abi(Abi::Go), Some(Abi::SystemV));
+        assert_eq!(
+            props.argument_registers(Abi::Win64),
+            Abi::Win64.argument_registers()
+        );
+        assert_eq!(
+            props.argument_registers(Abi::SystemV),
+            Abi::SystemV.argument_registers()
+        );
         let props = FunctionProperties {
             convention: Some("golang".to_string()),
             ..Default::default()
@@ -261,10 +284,13 @@ mod tests {
         assert_eq!(parse_convention("delphi"), Some("pascal"));
         assert_eq!(parse_convention("__Pascal"), Some("pascal"));
         assert_eq!(parse_convention("nope"), None);
-        assert_eq!(convention_abi("fastcall"), Some(Abi::Win64));
-        assert_eq!(convention_abi("go"), Some(Abi::Go));
-        assert_eq!(convention_abi("pascal"), Some(Abi::Pascal));
-        assert_eq!(convention_abi("nope"), None);
+        assert_eq!(convention_abi("fastcall", Abi::SystemV), Some(Abi::Win64));
+        assert_eq!(convention_abi("go", Abi::SystemV), Some(Abi::Go));
+        assert_eq!(convention_abi("pascal", Abi::SystemV), Some(Abi::Pascal));
+        assert_eq!(convention_abi("sysv", Abi::Win64), Some(Abi::SystemV));
+        assert_eq!(convention_abi("cdecl", Abi::Win64), Some(Abi::Win64));
+        assert_eq!(convention_abi("cdecl", Abi::Pascal), Some(Abi::SystemV));
+        assert_eq!(convention_abi("nope", Abi::SystemV), None);
     }
 
     #[test]
