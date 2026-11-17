@@ -1651,19 +1651,21 @@ pub fn rewriters() -> Vec<Arc<dyn Rewriter>> {
 }
 
 /// Run every registered rewriter that wants the function over its
-/// medium-level graph, in order: the nodes as they stand after, and whether
-/// any rewriter ran. A rewriter's failure, or a graph it leaves pointing
-/// outside itself or with two blocks at one address, refuses the lift with
-/// the rewriter's name.
+/// medium-level graph, in order: the nodes as they stand after, the index
+/// of the node the function is entered at among them — pruning the blocks
+/// below the entry renumbers it — and whether any rewriter ran. A
+/// rewriter's failure, or a graph it leaves pointing outside itself or
+/// with two blocks at one address, refuses the lift with the rewriter's
+/// name.
 pub(crate) fn rewrite_nodes(
     function: u64,
     name: &str,
     entry: usize,
     nodes: Vec<Node>,
-) -> Result<(Vec<Node>, bool), NotLifted> {
+) -> Result<(Vec<Node>, usize, bool), NotLifted> {
     let rewriters = rewriters();
     if rewriters.is_empty() {
-        return Ok((nodes, false));
+        return Ok((nodes, entry, false));
     }
     let mut rewrite = Rewrite {
         function,
@@ -1686,8 +1688,9 @@ pub(crate) fn rewrite_nodes(
         })?;
     }
     // Analyzed again whenever one ran: a rewriter may edit the nodes
-    // directly without marking them changed.
-    Ok((rewrite.nodes, ran))
+    // directly without marking them changed. The entry is the rewrite's
+    // own: the blocks pruned below it renumbered it with the rest.
+    Ok((rewrite.nodes, rewrite.entry, ran))
 }
 
 /// Add a recognizer: every function lifted after passes through it, after
