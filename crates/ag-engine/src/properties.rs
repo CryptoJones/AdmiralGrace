@@ -72,15 +72,17 @@ impl FunctionProperties {
     }
 
     /// The argument registers, as GPR indices, in order: the analyst's own
-    /// when any name reads, else the convention's, else the program's.
+    /// when every name reads, else the convention's, else the program's. A
+    /// single name that is no general register leaves the whole list
+    /// unfollowed, since dropping it would shift the arguments after it.
     pub fn argument_registers(&self, abi: Abi) -> Vec<u32> {
         if !self.arguments.is_empty() {
-            let named: Vec<u32> = self
+            let named: Option<Vec<u32>> = self
                 .arguments
                 .iter()
-                .filter_map(|name| gpr_index(name))
+                .map(|name| gpr_index(name))
                 .collect();
-            if !named.is_empty() {
+            if let Some(named) = named {
                 return named;
             }
         }
