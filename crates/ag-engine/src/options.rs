@@ -1020,14 +1020,15 @@ pub trait Sites {
     fn at(&self, address: u64) -> SiteOverride;
 
     /// The word at the site of a statement whose condition came from
-    /// `addresses`: the branch instruction itself, which is the last of
-    /// them in its block and so the highest. The compare and the
-    /// instructions that fed it are not sites — one of them may feed two
-    /// branches.
+    /// `addresses`, given in the order the condition was built: the branch
+    /// instruction itself, which completes the condition and so is the last
+    /// of them. It is not picked by address — an operand made in a block
+    /// laid out of line, a cold path that jumps back to the compare, sits
+    /// higher than the branch does. The compare and the instructions that
+    /// fed it are not sites — one of them may feed two branches.
     fn over(&self, addresses: &[u64]) -> SiteOverride {
         addresses
-            .iter()
-            .max()
+            .last()
             .map(|address| self.at(*address))
             .unwrap_or_default()
     }
