@@ -118,7 +118,7 @@ impl Provider for CorpusProvider {
     }
 
     fn function_detail(&self, address: u64) -> Option<FunctionDetail> {
-        let index = *self.corpus.by_address.get(&address)?;
+        let index = *self.corpus.by_address.get(&(None, address))?;
         let f = &self.corpus.functions[index];
         let (name, objc) = self.display_name(f);
 
@@ -162,7 +162,7 @@ impl Provider for CorpusProvider {
     }
 
     fn pseudocode(&self, address: u64) -> Option<String> {
-        let index = *self.corpus.by_address.get(&address)?;
+        let index = *self.corpus.by_address.get(&(None, address))?;
         let f = &self.corpus.functions[index];
         if !f.has_body() {
             return None;
