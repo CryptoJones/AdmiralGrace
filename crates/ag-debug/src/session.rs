@@ -17,7 +17,7 @@
 //! address and read back to the image's, so the listing can follow.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
@@ -460,7 +460,7 @@ impl Session {
         }
         if let Some(start) = by_name {
             self.runtime_base = Some(start);
-        } else if self.image_base == 0 {
+        } else if !self.addresses_known() {
             self.events.push_back(Event::Log(
                 "the program's mapping was not found: a position-independent program's breakpoints wait until it is"
                     .to_string(),
@@ -488,10 +488,13 @@ impl Session {
     }
 
     /// Whether the image's addresses are the program's, or translate to
-    /// them: a program that is not position-independent, or one whose
-    /// slide was learned.
+    /// them: a program whose slide was learned, or one that is not
+    /// position-independent and so runs where its image says. A non-zero
+    /// image base alone does not say so: a position-independent image can
+    /// have one too.
     fn addresses_known(&self) -> bool {
-        self.runtime_base.is_some() || self.image_base != 0
+        self.runtime_base.is_some()
+            || (self.image_base != 0 && loads_at_fixed_address(&self.program))
     }
 
     fn insert_breakpoint(&mut self, address: u64) -> Result<u64> {
@@ -833,6 +836,26 @@ impl Session {
         }
         Some(record)
     }
+}
+
+/// Whether `program` is linked to load at the addresses its image has: an
+/// ELF executable that is not position-independent (`ET_EXEC`). A file
+/// that cannot be read, or is of another kind, is not taken to be one.
+fn loads_at_fixed_address(program: &Path) -> bool {
+    const ET_EXEC: u16 = 2;
+    // The identification, then the two bytes of the file's type.
+    let mut header = [0u8; 18];
+    let read = std::fs::File::open(program).and_then(|mut file| file.read_exact(&mut header));
+    if read.is_err() || !header.starts_with(b"\x7fELF") {
+        return false;
+    }
+    let kind = [header[16], header[17]];
+    let kind = match header[5] {
+        1 => u16::from_le_bytes(kind),
+        2 => u16::from_be_bytes(kind),
+        _ => return false,
+    };
+    kind == ET_EXEC
 }
 
 /// An exit code as the debugger prints it: GDB's is octal with a leading
