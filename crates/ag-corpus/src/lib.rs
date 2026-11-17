@@ -377,14 +377,21 @@ pub struct CorpusStats {
     pub named_distinct: usize,
 }
 
+/// Count the corpus's functions by kind.
+///
+/// A function is external when its address is in the `EXTERNAL` space or
+/// its name carries the `<EXTERNAL>` prefix: the space is part of the
+/// address's meaning, so it decides whatever the name says. A function with
+/// no name is counted as external too.
 pub fn stats(corpus: &Corpus) -> CorpusStats {
     let external = corpus
         .functions
         .iter()
         .filter(|f| {
-            f.name
-                .as_deref()
-                .is_none_or(|n| n.starts_with("<EXTERNAL>"))
+            f.space.as_deref() == Some("EXTERNAL")
+                || f.name
+                    .as_deref()
+                    .is_none_or(|n| n.starts_with("<EXTERNAL>"))
         })
         .count();
     let written = corpus
