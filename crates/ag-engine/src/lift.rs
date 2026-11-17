@@ -75,7 +75,9 @@
 //!   (System V: `rdi, rsi, rdx, rcx, r8, r9`; Microsoft x64 for a `windows`
 //!   language: `rcx, rdx, r8, r9`) that are read before they are written,
 //!   named by position: `a`, `b`, `c`… The width of the first read fixes the
-//!   type.
+//!   type. A name the image gives the data the function mentions is passed
+//!   over, for a parameter and for a call's temporary alike: beside a
+//!   global `a` the first parameter is `b`.
 //! * **Calls** pass the argument registers written before the call, in
 //!   convention order up to the last one written; one the block never wrote
 //!   below that holds the function's own parameter, passed on to the callee.
@@ -1346,6 +1348,9 @@ fn lift_pass(
     let call_sites = std::mem::take(&mut lifter.call_sites);
     let mut slots = std::mem::take(&mut lifter.slot_facts);
     slots.address_taken = lifter.address_taken.clone();
+    // The names of the image's data the body mentions, which the lift named
+    // its parameters around.
+    let reserved = lifter.reserved.clone();
     let mut function = lifter.finish(name, entry, &chains, body)?;
     function.decoded_strings = decoded_strings;
     function.rendered_constants = rendered_constants;
@@ -1389,7 +1394,7 @@ fn lift_pass(
         // does not overwrite them.
         if let Some(Ok(proto)) = &prototype {
             for i in 0..proto.params.len() {
-                fixed.insert(parameter_name(i));
+                fixed.insert(free_parameter_name(i, &reserved));
             }
         }
         // A structure drafted for this frame is no type another function
@@ -1446,7 +1451,9 @@ fn lift_pass(
     }
     if let Some(Ok(proto)) = &prototype {
         for i in 0..proto.params.len() {
-            inferred.analyst.insert(parameter_name(i));
+            inferred
+                .analyst
+                .insert(free_parameter_name(i, &reserved));
         }
     }
     // The calls to the functions the analyst marked are read as their
@@ -1481,7 +1488,9 @@ fn lift_pass(
     // reach the analyst's marks too.
     match &prototype {
         Some(Ok(proto)) => {
-            for (from, to) in apply_prototype(&mut function, proto, &store, &edits.var_types) {
+            for (from, to) in
+                apply_prototype(&mut function, proto, &store, &edits.var_types, &reserved)
+            {
                 if inferred.analyst.remove(&from) {
                     inferred.analyst.insert(to);
                 }
@@ -1533,19 +1542,22 @@ fn lift_pass(
 /// and an explicit `RETURN` type wins over the prototype's return. The
 /// parameter renames made are returned, `(lift name, prototype name)`, so
 /// the caller can follow them in the analyst's marks; a name that collides
-/// with another variable is left as the lift named it.
+/// with another variable is left as the lift named it. The lift's names are
+/// the ones it chose around `reserved`, the names of the image's data the
+/// body mentions, and a prototype's name that is one of them is left too.
 fn apply_prototype(
     function: &mut LiftedFunction,
     proto: &crate::ctype::Prototype,
     store: &crate::types::TypeStore,
     var_types: &[(String, String)],
+    reserved: &BTreeSet<String>,
 ) -> Vec<(String, String)> {
     if !var_types.iter().any(|(v, _)| v == crate::typed::RETURN) {
         function.return_type = proto.ret.spelled(store);
     }
     // The parameters' types, and any the lift did not read added in order.
     for (i, (ty, _)) in proto.params.iter().enumerate() {
-        let lift_name = parameter_name(i);
+        let lift_name = free_parameter_name(i, reserved);
         let explicit = var_types.iter().any(|(v, _)| *v == lift_name);
         match function.params.get_mut(i) {
             Some(param) => {
@@ -1569,8 +1581,8 @@ fn apply_prototype(
     let mut renames = Vec::new();
     for (i, (_, name)) in proto.params.iter().enumerate() {
         let Some(name) = name else { continue };
-        let lift_name = parameter_name(i);
-        if name == &lift_name || taken.contains(name) {
+        let lift_name = free_parameter_name(i, reserved);
+        if name == &lift_name || taken.contains(name) || reserved.contains(name) {
             continue;
         }
         if !function.params.iter().any(|p| p.name == lift_name) {
@@ -2812,6 +2824,15 @@ struct Lifter<'a> {
     /// The register this function's result leaves in, as a GPR index: the
     /// analyst's word over `rax`.
     return_register: u32,
+    /// The names of the image's data the body mentions — read, written or
+    /// pointed at — kept across passes: no parameter and no temporary takes
+    /// one.
+    reserved: BTreeSet<String>,
+    /// Whether a name was reserved in this pass after a parameter or a
+    /// temporary was made under it, or under a name that moves for it: what
+    /// the pass built reads two things by one name, and the pass is run
+    /// again.
+    renamed: bool,
 }
 
 impl<'a> Lifter<'a> {
@@ -2842,6 +2863,8 @@ impl<'a> Lifter<'a> {
             slot_facts: crate::frame::SlotFacts::default(),
             arguments: abi.argument_registers().to_vec(),
             return_register: RAX,
+            reserved: BTreeSet::new(),
+            renamed: false,
         }
     }
 
@@ -2851,10 +2874,40 @@ impl<'a> Lifter<'a> {
         self.covered.iter().any(|made| made.holds(offset))
     }
 
+    /// The names of the parameters read so far, in order of position.
+    fn parameter_names(&self) -> Vec<String> {
+        self.params
+            .keys()
+            .map(|&position| free_parameter_name(position, &self.reserved))
+            .collect()
+    }
+
+    /// The name of the next temporary: `v1`, `v2`, …, the names of the
+    /// image's data passed over.
+    fn temporary_name(&self) -> String {
+        free_temporary_name(self.temps.len() + self.saved.len(), &self.reserved)
+    }
+
+    /// Keep `name`, which the image gives a piece of its data, from the
+    /// parameters and the temporaries. When one made earlier in this pass
+    /// has the name, or would move for it, the pass has read two things by
+    /// one name, and is run again ([`Self::lift_chains`]).
+    fn reserve(&mut self, name: &str) {
+        if self.reserved.contains(name) {
+            return;
+        }
+        let before = self.parameter_names();
+        self.reserved.insert(name.to_string());
+        let taken = self.temps.iter().any(|temp| temp.name == name)
+            || self.saved.iter().any(|saved| saved.name == name);
+        self.renamed |= taken || self.parameter_names() != before;
+    }
+
     /// Forget what one pass over the function found, keeping what holds
-    /// across passes: the slots whose address is taken, and the names of
-    /// the registers that became variables.
+    /// across passes: the slots whose address is taken, the names of the
+    /// registers that became variables, and the names of the image's data.
     fn reset(&mut self) {
+        self.renamed = false;
         self.state = State::initial();
         self.stack_pointers.clear();
         self.locals.clear();
@@ -2876,8 +2929,13 @@ impl<'a> Lifter<'a> {
     ) -> Result<Vec<(Vec<Stmt>, Terminator)>, NotLifted> {
         let count = chains.len();
         let mut forced: Vec<BTreeMap<Key, Forced>> = vec![BTreeMap::new(); count];
-        for _ in 0..PASSES {
+        // A pass thrown away for a name does not count: each one reserves
+        // one more of the finitely many names the image gives the
+        // function's data.
+        let mut passes = 0;
+        'pass: while passes < PASSES {
             self.reset();
+            let notes = self.call_notes.len();
             for keys in &forced {
                 for (key, what) in keys {
                     if let (Key::Slot(offset), Forced::Var { bits }) = (key, what) {
@@ -2917,7 +2975,16 @@ impl<'a> Lifter<'a> {
                 ins[node] = Some(state.clone());
                 self.state = state;
                 self.statements.clear();
-                let terminator = self.lift_chain(&chains[node])?;
+                let terminator = self.lift_chain(&chains[node]);
+                // The chain met data the image names as a parameter or a
+                // temporary made before it is named: whatever it made of
+                // the two under one name — a refusal too — is dropped, and
+                // the function lifted again with the name reserved.
+                if self.renamed {
+                    self.call_notes.truncate(notes);
+                    continue 'pass;
+                }
+                let terminator = terminator?;
                 // A latch assigns the registers its loop made variables,
                 // and holds the variables from there on.
                 for (&header, lp) in &analysis.loops {
@@ -2947,6 +3014,7 @@ impl<'a> Lifter<'a> {
                 outs[node] = Some(self.state.clone());
                 lifted[node] = Some((std::mem::take(&mut self.statements), terminator));
             }
+            passes += 1;
 
             // Compare each loop's latches with its header: what differs is
             // made a variable, and the function is lifted again.
@@ -3439,7 +3507,7 @@ impl<'a> Lifter<'a> {
             .position(|&register| register == index)?;
         let width = *self.params.entry(position).or_insert(bits);
         Some(Value::node(
-            AstNode::var(parameter_name(position)),
+            AstNode::var(free_parameter_name(position, &self.reserved)),
             width,
             Vec::new(),
         ))
@@ -3541,7 +3609,8 @@ impl<'a> Lifter<'a> {
         let value = match position {
             Some(position) => {
                 self.params.insert(position, bits);
-                Value::node(AstNode::var(parameter_name(position)), bits, Vec::new())
+                let name = free_parameter_name(position, &self.reserved);
+                Value::node(AstNode::var(name), bits, Vec::new())
             }
             None => Value::new(Sym::Entry(index), 64, Vec::new()),
         };
@@ -3795,7 +3864,7 @@ impl<'a> Lifter<'a> {
         }
         for offset in stale {
             let slot = self.state.stack.get(&offset).expect("found above").clone();
-            let temp = format!("v{}", self.temps.len() + self.saved.len() + 1);
+            let temp = self.temporary_name();
             self.saved.push(
                 Variable::new(type_name(slot.bits), temp.clone()).placed(Placement::Temporary),
             );
@@ -4020,6 +4089,7 @@ impl<'a> Lifter<'a> {
             };
             if let Some(Pointee::Data(name)) = pointee {
                 if !name.is_empty() {
+                    self.reserve(&name);
                     self.globals.insert(name.clone());
                     return Ok(Some(AstNode::var(name)));
                 }
@@ -4074,6 +4144,7 @@ impl<'a> Lifter<'a> {
                         return Ok(Value::node(AstNode::StringLiteral { text }, bits, from));
                     }
                     Some(Pointee::ClassRef(name)) => {
+                        self.reserve(&name);
                         self.globals.insert(name.clone());
                         return Ok(Value::node(AstNode::var(name), bits, from));
                     }
@@ -4986,9 +5057,12 @@ impl<'a> Lifter<'a> {
             let target = ins.memory_address().unwrap_or(disp as u64);
             let node = match self.symbols.pointee(target) {
                 Some(Pointee::String(text)) => AstNode::StringLiteral { text },
-                Some(Pointee::Data(name)) if !name.is_empty() => AstNode::AddressOf {
-                    target: Box::new(AstNode::var(name)),
-                },
+                Some(Pointee::Data(name)) if !name.is_empty() => {
+                    self.reserve(&name);
+                    AstNode::AddressOf {
+                        target: Box::new(AstNode::var(name)),
+                    }
+                }
                 Some(Pointee::Function(name)) => AstNode::FunctionName {
                     name,
                     address: target,
@@ -5566,9 +5640,9 @@ impl<'a> Lifter<'a> {
         }
         self.state.flags.clear();
         let return_register = props.return_register().unwrap_or(RAX);
-        let temp = self.temps.len() + self.saved.len();
+        let result = self.temporary_name();
         self.temps.push(Temp {
-            name: format!("v{}", temp + 1),
+            name: result,
             bits: None,
             callee: callee_name,
             register: return_register,
@@ -5903,8 +5977,10 @@ impl<'a> Lifter<'a> {
         let params = (0..count)
             .map(|position| {
                 let bits = self.params.get(&position).copied();
-                let variable =
-                    Variable::new(bits.map_or("long", type_name), parameter_name(position));
+                let variable = Variable::new(
+                    bits.map_or("long", type_name),
+                    free_parameter_name(position, &self.reserved),
+                );
                 match registers.get(position) {
                     Some(&index) => variable.placed(Placement::register(index, bits.unwrap_or(64))),
                     None => variable,
@@ -6832,6 +6908,28 @@ fn parameter_name(position: usize) -> String {
     } else {
         format!("arg{position}")
     }
+}
+
+/// The name of parameter `position` where the names in `taken` — the
+/// image's data the function mentions — are not to be had: the names
+/// [`parameter_name`] runs through, the taken ones passed over, so the
+/// first parameter beside a global `a` is `b`.
+fn free_parameter_name(position: usize, taken: &BTreeSet<String>) -> String {
+    (0..)
+        .map(parameter_name)
+        .filter(|name| !taken.contains(name))
+        .nth(position)
+        .expect("the names do not run out")
+}
+
+/// The name of the temporary made after `made` others: `v1`, `v2`, …, the
+/// names in `taken` passed over.
+fn free_temporary_name(made: usize, taken: &BTreeSet<String>) -> String {
+    (1usize..)
+        .map(|n| format!("v{n}"))
+        .filter(|name| !taken.contains(name))
+        .nth(made)
+        .expect("the names do not run out")
 }
 
 /// The name of the stack slot at `offset` from the entry stack pointer, the
