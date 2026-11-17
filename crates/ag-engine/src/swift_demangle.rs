@@ -114,7 +114,8 @@ enum Node {
         inner: Box<Node>,
     },
     GenericSignature {
-        params: usize,
+        /// How many parameters each depth has, outermost first.
+        params: Vec<usize>,
         requirements: Vec<Node>,
     },
     /// `A: P`, or `A: Base`.
@@ -362,8 +363,18 @@ impl Node {
                 params,
                 requirements,
             } => {
-                let names: Vec<String> = (0..*params).map(|i| generic_param_name(0, i)).collect();
-                let mut text = format!("<{}", names.join(", "));
+                // Each depth lists its own parameters: `<A, B><A1>`.
+                let depths: Vec<String> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(depth, count)| {
+                        (0..*count)
+                            .map(|index| generic_param_name(depth, index))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .collect();
+                let mut text = format!("<{}", depths.join("><"));
                 if !requirements.is_empty() {
                     let reqs: Vec<String> = requirements.iter().map(Node::print).collect();
                     text.push_str(&format!(" where {}", reqs.join(", ")));
@@ -1276,22 +1287,20 @@ impl<'a> Demangler<'a> {
         }
         requirements.reverse();
         let params = if has_counts {
-            let mut params = 0;
-            let mut depths = 0;
+            let mut params = Vec::new();
             while !self.next_if(b'l') {
-                depths += 1;
-                if depths > MOST_WRAPS {
+                if params.len() >= MOST_WRAPS {
                     return None;
                 }
-                params = if self.next_if(b'z') {
+                params.push(if self.next_if(b'z') {
                     0
                 } else {
                     self.index()?.checked_add(1)?
-                };
+                });
             }
             params
         } else {
-            1
+            vec![1]
         };
         Some(Node::GenericSignature {
             params,
