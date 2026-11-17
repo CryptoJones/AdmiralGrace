@@ -228,7 +228,13 @@ pub struct Corpus {
     pub provider: (String, String),
     pub functions: Vec<Function>,
     pub by_name: BTreeMap<String, Vec<usize>>,
-    pub by_address: BTreeMap<u64, usize>,
+    /// The function at each address, keyed on `(space, address)`.
+    ///
+    /// The space is part of the address's meaning: `EXTERNAL:0x1` and plain
+    /// `0x1` are different addresses and each resolves to its own record. A
+    /// plain address is keyed with `None`; a spaced one with the space as
+    /// the record wrote it.
+    pub by_address: BTreeMap<(Option<String>, u64), usize>,
     /// What the loader had to say about the data it read.
     ///
     /// A record that could not be read is skipped and named here; two
@@ -264,25 +270,27 @@ impl Corpus {
         }
 
         let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut by_address: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut by_address: BTreeMap<(Option<String>, u64), usize> = BTreeMap::new();
 
         for (i, f) in functions.iter().enumerate() {
             if let Some(n) = &f.name {
                 by_name.entry(n.clone()).or_default().push(i);
             }
 
-            // Two records may claim the same address. Both are kept — a
-            // second name for the same code is information — but the address
-            // resolves to the first, and the clash is said out loud.
-            match by_address.entry(f.address) {
+            // Two records may claim the same address — the same value in the
+            // same space. Both are kept — a second name for the same code is
+            // information — but the address resolves to the first, and the
+            // clash is said out loud. The same value in different spaces is
+            // not a clash.
+            match by_address.entry((f.space.clone(), f.address)) {
                 Entry::Vacant(slot) => {
                     slot.insert(i);
                 }
                 Entry::Occupied(slot) => {
                     let first = &functions[*slot.get()];
                     warnings.push(format!(
-                        "two functions claim the address {:#x}: {} and {}; the address resolves to {}",
-                        f.address,
+                        "two functions claim the address {}: {} and {}; the address resolves to {}",
+                        f.display_address(),
                         first.name.as_deref().unwrap_or("(unnamed)"),
                         f.name.as_deref().unwrap_or("(unnamed)"),
                         first.name.as_deref().unwrap_or("(unnamed)")
@@ -613,7 +621,12 @@ mod tests {
         assert_eq!(f.address, 0x1);
         assert_eq!(f.space.as_deref(), Some("EXTERNAL"));
         assert_eq!(f.display_address(), "EXTERNAL:0x1");
-        assert!(corpus.by_address.contains_key(&0x1), "the address resolves");
+        assert!(
+            corpus
+                .by_address
+                .contains_key(&(Some("EXTERNAL".to_string()), 0x1)),
+            "the address resolves in its space"
+        );
     }
 
     #[test]
@@ -671,7 +684,7 @@ mod tests {
         );
         assert_eq!(corpus.functions[0].name.as_deref(), Some("good"));
         assert!(
-            corpus.by_address.contains_key(&0x1000),
+            corpus.by_address.contains_key(&(None, 0x1000)),
             "the good record is still found"
         );
         assert_eq!(
@@ -713,7 +726,7 @@ mod tests {
             corpus.functions
         );
         assert_eq!(
-            corpus.by_address.get(&0x1000).copied(),
+            corpus.by_address.get(&(None, 0x1000)).copied(),
             Some(0),
             "the address resolves to the first"
         );
