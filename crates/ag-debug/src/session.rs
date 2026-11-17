@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -81,11 +81,24 @@ impl Debugger {
     }
 }
 
-/// A debugger process, its output read on a thread.
+/// How much of what the debugger printed to its error stream is kept: the
+/// end of it, where the reason it ended is.
+const STDERR_TAIL: usize = 4096;
+/// How long the error stream's reader is waited for when the debugger
+/// ends, so its last words are in the error.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
+
+/// A debugger process, its output read on a thread. What it prints to its
+/// error stream is read on another, and the end of it kept, so a debugger
+/// that ends can say why.
 pub struct ProcessTransport {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<std::io::Result<String>>,
+    /// The end of what the debugger printed to its error stream.
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    /// Disconnected once the error stream's reader has read to its end.
+    stderr_done: mpsc::Receiver<()>,
 }
 
 impl ProcessTransport {
@@ -98,11 +111,15 @@ impl ProcessTransport {
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("starting {program}"))?;
         let stdin = child.stdin.take().expect("the debugger's input is piped");
         let stdout = child.stdout.take().expect("the debugger's output is piped");
+        let mut stderr = child
+            .stderr
+            .take()
+            .expect("the debugger's error stream is piped");
         let (sender, lines) = mpsc::channel();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
@@ -112,11 +129,60 @@ impl ProcessTransport {
                 }
             }
         });
+        // The error stream is always read, so a debugger that prints much
+        // there is never held up by a full pipe. It is read as bytes, not
+        // lines: what is not text is kept all the same, and only the end
+        // of it is kept at all.
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let (done, stderr_done) = mpsc::channel::<()>();
+        let tail = Arc::clone(&stderr_tail);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                        tail.extend_from_slice(&chunk[..read]);
+                        let excess = tail.len().saturating_sub(STDERR_TAIL);
+                        tail.drain(..excess);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            // The stream is read to its end: whoever waits for it is told.
+            drop(done);
+        });
         Ok(Self {
             child,
             stdin,
             lines,
+            stderr_tail,
+            stderr_done,
         })
+    }
+
+    /// The error for a debugger that ended, with the last of what it
+    /// printed to its error stream: the reason it ended, most often.
+    fn ended(&self) -> std::io::Error {
+        // The error stream's reader may be a moment behind the output's:
+        // it is waited for, briefly, so the debugger's last words are
+        // here. Briefly only — a process the debugger left behind can hold
+        // the stream open long after it.
+        let _ = self.stderr_done.recv_timeout(STDERR_WAIT);
+        let tail = self
+            .stderr_tail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let text = String::from_utf8_lossy(&tail);
+        let text = text.trim();
+        let message = if text.is_empty() {
+            "the debugger ended".to_string()
+        } else {
+            format!("the debugger ended: {text}")
+        };
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, message)
     }
 }
 
@@ -131,10 +197,7 @@ impl Transport for ProcessTransport {
         match self.lines.recv_timeout(timeout) {
             Ok(line) => line.map(Some),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "the debugger ended",
-            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.ended()),
         }
     }
 }
@@ -1304,5 +1367,50 @@ mod tests {
             "poll should not mark session as Exited on a transport error, but state is {:?}",
             session.state()
         );
+    }
+
+    #[cfg(unix)]
+    fn shell(script: &str) -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), script.to_string()]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mi3_unrecognized_on_stderr_is_in_the_error_when_the_debugger_dies() {
+        let command = shell("echo 'Interpreter mi3 unrecognized' >&2; exit 1");
+
+        // The transport's own error carries the debugger's last words.
+        let mut transport = ProcessTransport::spawn(&command).expect("sh starts");
+        let error = loop {
+            match transport.next_line(Duration::from_secs(5)) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the debugger's end was not seen in time"),
+                Err(error) => break error,
+            }
+        };
+        assert!(error.to_string().contains("mi3 unrecognized"), "{error}");
+        // The debugger is still known to be gone, not only unreadable.
+        assert!(debugger_gone(&error), "{error:?}");
+
+        // And so does the session's, when the debugger dies before hello.
+        let transport = ProcessTransport::spawn(&command).expect("sh starts");
+        let mut session = Session::with_transport(Box::new(transport), Path::new("/x/test"), 0);
+        let error = session.hello().unwrap_err();
+        assert!(error.to_string().contains("mi3 unrecognized"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_flood_on_stderr_is_drained_and_does_not_keep_the_prompt_back() {
+        // More than a pipe holds: were the error stream not read, the
+        // child would wait on it for ever and the prompt never come.
+        let command = shell("head -c 200000 /dev/zero >&2; echo \"(gdb) \"");
+        let mut transport = ProcessTransport::spawn(&command).expect("sh starts");
+        let line = transport
+            .next_line(Duration::from_secs(5))
+            .expect("the debugger is there");
+        assert_eq!(line.as_deref(), Some("(gdb) "));
+        // Only the end of the flood is kept.
+        assert!(transport.stderr_tail.lock().unwrap().len() <= STDERR_TAIL);
     }
 }
