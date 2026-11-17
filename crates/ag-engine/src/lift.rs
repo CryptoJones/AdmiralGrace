@@ -1046,7 +1046,11 @@ pub fn lift_graph(
         })
         .collect();
     let analysis = structure::analyze(&successors(&nodes), entry, |node| nodes[node].address)?;
-    let (nodes, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
+    // The entry from here on is the one the rewriters left: pruning the
+    // blocks below it renumbers it, and the graph they left is analyzed,
+    // read and structured from there. The chains' analysis above keeps the
+    // entry the architecture gave.
+    let (nodes, entry, rewritten) = crate::plugin::rewrite_nodes(address, name, entry, nodes)?;
     // The plugins' recognizers have the graph the rewriters left, for the
     // strings its expressions build; the renderers, for the names of its
     // constants.
@@ -1298,7 +1302,9 @@ fn lift_pass(
     // graph they leave is analyzed again whenever one ran — a rewriter may
     // edit the nodes directly — while the chains keep their own analysis
     // for the lifted and low levels.
-    let (nodes, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
+    // The entry is the first chain, which every block left is reached
+    // from: pruning never renumbers it, so it stays 0.
+    let (nodes, _, rewritten) = crate::plugin::rewrite_nodes(entry, name, 0, nodes)?;
     // The plugins' recognizers have the graph the rewriters left, for the
     // strings its expressions build; the renderers, for the names of its
     // constants.
