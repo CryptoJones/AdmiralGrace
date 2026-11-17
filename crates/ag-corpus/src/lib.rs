@@ -312,21 +312,22 @@ impl Corpus {
         Ok(Self::drop_header(&raw))
     }
 
-    /// Drop the leading comment header of a function body.
+    /// Drop the provider's header from a function body.
     ///
-    /// The header is the run of `//` comment lines at the top of the file —
-    /// the lines the provider wrote to say which function this is. The body
-    /// is everything after it, and the body keeps its signature and its
-    /// locals: a header is dropped, not a function's head.
+    /// The header is the `// Function: <name> @ <address>` line the provider
+    /// wrote at the top of the file to say which function this is, with the
+    /// blank lines around it. Only that line is recognised as a header: any
+    /// other leading comment — an engine note such as `// returns int: x`,
+    /// or a thunk whose whole body is a comment — is part of the body and is
+    /// kept, as are the signature and the locals.
     pub fn drop_header(raw: &str) -> String {
         let mut body = String::new();
         let mut in_header = true;
 
         for line in raw.lines() {
-            let trimmed = line.trim();
-
             if in_header {
-                if trimmed.is_empty() || trimmed.starts_with("//") {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || Self::is_function_header(trimmed) {
                     continue;
                 }
                 in_header = false;
@@ -337,6 +338,12 @@ impl Corpus {
         }
 
         body.trim_end().to_string()
+    }
+
+    /// Whether `line` is the provider's `// Function:` header line.
+    fn is_function_header(line: &str) -> bool {
+        line.strip_prefix("//")
+            .is_some_and(|comment| comment.trim_start().starts_with("Function:"))
     }
 }
 
