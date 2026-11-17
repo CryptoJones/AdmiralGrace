@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub mod archive;
 pub mod kuna;
@@ -108,7 +108,10 @@ impl FunctionJson {
         };
 
         let path = match &self.relative_path {
-            Some(rp) => corpus_root.join(rp),
+            Some(rp) => corpus_root.join(
+                confined_relative_path(rp)
+                    .with_context(|| format!("the path of {}", self.label()))?,
+            ),
             None => corpus_root
                 .join("functions")
                 .join(format!("{:#x}.c", address)),
@@ -137,6 +140,26 @@ impl FunctionJson {
             format!("{:?}", self.name)
         }
     }
+}
+
+/// A record's `relative_path`, checked to stay under the corpus root.
+///
+/// The path is joined onto the corpus root, so it must be relative and must
+/// not climb: an absolute path would replace the root, and a `..` component
+/// would walk out of it. Either is an error.
+fn confined_relative_path(relative_path: &str) -> Result<&Path> {
+    let path = Path::new(relative_path);
+    let confined = path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+
+    if !confined {
+        return Err(anyhow::anyhow!(
+            "the path {relative_path:?} leaves the corpus root"
+        ));
+    }
+
+    Ok(path)
 }
 
 /// Parse an address that may name an address space.
@@ -265,9 +288,27 @@ impl Corpus {
         })
     }
 
+    /// Read the body of `f`.
+    ///
+    /// The file read is the one the path resolves to, links followed, and it
+    /// must lie under the corpus root: a path that leaves the root is an
+    /// error, not a read.
     pub fn function_body(&self, f: &Function) -> Result<String> {
+        let root = fs::canonicalize(&self.root)
+            .with_context(|| format!("resolving {}", self.root.display()))?;
+        let path = fs::canonicalize(&f.path)
+            .with_context(|| format!("reading {}", f.path.display()))?;
+
+        if !path.starts_with(&root) {
+            return Err(anyhow::anyhow!(
+                "{} is outside the corpus root {}",
+                f.path.display(),
+                self.root.display()
+            ));
+        }
+
         let raw =
-            fs::read_to_string(&f.path).with_context(|| format!("reading {}", f.path.display()))?;
+            fs::read_to_string(&path).with_context(|| format!("reading {}", f.path.display()))?;
         Ok(Self::drop_header(&raw))
     }
 
