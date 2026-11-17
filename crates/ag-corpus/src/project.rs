@@ -1696,6 +1696,7 @@ impl Annotation {
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.operand_format.is_none()
+            && self.constant_enum.is_none()
             && self.union_field.is_none()
             && self.jump_table.is_none()
             && self.patch.is_none()
