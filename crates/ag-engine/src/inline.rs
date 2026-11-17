@@ -206,7 +206,7 @@ impl Inliner<'_> {
             rebuild(shape, call)
         };
         match self.splice(target, &args, at, false) {
-            Ok((_, None)) if !matches!(shape, Shape::Bare) => {
+            Ok((_, None, _)) if !matches!(shape, Shape::Bare) => {
                 self.note(&name, at, "it returns no value");
                 out.push(Statement {
                     node: rebuilt(args, shape),
@@ -214,7 +214,8 @@ impl Inliner<'_> {
                     kind,
                 });
             }
-            Ok((body, value)) => {
+            Ok((body, value, locals)) => {
+                self.declare(locals);
                 let value = match (shape, value) {
                     (Shape::Bare, Some(value)) => effects(&value).then_some(value),
                     (shape, value) => value.map(|value| rebuild(shape, value)),
@@ -254,11 +255,12 @@ impl Inliner<'_> {
             let at = self.site_of(target, addresses);
             let name = callee_name(&callee);
             match self.splice(target, &args, at, true) {
-                Ok((_, Some(value))) => {
+                Ok((_, Some(value), locals)) => {
+                    self.declare(locals);
                     self.markers.push((name, at));
                     value
                 }
-                Ok((_, None)) => {
+                Ok((_, None, _)) => {
                     self.note(&name, at, "it returns no value");
                     AstNode::Call { callee, args }
                 }
@@ -314,16 +316,18 @@ impl Inliner<'_> {
     }
 
     /// The statements that stand for the call of `target` with `args` at
-    /// `at`, and the value it returns, if any; why not, when it cannot be
-    /// inlined. When `expression`, the call is inside a larger expression
-    /// and the body must be the value alone.
+    /// `at`, the value it returns, if any, and the locals the body brings;
+    /// why not, when it cannot be inlined. The locals are not declared
+    /// here: whoever keeps the body declares them, with
+    /// [`Inliner::declare`]. When `expression`, the call is inside a larger
+    /// expression and the body must be the value alone.
     fn splice(
         &mut self,
         target: u64,
         args: &[AstNode],
         at: u64,
         expression: bool,
-    ) -> Result<(Vec<Statement>, Option<AstNode>), String> {
+    ) -> Result<(Vec<Statement>, Option<AstNode>, Vec<Variable>), String> {
         let callee = match self.body(target) {
             Some(Ok(callee)) => callee.clone(),
             Some(Err(reason)) => return Err(reason.clone()),
@@ -383,6 +387,8 @@ impl Inliner<'_> {
         let base = identifier(&callee.name);
         let mut renames: BTreeMap<String, AstNode> = BTreeMap::new();
         let mut bound: Vec<Statement> = Vec::new();
+        // The locals the body brings, declared only once it is kept.
+        let mut staged: Vec<Variable> = Vec::new();
         for (param, arg) in callee.params.iter().zip(args) {
             let reads = Reads::of(&body, value.as_ref(), &param.name);
             let simple = arg.is_atom() || arg.is_constant();
@@ -403,8 +409,8 @@ impl Inliner<'_> {
                     param.name
                 ));
             }
-            let fresh = self.fresh(&format!("{base}_{}", param.name));
-            self.declared.push(Variable {
+            let fresh = self.fresh(&format!("{base}_{}", param.name), &staged);
+            staged.push(Variable {
                 ty: param.ty.clone(),
                 name: fresh.clone(),
                 placements: inlined_placements(param, &callee.name),
@@ -420,8 +426,8 @@ impl Inliner<'_> {
             renames.insert(param.name.clone(), AstNode::var(fresh));
         }
         for local in &callee.locals {
-            let fresh = self.fresh(&format!("{base}_{}", local.name));
-            self.declared.push(Variable {
+            let fresh = self.fresh(&format!("{base}_{}", local.name), &staged);
+            staged.push(Variable {
                 ty: local.ty.clone(),
                 name: fresh.clone(),
                 placements: inlined_placements(local, &callee.name),
@@ -430,7 +436,7 @@ impl Inliner<'_> {
             renames.insert(local.name.clone(), AstNode::var(fresh));
         }
         // The structure a fragment is of is named as the caller names it.
-        for variable in &mut self.declared {
+        for variable in self.declared.iter_mut().chain(&mut staged) {
             if let Some(fragment) = &mut variable.fragment {
                 if let Some(AstNode::Var { name }) = fragment
                     .within
@@ -463,19 +469,27 @@ impl Inliner<'_> {
                 self.notes.push(note);
             }
         }
-        Ok((statements, value))
+        Ok((statements, value, staged))
     }
 
-    /// `wanted`, or `wanted_2`, `wanted_3`… when the name is taken.
-    fn fresh(&mut self, wanted: &str) -> String {
+    /// `wanted`, or `wanted_2`, `wanted_3`… when the name is taken, by the
+    /// function or by one of `staged`. The name is not taken until its
+    /// variable is declared.
+    fn fresh(&self, wanted: &str, staged: &[Variable]) -> String {
         let mut name = wanted.to_string();
         let mut n = 2;
-        while self.taken.contains(&name) {
+        while self.taken.contains(&name) || staged.iter().any(|variable| variable.name == name) {
             name = format!("{wanted}_{n}");
             n += 1;
         }
-        self.taken.insert(name.clone());
         name
+    }
+
+    /// Declare the locals a body that is kept brought, their names taken.
+    fn declare(&mut self, locals: Vec<Variable>) {
+        self.taken
+            .extend(locals.iter().map(|variable| variable.name.clone()));
+        self.declared.extend(locals);
     }
 }
 
