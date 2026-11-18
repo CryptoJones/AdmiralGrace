@@ -2006,9 +2006,7 @@ impl Binary {
         let decoded = self.decoded_of(code);
         decoded
             .disasm
-            .instructions
-            .iter()
-            .find(|ins| ins.address == address)
+            .instruction_at(address)
             .map(|ins| ins.length)
     }
 
@@ -4342,9 +4340,7 @@ impl Binary {
             };
 
             let mut instructions = Vec::new();
-            for instruction in decoded.disasm.instructions.iter().filter(|instruction| {
-                block.from <= instruction.address && instruction.address < block.to
-            }) {
+            for instruction in decoded.disasm.range(block.from, block.to) {
                 // An instruction that names an address outright points at
                 // the data there: that is what a reference to a string or to
                 // data is. In 64-bit code that is a read through the
@@ -5072,12 +5068,13 @@ fn decode_arm_section(
 /// byte is the block's, or — when that one is a delay slot — the branch
 /// before it, whose flow the block ends in.
 fn last_of_block(disasm: &Disasm, to: u64) -> Option<&DecodedInsn> {
-    let at = disasm
-        .instructions
-        .iter()
-        .position(|ins| ins.address + ins.length as u64 == to)?;
-    let last = &disasm.instructions[at];
-    match at.checked_sub(1).map(|before| &disasm.instructions[before]) {
+    let before = disasm.range(0, to);
+    let at = before.len().checked_sub(1)?;
+    let last = &before[at];
+    if last.address + last.length as u64 != to {
+        return None;
+    }
+    match at.checked_sub(1).map(|index| &before[index]) {
         Some(branch)
             if branch.delay_slot && branch.address + branch.length as u64 == last.address =>
         {
@@ -5342,11 +5339,7 @@ fn cfg_from_blocks(
             ..ag_engine::cfg::BasicBlock::default()
         });
         cfg.index_by_address.insert(block.from, index as u32);
-        for instruction in disasm
-            .instructions
-            .iter()
-            .filter(|ins| ins.address >= block.from && ins.address < block.to)
-        {
+        for instruction in disasm.range(block.from, block.to) {
             if let Flow::Call(target) = instruction.flow {
                 cfg.call_sites.push(instruction.address);
                 cfg.call_targets.push(target);

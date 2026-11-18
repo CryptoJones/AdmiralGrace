@@ -1031,9 +1031,8 @@ pub fn lift_graph(
                 .or_else(|| cfg.block_containing(node.address))
                 .map(|block| {
                     disasm
-                        .instructions
+                        .range(block.from, block.to)
                         .iter()
-                        .filter(|ins| ins.address >= block.from && ins.address < block.to)
                         .map(|ins| ins.address)
                         .collect()
                 })
@@ -2019,13 +2018,7 @@ fn chains(
         };
         let mut instructions: Vec<DecodedInsn> = Vec::new();
         loop {
-            instructions.extend(
-                disasm
-                    .instructions
-                    .iter()
-                    .filter(|ins| block.contains(ins.address))
-                    .cloned(),
-            );
+            instructions.extend(disasm.range(block.from, block.to).iter().cloned());
             let last = instructions.last();
             let continues = last.is_some_and(|ins| !branches(ins) && ins.flow != Flow::Return)
                 && block.successor_addresses.as_slice() == [block.to]

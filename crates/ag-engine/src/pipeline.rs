@@ -34,6 +34,12 @@ pub struct Census {
     pub cancel_requested: std::sync::atomic::AtomicBool,
 }
 
+/// The decoded instructions of one segment.
+///
+/// `instructions` is in ascending address order. [`Disasm::decode`] pushes
+/// them that way, and [`Disasm::range`] and [`Disasm::instruction_at`]
+/// binary-search on it, so whatever else builds a `Disasm` must sort the
+/// instructions by address first.
 #[derive(Debug, Default)]
 pub struct Disasm {
     pub file_offset_of_segment: u64,
@@ -65,8 +71,22 @@ impl Disasm {
         })
     }
 
+    /// The instructions whose address is in `[from, to)`, in address order.
+    ///
+    /// Found by binary search on the order of `instructions`. Empty when no
+    /// instruction starts in the range, or when `to <= from`.
+    pub fn range(&self, from: u64, to: u64) -> &[DecodedInsn] {
+        let start = self.instructions.partition_point(|i| i.address < from);
+        let tail = &self.instructions[start..];
+        &tail[..tail.partition_point(|i| i.address < to)]
+    }
+
+    /// The instruction that starts at `address`, when one does.
+    ///
+    /// Found by binary search on the order of `instructions`.
     pub fn instruction_at(&self, address: u64) -> Option<&DecodedInsn> {
-        self.instructions.iter().find(|i| i.address == address)
+        let at = self.instructions.partition_point(|i| i.address < address);
+        self.instructions.get(at).filter(|i| i.address == address)
     }
 }
 
@@ -120,6 +140,67 @@ mod tests {
         assert_eq!(disasm.instruction_at(0x1000).map(|i| i.length), Some(1));
         assert_eq!(disasm.instruction_at(0x1002).map(|i| i.address), Some(0x1002));
         assert!(disasm.instruction_at(0x1003).is_none());
+    }
+
+    #[test]
+    fn instruction_at_and_range_match_a_linear_scan() {
+        // Two blocks: `nop; xor eax, eax; jmp +0` at 0x1000..0x1005, then
+        // `mov rbx, rax; nop; ret` at 0x1005..0x100a.
+        let bytes = [0x90, 0x31, 0xc0, 0xeb, 0x00, 0x48, 0x89, 0xc3, 0x90, 0xc3];
+        let mut ctx = X86IcedContext::new(Bitness::Bits64);
+        let disasm = Disasm::decode(&mut ctx, &bytes, 0x1000).unwrap();
+        let addresses = |instructions: &[DecodedInsn]| -> Vec<u64> {
+            instructions.iter().map(|i| i.address).collect()
+        };
+        assert_eq!(
+            addresses(&disasm.instructions),
+            [0x1000, 0x1001, 0x1003, 0x1005, 0x1008, 0x1009]
+        );
+
+        // Each block is exactly its own instructions.
+        assert_eq!(
+            addresses(disasm.range(0x1000, 0x1005)),
+            [0x1000, 0x1001, 0x1003]
+        );
+        assert_eq!(
+            addresses(disasm.range(0x1005, 0x100a)),
+            [0x1005, 0x1008, 0x1009]
+        );
+
+        // Every range over and around the segment equals a filter of the
+        // whole vector: bounds inside an instruction, empty and inverted
+        // ranges, and ranges outside the segment included.
+        for from in 0x0ffe_u64..=0x100c {
+            for to in 0x0ffe_u64..=0x100c {
+                let scanned: Vec<u64> = disasm
+                    .instructions
+                    .iter()
+                    .filter(|i| from <= i.address && i.address < to)
+                    .map(|i| i.address)
+                    .collect();
+                assert_eq!(
+                    addresses(disasm.range(from, to)),
+                    scanned,
+                    "range({from:#x}, {to:#x})"
+                );
+            }
+        }
+
+        // The binary search finds the very instruction a linear find does,
+        // and misses where it misses.
+        for address in 0x0ffe_u64..=0x100c {
+            let scanned = disasm.instructions.iter().find(|i| i.address == address);
+            assert_eq!(
+                disasm
+                    .instruction_at(address)
+                    .map(|i| i as *const DecodedInsn),
+                scanned.map(|i| i as *const DecodedInsn),
+                "instruction_at({address:#x})"
+            );
+        }
+        assert!(disasm.instruction_at(0x0fff).is_none());
+        assert!(disasm.instruction_at(0x1002).is_none());
+        assert!(disasm.instruction_at(0x100a).is_none());
     }
 
     #[test]
