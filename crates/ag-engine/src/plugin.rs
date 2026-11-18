@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Bitness;
 use crate::ast::AstNode;
-use crate::cfg::ProcedureCfg;
+use crate::cfg::{BasicBlock, ProcedureCfg};
 use crate::cpu_context::{DecodedInsn, Flow};
 use crate::image::Section;
 use crate::lift::{NotLifted, Statement, StatementKind, Variable};
@@ -1935,6 +1935,19 @@ pub struct ExternalLoader {
     pub timeout: Duration,
 }
 
+/// Which bytes a lift request carries. The request's `instructions` are
+/// the ones inside the function's blocks either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestBytes {
+    /// The whole section, from its base. A literal pool or a jump table
+    /// the function reads sits outside its blocks.
+    #[default]
+    Section,
+    /// The function's span, from its lowest block to its highest, with
+    /// `base` at the span's start. A manifest entry's `"bytes": "function"`.
+    Function,
+}
+
 /// An architecture that is a command: given a section as JSON on its
 /// standard input, it prints the instructions as JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1949,6 +1962,8 @@ pub struct ExternalArchitecture {
     pub blocks: Option<Vec<String>>,
     /// The command that lifts a whole function, when the manifest gives one.
     pub lift: Option<Vec<String>>,
+    /// Which bytes the `lift` request carries.
+    pub bytes: RequestBytes,
 }
 
 impl ExternalArchitecture {
@@ -1989,19 +2004,77 @@ fn instructions_json(disasm: &Disasm) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The instructions of `disasm` that lie inside `cfg`'s blocks.
+fn instructions_in_blocks<'a>(disasm: &'a Disasm, cfg: &ProcedureCfg) -> Vec<&'a DecodedInsn> {
+    disasm
+        .instructions
+        .iter()
+        .filter(|instruction| {
+            cfg.blocks
+                .iter()
+                .any(|block| block.contains(instruction.address))
+        })
+        .collect()
+}
+
+/// The function's span: from its lowest block to its highest, and the
+/// section bytes that cover it. An empty graph keeps the section.
+fn function_span<'a>(function: &'a FunctionCode<'a>) -> (u64, &'a [u8]) {
+    let Some(start) = function.cfg.blocks.iter().map(|block| block.from).min() else {
+        return (function.base, function.bytes);
+    };
+    let end = function
+        .cfg
+        .blocks
+        .iter()
+        .map(|block| block.to)
+        .max()
+        .unwrap_or(start);
+    if end < start || start < function.base {
+        return (function.base, function.bytes);
+    }
+    let from = (start - function.base) as usize;
+    let to = (end - function.base) as usize;
+    if from > function.bytes.len() {
+        return (start, &[]);
+    }
+    (start, &function.bytes[from..to.min(function.bytes.len())])
+}
+
 /// A function as JSON for a command that lifts it or patches its lift: the
 /// language, the function and its name, the section's bytes from `base`,
-/// the decoded instructions and the blocks of the control-flow graph.
-fn function_code_json(function: &FunctionCode) -> serde_json::Value {
+/// the instructions inside the function's blocks, and those blocks.
+///
+/// `bytes` is the whole section unless `span` is [`RequestBytes::Function`],
+/// which sends the function's span and moves `base` to its start.
+fn function_code_json(function: &FunctionCode, span: RequestBytes) -> serde_json::Value {
+    let (base, bytes) = match span {
+        RequestBytes::Section => (function.base, function.bytes),
+        RequestBytes::Function => function_span(function),
+    };
+    let instructions = instructions_in_blocks(function.disasm, function.cfg);
     serde_json::json!({
         "language": function.language,
         "function": function.address,
         "function_hex": format!("{:#x}", function.address),
         "name": function.name,
-        "base": function.base,
-        "base_hex": format!("{:#x}", function.base),
-        "bytes": hex_text(function.bytes),
-        "instructions": instructions_json(function.disasm),
+        "base": base,
+        "base_hex": format!("{base:#x}"),
+        "bytes": hex_text(bytes),
+        "instructions": instructions.iter().map(|instruction| {
+            let (flow, target) = flow_name(&instruction.flow);
+            let mut row = serde_json::json!({
+                "address": instruction.address,
+                "address_hex": format!("{:#x}", instruction.address),
+                "length": instruction.length,
+                "flow": flow,
+            });
+            if let Some(target) = target {
+                row["target"] = serde_json::json!(target);
+                row["target_hex"] = serde_json::json!(format!("{target:#x}"));
+            }
+            row
+        }).collect::<Vec<_>>(),
         "blocks": function.cfg.blocks.iter().map(|block| serde_json::json!({
             "from": block.from,
             "from_hex": format!("{:#x}", block.from),
@@ -2556,6 +2629,21 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
         }
         Ok(resolve_command(&command, &dir))
     };
+    let request_bytes =
+        |entry: &serde_json::Map<String, serde_json::Value>| -> Result<RequestBytes, String> {
+            match entry.get("bytes") {
+                None | Some(serde_json::Value::Null) => Ok(RequestBytes::Section),
+                Some(serde_json::Value::String(word)) if word == "section" => {
+                    Ok(RequestBytes::Section)
+                }
+                Some(serde_json::Value::String(word)) if word == "function" => {
+                    Ok(RequestBytes::Function)
+                }
+                Some(other) => Err(format!(
+                    "\"bytes\" is \"section\" or \"function\", not {other}"
+                )),
+            }
+        };
     let timeout_of =
         |entry: &serde_json::Map<String, serde_json::Value>| -> Result<Duration, String> {
             match entry.get("timeout") {
@@ -2625,6 +2713,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             timeout: timeout_of(entry)?,
             blocks: optional_command("blocks"),
             lift: optional_command("lift"),
+            bytes: request_bytes(entry)?,
         });
     }
     let mut lift_hooks = Vec::new();
@@ -2639,6 +2728,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             command: command_of(entry, "lift hook")?,
             timeout: timeout_of(entry)?,
             functions: strings(entry.get("functions")),
+            bytes: request_bytes(entry)?,
         });
     }
     let mut tools = Vec::new();
@@ -3166,7 +3256,7 @@ impl Architecture for ExternalArchitecture {
 
     fn lift(&self, function: &FunctionCode) -> Option<Result<LiftedGraph, String>> {
         let command = self.lift.as_ref()?;
-        let request = function_code_json(function);
+        let request = function_code_json(function, self.bytes);
         Some(
             self.ask(command, &request)
                 .and_then(|answer| graph_of(&answer)),
@@ -3308,6 +3398,8 @@ pub struct ExternalLiftHook {
     /// The functions the command is run for, by name or address; every
     /// function of its languages when empty.
     pub functions: Vec<String>,
+    /// Which bytes the hook's request carries.
+    pub bytes: RequestBytes,
 }
 
 impl LiftHook for ExternalLiftHook {
@@ -3328,7 +3420,7 @@ impl LiftHook for ExternalLiftHook {
         function: &FunctionCode,
         lifted: Option<&Result<LiftedGraph, String>>,
     ) -> Option<Result<LiftedGraph, String>> {
-        let mut request = function_code_json(function);
+        let mut request = function_code_json(function, self.bytes);
         if let Some(object) = request.as_object_mut() {
             match lifted {
                 Some(Ok(graph)) => {
@@ -3891,6 +3983,7 @@ mod tests {
             timeout: DEFAULT_TIMEOUT,
             blocks: None,
             lift: None,
+            bytes: RequestBytes::Section,
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -5083,6 +5176,7 @@ mod tests {
             ],
             timeout: Duration::from_secs(10),
             functions: Vec::new(),
+            bytes: RequestBytes::Section,
         };
         let graph_answer = serde_json::json!({
             "return_type": "void", "entry": 0,
@@ -5202,5 +5296,82 @@ mod tests {
         );
         unregister_lift_hook("hooked");
         unregister_lift_hook("second");
+    }
+
+    #[test]
+    fn instructions_of_a_lift_request_are_the_functions_blocks() {
+        fn at(address: u64) -> DecodedInsn {
+            DecodedInsn {
+                address,
+                length: 1,
+                mnemonic: 0,
+                flow: Flow::Next,
+                operands: Vec::new(),
+                register_uses: Vec::new(),
+                rip_relative_address: None,
+                absolute_address: None,
+                switch_indices: false,
+                opcode: 0,
+                flags_read: 0,
+                flags_written: 0,
+                rep: false,
+                delay_slot: false,
+            }
+        }
+        let disasm = Disasm {
+            file_offset_of_segment: 0,
+            instructions: vec![at(0x100), at(0x101), at(0x200), at(0x201)],
+        };
+        let cfg = ProcedureCfg {
+            blocks: vec![BasicBlock {
+                from: 0x100,
+                to: 0x102,
+                ..BasicBlock::default()
+            }],
+            ..ProcedureCfg::default()
+        };
+        let bytes = [0x11, 0x22, 0x33, 0x44];
+        let names = std::collections::BTreeMap::new();
+        let function = FunctionCode {
+            language: "TOY",
+            address: 0x100,
+            name: "first",
+            disasm: &disasm,
+            cfg: &cfg,
+            bytes: &bytes,
+            base: 0x100,
+            names: &names,
+        };
+        let section = function_code_json(&function, RequestBytes::Section);
+        let rows = section["instructions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| {
+            let address = row["address"].as_u64().unwrap();
+            (0x100..0x102).contains(&address)
+        }));
+        assert_eq!(section["base"], 0x100);
+        assert_eq!(section["bytes"], hex_text(&bytes));
+
+        let narrowed = function_code_json(&function, RequestBytes::Function);
+        assert_eq!(narrowed["instructions"], section["instructions"]);
+        assert_eq!(narrowed["base"], 0x100);
+        assert_eq!(narrowed["bytes"], hex_text(&bytes[..2]));
+
+        let dir = Dir::new("lift-bytes");
+        let path = dir.0.join("plugin.json");
+        std::fs::write(
+            &path,
+            r#"{ "lifthooks": [{ "languages": ["X"], "command": ["cat"], "bytes": "function" }] }"#,
+        )
+        .unwrap();
+        let manifest = read_manifest(&path).unwrap();
+        assert_eq!(manifest.lift_hooks[0].bytes, RequestBytes::Function);
+        std::fs::write(
+            &path,
+            r#"{ "lifthooks": [{ "languages": ["X"], "command": ["cat"], "bytes": "block" }] }"#,
+        )
+        .unwrap();
+        let error = read_manifest(&path).unwrap_err();
+        assert!(error.contains("\"section\" or \"function\""), "{error}");
     }
 }
