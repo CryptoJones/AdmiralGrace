@@ -164,7 +164,16 @@ pass (reported on standard error, once per function), the engine walks the flows
 once, with the context one instruction does not have, to the medium level (`docs/il.md`): it
 is given the function — `{"language": "…", "function": 256, "name": "start", "base": 256,
 "bytes": "<hex of the section>", "instructions": [ … ], "blocks": [ {"from": 256, "to": 259,
-"successors": [260, 259]}, … ]}` — and answers with its graph:
+"successors": [260, 259]}, … ]}` — and answers with its graph.
+
+`instructions` are the ones that lie inside the function's blocks, in address order, not every
+instruction of the section. `bytes` are still the whole section from `base`, because a literal
+pool or a jump table can sit outside the blocks. An architecture entry, for its `lift` command,
+or a lift-hook entry may say `"bytes": "function"`: then `bytes` is the function's span, from
+its lowest block to its highest, and `base` is where that span begins. `"bytes": "section"`
+names the default. Anything else is refused when the manifest is read. The `blocks` command
+is still given every instruction of the section. In Rust a `FunctionCode` still carries the
+section's disassembly and bytes.
 
 ```json
 { "return_type": "void", "params": [], "locals": [ { "name": "flag", "type": "int" } ], "entry": 0, "frame": [],
