@@ -90,8 +90,8 @@ pub fn result_use_after(disasm: &Disasm, cfg: &ProcedureCfg, site: u64) -> Resul
         else {
             continue;
         };
-        let instructions = disasm.instructions.iter().filter(|ins| {
-            block.contains(ins.address) && after.is_none_or(|after| ins.address > after)
+        let instructions = disasm.range(block.from, block.to).iter().filter(|ins| {
+            after.is_none_or(|after| ins.address > after)
         });
 
         let mut decided = false;

@@ -1581,11 +1581,11 @@ mod tests {
         }
         assert!(c_at(&compared, &options, &word("guard", false))
             .unwrap()
-            .contains("  }\n  x = 2;"));
-        let at_branch = BTreeMap::from([(0x1003u64, word("guard", false)[&0x1000])]);
-        assert!(c_at(&compared, &options, &at_branch)
-            .unwrap()
             .contains("  } else {\n"));
+        let at_compare = BTreeMap::from([(0x1003u64, word("guard", false)[&0x1000])]);
+        assert!(c_at(&compared, &options, &at_compare)
+            .unwrap()
+            .contains("  }\n  x = 2;"));
 
         // Where the taken arm falls through and the other does not, the
         // lift turns the condition round to make the guard — unless the
