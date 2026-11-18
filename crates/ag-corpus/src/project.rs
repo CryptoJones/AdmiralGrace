@@ -699,51 +699,69 @@ pub fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
 /// same point the longest word wins, so a declared name that starts with
 /// another — `v1` and `v10` — still keys on the whole word it found.
 pub fn replace_words(text: &str, pairs: &[(&str, &str)]) -> String {
-    let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
-    if pairs.is_empty() {
-        return text.to_string();
-    }
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // Each word still to be found, with the absolute offset of its next
+    // occurrence, in the order the pairs were given. An occurrence stays
+    // good until the scan moves past it, so a word is searched for again
+    // only then, and only from the scan's place onward; a word with no
+    // occurrence left is dropped. The text is read about once for each
+    // word, rather than once for each word at every step.
+    let mut pending: Vec<(usize, &str, &str)> = pairs
+        .iter()
+        .filter(|(word, _)| !word.is_empty())
+        .filter_map(|(word, name)| text.find(*word).map(|found| (found, *word, *name)))
+        .collect();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    // The character of the original text just before `rest`, so a word
-    // boundary is read from what the provider wrote, never from what the
-    // replacement put down.
-    let mut prev: Option<char> = None;
-    'scan: while !rest.is_empty() {
-        // The earliest whole-word match, longest word among equals.
-        let best = pairs
-            .iter()
-            .filter_map(|(word, name)| rest.find(word).map(|found| (found, *word, *name)))
-            .min_by(|(left_found, left_word, _), (right_found, right_word, _)| {
-                left_found.cmp(right_found).then(right_word.len().cmp(&left_word.len()))
-            });
-        if let Some((found, word, name)) = best {
-            let before = rest[..found]
-                .chars()
-                .next_back()
-                .or(prev)
-                .is_none_or(|c| !is_word(c));
-            let after_index = found + word.len();
-            let after = rest[after_index..]
-                .chars()
-                .next()
-                .is_none_or(|c| !is_word(c));
-            out.push_str(&rest[..found]);
-            if before && after {
-                out.push_str(name);
-            } else {
-                out.push_str(word);
+    // How far into `text` the scan has read: always a character boundary,
+    // the start of the text or the end of the last word found.
+    let mut cursor = 0;
+    loop {
+        pending.retain_mut(|(next, word, _)| {
+            if *next >= cursor {
+                return true;
             }
-            prev = word.chars().next_back();
-            rest = &rest[after_index..];
-            continue 'scan;
+            match text[cursor..].find(*word) {
+                Some(found) => {
+                    *next = cursor + found;
+                    true
+                }
+                None => false,
+            }
+        });
+        // The earliest match, longest word among equals, and the first
+        // pair given among those.
+        let best = pending.iter().copied().min_by(
+            |(left_found, left_word, _), (right_found, right_word, _)| {
+                left_found
+                    .cmp(right_found)
+                    .then(right_word.len().cmp(&left_word.len()))
+            },
+        );
+        let Some((found, word, name)) = best else {
+            break;
+        };
+        // A word boundary is read from the original text, what the
+        // provider wrote, never from what the replacement put down.
+        let before = text[..found]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word(c));
+        let after_index = found + word.len();
+        let after = text[after_index..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+        out.push_str(&text[cursor..found]);
+        if before && after {
+            out.push_str(name);
+        } else {
+            // Not a whole word, but still a hit: it is copied through and
+            // passed over whole, so nothing is matched inside it.
+            out.push_str(word);
         }
-        let width = rest.chars().next().expect("nonempty").len_utf8();
-        out.push_str(&rest[..width]);
-        prev = rest.chars().next();
-        rest = &rest[width..];
+        cursor = after_index;
     }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -4282,5 +4300,214 @@ mod tests {
         assert!(!record.is_empty());
         record.global_pointer = None;
         assert!(record.is_empty());
+    }
+
+    /// `replace_words` as it was before it remembered where each word next
+    /// occurs: every pair is searched for over the whole remainder at every
+    /// step. Kept to hold the faster scan to the same answers. It is
+    /// quadratic where nothing matches, so it is only run over short texts.
+    fn replace_words_reference(text: &str, pairs: &[(&str, &str)]) -> String {
+        let pairs: Vec<&(&str, &str)> = pairs.iter().filter(|(word, _)| !word.is_empty()).collect();
+        if pairs.is_empty() {
+            return text.to_string();
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        // The character of the original text just before `rest`, so a word
+        // boundary is read from what the provider wrote, never from what the
+        // replacement put down.
+        let mut prev: Option<char> = None;
+        'scan: while !rest.is_empty() {
+            // The earliest whole-word match, longest word among equals.
+            let best = pairs
+                .iter()
+                .filter_map(|(word, name)| rest.find(word).map(|found| (found, *word, *name)))
+                .min_by(|(left_found, left_word, _), (right_found, right_word, _)| {
+                    left_found.cmp(right_found).then(right_word.len().cmp(&left_word.len()))
+                });
+            if let Some((found, word, name)) = best {
+                let before = rest[..found]
+                    .chars()
+                    .next_back()
+                    .or(prev)
+                    .is_none_or(|c| !is_word(c));
+                let after_index = found + word.len();
+                let after = rest[after_index..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_word(c));
+                out.push_str(&rest[..found]);
+                if before && after {
+                    out.push_str(name);
+                } else {
+                    out.push_str(word);
+                }
+                prev = word.chars().next_back();
+                rest = &rest[after_index..];
+                continue 'scan;
+            }
+            let width = rest.chars().next().expect("nonempty").len_utf8();
+            out.push_str(&rest[..width]);
+            prev = rest.chars().next();
+            rest = &rest[width..];
+        }
+        out
+    }
+
+    /// What `replace_words` makes of `text`, checked against the reference.
+    fn same_as_reference(text: &str, pairs: &[(&str, &str)]) -> String {
+        let got = replace_words(text, pairs);
+        assert_eq!(
+            got,
+            replace_words_reference(text, pairs),
+            "{text:?} with {pairs:?}"
+        );
+        got
+    }
+
+    #[test]
+    fn replace_words_answers_as_the_reference_scan_does() {
+        // A name that starts with another keys on the whole word found: a
+        // rename of v10 never rewrites v1, nor one of v1 the v1 in v10.
+        assert_eq!(
+            same_as_reference("v1 = v10 + v1;", &[("v10", "b")]),
+            "v1 = b + v1;"
+        );
+        assert_eq!(
+            same_as_reference("v1 = v10 + v1;", &[("v1", "a")]),
+            "a = v10 + a;"
+        );
+        assert_eq!(
+            same_as_reference("v1 = v10 + v1;", &[("v1", "a"), ("v10", "b")]),
+            "a = b + a;"
+        );
+        assert_eq!(
+            same_as_reference("v1 = v10 + v1;", &[("v10", "b"), ("v1", "a")]),
+            "a = b + a;"
+        );
+
+        // A hit that is not on a word boundary is left as it is written.
+        assert_eq!(
+            same_as_reference("add(address, dadd)", &[("add", "sum")]),
+            "sum(address, dadd)"
+        );
+        assert_eq!(
+            same_as_reference("add + add", &[("add", "addX")]),
+            "addX + addX"
+        );
+        // It is still a hit, though: it is passed over whole, so a word
+        // starting inside it is not found.
+        assert_eq!(
+            same_as_reference("a.bc", &[("a.b", "x"), ("bc", "y")]),
+            "a.bc"
+        );
+        assert_eq!(
+            same_as_reference("address", &[("add", "x"), ("dress", "y")]),
+            "address"
+        );
+
+        // Multibyte text, in the words and around them.
+        assert_eq!(
+            same_as_reference(
+                "größe = größen + 1; 変数",
+                &[("größe", "size"), ("変数", "var")]
+            ),
+            "size = größen + 1; var"
+        );
+
+        // A word need not be an identifier: an AT&T register is `%rbp`.
+        assert_eq!(
+            same_as_reference("mov %rbp, %rsp; lea -8(%rbp), %rax", &[("%rbp", "frame")]),
+            "mov frame, %rsp; lea -8(frame), %rax"
+        );
+        assert_eq!(
+            same_as_reference("x%rbp %rbp1", &[("%rbp", "frame")]),
+            "x%rbp %rbp1"
+        );
+
+        // Two renames in flight at once, read in one pass.
+        assert_eq!(
+            same_as_reference(
+                "local_10 = local_14 + local_10;",
+                &[("local_10", "count"), ("local_14", "local_10")]
+            ),
+            "count = local_10 + count;"
+        );
+
+        // The edges: nothing to read, nothing to rename, an empty word, and
+        // one word given twice, where the first pair wins.
+        assert_eq!(same_as_reference("", &[("a", "x")]), "");
+        assert_eq!(same_as_reference("a b", &[]), "a b");
+        assert_eq!(same_as_reference("a b", &[("", "x"), ("b", "c")]), "a c");
+        assert_eq!(same_as_reference("a a", &[("a", "x"), ("a", "y")]), "x x");
+
+        // A seeded sweep over short texts and words from a small alphabet,
+        // so hits, near hits and overlapping words are all common.
+        const ALPHABET: [char; 9] = ['a', 'd', 'v', '1', '0', '_', ' ', '%', 'é'];
+        fn step(state: &mut u64, bound: usize) -> usize {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            (*state % bound as u64) as usize
+        }
+        fn random(state: &mut u64, longest: usize) -> String {
+            let len = step(state, longest + 1);
+            (0..len)
+                .map(|_| ALPHABET[step(state, ALPHABET.len())])
+                .collect()
+        }
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..2_000 {
+            let text = random(&mut state, 40);
+            let count = step(&mut state, 4);
+            let owned: Vec<(String, String)> = (0..count)
+                .map(|_| (random(&mut state, 3), random(&mut state, 4)))
+                .collect();
+            let pairs: Vec<(&str, &str)> = owned
+                .iter()
+                .map(|(word, name)| (word.as_str(), name.as_str()))
+                .collect();
+            same_as_reference(&text, &pairs);
+        }
+    }
+
+    #[test]
+    fn replace_words_reads_a_long_text_with_no_renamed_word_once() {
+        // 600,000 characters none of the words appear in. Searching the
+        // whole remainder at every character took minutes; the bound is
+        // loose so that only that fails it.
+        let text = "mov eax, dword [rsp+8]; ".repeat(25_000);
+        assert_eq!(text.len(), 600_000);
+        let started = std::time::Instant::now();
+        let out = replace_words(
+            &text,
+            &[("local_10", "count"), ("%rbp", "frame"), ("zzz", "y")],
+        );
+        let took = started.elapsed();
+        assert!(out == text, "a text no word appears in is unchanged");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "the scan took {took:?}"
+        );
+    }
+
+    #[test]
+    fn replace_words_does_not_search_again_for_a_word_that_never_appears() {
+        // 600,000 characters where one word matches 300,000 times and the
+        // other never does: the one that never appears is searched for
+        // once, not once for every match of the other.
+        let count = 300_000;
+        let text = "a ".repeat(count);
+        let started = std::time::Instant::now();
+        let out = replace_words(&text, &[("a", "x"), ("zzz", "y")]);
+        let took = started.elapsed();
+        assert!(out == "x ".repeat(count), "every a became x");
+        assert!(!out.contains('a'), "no a is left");
+        assert!(!out.contains("zzz") && !out.contains('y'), "zzz is absent");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "the scan took {took:?}"
+        );
     }
 }
