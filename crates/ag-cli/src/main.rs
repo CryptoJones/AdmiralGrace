@@ -27,6 +27,7 @@ mod gzf;
 mod ida;
 mod image;
 mod mcp;
+mod pdb;
 mod platform;
 mod plugins;
 mod port;
@@ -239,6 +240,14 @@ enum Cmd {
     Ida {
         #[command(subcommand)]
         cmd: ida::IdaCmd,
+    },
+    /// Read Microsoft PDB debug info (.pdb) and fetch symbols from a symbol
+    /// server: report what a PDB holds (info), download a PE binary's
+    /// matching PDB (fetch), or write its names, prototypes, comments,
+    /// types and locals into a project (apply).
+    Pdb {
+        #[command(subcommand)]
+        cmd: pdb::PdbCmd,
     },
     /// Compare two versions of a program: match their functions by hash,
     /// name and shape, report the differences, and carry names and types
@@ -526,6 +535,7 @@ fn cmd_run(cmd: Cmd) -> Result<i32> {
         Cmd::Platform { cmd } => platform::run(cmd),
         Cmd::Funcid { cmd } => funcid::run(cmd),
         Cmd::Ida { cmd } => ida::run(cmd),
+        Cmd::Pdb { cmd } => pdb::run(cmd),
         Cmd::Diff(args) => diff::run(args),
     }
 }

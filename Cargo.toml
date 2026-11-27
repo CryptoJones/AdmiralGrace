@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.85.27"
+version = "0.85.28"
 edition = "2021"
 license = "MIT"
 
@@ -38,6 +38,9 @@ cpp_demangle = "0.5.1"
 gimli = { version = "0.33", default-features = false, features = ["read"] }
 msvc-demangler = "0.11.0"
 rustc-demangle = "0.1.28"
+# The Microsoft PDB reader, already in Cargo.lock via kuna-analysis, for
+# importing symbols, types and locals (#400).
+pdb = "0.8.0"
 
 [profile.release]
 opt-level = 2

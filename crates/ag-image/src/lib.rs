@@ -86,6 +86,7 @@ pub use ag_engine::objc::{
 };
 pub use ag_engine::opaque::Opaque;
 pub use ag_engine::options;
+pub use ag_engine::pdb;
 use ag_engine::options::{BranchesEndProcedures, CodeSections, X86Syntax};
 pub use ag_engine::platform::{self as platform_types, Os as PlatformOs, Platform};
 pub use ag_engine::propagate::{self as propagate};
