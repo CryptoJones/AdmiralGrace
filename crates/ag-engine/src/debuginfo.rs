@@ -6,17 +6,22 @@
 //! [`parse`] reads one through the first parser that recognizes it: a
 //! parser a plugin registered ([`crate::plugin::DebugInfoParser`]), before
 //! the engine's own. The result is a [`DebugInfo`] — the functions, the
-//! data, the C types and the notes, in the file's own order — which a
-//! project keeps as the analyst's names, prototypes, comments and types.
+//! data, the locals, the C types and the notes, in the file's own order —
+//! which a project keeps as the analyst's names, prototypes, comments,
+//! stack variables and types.
 //!
-//! Two parsers are built in. `map` reads a linker map file: GNU ld's
+//! Three parsers are built in. `map` reads a linker map file: GNU ld's
 //! `Linker script and memory map` (the symbols at their addresses, under
 //! the output sections that say which are code) and MSVC's `Publics by
 //! Value` (the publics at their Rva+Base, the section table's `CODE`
 //! class saying which are functions). `json` reads a JSON document of the
 //! shape a parser command answers with — the interchange a tool of another
-//! kind exports to, and a parser of its own writes. A format the engine
-//! does not read — a PDB, a DWARF file of another tool's making — is a
+//! kind exports to, and a parser of its own writes. `dwarf` reads the
+//! DWARF debug information of an ELF, Mach-O or PE image — the names,
+//! types, prototypes and locals a compiler left ([`crate::dwarf`], which
+//! also finds the DWARF beside a stripped image: a sibling file, a dSYM
+//! bundle, a build-ID directory or a debuginfod server, #401). A format
+//! the engine does not read — a PDB, which `ag pdb` reads (#400) — is a
 //! parser a plugin adds, in Rust or as a command declared in a manifest
 //! (`docs/plugins.md`).
 //!
@@ -47,6 +52,8 @@ pub struct DebugInfo {
     pub functions: Vec<DebugFunction>,
     /// The data symbols, in the order the file declares them.
     pub data: Vec<DebugData>,
+    /// The local variables, in the order the file declares them.
+    pub locals: Vec<DebugLocal>,
     /// The C type definitions, in the order C reads them.
     pub types: Vec<String>,
     /// Notes left on the way through: symbols held back, names mended.
@@ -81,6 +88,24 @@ pub struct DebugData {
     pub ctype: Option<String>,
 }
 
+/// One local variable a debug info file places in a function's stack
+/// frame (#401): the DWARF reader reads these from the variables and
+/// spilled parameters under a subprogram.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugLocal {
+    /// The entry address of the function the variable belongs to.
+    pub function: u64,
+    /// The variable's name, as the source spells it.
+    pub name: String,
+    /// Its offset from the stack pointer at the function's entry, as the
+    /// lift's `local_<hex>` names count it: `-28` for `local_1c`.
+    pub offset: i64,
+    /// Its size in bytes.
+    pub size: u32,
+    /// Its C type — `int`, `struct point` — when the file gives one.
+    pub ctype: Option<String>,
+}
+
 /// A debug info file read: the parser that read it, and what it said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
@@ -92,7 +117,11 @@ pub struct Parsed {
 
 /// The built-in parsers, in the order they are offered a file.
 fn builtins() -> Vec<Arc<dyn DebugInfoParser>> {
-    vec![Arc::new(MapParser), Arc::new(JsonParser)]
+    vec![
+        Arc::new(MapParser),
+        Arc::new(JsonParser),
+        Arc::new(crate::dwarf::DwarfParser),
+    ]
 }
 
 /// Every parser, the ones registered first, in the order they were, then
@@ -477,12 +506,12 @@ impl DebugInfoParser for JsonParser {
         let object = answer
             .as_object()
             .ok_or_else(|| format!("{name}: a debug info document is a JSON object"))?;
-        if !["functions", "data", "types"]
+        if !["functions", "data", "locals", "types"]
             .iter()
             .any(|key| object.contains_key(*key))
         {
             return Err(format!(
-                "{name}: not a debug info document: no functions, data or types"
+                "{name}: not a debug info document: no functions, data, locals or types"
             ));
         }
         plugin::debug_info_of(&answer).map_err(|error| format!("{name}: {error}"))
@@ -831,6 +860,9 @@ Copyright (C) Microsoft Corporation.  All rights reserved.
             "the built-in map is shadowed, not listed twice"
         );
         plugin::unregister_debug_info_parser("map");
-        assert_eq!(available(), vec!["map".to_string(), "json".to_string()]);
+        assert_eq!(
+            available(),
+            vec!["map".to_string(), "json".to_string(), "dwarf".to_string()]
+        );
     }
 }

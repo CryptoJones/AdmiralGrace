@@ -396,7 +396,7 @@ fn the_parsers_are_listed_without_a_debug_file() {
         .iter()
         .map(|p| p["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(names, vec!["map", "json"]);
+    assert_eq!(names, vec!["map", "json", "dwarf"]);
     assert!(list[0]["builtin"].as_bool().expect("builtin"));
     assert!(
         list[0]["description"]
@@ -572,4 +572,234 @@ fn a_parser_without_magic_is_offered_every_file_before_the_builtins() {
         annotation_at(&show_json(&file), "0x1149")["name"],
         serde_json::json!("always_add")
     );
+}
+
+#[test]
+fn dwarf_debug_info_imports_types_prototypes_data_and_locals() {
+    let binary = fixture("dwarf.elf");
+    let file = TempFile::new("dwarf-import");
+    let (ok, stdout, stderr) = {
+        let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("project")
+            .arg(&binary)
+            .args(["save", "--out", &file.text(), "--locate-dwarf"])
+            .output()
+            .expect("the ag binary runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("locals added"), "{stdout}");
+    assert!(stdout.contains("(dwarf)"), "{stdout}");
+
+    let report = show_json(&file);
+    let main = annotation_at(&report, &format!("{:#x}", {
+        let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+            .arg("project")
+            .arg(&binary)
+            .args(["debuginfo", &binary.to_string_lossy(), "--json"])
+            .output()
+            .expect("ag runs");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("preview JSON");
+        let main_fn = parsed["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "main")
+            .unwrap();
+        ag_corpus::parse_addr(main_fn["address"].as_str().unwrap()).unwrap()
+    }));
+    assert_eq!(main["name"], serde_json::json!("main"));
+    assert_eq!(main["prototype"], serde_json::json!("int main(void)"));
+    assert_eq!(main["comment"], serde_json::json!("source: dwarf.c:49"));
+    let stack_vars = main["stack_vars"].as_array().expect("stack_vars");
+    assert!(
+        stack_vars
+            .iter()
+            .any(|v| v["name"] == "o" && v["type"] == "struct outer"),
+        "{stack_vars:?}"
+    );
+    let types = report["types"].as_array().expect("types");
+    assert!(
+        types.iter().any(|t| t["name"] == "struct outer"),
+        "{types:?}"
+    );
+}
+
+#[test]
+fn dwarf_locate_finds_sibling_dsym_build_id_and_debuginfod() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let stripped_bytes = std::fs::read(fixture("dwarf_stripped.elf")).unwrap();
+    let debug_bytes = std::fs::read(fixture("dwarf.debug")).unwrap();
+
+    // 1. Sibling `.debug` file.
+    let dir = Dir::new("locate-sibling");
+    let prog = dir.0.join("prog");
+    std::fs::write(&prog, &stripped_bytes).unwrap();
+    std::fs::write(dir.0.join("prog.debug"), &debug_bytes).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&prog)
+        .args(["debuginfo", "--locate", "--preview", "--json"])
+        .output()
+        .expect("ag runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["parser"], serde_json::json!("dwarf"));
+    assert!(
+        json["source"].as_str().unwrap().contains("sibling file"),
+        "{json}"
+    );
+    assert!(!json["locals"].as_array().unwrap().is_empty());
+
+    // 2. `.dSYM` bundle (passed directly and via `--locate`).
+    let dsym_dir = Dir::new("locate-dsym");
+    let dsym_prog = dsym_dir.0.join("prog");
+    std::fs::write(&dsym_prog, &stripped_bytes).unwrap();
+    let bundle = dsym_dir.0.join("prog.dSYM");
+    let dsym_dwarf = bundle.join("Contents/Resources/DWARF");
+    std::fs::create_dir_all(&dsym_dwarf).unwrap();
+    std::fs::write(dsym_dwarf.join("prog"), &debug_bytes).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&dsym_prog)
+        .args(["debuginfo", "--locate", "--preview"])
+        .output()
+        .expect("ag runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dSYM"), "{stdout}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&dsym_prog)
+        .args(["debuginfo", &bundle.to_string_lossy(), "--preview"])
+        .output()
+        .expect("ag runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("dwarf:"));
+
+    // 3. Build-ID directory via `--debug-dir`.
+    let bid_dir = Dir::new("locate-buildid");
+    let bid_prog = bid_dir.0.join("prog");
+    std::fs::write(&bid_prog, &stripped_bytes).unwrap();
+    let preview_self = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&bid_prog)
+        .args(["debuginfo", "--locate", "--preview"])
+        .output()
+        .unwrap();
+    assert!(!preview_self.status.success());
+
+    let id = {
+        let mut found = None;
+        // Extract build ID from the ELF note via `readelf`? No, parse via the `dwarf_stripped.elf` fixture note directly.
+        // We can read PT_NOTE / .note.gnu.build-id from stripped_bytes directly.
+        let mut pos = 0usize;
+        while let Some(idx) = stripped_bytes[pos..].windows(4).position(|w| w == b"GNU\0") {
+            let at = pos + idx;
+            if at >= 12 {
+                let namesz = u32::from_le_bytes(stripped_bytes[at - 12..at - 8].try_into().unwrap()) as usize;
+                let descsz = u32::from_le_bytes(stripped_bytes[at - 8..at - 4].try_into().unwrap()) as usize;
+                let kind = u32::from_le_bytes(stripped_bytes[at - 4..at].try_into().unwrap());
+                if namesz == 4 && kind == 3 && at + 4 + descsz <= stripped_bytes.len() {
+                    let hex: String = stripped_bytes[at + 4..at + 4 + descsz]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    found = Some(hex);
+                    break;
+                }
+            }
+            pos = at + 4;
+        }
+        found.expect("build ID in fixture")
+    };
+    let debug_root = bid_dir.0.join("dbg");
+    let bid_file = debug_root
+        .join(".build-id")
+        .join(&id[..2])
+        .join(format!("{}.debug", &id[2..]));
+    std::fs::create_dir_all(bid_file.parent().unwrap()).unwrap();
+    std::fs::write(&bid_file, &debug_bytes).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&bid_prog)
+        .args([
+            "debuginfo",
+            "--locate",
+            "--debug-dir",
+            &debug_root.to_string_lossy(),
+            "--preview",
+        ])
+        .output()
+        .expect("ag runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("build-ID directory"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // 4. Debuginfod HTTP server -> cache -> cache hit.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let payload = debug_bytes.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let hdr = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        stream.write_all(hdr.as_bytes()).unwrap();
+        stream.write_all(&payload).unwrap();
+    });
+    let cache = bid_dir.0.join("cache");
+    let proj = TempFile::new("debuginfod-proj");
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&bid_prog)
+        .args(["save", "--out", &proj.text()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ag"))
+        .arg("project")
+        .arg(&bid_prog)
+        .args([
+            "debuginfo",
+            "--file",
+            &proj.text(),
+            "--locate",
+            "--debug-dir",
+            &bid_dir.0.join("empty-dbg").to_string_lossy(),
+            "--debuginfod-url",
+            &format!("http://127.0.0.1:{port}"),
+            "--cache",
+            &cache.to_string_lossy(),
+            "--no-types",
+            "--no-locals",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    server.join().unwrap();
+    let apply_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(apply_json["parser"], serde_json::json!("dwarf"));
+    assert_eq!(apply_json["locals_added"], serde_json::json!(0));
+    assert_eq!(apply_json["types_added"], serde_json::json!(0));
+    assert!(apply_json["named"].as_u64().unwrap() > 0);
+    assert!(cache.join(&id).join("debuginfo").exists());
 }
