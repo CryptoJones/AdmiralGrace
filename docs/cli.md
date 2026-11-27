@@ -12,8 +12,8 @@ Every subcommand lives under `corpus`, because both sources are described the sa
 | [DWARF](#debug-information-ag-image-dwarf) | [Ghidra](#ghidra-ag-image-gzf) |
 | [`ag asm`](#assembling-one-instruction-ag-asm) | [`ag project`](#the-project-file-ag-project) |
 | [`ag archive`](#type-archives-shared-across-projects-ag-archive) | [`ag funcid`](#library-identification-by-whole-function-hash-ag-funcid) |
-| [`ag ida`](#importing-ida-databases-and-type-libraries-ag-ida) | [`ag platform`](#platform-types-ag-platform) |
-| [`ag debug`](#a-program-under-the-debugger-ag-debug) | |
+| [`ag ida`](#importing-ida-databases-and-type-libraries-ag-ida) | [`ag pdb`](#importing-pdb-debug-info-ag-pdb) |
+| [`ag platform`](#platform-types-ag-platform) | [`ag debug`](#a-program-under-the-debugger-ag-debug) |
 | [Plugins](#plugins-ag-plugins-and-ag-tool) | [`ag mcp`](#an-mcp-server-ag-mcp) |
 | [`ag catalog`](#ag-catalog-the-engines-options) | [The embedded manual](#the-embedded-manual-and-agent-skill) |
 | [Exit codes](#exit-codes) | |
@@ -925,6 +925,37 @@ ag ida apply types.til --binary ./program --project program.agproj
 |---|---|
 | `ag ida info FILE [--list] [--json]` | Reports the IDA version, processor, imagebase and input file a database describes, and its counts of names, functions, segments, comments and types; a type library reports its title, base and type count. `--list` names every name, function and type. |
 | `ag ida apply FILE --binary BINARY --project PROJECT [--raw ARCH --base ADDR …] [--no-types] [--json]` | Writes the database's names, comments, prototypes and types into a project, made from `BINARY` when not there yet (raw bytes load as `--raw`/`--base` say). A rename, comment, prototype or type already present stands. `--no-types` leaves the types out. The summary counts what was named, commented, prototyped and added. |
+
+## Importing PDB debug info: `ag pdb`
+
+Microsoft Program Database (`.pdb`) files — local or fetched from a
+symbol server using the PE image's CodeView `RSDS` record — can be
+inspected (`info`), downloaded into a local symbol cache (`fetch`), or
+applied to a project (`apply`). `apply` imports function and data names,
+C prototypes, source locations, C type definitions (structs, unions,
+enums, bitfields and typedefs in dependency order), and stack and
+register local variables (`stack_vars` and variable renames/types).
+
+`apply` keeps the analyst's own words: an existing function name,
+prototype, comment, data label, type definition, or non-overlapping
+local variable stands. When `FILE` is omitted on `apply`, `ag pdb`
+inspects `--binary` for a CodeView `RSDS` debug directory, checks
+beside the binary and in `--cache`, and downloads a matching PDB from
+`--server` or `_NT_SYMBOL_PATH` when configured.
+
+```sh
+ag pdb info program.pdb --list
+ag pdb info program.exe
+ag pdb fetch program.exe --server https://msdl.microsoft.com/download/symbols
+ag pdb apply program.pdb --binary program.exe --project program.agproj
+ag pdb apply --binary program.exe --project program.agproj --server http://127.0.0.1:8080/symbols
+```
+
+| Command | What it does |
+|---|---|
+| `ag pdb info FILE [--base ADDR] [--list] [--json]` | Reports a `.pdb` file's GUID, age, machine and counts of functions, locals, data and types (or a PE image's CodeView `RSDS` identity and whether a local matching PDB exists). `--base` shifts RVAs; `--list` prints every item. |
+| `ag pdb fetch BINARY [--server URL]… [--cache DIR] [-o FILE] [--json]` | Reads the PE binary's CodeView `RSDS` record, checks sibling files and `--cache` (default `$XDG_CACHE_HOME/ag/symbols` or `~/.cache/ag/symbols`), and downloads a matching PDB from `--server`, `_NT_SYMBOL_PATH`, or Microsoft's symbol server (`https://msdl.microsoft.com/download/symbols`). |
+| `ag pdb apply [FILE] --binary BINARY --project PROJECT [--server URL]… [--cache DIR] [--raw ARCH --base ADDR …] [--no-types] [--no-locals] [--json]` | Writes the PDB's function names, prototypes, source comments, data labels, types, and stack/register locals into `PROJECT`, creating it from `BINARY` when absent. Analyst edits are kept; `--no-types` skips types and `--no-locals` skips locals. |
 
 ## Platform types: `ag platform`
 

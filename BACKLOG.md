@@ -238,7 +238,7 @@ Filed 2026-10-26.
 
 ### Debug info and interop
 
-- [ ] Import PDB debug info, with symbol server download — [#400](https://github.com/CryptoJones/AdmiralGrace/issues/400)
+- [x] Import PDB debug info, with symbol server download — [#400](https://github.com/CryptoJones/AdmiralGrace/issues/400)
 - [ ] Import DWARF from the image, a sibling file, a dSYM, debuginfod or a build-ID directory — [#401](https://github.com/CryptoJones/AdmiralGrace/issues/401)
 - [x] Export the analysis as DWARF — [#402](https://github.com/CryptoJones/AdmiralGrace/issues/402)
 - [x] Import IDA databases and type libraries — [#403](https://github.com/CryptoJones/AdmiralGrace/issues/403)

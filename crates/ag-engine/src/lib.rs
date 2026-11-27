@@ -46,6 +46,7 @@ pub mod msp430;
 pub mod objc;
 pub mod opaque;
 pub mod options;
+pub mod pdb;
 pub mod pipeline;
 pub mod platform;
 pub mod plugin;
