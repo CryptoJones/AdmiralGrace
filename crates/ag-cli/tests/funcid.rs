@@ -328,9 +328,15 @@ impl SigServer {
             .spawn()
             .expect("the server starts");
         let mut line = String::new();
-        std::io::BufReader::new(child.stdout.take().expect("the server's stdout"))
+        let mut reader =
+            std::io::BufReader::new(child.stdout.take().expect("the server's stdout"));
+        reader
             .read_line(&mut line)
             .expect("the server says where it listens");
+        // Keep draining stdout so subsequent startup/status lines never hit EPIPE.
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        });
         let url = line
             .trim()
             .rsplit(' ')
