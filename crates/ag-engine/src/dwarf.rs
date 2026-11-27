@@ -1805,9 +1805,18 @@ pub fn locate_with(
         let mut candidates = vec![dir.join(&link), dir.join(".debug").join(&link)];
         for debug_dir in debug_dirs {
             // The image's path under the global debug directory, its
-            // root stripped so the join keeps the directory.
+            // root stripped so the join keeps the directory. Check both
+            // the lexical absolute path (when the path crosses a symlink
+            // such as macOS `/var` -> `/private/var`) and the canonical path.
+            if dir.is_absolute() {
+                let under = dir.strip_prefix("/").unwrap_or(dir);
+                candidates.push(debug_dir.join(under).join(&link));
+            }
             let under = absolute_dir.strip_prefix("/").unwrap_or(absolute_dir);
-            candidates.push(debug_dir.join(under).join(&link));
+            let canonical_candidate = debug_dir.join(under).join(&link);
+            if !candidates.contains(&canonical_candidate) {
+                candidates.push(canonical_candidate);
+            }
         }
         for candidate in candidates {
             let Ok(found) = std::fs::read(&candidate) else {
