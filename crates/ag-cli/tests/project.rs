@@ -960,19 +960,21 @@ fn a_copy_of_the_target_is_written_with_the_patches_in_it() {
     // and the target is as it was. The link can only be made when the
     // scratch directory is on the target's file system.
     #[cfg(unix)]
-    if std::fs::hard_link(&target, TempFile::new("write-patched-link").path()).is_ok() {
+    {
         let link = TempFile::new("write-patched-link");
-        let (ok, _, stderr) = project(&[
-            "write-patched",
-            "--file",
-            &file.text(),
-            "--out",
-            &link.text(),
-            "--force",
-        ]);
-        assert!(!ok);
-        assert!(stderr.contains("is the target itself"), "{stderr}");
-        assert_eq!(std::fs::read(&target).expect("the target"), original);
+        if std::fs::hard_link(&target, link.path()).is_ok() {
+            let (ok, _, stderr) = project(&[
+                "write-patched",
+                "--file",
+                &file.text(),
+                "--out",
+                &link.text(),
+                "--force",
+            ]);
+            assert!(!ok);
+            assert!(stderr.contains("is the target itself"), "{stderr}");
+            assert_eq!(std::fs::read(&target).expect("the target"), original);
+        }
     }
 
     // A read-only copy — the target's mode when the target is — is written

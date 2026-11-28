@@ -25,6 +25,7 @@ pub mod defuse;
 pub mod demangle;
 pub mod diff;
 pub mod dyld;
+pub mod dwarf;
 pub mod emit;
 pub mod emulate;
 pub mod fragments;

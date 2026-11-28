@@ -63,6 +63,7 @@ pub use ag_engine::cfgwalk::TableHint as JumpTableHint;
 pub use ag_engine::com::{ComMetadata as AgComMetadata, Guid};
 pub use ag_engine::ctype::{self as ctype, CError, TypeText};
 pub use ag_engine::debuginfo;
+pub use ag_engine::dwarf as dwarf_import;
 pub use ag_engine::defuse::{
     DefUse, Location as DefUseLocation, Role as DefUseRole, Touch, ValueWeb,
 };

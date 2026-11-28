@@ -35,9 +35,15 @@ pub enum ProjectCmd {
         #[arg(long)]
         force: bool,
         /// An external debug info file to load as the project is made: a
-        /// linker map, a JSON document, or a format a plugin's parser reads.
+        /// linker map, a JSON document, a DWARF image, or a format a
+        /// plugin's parser reads.
         #[arg(long, value_name = "FILE")]
         debug_info: Option<PathBuf>,
+        /// Locate DWARF debug information for the target automatically as the
+        /// project is made (embedded, `.gnu_debuglink`, sibling file,
+        /// `.dSYM` bundle, build-ID directory, or debuginfod).
+        #[arg(long, conflicts_with = "debug_info")]
+        locate_dwarf: bool,
         /// The parser to read `--debug-info` with, by name; the first that
         /// recognizes the file otherwise.
         #[arg(long, value_name = "NAME", requires = "debug_info")]
@@ -622,21 +628,47 @@ pub enum ProjectCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Load an external debug info file: the names, prototypes, types and
-    /// data labels another tool already knows — a linker map, a JSON
-    /// document, or a format a plugin's parser reads. Without a file, the
-    /// parsers are listed.
+    /// Load an external debug info file — or locate DWARF beside the
+    /// target — and keep its names, prototypes, locals, types and data
+    /// labels: a linker map, a JSON document, a DWARF image / `.debug` /
+    /// `.dSYM`, or a format a plugin's parser reads. Without a file or
+    /// `--locate`, the parsers are listed.
     Debuginfo {
         /// The project file to change; without one, the debug file is only
         /// reported.
         #[arg(long)]
         file: Option<PathBuf>,
-        /// The debug info file to read.
+        /// The debug info file to read (or a `.dSYM` bundle directory).
         debug: Option<PathBuf>,
+        /// Locate DWARF debug information for the target automatically:
+        /// embedded in the image, `.gnu_debuglink`, sibling `.debug` /
+        /// `.debuginfo` / `.dwarf`, `.dSYM` bundle, build-ID directory,
+        /// debuginfod cache, or `DEBUGINFOD_URLS`.
+        #[arg(long, conflicts_with = "debug")]
+        locate: bool,
+        /// Global debug directory to search for `.gnu_debuglink` and
+        /// `.build-id` matches (repeatable; defaults to `/usr/lib/debug`).
+        #[arg(long = "debug-dir", value_name = "DIR")]
+        debug_dirs: Vec<PathBuf>,
+        /// Debuginfod server URL to query by build ID (repeatable; defaults
+        /// to `DEBUGINFOD_URLS`).
+        #[arg(long = "debuginfod-url", value_name = "URL")]
+        debuginfod_urls: Vec<String>,
+        /// Local debuginfod cache directory (defaults to
+        /// `DEBUGINFOD_CACHE_PATH`, `$XDG_CACHE_HOME/debuginfod_client`, or
+        /// `~/.cache/debuginfod_client`).
+        #[arg(long, value_name = "DIR")]
+        cache: Option<PathBuf>,
         /// The parser to read it with, by name; the first that recognizes
         /// it otherwise.
         #[arg(long, value_name = "NAME")]
         format: Option<String>,
+        /// Leave C type definitions out, even where the debug info carries them.
+        #[arg(long)]
+        no_types: bool,
+        /// Leave local variables out, even where the debug info carries them.
+        #[arg(long)]
+        no_locals: bool,
         /// Say what the file holds without writing anything.
         #[arg(long)]
         preview: bool,
@@ -724,6 +756,7 @@ pub fn run(
             options,
             force,
             debug_info,
+            locate_dwarf,
             debug_info_format,
         } => save(
             &target,
@@ -731,6 +764,7 @@ pub fn run(
             options,
             force,
             debug_info.as_deref(),
+            locate_dwarf,
             debug_info_format.as_deref(),
         ),
         ProjectCmd::Show { file, json } => show(&target, &file, json),
@@ -764,14 +798,26 @@ pub fn run(
         ProjectCmd::Debuginfo {
             file,
             debug,
+            locate,
+            debug_dirs,
+            debuginfod_urls,
+            cache,
             format,
+            no_types,
+            no_locals,
             preview,
             json,
         } => debuginfo(
             &target,
             file.as_deref(),
             debug.as_deref(),
+            locate,
+            &debug_dirs,
+            &debuginfod_urls,
+            cache.as_deref(),
             format.as_deref(),
+            !no_types,
+            !no_locals,
             preview,
             json,
         ),
@@ -1471,6 +1517,7 @@ fn save(
     options: Vec<String>,
     force: bool,
     debug_info: Option<&Path>,
+    locate_dwarf: bool,
     debug_info_format: Option<&str>,
 ) -> Result<i32> {
     if out.exists() && !force {
@@ -1550,8 +1597,23 @@ fn save(
         project.options.insert(name.to_string(), value.to_string());
     }
     if let Some(debug) = debug_info {
-        let (parser, applied) = load_debug_info(target, &mut project, debug, debug_info_format)?;
+        let (parser, applied) = load_debug_info(
+            target,
+            &mut project,
+            debug,
+            debug_info_format,
+            true,
+            true,
+        )?;
         println!("{}: {}", debug.display(), applied.summary(&parser));
+    } else if locate_dwarf {
+        let (parsed, source) = locate_dwarf_info(target, &[], &[], None)?;
+        let image = image_under(target, &project)?;
+        let applied = apply_debug_info(&mut project, &image, &parsed.info, true, true);
+        for note in parsed.info.notes.iter().chain(&applied.notes) {
+            eprintln!("note: {note}");
+        }
+        println!("{source}: {}", applied.summary(&parsed.parser));
     }
     project.save(out)?;
     println!(
@@ -2749,46 +2811,114 @@ fn svd_import(
     Ok(0)
 }
 
-/// Load an external debug info file into the project of `target`, or say
-/// what it holds: without a project file, or with `--preview`, the file is
-/// only reported. Without a debug file, the parsers are listed.
+/// Load an external debug info file (or locate DWARF for `target`) into
+/// the project of `target`, or say what it holds: without a project file,
+/// or with `--preview`, the file is only reported. Without a debug file or
+/// `--locate`, the parsers are listed.
+#[allow(clippy::too_many_arguments)]
 fn debuginfo(
     target: &Path,
     file: Option<&Path>,
     debug: Option<&Path>,
+    locate: bool,
+    debug_dirs: &[PathBuf],
+    debuginfod_urls: &[String],
+    cache: Option<&Path>,
     format: Option<&str>,
+    with_types: bool,
+    with_locals: bool,
     preview: bool,
     json: bool,
 ) -> Result<i32> {
-    let Some(debug) = debug else {
+    let (parsed, source) = if locate {
+        let (parsed, src) = locate_dwarf_info(target, debug_dirs, debuginfod_urls, cache)?;
+        (parsed, Some(src))
+    } else if let Some(debug) = debug {
+        (read_debug_info(debug, format)?, None)
+    } else {
         return list_debug_parsers(json);
     };
     if preview || file.is_none() {
-        let parsed = read_debug_info(debug, format)?;
-        report_debug_info(&parsed, json)?;
+        report_debug_info(&parsed, source.as_deref(), json)?;
         return Ok(0);
     }
     let file = file.expect("a project file is named when the load is not a preview");
     let mut project = open_project(target, file)?;
-    let (parser, applied) = load_debug_info(target, &mut project, debug, format)?;
+    let image = image_under(target, &project)?;
+    let applied = apply_debug_info(&mut project, &image, &parsed.info, with_types, with_locals);
+    for note in parsed.info.notes.iter().chain(&applied.notes) {
+        eprintln!("note: {note}");
+    }
     project.save(file)?;
     if json {
+        let mut report = serde_json::json!({
+            "project": file.display().to_string(),
+            "parser": parsed.parser,
+            "named": applied.named,
+            "prototyped": applied.prototyped,
+            "commented": applied.commented,
+            "labeled": applied.labeled,
+            "locals_added": applied.locals_added,
+            "types_added": applied.types_added,
+        });
+        if let Some(src) = source {
+            report["source"] = serde_json::json!(src);
+        }
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if let Some(src) = source {
         println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "project": file.display().to_string(),
-                "parser": parser,
-                "named": applied.named,
-                "prototyped": applied.prototyped,
-                "commented": applied.commented,
-                "labeled": applied.labeled,
-                "types_added": applied.types_added,
-            }))?
+            "{}: {} [{}]",
+            file.display(),
+            applied.summary(&parsed.parser),
+            src
         );
     } else {
-        println!("{}: {}", file.display(), applied.summary(&parser));
+        println!("{}: {}", file.display(), applied.summary(&parsed.parser));
     }
     Ok(0)
+}
+
+/// Locate DWARF debug information for `target` from the image itself,
+/// `.gnu_debuglink`, a sibling file, a `.dSYM` bundle, a build-ID directory,
+/// the debuginfod cache, or debuginfod servers.
+fn locate_dwarf_info(
+    target: &Path,
+    debug_dirs: &[PathBuf],
+    debuginfod_urls: &[String],
+    cache: Option<&Path>,
+) -> Result<(ag_image::debuginfo::Parsed, String)> {
+    let dirs: Vec<PathBuf> = if debug_dirs.is_empty() {
+        vec![PathBuf::from("/usr/lib/debug")]
+    } else {
+        debug_dirs.to_vec()
+    };
+    let urls = if debuginfod_urls.is_empty() {
+        std::env::var("DEBUGINFOD_URLS").unwrap_or_default()
+    } else {
+        debuginfod_urls.join(" ")
+    };
+    let default_cache = if cache.is_none() {
+        ag_image::dwarf_import::default_cache_dir()
+    } else {
+        None
+    };
+    let cache_ref = cache.or(default_cache.as_deref());
+    let located = ag_image::dwarf_import::locate_with(target, &dirs, &urls, cache_ref)
+        .map_err(anyhow::Error::msg)?;
+    let mut info = ag_image::dwarf_import::read(&located.source, &located.bytes)
+        .map_err(anyhow::Error::msg)?;
+    if !located.notes.is_empty() {
+        let mut notes = located.notes;
+        notes.extend(info.notes);
+        info.notes = notes;
+    }
+    Ok((
+        ag_image::debuginfo::Parsed {
+            parser: "dwarf".to_string(),
+            info,
+        },
+        located.source,
+    ))
 }
 
 /// The debug info parsers there are: the ones plugins registered, then the
@@ -2823,20 +2953,53 @@ fn list_debug_parsers(json: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// Read a debug info file through the parser named, or the first that
-/// recognizes it.
+/// Read a debug info file (or a `.dSYM` bundle directory) through the parser
+/// named, or the first that recognizes it.
 fn read_debug_info(debug: &Path, format: Option<&str>) -> Result<ag_image::debuginfo::Parsed> {
-    let bytes =
-        std::fs::read(debug).with_context(|| format!("{} cannot be read", debug.display()))?;
-    ag_image::debuginfo::parse(&debug.display().to_string(), &bytes, format)
+    let resolved = resolve_debug_path(debug)?;
+    let bytes = std::fs::read(&resolved)
+        .with_context(|| format!("{} cannot be read", resolved.display()))?;
+    ag_image::debuginfo::parse(&resolved.display().to_string(), &bytes, format)
         .map_err(anyhow::Error::msg)
 }
 
+/// Resolve a `.dSYM` bundle directory to the DWARF file inside
+/// `Contents/Resources/DWARF/`.
+fn resolve_debug_path(debug: &Path) -> Result<PathBuf> {
+    if !debug.is_dir() {
+        return Ok(debug.to_path_buf());
+    }
+    let resources = debug.join("Contents/Resources/DWARF");
+    let search_dir = if resources.is_dir() { &resources } else { debug };
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(search_dir)
+        .with_context(|| format!("reading {}", search_dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    entries.sort();
+    for candidate in &entries {
+        if let Ok(bytes) = std::fs::read(candidate) {
+            if ag_image::dwarf_import::has_dwarf(&bytes) {
+                return Ok(candidate.clone());
+            }
+        }
+    }
+    entries
+        .into_iter()
+        .next()
+        .with_context(|| format!("{} holds no DWARF file", debug.display()))
+}
+
 /// Say what a debug info file holds, without writing anything: the
-/// functions, the data and the types, as the parser read them. The JSON is
-/// the interchange document itself, so a report saved to a file is one the
-/// `json` parser reads back.
-fn report_debug_info(parsed: &ag_image::debuginfo::Parsed, json: bool) -> Result<()> {
+/// functions, the locals, the data and the types, as the parser read them.
+/// The JSON is the interchange document itself, so a report saved to a file
+/// is one the `json` parser reads back.
+fn report_debug_info(
+    parsed: &ag_image::debuginfo::Parsed,
+    source: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let info = &parsed.info;
     if json {
         let functions: Vec<serde_json::Value> = info
@@ -2876,25 +3039,57 @@ fn report_debug_info(parsed: &ag_image::debuginfo::Parsed, json: bool) -> Result
                 row
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "parser": parsed.parser,
-                "functions": functions,
-                "data": data,
-                "types": info.types,
-                "notes": info.notes,
-            }))?
-        );
+        let locals: Vec<serde_json::Value> = info
+            .locals
+            .iter()
+            .map(|local| {
+                let mut row = serde_json::json!({
+                    "function": format!("{:#x}", local.function),
+                    "name": local.name,
+                    "offset": local.offset,
+                    "size": local.size,
+                });
+                if let Some(ctype) = &local.ctype {
+                    row["type"] = serde_json::json!(ctype);
+                }
+                row
+            })
+            .collect();
+        let mut report = serde_json::json!({
+            "parser": parsed.parser,
+            "functions": functions,
+            "data": data,
+            "locals": locals,
+            "types": info.types,
+            "notes": info.notes,
+        });
+        if let Some(source) = source {
+            report["source"] = serde_json::json!(source);
+        }
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
-    println!(
-        "{}: {} functions, {} data, {} types",
-        parsed.parser,
-        info.functions.len(),
-        info.data.len(),
-        info.types.len()
-    );
+    if info.locals.is_empty() {
+        println!(
+            "{}: {} functions, {} data, {} types",
+            parsed.parser,
+            info.functions.len(),
+            info.data.len(),
+            info.types.len()
+        );
+    } else {
+        println!(
+            "{}: {} functions, {} locals, {} data, {} types",
+            parsed.parser,
+            info.functions.len(),
+            info.locals.len(),
+            info.data.len(),
+            info.types.len()
+        );
+    }
+    if let Some(source) = source {
+        println!("  source: {source}");
+    }
     for function in &info.functions {
         let mut line = format!("  {:#x} {}", function.address, function.name);
         if let Some(prototype) = &function.prototype {
@@ -2904,6 +3099,23 @@ fn report_debug_info(parsed: &ag_image::debuginfo::Parsed, json: bool) -> Result
             line.push_str(&format!(" [{source}]"));
         }
         println!("{line}");
+        for local in info
+            .locals
+            .iter()
+            .filter(|local| local.function == function.address)
+        {
+            let sign = if local.offset < 0 { '-' } else { '+' };
+            let mut lline = format!(
+                "    local {}  [sp{sign}{:#x}] {} bytes",
+                local.name,
+                local.offset.unsigned_abs(),
+                local.size
+            );
+            if let Some(ctype) = &local.ctype {
+                lline.push_str(&format!("  {ctype}"));
+            }
+            println!("{lline}");
+        }
     }
     for symbol in &info.data {
         let mut line = format!("  {:#x} {}", symbol.address, symbol.name);
@@ -2935,10 +3147,12 @@ fn load_debug_info(
     project: &mut ProjectFile,
     debug: &Path,
     format: Option<&str>,
+    with_types: bool,
+    with_locals: bool,
 ) -> Result<(String, DebugInfoApplied)> {
     let parsed = read_debug_info(debug, format)?;
     let image = image_under(target, project)?;
-    let applied = apply_debug_info(project, &image, &parsed.info);
+    let applied = apply_debug_info(project, &image, &parsed.info, with_types, with_locals);
     for note in parsed.info.notes.iter().chain(&applied.notes) {
         eprintln!("note: {note}");
     }
@@ -2952,6 +3166,7 @@ struct DebugInfoApplied {
     prototyped: usize,
     commented: usize,
     labeled: usize,
+    locals_added: usize,
     types_added: usize,
     notes: Vec<String>,
 }
@@ -2960,24 +3175,38 @@ impl DebugInfoApplied {
     /// The one line a load reports: what it kept, and the parser that read
     /// the file.
     fn summary(&self, parser: &str) -> String {
-        format!(
-            "{} named, {} prototyped, {} commented, {} data labeled, {} types added ({parser})",
-            self.named, self.prototyped, self.commented, self.labeled, self.types_added
-        )
+        if self.locals_added > 0 {
+            format!(
+                "{} named, {} prototyped, {} commented, {} data labeled, {} locals added, {} types added ({parser})",
+                self.named,
+                self.prototyped,
+                self.commented,
+                self.labeled,
+                self.locals_added,
+                self.types_added
+            )
+        } else {
+            format!(
+                "{} named, {} prototyped, {} commented, {} data labeled, {} types added ({parser})",
+                self.named, self.prototyped, self.commented, self.labeled, self.types_added
+            )
+        }
     }
 }
 
 /// Keep what a debug info file says as the analyst's own: the names,
-/// prototypes and source comments of its functions, the labels and type
-/// comments of its data, and its C types. What the project says already
-/// wins — a name, a prototype, a comment is only filled where there is
-/// none — and a symbol whose address another holds already is left out
-/// with a note, so loading the same file twice keeps nothing the second
-/// time.
+/// prototypes and source comments of its functions, the stack locals in
+/// their frames, the labels and type comments of its data, and its C types.
+/// What the project says already wins — a name, a prototype, a comment or
+/// an overlapping stack variable is only filled where there is none — and a
+/// symbol whose address another holds already is left out with a note, so
+/// loading the same file twice keeps nothing the second time.
 fn apply_debug_info(
     project: &mut ProjectFile,
     image: &ag_image::Binary,
     info: &ag_image::debuginfo::DebugInfo,
+    with_types: bool,
+    with_locals: bool,
 ) -> DebugInfoApplied {
     let mut applied = DebugInfoApplied::default();
     let mut seen: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
@@ -3009,6 +3238,31 @@ fn apply_debug_info(
             }
         }
     }
+    if with_locals {
+        for local in &info.locals {
+            let annotation =
+                project.annotation_mut(TargetKind::Function, &format!("{:#x}", local.function));
+            let overlaps = annotation.stack_vars.iter().any(|existing| {
+                existing.offset == local.offset
+                    || (existing.offset < local.offset + i64::from(local.size)
+                        && local.offset < existing.offset + i64::from(existing.size))
+            });
+            if overlaps {
+                applied.notes.push(format!(
+                    "{:#x}: local {} held back: overlaps an existing stack variable",
+                    local.function, local.name
+                ));
+                continue;
+            }
+            annotation.set_stack_var(
+                local.offset,
+                local.size,
+                Some(&local.name),
+                local.ctype.as_deref(),
+            );
+            applied.locals_added += 1;
+        }
+    }
     for symbol in &info.data {
         if let Some(first) = seen.get(&symbol.address) {
             applied.notes.push(format!(
@@ -3038,19 +3292,21 @@ fn apply_debug_info(
             }
         }
     }
-    let model = image.data_model();
-    let mut held = crate::types::texts(project);
-    for text in &info.types {
-        match ag_image::ctype::add(model, &held, text) {
-            Ok((defined, added, said)) => {
-                held = defined;
-                applied.types_added += added.len();
-                applied.notes.extend(said);
+    if with_types {
+        let model = image.data_model();
+        let mut held = crate::types::texts(project);
+        for text in &info.types {
+            match ag_image::ctype::add(model, &held, text) {
+                Ok((defined, added, said)) => {
+                    held = defined;
+                    applied.types_added += added.len();
+                    applied.notes.extend(said);
+                }
+                Err(reason) => applied.notes.push(format!("type held back: {reason}")),
             }
-            Err(reason) => applied.notes.push(format!("type held back: {reason}")),
         }
+        project.types = crate::types::definitions(&held);
     }
-    project.types = crate::types::definitions(&held);
     project.prune();
     applied
 }

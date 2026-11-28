@@ -1262,7 +1262,7 @@ impl DebugInfoParser for ExternalDebugInfoParser {
 /// `types` are C definitions in the order C reads them. An answer without
 /// any of the keys says nothing.
 pub fn debug_info_of(answer: &serde_json::Value) -> Result<crate::debuginfo::DebugInfo, String> {
-    use crate::debuginfo::{DebugData, DebugFunction, DebugInfo};
+    use crate::debuginfo::{DebugData, DebugFunction, DebugInfo, DebugLocal};
 
     let object = answer.as_object().ok_or_else(|| {
         "the answer is a JSON object, `{\"functions\": […], …}` or `{}`".to_string()
@@ -1332,6 +1332,46 @@ pub fn debug_info_of(answer: &serde_json::Value) -> Result<crate::debuginfo::Deb
             address,
             name: name.to_string(),
             size: size_of(row, "data", index)?,
+            ctype: text_of(row, "type"),
+        });
+    }
+    for (index, row) in rows("locals")?.iter().enumerate() {
+        let function = row.get("function").and_then(number).ok_or_else(|| {
+            format!("local {index} names its function's address, as a number or hex text")
+        })?;
+        let name = row
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("local {index} has a non-empty \"name\""))?;
+        let offset = row
+            .get("offset")
+            .and_then(|value| {
+                value.as_i64().or_else(|| {
+                    let text = value.as_str()?.trim();
+                    let (negative, digits) = match text.strip_prefix('-') {
+                        Some(rest) => (true, rest),
+                        None => (false, text.strip_prefix('+').unwrap_or(text)),
+                    };
+                    let magnitude = match digits
+                        .strip_prefix("0x")
+                        .or_else(|| digits.strip_prefix("0X"))
+                    {
+                        Some(hex) => i64::from_str_radix(hex, 16).ok()?,
+                        None => digits.parse::<i64>().ok()?,
+                    };
+                    Some(if negative { -magnitude } else { magnitude })
+                })
+            })
+            .ok_or_else(|| format!("local {index} names its offset, as a number or hex text"))?;
+        let size = size_of(row, "local", index)?
+            .filter(|size| *size <= u64::from(u32::MAX))
+            .ok_or_else(|| format!("local {index} names its size, in bytes"))?;
+        info.locals.push(DebugLocal {
+            function,
+            name: name.to_string(),
+            offset,
+            size: size as u32,
             ctype: text_of(row, "type"),
         });
     }
